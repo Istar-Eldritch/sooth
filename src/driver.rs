@@ -903,27 +903,41 @@ pub fn build(path: &Path) -> Result<PathBuf, String> {
 
 /// `build` with a `--manifest` override; see `emit_ssa_with_manifest`.
 pub fn build_with_manifest(path: &Path, manifest: Option<&Path>) -> Result<PathBuf, String> {
-    let ssa = emit_ssa_with_manifest(path, manifest)?;
+    let out_path = binary_path(path);
+    build_into(path, &out_path, manifest)?;
+    Ok(out_path)
+}
 
+/// `build_with_manifest`, with the output binary's path taken explicitly rather
+/// than fixed at `binary_path(source)` (R4.3): `build`/`run` still land beside
+/// the source (their callers keep passing `binary_path(source)`), while
+/// `test` targets a temp path so no binary ever lands in the tree.
+pub(crate) fn build_into(path: &Path, out: &Path, manifest: Option<&Path>) -> Result<(), String> {
+    let ssa = emit_ssa_with_manifest(path, manifest)?;
+    link_shimmed_binary(&ssa, out)
+}
+
+/// The qbe/cc plumbing shared by every native-binary output: compile the SSA
+/// to assembly, link it with the C shim (`sooth_main` -> `main`) into `out`.
+fn link_shimmed_binary(ssa: &str, out: &Path) -> Result<(), String> {
     let dir = tempfile_dir()?;
     let ssa_path = dir.join("out.ssa");
     let asm_path = dir.join("out.s");
     let shim_path = dir.join("shim.c");
-    std::fs::write(&ssa_path, &ssa).map_err(|e| format!("writing {ssa_path:?}: {e}"))?;
+    std::fs::write(&ssa_path, ssa).map_err(|e| format!("writing {ssa_path:?}: {e}"))?;
     std::fs::write(&shim_path, C_SHIM).map_err(|e| format!("writing {shim_path:?}: {e}"))?;
 
     run_command(Command::new("qbe").arg(&ssa_path).arg("-o").arg(&asm_path))?;
 
-    let out_path = binary_path(path);
     run_command(
         Command::new("cc")
             .arg(&asm_path)
             .arg(&shim_path)
             .arg("-o")
-            .arg(&out_path),
+            .arg(out),
     )?;
 
-    Ok(out_path)
+    Ok(())
 }
 
 /// Compile and run a source file, returning the child's exit status. The caller
@@ -938,6 +952,125 @@ pub fn run_with_manifest(path: &Path, manifest: Option<&Path>) -> Result<ExitSta
     Command::new(&binary)
         .status()
         .map_err(|e| format!("running {binary:?}: {e}"))
+}
+
+/// Every `*.sth` directly under `dir` (non-recursive), sorted for determinism.
+fn collect_sth_files(dir: &Path) -> Result<Vec<PathBuf>, String> {
+    let read = std::fs::read_dir(dir).map_err(|e| format!("reading {dir:?}: {e}"))?;
+    let mut out = Vec::new();
+    for entry in read {
+        let entry = entry.map_err(|e| format!("reading {dir:?}: {e}"))?;
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) == Some("sth") {
+            out.push(path);
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
+/// Resolve `sooth test`'s entry set (R3). No `paths` resolves the package
+/// containing `cwd` and takes every `*.sth` under its `tests/` directory
+/// (R3.1); `cwd` itself is probed directly before falling back to
+/// `packages::find_package_root`'s ancestor walk, since that walk starts at
+/// `file.parent()` and would otherwise skip the cwd's own `sooth.pkg`. Given
+/// `paths`, each named file is an entry and each named directory contributes
+/// every `*.sth` directly under it (R3.2, non-recursive).
+pub fn discover_test_entries(cwd: &Path, paths: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
+    if paths.is_empty() {
+        let root = if cwd.join("sooth.pkg").is_file() {
+            Some(cwd.to_path_buf())
+        } else {
+            packages::find_package_root(&cwd.join("_"))
+        };
+        let root =
+            root.ok_or_else(|| format!("no sooth.pkg found at or above {}", cwd.display()))?;
+        let tests_dir = root.join("tests");
+        if !tests_dir.is_dir() {
+            return Err(format!("no tests directory at {}", tests_dir.display()));
+        }
+        let entries = collect_sth_files(&tests_dir)?;
+        if entries.is_empty() {
+            return Err(format!("{} contains no *.sth files", tests_dir.display()));
+        }
+        Ok(entries)
+    } else {
+        let mut entries = Vec::new();
+        for p in paths {
+            if p.is_dir() {
+                entries.extend(collect_sth_files(p)?);
+            } else {
+                entries.push(p.clone());
+            }
+        }
+        entries.sort();
+        Ok(entries)
+    }
+}
+
+/// Count R1 protocol lines in a captured stdout: `(ok, not_ok)`. `not ok` is
+/// classified before `ok` so a `not ok -- ...` line is never miscounted as a
+/// pass by a substring match on `"ok"`.
+pub(crate) fn count_protocol(stdout: &str) -> (usize, usize) {
+    let mut ok = 0usize;
+    let mut not_ok = 0usize;
+    for line in stdout.lines() {
+        if line.starts_with("not ok -- ") {
+            not_ok += 1;
+        } else if line.starts_with("ok -- ") {
+            ok += 1;
+        }
+    }
+    (ok, not_ok)
+}
+
+/// `sooth test`: discover entries (R3), build each into its own temp dir and
+/// run it (R4), count R1 protocol lines, and print a summary. Returns the
+/// process exit code: 0 iff every entry passed. An entry fails if any `not
+/// ok` line appears, the child exits non-zero, or its build fails (R1).
+pub fn test(cwd: &Path, paths: &[PathBuf]) -> Result<i32, String> {
+    let entries = discover_test_entries(cwd, paths)?;
+
+    let mut total_ok = 0usize;
+    let mut total_not_ok = 0usize;
+    let mut failed = 0usize;
+
+    for entry in &entries {
+        let dir = tempfile_dir()?;
+        let binary = dir.join("test");
+        let outcome = match build_into(entry, &binary, None) {
+            Err(e) => Err(format!("build failed: {e}")),
+            Ok(()) => match Command::new(&binary).output() {
+                Err(e) => Err(format!("running {binary:?}: {e}")),
+                Ok(output) => {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    let (ok, not_ok) = count_protocol(&stdout);
+                    total_ok += ok;
+                    total_not_ok += not_ok;
+                    if not_ok > 0 || !output.status.success() {
+                        Err(format!("{ok} ok, {not_ok} not ok"))
+                    } else {
+                        Ok(())
+                    }
+                }
+            },
+        };
+        match outcome {
+            Ok(()) => println!("ok   {}", entry.display()),
+            Err(e) => {
+                failed += 1;
+                println!("FAIL {} -- {e}", entry.display());
+            }
+        }
+    }
+
+    println!(
+        "{} entries, {} failed ({total_ok} ok, {total_not_ok} not ok assertions)",
+        entries.len(),
+        failed
+    );
+
+    Ok(if failed == 0 { 0 } else { 1 })
 }
 
 /// Compile QBE IL text to a shared object at `out`. Mirrors `build`'s qbe/cc
@@ -2998,5 +3131,102 @@ mod tests {
         let origins = resolve_trait_export_origins(&traits, 2, &exports, &import_maps, &selectives);
         assert!(origins[0].is_empty(), "module 0 declares Foo itself");
         assert_eq!(origins[1].get("Foo"), Some(&0));
+    }
+
+    #[test]
+    fn count_protocol_counts_ok_and_not_ok_separately() {
+        let stdout = "ok -- a\nnot ok -- b\nok -- c\n";
+        assert_eq!(count_protocol(stdout), (2, 1));
+    }
+
+    /// R1's ordering hazard: a naive substring match on `"ok"` (rather than a
+    /// `not ok -- ` / `ok -- ` prefix match) would count a `not ok` line as a
+    /// pass too.
+    #[test]
+    fn count_protocol_does_not_miscount_not_ok_as_ok() {
+        assert_eq!(count_protocol("not ok -- x\n"), (0, 1));
+    }
+
+    #[test]
+    fn count_protocol_ignores_non_protocol_lines() {
+        let stdout = "ok -- a\nsome other line\nnot ok -- b\n\n";
+        assert_eq!(count_protocol(stdout), (1, 1));
+    }
+
+    /// A scratch package tree for the discovery unit tests, removed on drop.
+    struct PkgTree(PathBuf);
+    impl PkgTree {
+        fn new(tag: &str) -> PkgTree {
+            static N: AtomicU64 = AtomicU64::new(0);
+            let seq = N.fetch_add(1, Ordering::Relaxed);
+            let dir = std::env::temp_dir().join(format!(
+                "sooth-test-discovery-{}-{tag}-{seq}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            PkgTree(dir)
+        }
+        fn write(&self, rel: &str, contents: &str) -> PathBuf {
+            let path = self.0.join(rel);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(&path, contents).unwrap();
+            path
+        }
+    }
+    impl Drop for PkgTree {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn discover_test_entries_no_path_reads_pkgroot_tests_dir() {
+        let t = PkgTree::new("no-path");
+        t.write("sooth.pkg", "package: p ; layer: hosted ;");
+        t.write("tests/a.sth", "");
+        t.write("tests/b.sth", "");
+        let entries = discover_test_entries(&t.0, &[]).expect("discovery should succeed");
+        assert_eq!(
+            entries,
+            vec![t.0.join("tests/a.sth"), t.0.join("tests/b.sth")]
+        );
+    }
+
+    #[test]
+    fn discover_test_entries_explicit_file_and_dir() {
+        let t = PkgTree::new("explicit");
+        t.write("sooth.pkg", "package: p ; layer: hosted ;");
+        let file = t.write("tests/a.sth", "");
+        t.write("other/b.sth", "");
+        t.write("other/c.sth", "");
+        let entries = discover_test_entries(&t.0, &[file.clone(), t.0.join("other")])
+            .expect("discovery should succeed");
+        assert_eq!(
+            entries,
+            vec![t.0.join("other/b.sth"), t.0.join("other/c.sth"), file]
+        );
+    }
+
+    #[test]
+    fn discover_test_entries_no_ancestor_pkg_is_error() {
+        let t = PkgTree::new("no-pkg");
+        assert!(discover_test_entries(&t.0, &[]).is_err());
+    }
+
+    #[test]
+    fn discover_test_entries_missing_tests_dir_is_error() {
+        let t = PkgTree::new("missing-tests");
+        t.write("sooth.pkg", "package: p ; layer: hosted ;");
+        assert!(discover_test_entries(&t.0, &[]).is_err());
+    }
+
+    #[test]
+    fn discover_test_entries_empty_tests_dir_is_error() {
+        let t = PkgTree::new("empty-tests");
+        t.write("sooth.pkg", "package: p ; layer: hosted ;");
+        std::fs::create_dir_all(t.0.join("tests")).unwrap();
+        assert!(discover_test_entries(&t.0, &[]).is_err());
     }
 }
