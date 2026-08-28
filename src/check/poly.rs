@@ -3372,51 +3372,43 @@ fn poly_walk_arms(
             cross,
             arm.tail,
         )?;
-        // A `Type::Variant` may not leave the call. Every type-directed
-        // predicate outside the eliminator is written over `Type::Enum`, so
-        // `is_copy` reads an escaped variant as trivially `Copy` and a later
-        // `dup` double-drops a linear payload.
+        // Neither a `Type::Variant` nor its narrowed-generic twin may leave
+        // the call. Every type-directed predicate outside the eliminator is
+        // written over `Type::Enum`, so `is_copy` reads an escaped variant as
+        // trivially `Copy` and a later `dup` double-drops a linear payload.
+        //
+        // P7.S12 (R3.4): one exhaustive classification rather than a pair of
+        // matches ending in `_ => None`, so a `PolyType` variant added later
+        // cannot escape here in silence -- this is the load-bearing site.
+        // The two errors differ only in rendering: a `GenericVariant` has no
+        // concrete `Type`, so it goes through the `poly_type_str` sibling.
         for slot in &exit {
+            // One `Ref` layer is peeled first, matching the depth the
+            // concrete arm has always looked to.
             let escaping = match &slot.pt {
-                PolyType::Concrete(t) => Some(*t),
-                PolyType::Ref(referent, _) => match referent.as_ref() {
-                    PolyType::Concrete(t) => Some(*t),
-                    _ => None,
-                },
-                _ => None,
+                PolyType::Ref(referent, _) => referent.as_ref(),
+                pt => pt,
             };
-            if let Some(escaping @ Type::Variant(..)) = escaping {
-                return Err(eliminator_variant_escape_error(
-                    ctx,
-                    literal_span,
-                    name,
-                    escaping,
-                ));
-            }
-            // P7.S12 (R3.4): the narrowed-generic-variant twin of the check
-            // above -- a `GenericVariant` (or a reference to one) escaping
-            // its arm is the identical hazard `Type::Variant` is guarded
-            // against here, but it has no concrete `Type` to render, so it
-            // goes through the `poly_type_str`-rendered sibling error
-            // instead. Load-bearing ahead of any construction of one
-            // (Phase 3): an unconverted wildcard here would read an escaped
-            // narrowed variant as trivially `Copy`, and a later `dup` would
-            // double-drop a linear payload.
-            let escaping_variant = match &slot.pt {
-                PolyType::GenericVariant { .. } => Some(&slot.pt),
-                PolyType::Ref(referent, _) => match referent.as_ref() {
-                    pt @ PolyType::GenericVariant { .. } => Some(pt),
-                    _ => None,
-                },
-                _ => None,
-            };
-            if let Some(pt) = escaping_variant {
-                return Err(poly_eliminator_variant_escape_error(
-                    ctx,
-                    literal_span,
-                    name,
-                    &poly_type_str(pt, sig),
-                ));
+            match escaping {
+                PolyType::Concrete(t @ Type::Variant(..)) => {
+                    return Err(eliminator_variant_escape_error(ctx, literal_span, name, *t));
+                }
+                pt @ PolyType::GenericVariant { .. } => {
+                    return Err(poly_eliminator_variant_escape_error(
+                        ctx,
+                        literal_span,
+                        name,
+                        &poly_type_str(pt, sig),
+                    ));
+                }
+                PolyType::Concrete(_)
+                | PolyType::Var(_)
+                | PolyType::Array(..)
+                | PolyType::Quotation(..)
+                | PolyType::Ref(..)
+                | PolyType::OwnedCell(_)
+                | PolyType::QuotLit
+                | PolyType::Generic { .. } => {}
             }
             // S3b L2: nor may a quotation literal, which would then have to be
             // materialised to exist past the arm. Its own span, not the
@@ -8823,7 +8815,7 @@ pub(crate) fn poly_type_str(pt: &PolyType, sig: &PolySig) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::{ArrayDecl, ArrayId, OwnedCellDecl};
+    use crate::ast::{ArrayDecl, ArrayId, GenericEnumDecl, GenericVariantDecl, OwnedCellDecl};
     use crate::lexer::lex;
 
     /// P7.S3k: the callee-side walk context for a fixture that drives
@@ -13113,6 +13105,123 @@ mod tests {
         assert_eq!(refs.len(), 1, "the shape must be interned exactly once");
         assert_eq!(refs[0].referent, Type::I64);
         assert!(refs[0].mutable);
+    }
+
+    /// P7.S12 phase 2 (R3.3/R4.1): `apply_subst`'s `GenericVariant` arm is
+    /// the only arm this phase adds that computes rather than rejects, and
+    /// nothing constructs a `GenericVariant` until phase 3 -- so the witness
+    /// hand-builds one. It grounds the variant's own `args` through the same
+    /// instantiator the `Generic` arm uses, then reads the narrowed
+    /// variant's display off the resulting monomorph: through
+    /// `GenericTypes::enum_decl` while that mint is still unflushed, and off
+    /// `ctx.enums()` once it has been flushed and the base rebased. Both
+    /// halves must answer identically, which is what makes the id-range
+    /// guard between them invisible to a correctly-based registry.
+    #[test]
+    fn apply_subst_grounds_a_generic_variant_across_the_flush() {
+        let mut generics = GenericTypes::with_bases(0, 0);
+        generics.enums.push(GenericEnumDecl {
+            name: "Opt".to_string(),
+            ty_var_names: vec!["'T".to_string()],
+            variants: vec![
+                GenericVariantDecl {
+                    name: "None".to_string(),
+                    fields: Vec::new(),
+                    span: Span::default(),
+                },
+                GenericVariantDecl {
+                    name: "Some".to_string(),
+                    fields: vec![("0".to_string(), PolyType::Var(0))],
+                    span: Span::default(),
+                },
+            ],
+            span: Span::default(),
+            module: 0,
+        });
+        let cell = RefCell::new(generics);
+        let pty = crate::ast::generic_variant_type(&cell.borrow(), 0, 0, 1, vec![PolyType::Var(0)]);
+        let sig = ref_sig();
+        let mut subst = Subst::default();
+        subst.ty.push((0, Type::I64));
+        let effect = StackEffect {
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+        };
+        let mut enums: Vec<EnumDecl> = Vec::new();
+        let mut arrays: Vec<ArrayDecl> = Vec::new();
+        let mut cells: Vec<OwnedCellDecl> = Vec::new();
+        let mut refs: Vec<RefDecl> = Vec::new();
+
+        let unflushed = {
+            let ctx = Ctx::Word {
+                mangled: "f",
+                effect: &effect,
+                structs: &[],
+                enums: &enums,
+                statics: &[],
+                module: 0,
+                modules: None,
+                self_tail_call: false,
+                generics: Some(&cell),
+            };
+            apply_subst(
+                &sig,
+                &pty,
+                &subst,
+                "f",
+                Span::default(),
+                &ctx,
+                &mut arrays,
+                &mut cells,
+                &mut refs,
+            )
+            .expect("a bound argument grounds the narrowed variant")
+        };
+        let Type::Variant(id, vi, display) = unflushed else {
+            panic!("a narrowed generic variant grounds to a `Type::Variant`: {unflushed:?}")
+        };
+        assert_eq!(vi, 1, "the arm's own variant index rides through");
+        assert_eq!(
+            display, "Opt[i64].Some",
+            "the display names the monomorph, not the header"
+        );
+        assert!(
+            id.index() >= enums.len(),
+            "the mint is still unflushed, so the decl is only readable through `enum_decl`"
+        );
+
+        cell.borrow_mut().flush_enums_into(&mut enums);
+        cell.borrow_mut().rebase(0, enums.len());
+        assert_eq!(enums.len(), 1);
+        assert!(
+            id.index() < enums.len(),
+            "the flush moved the mint into `ctx.enums()`"
+        );
+
+        let ctx = Ctx::Word {
+            mangled: "f",
+            effect: &effect,
+            structs: &[],
+            enums: &enums,
+            statics: &[],
+            module: 0,
+            modules: None,
+            self_tail_call: false,
+            generics: Some(&cell),
+        };
+        let flushed = apply_subst(
+            &sig,
+            &pty,
+            &subst,
+            "f",
+            Span::default(),
+            &ctx,
+            &mut arrays,
+            &mut cells,
+            &mut refs,
+        )
+        .expect("the memoized instantiation grounds the same way after the flush");
+        assert_eq!(flushed, unflushed);
     }
 
     // -- Phase 2 (R-B1..R-B6): production and checking --------------------

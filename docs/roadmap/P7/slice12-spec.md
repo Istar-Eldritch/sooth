@@ -466,14 +466,26 @@ backend panic is a failure rather than a missing line.
   `tests/phase5_generic_enum_elimination.rs`, which does not exist.) R2.3's registration
   choice is only sound if the concrete path is byte-identical, and these are what say so.
 - **R8.8 (unit tests beside the stage)**
-  - `src/ast.rs`: R4.1 over a `Var` field and a `Concrete` field leaves the result symbolic
-    and interns nothing -- assert the `refs`/`arrays` registries are untouched, since an
-    interning slip is invisible in the returned shape.
+  - `src/ast.rs`: R4.1 over a `Var` field and a `Concrete` field leaves the result symbolic.
+    The draft also asked to assert `refs`/`arrays` are untouched; **amended in phase 2**:
+    R4.3 gives the function no registry parameters at all, so an interning slip is not
+    representable and the assertion could only pass. It was written, measured as a placebo,
+    and deleted; no-interning is carried by the signature and documented there.
   - `src/check/declarations.rs`: a header with monomorphs registers `Concrete`, one without
     registers `Generic` (R2.3).
   - `src/check/poly.rs`: R1.1's branch selection in both directions (a `Concrete` gate with a
     `Generic` scrutinee and the reverse); R5.4's narrowing carries the scrutinee's args
     positionally; R6.1's destructure pushes fields first-deepest.
+  - `src/check/poly.rs` (**added in phase 2**): `apply_subst`'s `GenericVariant` arm, the one
+    arm of R3.3's 22 that computes rather than rejects, over a hand-built `GenericVariant` --
+    both sides of its display lookup (an unflushed mint read through `GenericTypes::enum_decl`,
+    and the same mint read off `ctx.enums()` after a flush and rebase). Its id-range guard is
+    *not* witnessable: reverting it to the previous `unwrap_or_else` fallback leaves the test
+    green, because the two paths can only disagree when `enum_base` is stale relative to
+    `ctx.enums().len()`, which `check_poly_body`'s rebase-before-walk ordering excludes. It is
+    a diagnostic tightening (a truthful panic in place of an out-of-bounds index), not a
+    behaviour fix. If phase 3 ever grounds a `GenericVariant` from a context that does not
+    rebase first, that ordering becomes load-bearing and needs its own witness.
   - `src/ir/func_builder/calls.rs`: R1.3 dispatches on the recorded id when the bare-key
     `EnumWord` names a *different* monomorph; R1.6's miss falls through rather than panicking;
     R1.4's invariance (two monomorphs of one header have equal variant counts and equal
@@ -531,7 +543,14 @@ anything below, and it closes three live runtime/build failures.
 **Phase 2 -- R3 + R4 (M).** The `PolyType` variant, its 22 forced arms, R3.4's wildcard
 conversions, and the symbolic substitution. No behaviour change: nothing constructs a
 `GenericVariant` yet, so the arms are exhaustiveness-only. R8.8's `src/ast.rs` tests land
-here.
+here, plus the `apply_subst` witness R8.8 gained.
+
+The escape check (R3.4's load-bearing site) is one exhaustive `match` over `PolyType` rather
+than two matches ending in `_ => None`, so the next `PolyType` variant cannot fall through it
+in silence -- which is the whole reason R3.4 named it. `poly_eliminator_call`'s scrutinee
+`_ =>` is deliberately *not* converted here: it is R5.1's own branch site and phase 3 replaces
+it. The remaining R3.4 wildcards are justified in place, at each site, rather than in a
+separate report.
 
 **Phase 3 -- R2 + R5 (hard, L).** The registry widening (including R2.4's stand-in
 rejection), `PolyArm.declared_inputs`' widening, and the generic branch up to and including
