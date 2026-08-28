@@ -4018,4 +4018,94 @@ mod tests {
             "should name both legal homes: {err}"
         );
     }
+
+    fn mk_enum(name: &str, variants: &[(&str, Vec<Type>)]) -> EnumDecl {
+        EnumDecl {
+            name: name.to_string(),
+            name_static: Box::leak(name.to_string().into_boxed_str()),
+            variants: variants
+                .iter()
+                .map(|(vname, field_tys)| VariantDecl {
+                    name: vname.to_string(),
+                    name_static: Box::leak(vname.to_string().into_boxed_str()),
+                    display_static: Box::leak(format!("{name}.{vname}").into_boxed_str()),
+                    fields: field_tys
+                        .iter()
+                        .enumerate()
+                        .map(|(i, ty)| (format!("f{i}"), *ty))
+                        .collect(),
+                    span: Span::default(),
+                })
+                .collect(),
+            span: Span::default(),
+            module: 0,
+        }
+    }
+
+    /// P7.S11 (R4): `enum_generated_sigs`/`variant_generated_sigs` derive a
+    /// variant's constructor/destructure output type from the *slice
+    /// position* the decl is found at, not from any id carried by the decl
+    /// itself (`EnumId::from_index(idx)`, `src/check/declarations.rs:1755`).
+    /// R4 relies on this: it must generate over the *extended* `local.enums`
+    /// slice, never over a fresh one-element slice, or a grounded monomorph's
+    /// constructor would register at id 0 no matter where it actually landed.
+    #[test]
+    fn enum_generated_sigs_over_an_extended_slice_carries_the_monomorphs_own_id() {
+        let base = vec![mk_enum("Shape", &[("Circle", vec![Type::I64])])];
+        let grounded = mk_enum(
+            "Result[i64 i64]",
+            &[("Ok", vec![Type::I64]), ("Err", vec![Type::I64])],
+        );
+        let mut extended = base.clone();
+        extended.push(grounded.clone());
+
+        let (_, _, sig) = enum_generated_sigs(&extended)
+            .into_iter()
+            .find(|(name, _, _)| name == "Ok")
+            .expect("the extended slice generates Ok's constructor");
+        assert_eq!(
+            sig.outputs[0],
+            Type::Enum(EnumId::from_index(base.len()), "Result[i64 i64]")
+        );
+
+        // The one-element-slice failure mode this test forbids: the same
+        // decl alone yields id 0, which is why R4 must generate over the
+        // whole extended slice, not a fresh slice of just the mint.
+        let (_, _, alone_sig) = enum_generated_sigs(std::slice::from_ref(&grounded))
+            .into_iter()
+            .find(|(name, _, _)| name == "Ok")
+            .expect("a one-element slice still generates Ok's constructor");
+        assert_eq!(
+            alone_sig.outputs[0],
+            Type::Enum(EnumId::from_index(0), "Result[i64 i64]")
+        );
+    }
+
+    /// P7.S11 (R4): the skip count R4 subtracts off `enum_generated_sigs`/
+    /// `variant_generated_sigs` over the extended slice is *not* a per-decl
+    /// arithmetic count (a one-variant and a three-variant enum contribute
+    /// different numbers of entries) -- it is the length of the same helper
+    /// run over the base slice, which is a prefix of the extended run because
+    /// both are a single in-order `enumerate().push()` loop over a shared
+    /// prefix of decls.
+    #[test]
+    fn enum_generated_sigs_prefix_is_stable_under_extension() {
+        let base = vec![
+            mk_enum("One", &[("A", vec![])]),
+            mk_enum("Three", &[("X", vec![]), ("Y", vec![]), ("Z", vec![])]),
+        ];
+        let mut extended = base.clone();
+        extended.push(mk_enum("Extra", &[("E", vec![Type::I64])]));
+
+        let base_sigs = enum_generated_sigs(&base);
+        let extended_sigs = enum_generated_sigs(&extended);
+        assert_eq!(&extended_sigs[..base_sigs.len()], &base_sigs[..]);
+
+        let base_variant_sigs = variant_generated_sigs(&base);
+        let extended_variant_sigs = variant_generated_sigs(&extended);
+        assert_eq!(
+            &extended_variant_sigs[..base_variant_sigs.len()],
+            &base_variant_sigs[..]
+        );
+    }
 }

@@ -593,6 +593,51 @@ pub(super) fn check_poly_combinator_standalone(
             Ok((inputs, outputs))
         },
     )?;
+    // P7.S11 (R4): if signature grounding minted a monomorph, its generated
+    // constructor/destructure sigs are not yet in `env` -- `env` was built
+    // from `module.structs`/`module.enums` before the word loop, and the
+    // mint lives only in `local.structs`/`local.enums`. Extend a clone with
+    // exactly the newly flushed tail (the base decls' own sigs are already
+    // in `env`; re-appending them would double every constructor overload),
+    // so a body term naming one of those variants resolves.
+    let mut local_env;
+    let env: &HashMap<String, Vec<Overload>> =
+        if local.enums.len() > enums.len() || local.structs.len() > structs.len() {
+            local_env = env.clone();
+            let struct_skip = struct_generated_sigs(structs).len();
+            for (name, symbol, sig) in struct_generated_sigs(&local.structs)
+                .into_iter()
+                .skip(struct_skip)
+            {
+                local_env
+                    .entry(name)
+                    .or_default()
+                    .push(Overload { sig, symbol });
+            }
+            let enum_skip = enum_generated_sigs(enums).len();
+            for (name, symbol, sig) in enum_generated_sigs(&local.enums)
+                .into_iter()
+                .skip(enum_skip)
+            {
+                local_env
+                    .entry(name)
+                    .or_default()
+                    .push(Overload { sig, symbol });
+            }
+            let variant_skip = variant_generated_sigs(enums).len();
+            for (name, symbol, sig) in variant_generated_sigs(&local.enums)
+                .into_iter()
+                .skip(variant_skip)
+            {
+                local_env
+                    .entry(name)
+                    .or_default()
+                    .push(Overload { sig, symbol });
+            }
+            &local_env
+        } else {
+            env
+        };
     let terms = &word.body;
     let terms = terms.clone();
     // A concrete stand-in for the combinator, checked by the ordinary path.

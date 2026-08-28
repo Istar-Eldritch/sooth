@@ -10,7 +10,7 @@ use super::*;
 
 /// A word's typed stack effect: the concrete input and output slot types,
 /// deepest-first (leftmost in `( … )` is deepest on the stack).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Sig {
     pub inputs: Vec<Type>,
     pub outputs: Vec<Type>,
