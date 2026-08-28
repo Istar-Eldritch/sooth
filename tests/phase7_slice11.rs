@@ -131,7 +131,7 @@ fn a_body_indexing_its_grounded_output_decl_reports_not_panics() {
 /// would panic indexing it. No sibling monomorph exists in this fixture, so
 /// the mint really is scratch, not a dedup onto something already flushed.
 #[test]
-fn a_combinator_returning_an_array_of_its_grounded_monomorph_builds_and_runs() {
+fn a_combinator_returning_an_array_of_its_grounded_monomorph_builds_and_does_not_panic() {
     let src = "type: Result['T 'E] | Ok 'T | Err 'E ;\n\
          : hold inline ( 'T ~[ 'T -- Result['T i64] ] -- array[Result['T i64] 4] )\n\
            call 4 fill ;\n\

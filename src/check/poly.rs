@@ -15450,11 +15450,14 @@ mod tests {
     /// The R3 scope twin: a generic nested inside a quotation-input effect's
     /// row (not itself the top-level slot) is not rejected and grounds
     /// normally. Fails if R3's guard recurses into slots instead of testing
-    /// the top level.
+    /// the top level. A *concrete* declared output (unlike the R1/R2 floor
+    /// test above, whose output also applies the generic header) isolates
+    /// "nested-in-input grounds" from "a declared output grounds": nothing
+    /// but the quotation-input row's generic could make this pass.
     #[test]
     fn standalone_generic_nested_in_a_quotation_input_is_not_rejected() {
         let src = "type: Result['T 'E] | Ok 'T | Err 'E ;\n\
-             : relay inline ( 'T ~[ 'T -- Result['T i64] ] -- Result['T i64] ) call ;\n";
+             : hold inline ( 'T ~[ 'T -- Result['T i64] ] -- i64 ) call drop 0 ;\n";
         check_src(src)
             .expect("a generic nested inside a quotation-input row must not be rejected by R3");
     }
@@ -15679,6 +15682,27 @@ mod tests {
             checked.arrays.len(),
             live_array_len,
             "check_poly_combinator_standalone must not intern the array into the live registry"
+        );
+    }
+
+    /// R6's other half, missed by the unit test above: a cell/ref shape
+    /// grounded through the *body* (not the signature -- `-- ^Result['T i64]`
+    /// and `-- &Result['T i64]` don't parse, the standing poly borrow-sigil
+    /// gap) must also stay word-scoped. `check_poly_combinator_standalone`
+    /// runs the body through the ordinary `check_word` path over
+    /// `&mut local.cells`/`&mut local.refs`, so `^` minting a cell payload
+    /// of the combinator's own grounded monomorph must never touch
+    /// `module.owned_cells`.
+    #[test]
+    fn standalone_grounding_a_cell_through_the_body_leaves_the_live_cells_untouched() {
+        let src = "type: Result['T 'E] | Ok 'T | Err 'E ;\n\
+             : hold inline ( 'T ~[ 'T -- Result['T i64] ] -- i64 ) call ^ drop 0 ;\n";
+        let (checked, _) =
+            checked_like_a_build(src).expect("hold checks standalone and the module compiles");
+        assert_eq!(
+            checked.owned_cells.len(),
+            0,
+            "check_poly_combinator_standalone must not intern the body's cell into the live registry"
         );
     }
 }
