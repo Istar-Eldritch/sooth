@@ -237,22 +237,23 @@ fn combinator_constructing_ungrounded_generic_enum_is_rejected() {
     );
 }
 
-/// R1.2a: a poly body's *own* generic instantiation, minted mid-walk (`mk`'s
-/// `One` here, inside `inner`), must still be visible to a poly-to-poly call
-/// reached later in the *same* body's walk (`outer` calling `inner`) --
-/// `check_poly_body` rebases `self.generics` to `Some(&generics_cell)` for
-/// exactly this, and the post-fixpoint block flushes it back onto the live
-/// `structs`/`enums` registries once nothing is still minting. Reverting
-/// either half (`self.generics` fixed at `None`, or dropping the flush
-/// block) leaves the whole suite green -- 2989 passed, 0 failed either way --
-/// so this is the one test load-bearing for R1.2a: without it, `sink`'s own
-/// unused `Pair[i64]` reference is what keeps the suite oblivious.
+/// R1.2a: a poly body's *own* generic instantiation, minted mid-walk
+/// (`inner`'s `One`, which mints `Pair[Pt]`), must still be visible to the
+/// poly-to-poly call that reached it (`outer` calling `inner`). Two halves
+/// carry that, and this is the only test load-bearing for either: reverting
+/// one leaves the rest of the suite green.
+///
+/// - `discover_transitive_instantiations` takes the live `generics_cell`
+///   rather than `None`. Reverted, this fixture is falsely rejected
+///   ("cannot yet be instantiated at a variable-bearing application").
+/// - `module.generics = generics_cell.into_inner()` sits *past* that call,
+///   so the cell is still live while the fixpoint grounds `enum_words`, and
+///   what it mints is flushed at the end of the fixpoint. Reverted, this
+///   fixture ICEs in lowering ("checked user word exists").
 #[test]
 fn poly_to_poly_call_sees_a_generic_instantiation_minted_mid_walk() {
     let src = format!(
         "{TYPES}\
-         : sink ( Pair[i64] -- i64 ) ~[ ( One ) One> ] ~[ ( Nil ) drop 0 ] Pair? ;\n\
-         : mk ( 'T -- Pair['T] i64 ) One 1 ;\n\
          : inner ( 'T -- i64 ) One drop 5 ;\n\
          : outer ( 'U -- i64 ) inner ;\n\
          : main ( -- ) 1 2 Pt outer . ;\n"
@@ -261,4 +262,39 @@ fn poly_to_poly_call_sees_a_generic_instantiation_minted_mid_walk() {
     let (stdout, code) = build_and_run(prog.path());
     assert_eq!(code, 0);
     assert_eq!(stdout, "5\n");
+}
+
+/// R1.1 review fix: an eliminator whose scrutinee is a monomorph this body's
+/// own walk minted moments ago. `rt`'s `One` mints `Pair[i64]` mid-walk while
+/// the registry's one flushed entry is `mk2`'s `Pair[Pt]`, so the scrutinee's
+/// `EnumId` sits past `enums.len()` until `check_module` flushes. Both
+/// id-to-decl lookups in `poly_eliminator_call` therefore have to consult the
+/// live `GenericTypes`; indexing `enums` unconditionally (as phase 1 first
+/// shipped) panics at either one with "index out of bounds: the len is 1 but
+/// the index is 1".
+///
+/// The rejection asserted below is the pre-existing poly-destructure
+/// restriction and is incidental to that point. If a later phase lifts it,
+/// switch this to assert a clean build rather than deleting the fixture: no
+/// other test reaches the guarded arms.
+#[test]
+fn eliminating_a_body_local_monomorph_diagnoses_rather_than_ices() {
+    let src = format!(
+        "{TYPES}\
+         : mk2 ( Pt -- Pair[Pt] ) One ;\n\
+         : rt ( 'T -- i64 )\n\
+           drop 5 One\n\
+           ~[ ( One ) One> ]\n\
+           ~[ ( Nil ) drop 0 ]\n\
+           Pair? ;\n\
+         : main ( -- ) 1 2 Pt mk2 drop 1 2 Pt rt . ;\n"
+    );
+    let prog = Scratch::write("r11-local-mint", &src);
+    let err =
+        driver::build_with_manifest(prog.path(), common::manifest_for(prog.path()).as_deref())
+            .expect_err("the poly-destructure restriction rejects this body");
+    assert!(
+        err.contains("`One>` is not permitted on `Pair[i64].One`"),
+        "expected a diagnostic naming the body-local monomorph, got: {err}"
+    );
 }

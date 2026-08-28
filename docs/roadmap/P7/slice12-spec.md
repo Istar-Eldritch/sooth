@@ -192,11 +192,15 @@ through the colliding keys.
 
   `trait_calls` never had to care about any of this: `resolve_user_bound` is a registry
   lookup, not an interning mint.
-- **R1.3 (the read)** `lower_call` consults `self.enum_words.get(&span)` immediately after
-  the `builtin_overloads` block (`src/ir/func_builder/calls.rs:370`) and **before** the bare
-  `self.structs.words` / `self.enums.words` lookups at `:777`/`:783`. On a hit it dispatches
-  `lower_enum_call` with the recorded id. The bare-key lookups stay for monomorphic bodies,
-  where they are unambiguous.
+- **R1.3 (the read)** `lower_call` consults `self.enum_words.get(&span)` **before** the bare
+  `self.enums.words` lookup. On a hit it dispatches `lower_enum_call` with the recorded id.
+  The bare-key lookups stay for monomorphic bodies, where they are unambiguous.
+
+  As built the consult sits between the bare `self.structs.words` and `self.enums.words`
+  lookups, not ahead of both as this rule first read. The difference is inert: `enum_words`
+  is keyed by the span of a generated *enum*-word call, so a hit whose name also resolves in
+  `structs.words` would need one name in both generated-word maps, which is a pre-existing
+  collision the earlier stages already exclude.
 - **R1.4 (what stays on the family id, and why)** Two reads are family-invariant and must
   **not** move:
   - the variant *count* in `lower_eliminator` (`calls.rs:920`) is read before the
@@ -214,8 +218,15 @@ through the colliding keys.
   combinator body, which is spliced at N sites (`splice_trait_calls` is keyed `(uid, span)`
   for exactly this reason, `src/check/poly.rs:1157`). This slice does **not** widen the key.
   Instead: a generated enum word reached through a combinator splice at a *generic* enum
-  gets a located rejection naming the restriction. Silence there would reinstate B3 behind a
-  different door.
+  gets a located rejection naming the restriction.
+
+  Measured after the fact: this is a message upgrade, not a safety gate. With the R1.5 check
+  stubbed out its own fixture is still rejected, by the pre-existing
+  variable-bearing-application error ("grounding a generic over its own type variable is not
+  yet implemented"). Keep the sharper message; do not credit it with closing a hole. That
+  also bounds the residual gap noted at `src/check.rs`'s pre-pass skip: a combinator without
+  a `Bound::User` never reaches this check at all, and nothing miscompiles through the gap
+  today only because the same older gate catches that shape first.
 - **R1.6** No `expect` on the recorded id at lowering: a miss falls through to the bare key
   (the monomorphic path), it does not panic.
 
