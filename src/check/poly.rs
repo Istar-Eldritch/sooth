@@ -2459,6 +2459,13 @@ fn poly_cross_output(
                 ),
             )),
         },
+        // P7.S12 phase 2 (R3.4): a `GenericVariant` reaches this arm too
+        // (declared output R3.5 never spells one, but a body-mint could in
+        // principle be cross-called against), and it is already rejected
+        // explicitly, not passed through silently -- the same "compound type
+        // unsupported" diagnostic every other multi-field/`Ref` output gets.
+        // No conversion needed: the wildcard here is a deliberate catch-all
+        // error path, not a silent default.
         _ => Err(poly_cross_call_unsupported_error(
             ctx,
             span,
@@ -3105,6 +3112,14 @@ fn poly_eliminator_call(
         }
         // OQ2: an abstract scrutinee is a `'T` that is *some* enum, which is
         // not constructible without an enum-kind bound (P7.S3d).
+        //
+        // P7.S12 phase 2 (R3.4): a `GenericVariant` scrutinee falls through
+        // to this arm too, and today reads as the same "abstract enum, not
+        // yet grounded" rejection -- wrong wording (it names a real enum,
+        // just an ungrounded one), but not unsound: nothing in this phase
+        // constructs a `GenericVariant` (R3.5), so the arm is unreached.
+        // Deferred to phase 3, which is where a `GenericVariant` scrutinee
+        // first becomes reachable at all (R5.1's own branch site).
         _ => {
             return Err(poly_abstract_enum_scrutinee_error(
                 ctx,
@@ -4016,6 +4031,10 @@ fn poly_construction_fallback(
     is_enum: bool,
     idx: usize,
 ) -> Option<(u32, &[PolyType], &'static str)> {
+    // P7.S12 phase 2 (R3.4): this scrutinee is a declared *output* shape
+    // (R3.5: a `GenericVariant` never spells one), so the `_ =>` here only
+    // ever discards `Var`/`Concrete`/`Ref`/other `Generic` headers -- safe
+    // as written, no conversion needed.
     sig.outputs.iter().find_map(|pty| match pty {
         PolyType::Generic {
             is_enum: oe,
@@ -7775,8 +7794,13 @@ pub(super) fn apply_subst(
         // resulting monomorph -- the same `(idx, module, args)` id space, S3a
         // D3. The mint may not be flushed into `ctx.enums()` yet (it can be
         // this very call), so a body-local decl is read through
-        // `GenericTypes::enum_decl` first, mirroring `poly_eliminator_call`'s
-        // own guard.
+        // `GenericTypes::enum_decl` first -- guarded on `id.index() >=
+        // ctx.enums().len()`, exactly `poly_eliminator_call`'s own guard
+        // (R1.1 there): a hand-built `GenericTypes` with `enum_base == 0`
+        // and a non-empty `enums` makes `enum_decl(small_id)` compute
+        // `id.index() - 0`, which can land inside `inst_enums` and return
+        // the *wrong* decl for an id that in fact names an already-flushed
+        // entry, rather than falling through to `None`.
         PolyType::GenericVariant {
             idx,
             module,
@@ -7811,10 +7835,15 @@ pub(super) fn apply_subst(
             else {
                 unreachable!("instantiate_enum always returns Type::Enum")
             };
-            let display = g
-                .enum_decl(id)
-                .map(|d| d.variants[*vi].display_static)
-                .unwrap_or_else(|| ctx.enums()[id.index()].variants[*vi].display_static);
+            let display = if id.index() >= ctx.enums().len() {
+                g.enum_decl(id)
+                    .map(|d| d.variants[*vi].display_static)
+                    .expect(
+                        "id past `ctx.enums().len()` names a mint this call's own `g` just made",
+                    )
+            } else {
+                ctx.enums()[id.index()].variants[*vi].display_static
+            };
             Ok(Type::Variant(id, *vi, display))
         }
     }

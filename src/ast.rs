@@ -1921,6 +1921,11 @@ impl ImplTarget {
     }
 
     /// The concrete `Type` of a concrete target, or `None` for a generic one.
+    ///
+    /// P7.S12 phase 2 (R3.4): `pattern` is an `impl:` target pattern, a shape
+    /// with no eliminator arm to ground it in, and `GenericVariant` is
+    /// unconstructible outside one (R3.5). The `_ =>` here can never see a
+    /// `GenericVariant`; no conversion needed.
     pub fn concrete_ty(&self) -> Option<Type> {
         match self.pattern {
             PolyType::Concrete(t) => Some(t),
@@ -4153,22 +4158,11 @@ mod tests {
 
     /// P7.S12 (R4.1/R4.3): a `Var` field resolves positionally against the
     /// scrutinee's own argument list; a `Concrete` field passes through
-    /// unchanged. Neither touches `refs`/`arrays` -- built with entries
-    /// already in them and asserted untouched afterward, since an interning
-    /// slip is invisible in the returned shape alone.
+    /// unchanged. No-interning is a signature property here (the function
+    /// takes no registries to intern into), not something this test can
+    /// independently verify.
     #[test]
-    fn substitute_generic_variant_field_var_and_concrete_arms_intern_nothing() {
-        let mut scratch = ScratchRegs::default();
-        scratch.arrays.push(ArrayDecl {
-            name_static: "array[i64 4]",
-            element: Type::I64,
-            count: 4,
-        });
-        scratch.refs.push(RefDecl {
-            name_static: "&i64",
-            referent: Type::I64,
-            mutable: false,
-        });
+    fn substitute_generic_variant_field_var_and_concrete_arms() {
         let args = vec![PolyType::Concrete(Type::U32)];
 
         let var_field = substitute_generic_variant_field(&PolyType::Var(0), &args);
@@ -4177,9 +4171,6 @@ mod tests {
         let concrete_field =
             substitute_generic_variant_field(&PolyType::Concrete(Type::I64), &args);
         assert_eq!(concrete_field, PolyType::Concrete(Type::I64));
-
-        assert_eq!(scratch.arrays.len(), 1);
-        assert_eq!(scratch.refs.len(), 1);
     }
 
     /// Round-2 review fix (R4): a struct argument's bare name is the plain
