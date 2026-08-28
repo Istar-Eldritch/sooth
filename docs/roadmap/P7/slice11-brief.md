@@ -76,10 +76,72 @@ construction is groundable here too" fix to land.
   `Generic`-typed operations reachable only from a combinator body (`dup`/`over` rejection,
   `unify_poly_input`'s consuming side) needs its own probe before scoping in or out.
 
-## Ready to spec: no — needs a design probe first
+## Probe findings (2026-08-28, against current `main`)
 
-Before a spec is written, probe (a) whether `Some(&generics)` can simply be threaded into
-`check_poly_combinator_standalone` and rebased the same way the ordinary path does at the
-top of its own check, or whether the "no real call site" gap above forces a distinct
-mechanism, and (b) a minimal repro building today's `lib/option.sth::map` end to end, to use
-as this slice's golden.
+**(a) Threading `Some(&generics_cell)` into `check_poly_combinator_standalone` is
+mechanically trivial** — the cell is already alive in `check.rs::check`'s enclosing scope
+(`generics_cell`, built once at the top of the function and passed `Some(&generics_cell)` to
+every other check path) and simply wasn't passed to this one call site. Threading it through
+`check_poly_combinator_standalone`'s new parameter and into its two `apply_subst` calls (the
+combinator's own declared input/output slots) and its inner `check_word` call builds clean.
+With only that change, a **signature-level** `Generic` type — e.g. an `Option['T]` input —
+still hits a different, already-shipped rejection first: P7.S12's standing
+"variable-bearing application" restriction on a combinator's *declared slot*
+(`a_combinator_over_a_generic_enum_slot_is_rejected_before_r15_can_fire`,
+`tests/phase7_slice12.rs:635`), which fires during `apply_subst` on the signature *before*
+`ctx.generics()` is ever consulted for the body. So the fixture this slice actually needs is
+output-only construction (`map`'s shape: a concrete/quotation input, an `Option['U]`
+output), not a `Option['T]`-typed input parameter — confirmed live:
+
+```sooth
+type: Result['T 'E] | Ok 'T | Err 'E ;
+: wrap inline ( 'T ~[ 'T -- 'U ] -- Result['U i64] ) call Ok ;
+```
+
+fails today with exactly the predicted `poly_generic_not_yet_groundable_error`.
+
+**(b) Threading the cell alone does not fix construction.** `check_poly_combinator_standalone`
+builds a fully *concrete* `WordDef` (`poly: None`) and checks its body with `check_word` →
+`check_terms_word`, the ordinary **concrete** term walk. `poly_construct_generic` — the
+mechanism that lets a real poly body's own term walk (`poly_call_term`, only reached from
+`check_terms_relaxed`) construct a `PolyType::Generic` output — is never called from the
+concrete path at all. The concrete walk's only way to resolve a variant-constructor name
+like `Ok` is an ordinary `env.get(name)` lookup, which only has an entry if *some other
+monomorph of that generic enum was already minted and registered elsewhere in the same
+program* (verified: adding an unrelated `: mki ( i64 -- Result[i64 i64] ) Ok ;` to the same
+file makes the "unknown word `Ok`" error disappear, replaced by an unrelated call-site
+output-inference error on `wrap`'s own `'U`). A library file defining `map`/`and_then` with
+nothing else in it instantiating `Option[i64]` first has no such accidental monomorph, so
+threading the cell is not sufficient on its own — the gap is real construction machinery for
+the standalone-checked body, not just a `None` guard to lift.
+
+This sharpens the brief's own open question: it is not "loosen the standalone gate" (there
+is no gate on the body path to loosen — the concrete checker simply has no construction
+mechanism for a `Generic` output at all) but **which of two real designs to build**:
+
+- **Route the standalone body through the poly-body term walk** (`check_terms_relaxed` /
+  `poly_call_term`) instead of the concrete one, so `poly_construct_generic`'s existing
+  by-name search over `structs`/`enums`/`ctx.generics()` fires for real, minting a stand-in
+  monomorph (`Option[i64]`, keyed the same way an ordinary poly word's own construction
+  mints one today) the first time a combinator body constructs one — no dependency on any
+  other word in the program having minted it first. This is the larger change: the concrete
+  stand-in `WordDef`/`check_word` call would need replacing or wrapping with the poly path,
+  and every other already-working concrete-checker behaviour the standalone pass currently
+  gets for free (quotation `call`/`times`, R8/R9, R16) would need to keep working under the
+  poly walk instead.
+- **Pre-mint a stand-in monomorph before the concrete check runs**, registering its
+  constructors into a scratch `env` clone the same way `apply_subst`'s existing
+  `Generic`-grounding arm mints one for a *signature slot* — i.e. do for the body's
+  constructor names what the signature-slot fix above already does for declared
+  inputs/outputs, without switching the body walk off the concrete checker. Smaller change,
+  but needs its own answer to "keyed on what module and what dedup identity" for a
+  monomorph that exists only because the *standalone* stand-in check needed it, never a
+  real call site — the same identity question the brief's second bullet already flagged.
+
+## Ready to spec: yes
+
+The two probes above resolve the brief's structural uncertainty (is this a small threading
+fix or a distinct mechanism → confirmed the latter) and supply a real golden
+(`wrap`/`Result['U i64]`, or the equivalent `lib/core/option.sth::map`). The spec still has
+a design choice to make between the two routes above; that choice belongs in the spec, not
+this brief.
