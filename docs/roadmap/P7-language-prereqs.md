@@ -1197,7 +1197,7 @@ inside a poly body.** `[ done ]` Detail: [slice12-spec](./P7/slice12-spec.md).
 
 A generic enum's eliminator (`Option?`) can be called inside a polymorphic body while the
 scrutinee is still an ungrounded `PolyType::Generic` (`Option['T]`). `eliminator_registry`
-(`src/check/declarations.rs:1889`) returns `EliminatorTarget::Concrete(EnumId) | Generic
+(`src/check/declarations.rs:1921`) returns `EliminatorTarget::Concrete(EnumId) | Generic
 { idx: u32 }`, built from `enums` and from `ctx.generics()`'s generic-enum decls; a header
 with a monomorph registers `Concrete`, a header with none registers `Generic`. The registry
 entry is a **name gate only**: `poly_eliminator_call`'s `PolyType::Generic { is_enum: true,
@@ -1234,33 +1234,48 @@ elimination are not one text); `poly_generic_scrutinee_ref_tag_error` (a `&`/`&!
 over a generic scrutinee -- this slice adds the dedicated rejection, `&`/`&!` narrowing
 itself is still not supported); `poly_ordinary_literal_at_inline_param_error`
 (`GenericVariant`'s sibling case of the existing inline-parameter check,
-`src/check/poly.rs:3251` region); `eliminator_arm_names_no_eliminator_error` (arms correctly
+`src/check/poly.rs:3639`); `eliminator_arm_names_no_eliminator_error` (arms correctly
 adjacent to a call that names no eliminator at all, e.g. a typo'd `Optionn?` -- distinct
 from `eliminator_arm_outside_call_error`'s written-adjacency mistake); and
 `concrete_body_generic_eliminator_error` (an ungrounded scrutinee reached from a concrete
-body -- fires from both an ordinary concrete body via `check_word`, `src/check/terms.rs:613`,
-and `check_poly_combinator_standalone`'s i64 stand-in body, `src/check/terms.rs:1259-1267`;
-neither has an instantiator to ground one with).
+body). That last one has a single fire site, `src/check/terms.rs:613`, reached by two
+routes: an ordinary concrete body via `check_word`, and
+`check_poly_combinator_standalone`'s i64 stand-in body, which the concrete checker also
+walks. Neither has an instantiator to ground a scrutinee with.
+
+```text
+error: `Option?` names the generic enum `Option`, which nothing in this program instantiates
+  a concrete body eliminates one grounded instantiation (`Option[i64]`), never the header: an ungrounded scrutinee needs a polymorphic body
+```
 
 Witnessed by `tests/phase7_slice12.rs`: the eliminate/destructure/construct false-rejection
 and segfault repros in both declaration orders, `is-some` over `Option['T]` at two
 instantiations with different payload layouts, a construct-and-eliminate poly word, a
 zero-field destructure (`None`), a two-field variant destructured in declared field order,
-and every rejection above asserted on message text.
+and every rejection above asserted on message text. One of the eight is a sharpened message
+rather than a live gate: `poly_combinator_generic_enum_elimination_error` is unreachable
+today, exactly as its construction twin is, because a combinator carrying an `Option['T]`
+slot is rejected first by the standing variable-bearing-application restriction. Its fixture
+asserts that restriction's text and is the tripwire for the day it lifts.
 
 CLAUDE.md's five split signals, re-run over both files this slice grew. `src/check/poly.rs`
-is 9312 source lines, up from 3348 at the [P7.S3b split deferral](./P7/slice3b-spec.md),
-whose own stated expiry -- "the split point becomes real ... which adds a second quotation
-consumer" -- fired at P7.S3d and again at P7.S3b-follow; both re-runs re-argued the signals
-in full and reaffirmed the deferral. This slice's own re-run: `Ordering`'s non-test uses sit
-in one region (the `poly.rs:6524`/`7649-7710` specificity comparisons) and `RefCell` is five
-sites confined to the eliminator/instantiator threading this slice owns, so import
-divergence is weaker evidence than previously argued -- a single-region import is evidence
-*for* one responsibility, not for a split; `GenericTypes` remains genuinely spread. The
-mutual recursion `poly_call_term -> poly_eliminator_call -> poly_walk -> poly_call_term`
-still crosses this slice's own `poly_destructure_generic`, so a responsibility-shaped split
-still cuts that cycle. Given the file's growth since the last full re-run, the next slice
-that touches `poly.rs` meaningfully should re-argue all five signals from scratch rather
-than carry this one forward. `src/ir/func_builder/calls.rs` stays at 0 of 5: the `enum_words`
+is 9311 source lines and sits at **3 of 5**: it does three jobs (signature checking, the
+abstract walk, instantiation), it mixes the walk with its 65 message formatters, and it
+holds functions that never call each other. Import divergence does **not** fire --
+`Ordering`'s non-test uses sit in one region (the `poly.rs:6524`/`7649-7710` specificity
+comparisons) and `RefCell` is three non-test sites, all of them the instantiator threading
+(`check_poly_body`, `discover_transitive_instantiations`, `CrossGround`); a single-region
+import is evidence *for* one responsibility, not for a split; only
+`GenericTypes` is genuinely spread. Nor does a circular dependency force a boundary: the
+mutual recursion `poly_call_term -> poly_eliminator_call -> poly_walk -> poly_call_term` now
+also crosses `poly_destructure_generic`, so a responsibility-shaped split would *cut* that
+cycle rather than be forced by it. The split stays deferred because both candidates are
+wrong: `poly/diagnostics.rs` is the layer-shaped split CLAUDE.md names as wrong, with no
+precedent in this checker (`check.rs` interleaves 41 error formatters with their checks,
+`declarations.rs` 28, `terms.rs` 12), and `poly/eliminator.rs` moves that recursive cluster
+across a file boundary, buying more coupling than lines. This slice's additions -- registry
+widening, `GenericVariant`, the destructure intercept -- sit inside the
+eliminator/construction responsibility the file already carries, not on a fourth axis.
+`src/ir/func_builder/calls.rs` stays at 0 of 5: the `enum_words`
 read sits in the existing `lower_call` -> `lower_enum_call` -> `lower_eliminator` chain, one
 `use super::*`, no import divergence, no mixed high/low-level code. Neither splits.

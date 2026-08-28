@@ -483,6 +483,31 @@ fn a_generic_variant_escaping_its_arm_is_rejected() {
     );
 }
 
+/// R3.1: `dup` on a narrowed `GenericVariant`, the copy rule the escape check
+/// above exists to protect. `poly_is_copy` never admits a narrowed variant --
+/// `Option.Some` wraps a payload that is linear at some instantiation -- so the
+/// rejection must name the variant rather than fall through to a generic
+/// `cannot dup` over the scrutinee's own `Option['T]`.
+#[test]
+fn duplicating_a_narrowed_generic_variant_is_rejected() {
+    let src = format!(
+        "{OPTION}\
+         : probe ( Option['T] -- i64 )\n\
+           ~[ ( Some ) dup drop drop 1 ]\n\
+           ~[ ( None ) drop 0 ]\n\
+           Option? ;\n\
+         : mki ( i64 -- Option[i64] ) Some ;\n\
+         : main ( -- ) 7 mki probe . ;\n"
+    );
+    let prog = Scratch::write("r31-copy", &src);
+    let err = build_error(prog.path());
+    assert!(
+        err.contains("cannot `dup` a generic variant")
+            && err.contains("`Option.Some` may carry a linear field"),
+        "expected the narrowed-variant copy rejection, got: {err}"
+    );
+}
+
 /// R8.6/R5.7: a `&`-mode arm tag over a generic scrutinee. Narrowing one
 /// needs `intern_ref_type` over a shape with no `Type` yet (R4.3's explicit
 /// non-goal), so this slice admits the owning mode only -- a located
