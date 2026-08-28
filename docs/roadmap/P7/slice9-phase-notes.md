@@ -1331,10 +1331,12 @@ its source is byte-identical. The field was dead, not live-but-quiet.
 Two guards, each proved live *after* the parameter removal (isolated edit-and-revert on
 one file at a time, restored and `git diff --stat` checked; no worktree copy).
 
-- `instantiation_symbol`'s `sooth_mono_` prefix → `sooth_monoX_`: kills
-  `ast::tests::instantiation_symbol_reproduces_native_spelling_expected` **and**
-  `check::poly::tests::transitive_discovery_dedups_repeated_instantiation_symbol`
-  (2 failed). The surviving test is not a placebo.
+- `instantiation_symbol`'s `sooth_mono_` prefix → `sooth_monoX_`: **1588 passed / 10
+  failed** in `cargo test --lib`, among them
+  `ast::tests::instantiation_symbol_reproduces_native_spelling_expected` and
+  `check::poly::tests::transitive_discovery_dedups_repeated_instantiation_symbol`; the
+  other eight are transitive-discovery and monomorphization tests that assert on minted
+  symbol names. The surviving test is not a placebo.
 - `struct_drop_symbol`'s `sooth_struct_drop_` prefix → `sooth_struct_dropX_`: kills
   `ir::destructors::tests::lower_appends_one_destructor_func_per_linear_struct_only`
   (1597 passed / 1 failed). The un-parameterised minter is still witnessed.
@@ -1342,7 +1344,7 @@ one file at a time, restored and `git diff --stat` checked; no worktree copy).
 `lower_call_uses_resolved_generation_symbol` was not mutation-proved because it is
 deleted; its mutation proof is the deletion itself.
 
-### Two doc-prose calls
+### Three doc-prose calls
 
 - **`src/driver.rs:961` stripped here**, out of the spec's literal R7 list. The comment
   inside `compile_so` read "allow them (earlier generations, printf) to resolve at load
@@ -1353,6 +1355,14 @@ deleted; its mutation proof is the deletion itself.
 - **`src/ir/types.rs:552` left for phase 10**, deliberately: the `Resolver` doc says "the
   REPL supplies generation-mangled symbols". It contains `REPL`, so E2's grep does catch
   it, and it describes no signature this phase changes.
+- **`docs/roadmap/P7-language-prereqs.md:811-817` fixed here** (commit `08700c8`), out of
+  the spec's literal R7 list, on the same reasoning as `driver.rs:961`. The S3v entry's
+  `REPL:` paragraph asserted that the closure disposer "resolves them against the live
+  `drop_generation`, so it carries the session-wide override epoch" — a design claim about
+  a field this phase deletes. R8 names `P7-language-prereqs.md`'s **S9** entry, not S3v,
+  and phase 10 derives its sweep list from a grep over `src/` only, so neither would have
+  reached a `docs/` line: left standing it survives the whole slice. It now describes what
+  `emit_drop` actually does, resolve by the aggregate's positional id symbol.
 
 ### Deletion proof (E5, this phase's items)
 
@@ -1364,14 +1374,9 @@ order to record them as gone; that is the note working, not a survival).
 
 ### Carried forward
 
-- **`docs/roadmap/P7-language-prereqs.md:811-817` is a phase-10 item and is not on the
-  spec's list.** The S3v entry carries a whole `REPL:` paragraph asserting that the
-  closure disposer "resolves them against the live `drop_generation`, so it carries the
-  session-wide override epoch". That field no longer exists. R8 names
-  `P7-language-prereqs.md`'s **S9** entry, and phase 10 derives its sweep list from a grep
-  over `src/` only, so neither reaches this paragraph; it is recorded here explicitly so
-  the slice does not leave a stated design claim about a deleted field standing.
 - The `always_mangle` note from phase 7 is unaffected: nothing here touches `resolve`.
+- Nothing else is carried forward beyond `src/ir/types.rs:552`, recorded above as a
+  phase-10 item.
 
 ### Gate
 
