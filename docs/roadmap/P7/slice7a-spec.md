@@ -242,7 +242,7 @@ missed (`ae65acce`, `c4880c3b`). Pure move, independently revertable; full gate 
 no assertion edits, plus R5.2a.
 
 **Phase 2 -- R2 + R3 + R4 (S). Shipped.** The `hosted` manifest and `libc.sth` as `9012ef1`,
-plus review follow-ups (`3ace465` and this one). Exit met: R5.1, R5.2b, R5.3 (folded into
+plus review follow-ups (`3ace465`, `a2cf644`). Exit met: R5.1, R5.2b, R5.3 (folded into
 R5.8(2)), R5.4, R5.5, R5.6, R5.8, and all three R7 mutations caught.
 
 **Phase 3 -- bookkeeping (S). Shipped.** P7.S7a marked `[ done ]` in
