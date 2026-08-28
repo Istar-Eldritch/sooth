@@ -84,7 +84,7 @@
 ; exact-match predicate (no pattern-syntax pitfalls) is both simplest and
 ; the most robust in the face of stray sigil chars.
 ; `else`/`end` are gone: slice 10c deleted the `if ... else ... end` keywords.
-; `branch` is the primitive; `if`/`unless` are the `lib/core.sth` words over it.
+; `branch` is the primitive; `if`/`unless` are the `lib/core/bool.sth` words over it.
 ((word) @keyword.conditional
  (#any-of? @keyword.conditional "if" "unless" "branch"))
 
@@ -99,7 +99,7 @@
    "add" "sub" "mul" "div" "mod" "and" "or" "xor" "not" "shl" "shr"
    ; comparison primitives (32-bit flag)
    "ueq" "ult" "ugt" "ulte" "ugte" "une"
-   ; surface comparisons (lib/cmp.sth words)
+   ; surface comparisons (lib/core/cmp.sth words)
    "eq" "lt" "gt" "lte" "gte" "ne"
    ; control / discriminant
    "call" "tag" "branch"
