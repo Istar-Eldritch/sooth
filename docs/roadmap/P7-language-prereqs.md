@@ -808,9 +808,9 @@ Standing hazard: a closure capturing an array or a slice ICEs at `src/backend/qb
 word per capture. That is the env block, not the closure value, and a scalar or linear-struct
 capture works end to end.
 
-REPL: the disposer calls aggregate destructors through `emit_drop`, which resolves them against
-the live `drop_generation`, so it carries the session-wide override epoch
-(`src/ir/destructors.rs:8-35`) with no plumbing of its own. Unreachable rather than untested: a
+REPL: the disposer calls aggregate destructors through `emit_drop`, which resolves them by the
+aggregate's positional id symbol (`struct_drop_symbol` and its three siblings,
+`src/ir/destructors.rs:8-35`) with no plumbing of its own. Unreachable rather than untested: a
 disposer exists only for a *materialized* closure, and no session line can link one (the standing
 `__quot0` non-PIC relocation, which storing a closure in a field forces exactly as building a bare
 one does), so no session reaches the disposer at all. Pinned as a blocked-state tripwire in
