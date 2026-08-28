@@ -274,6 +274,17 @@ pub fn reject_reserved_name(kind: &str, name: &str, span: Span) -> Result<(), St
             span.line, span.col
         ));
     }
+    // P7.S6a (R2.2): `Len` is the header bracket's kind annotation
+    // (`'N: Len`), intercepted ahead of `parse_capabilities` unconditionally
+    // by any bound bracket -- a user-declared trait named `Len` would
+    // otherwise be silently unreachable from any bracket, the same reason
+    // `Slice`/`array` are reserved above.
+    if kind == "trait" && name == "Len" {
+        return Err(format!(
+            "error: `{name}` is reserved for the header bracket's kind annotation (`'N: {name}`) and cannot be used as a {kind} name at line {}, col {}",
+            span.line, span.col
+        ));
+    }
     Ok(())
 }
 
@@ -1306,11 +1317,18 @@ enum RawLen {
     Var(u32),
 }
 
-/// The kind a `'`-name was first used as: X1 rejects the same name appearing
-/// as both a type variable and a length variable.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum VarKind {
-    Ty,
+/// P7.S6a (R1): the kind a `'`-name was bound as -- `Star` (a type
+/// variable) or `Len` (a length variable). Word signatures used a
+/// parser-private `VarKind { Ty, Len }` for exactly this distinction before
+/// this slice; `Kind` replaces it in place (`Ty` renamed `Star`, matching the
+/// implicit "no kind" `ty_var_names` already assumed) so the new `type:`/
+/// `trait:` header bracket path (`parse_header_bracket`) can share it rather
+/// than inventing a second kind type. Stays `{ Star, Len }`: no `Const`
+/// (non-length const kinds) and no `Arrow` (higher-kinded), which
+/// DESIGN.md's "dependent types: never" and P7b respectively keep out.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Kind {
+    Star,
     Len,
 }
 
@@ -1324,7 +1342,7 @@ struct PolyBuilder {
     len_names: Vec<String>,
     ty_index: HashMap<String, u32>,
     len_index: HashMap<String, u32>,
-    kind: HashMap<String, VarKind>,
+    kind: HashMap<String, Kind>,
     row_in: Option<u32>,
     row_out: Option<u32>,
     /// Slice 10a (R7): the row-name id table, shared by the top-level row
@@ -1434,10 +1452,10 @@ impl PolyBuilder {
     /// binding (first) occurrence. A name already seen in a count position is
     /// X1.
     fn intern_ty_var(&mut self, name: &str, span: Span) -> Result<(u32, bool), String> {
-        if self.kind.get(name) == Some(&VarKind::Len) {
+        if self.kind.get(name) == Some(&Kind::Len) {
             return Err(var_kind_conflict_error(name, span));
         }
-        self.kind.insert(name.to_string(), VarKind::Ty);
+        self.kind.insert(name.to_string(), Kind::Star);
         if let Some(&id) = self.ty_index.get(name) {
             return Ok((id, false));
         }
@@ -1450,10 +1468,10 @@ impl PolyBuilder {
     /// Intern a length variable (an array count `'N`). A name already seen in
     /// a type position is X1.
     fn intern_len_var(&mut self, name: &str, span: Span) -> Result<u32, String> {
-        if self.kind.get(name) == Some(&VarKind::Ty) {
+        if self.kind.get(name) == Some(&Kind::Star) {
             return Err(var_kind_conflict_error(name, span));
         }
-        self.kind.insert(name.to_string(), VarKind::Len);
+        self.kind.insert(name.to_string(), Kind::Len);
         if let Some(&id) = self.len_index.get(name) {
             return Ok(id);
         }
@@ -1670,6 +1688,41 @@ fn unbound_bound_qualifier_error(qualifier: &str, base: &str, span: Span) -> Str
 fn var_kind_conflict_error(name: &str, span: Span) -> String {
     format!(
         "error: variable `{name}` at line {}, col {} is used as both a type variable and a length variable; these are two different variables",
+        span.line, span.col
+    )
+}
+
+/// P7.S6a (R2): the header-bracket twin of `var_kind_conflict_error` -- a
+/// `type:`/`trait:` header binding one `'`-name once with no annotation
+/// (a type variable) and once with `: Len` (`type: Bad['T 'T: Len] ...`).
+/// Reported ahead of `duplicate_generic_ty_var_error` (which stays for the
+/// same-kind case, `type: Box['T 'T]`) because the two bindings here name two
+/// different kinds of variable, not one variable bound twice.
+fn header_var_kind_conflict_error(name: &str, decl_name: &str, span: Span) -> String {
+    format!(
+        "error: `{name}` at line {}, col {} is bound as both a type variable and a length variable in `{decl_name}`'s header; these are two different variables",
+        span.line, span.col
+    )
+}
+
+/// P7.S6a (R2): a header-bracket kind annotation naming anything but `Len`
+/// (`'N: Foo`). No other kind is spellable this slice (see `Kind`'s own doc
+/// comment).
+fn header_bracket_unknown_kind_error(found: &str, span: Span) -> String {
+    format!(
+        "error: unknown kind annotation `{found}` at line {}, col {} (the only spellable kind is `Len`, e.g. `'N: Len`)",
+        span.line, span.col
+    )
+}
+
+/// P7.S6a (R2.1): a non-empty header bracket binding zero type variables
+/// (`type: Buf['N: Len] ...`). Ruled out rather than supported: four sites in
+/// `src/check/poly.rs` treat an empty type-args list as the signal for "not
+/// generic here", a convention only correct today because this shape was
+/// previously unconstructible.
+fn header_bracket_no_type_variable_error(decl_name: &str, span: Span) -> String {
+    format!(
+        "error: `{decl_name}`'s header binds a length variable but no type variable at line {}, col {} (a generic header needs at least one type variable)",
         span.line, span.col
     )
 }
@@ -2491,9 +2544,11 @@ impl<'t> Parser<'t> {
                 if vars.len() > 1 {
                     return Err(multi_variable_trait_error(&name, vars[1].1));
                 }
-                vars.into_iter()
+                let (var, var_span, _kind) = vars
+                    .into_iter()
                     .next()
-                    .expect("parse_header_bracket rejects an empty bracket")
+                    .expect("parse_header_bracket rejects an empty bracket");
+                (var, var_span)
             }
             // R10: the retired postfix variable (`trait: Ord 'T`). Its own
             // error rather than the neither-form one below, which would
@@ -4873,7 +4928,13 @@ impl<'t> Parser<'t> {
         let type_span = self.expect_word("type:")?;
         let (name, _) = self.expect_word_any_spanned()?;
         // `header_is_generic` gates every route here, so the `[` is present.
-        let ty_vars = self.parse_header_bracket(&name)?;
+        // P7.S6a: `GenericHeader`'s own split into a type-variable list and a
+        // length-variable list is P7.S6a phase 2 (R2a); until then this
+        // strips the kind `parse_header_bracket` now carries per entry,
+        // leaving every bound name (of either kind) in the one list exactly
+        // as before R2's annotation existed.
+        let vars = self.parse_header_bracket(&name)?;
+        let ty_vars = vars.into_iter().map(|(n, s, _)| (n, s)).collect();
         Ok((name, ty_vars, type_span))
     }
 
@@ -5296,16 +5357,22 @@ impl<'t> Parser<'t> {
         Ok(args)
     }
 
-    /// P7.S6 (R5): parse a bracketed type-variable list `['T 'U]` from a
-    /// `type:`/`trait:` header. Assumes `[` is the current token; consumes
-    /// through the matching `]`. The bracket's contents are `'`-prefixed words
-    /// only (no bounds on a header -- bounds are a word-definition feature,
-    /// R6). An empty bracket, a duplicate variable, or a non-`'`/non-`]` token
-    /// are located errors.
-    fn parse_header_bracket(&mut self, decl_name: &str) -> Result<Vec<(String, Span)>, String> {
+    /// P7.S6 (R5), widened P7.S6a (R2): parse a bracketed variable list
+    /// `['T 'N: Len]` from a `type:`/`trait:` header. Assumes `[` is the
+    /// current token; consumes through the matching `]`. Each entry is a
+    /// bare `'`-prefixed word (kind `Star`, the unannotated common case) or
+    /// one annotated `: Len` (colon glued or spaced, mirroring a word
+    /// bound's `'T: Copy`); no other kind is spellable this slice. An empty
+    /// bracket, a duplicate same-kind variable, a name bound as both kinds, a
+    /// non-`'`/non-`]` token, an unknown kind annotation, or (R2.1) a
+    /// non-empty bracket binding zero type variables are located errors.
+    fn parse_header_bracket(
+        &mut self,
+        decl_name: &str,
+    ) -> Result<Vec<(String, Span, Kind)>, String> {
         let bracket_span = self.peek().map(|(_, s)| *s).unwrap_or_default();
         self.pos += 1; // consume `[`
-        let mut ty_vars: Vec<(String, Span)> = Vec::new();
+        let mut vars: Vec<(String, Span, Kind)> = Vec::new();
         loop {
             match self.peek() {
                 Some((Token::RBracket, _)) => {
@@ -5313,11 +5380,40 @@ impl<'t> Parser<'t> {
                     break;
                 }
                 Some((Token::Word(w), span)) if w.starts_with('\'') => {
-                    let (w, span) = self.expect_word_any_spanned()?;
-                    if ty_vars.iter().any(|(n, _)| *n == w) {
-                        return Err(duplicate_generic_ty_var_error(&w, decl_name, span));
+                    let glued_colon = w.ends_with(':') && w.len() > 1;
+                    let (name, span) = if glued_colon {
+                        (w[..w.len() - 1].to_string(), *span)
+                    } else {
+                        let (nw, ns) = self.expect_word_any_spanned()?;
+                        (nw, ns)
+                    };
+                    if glued_colon {
+                        self.pos += 1;
                     }
-                    ty_vars.push((w, span));
+                    let colon_follows = if glued_colon {
+                        true
+                    } else {
+                        matches!(self.peek(), Some((Token::Word(c), _)) if c == ":")
+                    };
+                    if colon_follows && !glued_colon {
+                        self.pos += 1;
+                    }
+                    let kind = if colon_follows {
+                        let (kind_name, kind_span) = self.expect_word_any_spanned()?;
+                        if kind_name != "Len" {
+                            return Err(header_bracket_unknown_kind_error(&kind_name, kind_span));
+                        }
+                        Kind::Len
+                    } else {
+                        Kind::Star
+                    };
+                    if let Some((_, _, existing_kind)) = vars.iter().find(|(n, _, _)| *n == name) {
+                        if *existing_kind != kind {
+                            return Err(header_var_kind_conflict_error(&name, decl_name, span));
+                        }
+                        return Err(duplicate_generic_ty_var_error(&name, decl_name, span));
+                    }
+                    vars.push((name, span, kind));
                 }
                 Some((tok, span)) => {
                     return Err(header_bracket_non_var_error(decl_name, tok, *span));
@@ -5325,10 +5421,16 @@ impl<'t> Parser<'t> {
                 None => return Err(self.eof_error("`]` (unterminated type-variable list)")),
             }
         }
-        if ty_vars.is_empty() {
+        if vars.is_empty() {
             return Err(empty_header_bracket_error(decl_name, bracket_span));
         }
-        Ok(ty_vars)
+        if !vars.iter().any(|(_, _, k)| *k == Kind::Star) {
+            return Err(header_bracket_no_type_variable_error(
+                decl_name,
+                bracket_span,
+            ));
+        }
+        Ok(vars)
     }
 
     /// A generic `type:` field's type (R1): a recursive descent over the
@@ -6003,6 +6105,43 @@ mod tests {
     fn parse_src(src: &str) -> Result<Module, String> {
         let tokens = lex(src).unwrap();
         parse(&tokens)
+    }
+
+    /// P7.S6a (R1/R2): drive `parse_header_bracket` directly (it is
+    /// parser-private and, unlike `type:`/`trait:`, has no other route that
+    /// preserves per-entry `Kind` -- `GenericHeader`'s own two-list split is
+    /// P7.S6a phase 2). `src` is the bracket alone, e.g. `"['T 'N: Len]"`.
+    fn header_bracket_vars(src: &str) -> Result<Vec<(String, Span, Kind)>, String> {
+        let tokens = lex(src).unwrap();
+        let mut arrays = Vec::new();
+        let mut owned_cells = Vec::new();
+        let mut refs = Vec::new();
+        let mut slices = Vec::new();
+        let mut generics = GenericTypes::default();
+        let imports = HashMap::new();
+        let exports: Vec<Vec<(String, Span)>> = Vec::new();
+        let selective = HashMap::new();
+        let type_origin: Vec<HashMap<String, u32>> = Vec::new();
+        let trait_origin: Vec<HashMap<String, u32>> = Vec::new();
+        let mut parser = Parser {
+            tokens: &tokens,
+            pos: 0,
+            structs: &[],
+            enums: &[],
+            arrays: &mut arrays,
+            owned_cells: &mut owned_cells,
+            refs: &mut refs,
+            slices: &mut slices,
+            module: 0,
+            imports: &imports,
+            exports: &exports,
+            selective: &selective,
+            type_origin: &type_origin,
+            trait_origin: &trait_origin,
+            generics: &mut generics,
+            traits: &[],
+        };
+        parser.parse_header_bracket("Test")
     }
 
     /// P7 slice 3i: `core::bool`'s declaration, for a fixture whose subject is
@@ -10796,6 +10935,57 @@ mod tests {
             module.words[0].poly.is_some(),
             "generic impl member word should be polymorphic"
         );
+    }
+
+    // ---- P7.S6a Phase 1: R1 `Kind` enum, R2/R2.1/R2.2 header bracket ----
+
+    #[test]
+    fn parse_header_bracket_len_annotation_interns_a_length_variable() {
+        let vars = header_bracket_vars("['T 'N: Len]").unwrap();
+        assert_eq!(
+            vars.iter()
+                .map(|(n, _, k)| (n.clone(), *k))
+                .collect::<Vec<_>>(),
+            vec![
+                ("'T".to_string(), Kind::Star),
+                ("'N".to_string(), Kind::Len)
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_header_bracket_bare_var_defaults_to_star() {
+        let vars = header_bracket_vars("['T]").unwrap();
+        assert_eq!(vars.len(), 1);
+        assert_eq!(vars[0].0, "'T");
+        assert_eq!(vars[0].2, Kind::Star);
+    }
+
+    #[test]
+    fn parse_header_bracket_unknown_kind_annotation_is_error() {
+        let err = header_bracket_vars("['T 'N: Foo]").unwrap_err();
+        assert!(err.contains("Len"), "{err}");
+    }
+
+    #[test]
+    fn parse_header_bracket_name_as_both_kinds_is_error() {
+        let err = header_bracket_vars("['T 'T: Len]").unwrap_err();
+        assert!(
+            err.contains("both a type variable and a length variable"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn parse_header_bracket_length_only_is_error() {
+        let err = header_bracket_vars("['N: Len]").unwrap_err();
+        assert!(err.contains("no type variable"), "{err}");
+    }
+
+    #[test]
+    fn reject_reserved_name_rejects_trait_len() {
+        let err = parse_src("trait: Len : show ( 'T -- ) ; ;").unwrap_err();
+        assert!(err.contains("reserved"), "{err}");
     }
 
     // ---- P7.S6 Phase 2: R5/R5a/R5b/R6/R6a bracket binding sites ----
