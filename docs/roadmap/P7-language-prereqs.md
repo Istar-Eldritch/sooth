@@ -1192,90 +1192,75 @@ regardless of whether a real registry exists elsewhere in the program. Reproduce
 site. This blocks writing `Option`/`Result`-shaped combinators (`map`, `and_then`, ...) as
 library words at all. Detail: [slice11-brief](./P7/slice11-brief.md).
 
-**P7.S12 -- A generic enum's eliminator, and its generated words, are monomorph-blind
-inside a poly body.** `[ done ]` Two defects, specified together because the second is
-the first's exit criterion. Detail: [slice12-spec](./P7/slice12-spec.md).
+**P7.S12 -- A generic enum's eliminator, and its generated words, resolve per monomorph
+inside a poly body.** `[ done ]` Detail: [slice12-spec](./P7/slice12-spec.md).
 
-(A) A generic enum's eliminator (`Option?`) cannot be called inside a polymorphic body when
-the scrutinee is still an ungrounded `PolyType::Generic` (`Option['T]`), for two reasons in
-two mechanisms: `eliminator_registry` (`src/check/declarations.rs:1889`) is keyed only from
-`enums: &[EnumDecl]`, the module's already-monomorphized enum declarations, so a generic
-header with no concrete instantiation anywhere in the program is never a key; and
-`poly_eliminator_call` (`src/check/poly.rs:2973`) has no scrutinee arm for
-`PolyType::Generic` even when the key exists. The rejection is rendered through
-`eliminator_arm_outside_call_error` (`src/check/terms.rs:1178`), the message for a
-written-adjacency mistake, which is the wrong cause. Control: the identical shape over a
-concrete, non-generic enum inside a poly word, and over a concretely-instantiated generic
-enum (`Option[i64]`) inside a monomorphic word, both work.
+A generic enum's eliminator (`Option?`) can be called inside a polymorphic body while the
+scrutinee is still an ungrounded `PolyType::Generic` (`Option['T]`). `eliminator_registry`
+(`src/check/declarations.rs:1889`) returns `EliminatorTarget::Concrete(EnumId) | Generic
+{ idx: u32 }`, built from `enums` and from `ctx.generics()`'s generic-enum decls; a header
+with a monomorph registers `Concrete`, a header with none registers `Generic`. The registry
+entry is a **name gate only**: `poly_eliminator_call`'s `PolyType::Generic { is_enum: true,
+.. }` scrutinee arm reads the operative header off the scrutinee slot itself, the same S3b
+R5 rule `check_eliminator_call` applies on the concrete path. `PolyType::GenericVariant
+{ idx, module, vi, args, name }` -- the poly twin of `Type::Variant`, with 22 forced
+exhaustive-match arms and no `_ =>` -- carries a narrowed arm's payload type across the
+escape check and into a poly-aware destructure intercept in `poly_call_term`, so
+`~[ ( Some ) Some> .. ]` reaches the payload of an ungrounded `Option['T]`.
 
-(B) Every generated enum word reached from a poly body resolves to the wrong monomorph. A
-concrete call site resolves through the checker-recorded mangled symbol in
-`builtin_overloads`; a poly body records none (its walk is abstract and its spans are shared
-by all instantiations), so `Construct`, `Destructure` and `Eliminate` all fall to the bare
-surface key in `ewords` (`src/ir/layout.rs:651-686`), which is last-write-wins across every
-monomorph of one header. `eliminator_registry` has the same bare-key collision one stage up,
-and there the id is used as identity rather than as a family gate. Reproduced against
-`afd3d52`, all order-dependent on which monomorph is declared last: a poly word eliminating
-a concrete `Pair[i64]` is falsely rejected as expecting `Pair[Pt]` in one order and builds
-in the other; a poly word constructing `Pair['T]` segfaults (`EXIT=139`) in one order and
-dies at `src/backend/qbe.rs:534` ("an aggregate field is copied by blit, not
-scalar-stored") in the other. The concrete path is correct in every control.
+Every generated enum word reached from a poly body also resolves to its own monomorph, not
+the last-declared one. A concrete call site resolves through the checker-recorded mangled
+symbol in `builtin_overloads`; a poly body records none (its walk is abstract and its spans
+are shared by all instantiations). `CallInst` carries `enum_words: HashMap<Span, EnumId>`,
+a per-`(callee, θ)` record of which monomorph a poly body's generated enum word site
+resolves to; `lower_call` (`src/ir/func_builder/calls.rs:791` region) consults it ahead of
+the bare surface-name lookup in `self.enums.words`, which stays last-write-wins for
+monomorphic bodies, where it is unambiguous. A miss falls through to the bare key rather
+than panicking (R1.6). `eliminator_registry` (checker-side, `src/check/declarations.rs`)
+has the analogous bare-key collision one stage up; there the widened entry is what stops
+the id from being read as identity rather than as a family gate.
 
-Together these block `Option`/`Result`-shaped library words (`is-some`, `unwrap_or`,
-`and_then`) entirely. The name gate is shared with P7.S11's combinator path, so the
-standalone-combinator and `inline`-splice routes each need an explicit ruling here.
+Together this unblocks `Option`/`Result`-shaped library words (`is-some`, `unwrap_or`,
+`and_then`) written as poly bodies (`tests/phase7_slice12.rs:323`). The name gate is shared
+with P7.S11's combinator path, so the standalone-combinator and `inline`-splice routes each
+get an explicit ruling.
 
-Fixed on both mechanisms. The registry (`eliminator_registry`) now returns
-`EliminatorTarget::Concrete(EnumId) | Generic { idx, module }`, built from `enums` and
-from `ctx.generics()`'s generic-enum decls; a header with a monomorph registers
-`Concrete` (identical to today), a header with none registers `Generic`. The registry
-id is a **name gate only**: `poly_eliminator_call`'s new `PolyType::Generic { is_enum:
-true, .. }` scrutinee arm reads the operative header off the scrutinee slot itself, the
-same S3b R5 rule `check_eliminator_call` already applies on the concrete path. A new
-`PolyType::GenericVariant { idx, module, vi, args, name }` -- the poly twin of
-`Type::Variant`, with 22 forced exhaustive-match arms and no `_ =>` -- carries a narrowed
-arm's payload type across the escape check and into a poly-aware destructure intercept in
-`poly_call_term`, so `~[ ( Some ) Some> .. ]` reaches the payload of an ungrounded
-`Option['T]`. On the lowering side, `CallInst` gained `enum_words: HashMap<Span,
-EnumId>`, a per-`(callee, θ)` record of which monomorph a poly body's generated enum word
-site actually resolves to; `lower_resolved_word_call` consults it ahead of the bare
-surface-name lookup in `ewords`/`eliminator_registry`, which is last-write-wins across
-monomorphs and was B's root cause. A miss falls through to the bare key rather than
-panicking (R1.6). Two routes stay explicitly out of the fix rather than silently wrong: a
-generic enum word reached through an `inline` combinator splice --
+Eight new diagnostics: `poly_copy_generic_variant_error` (a `GenericVariant` read where
+`Copy` is required); `poly_eliminator_variant_escape_error` (a narrowed variant, or a `Ref`
+to one, leaving its arm); `poly_combinator_generic_enum_construction_error` and
+`poly_combinator_generic_enum_elimination_error` (a generic enum word reached through an
+`inline` combinator splice -- each mechanism gets its own message, construction and
+elimination are not one text); `poly_generic_scrutinee_ref_tag_error` (a `&`/`&!`-mode tag
+over a generic scrutinee -- this slice adds the dedicated rejection, `&`/`&!` narrowing
+itself is still not supported); `poly_ordinary_literal_at_inline_param_error`
+(`GenericVariant`'s sibling case of the existing inline-parameter check,
+`src/check/poly.rs:3251` region); `eliminator_arm_names_no_eliminator_error` (arms correctly
+adjacent to a call that names no eliminator at all, e.g. a typo'd `Optionn?` -- distinct
+from `eliminator_arm_outside_call_error`'s written-adjacency mistake); and
+`concrete_body_generic_eliminator_error` (an ungrounded scrutinee reached from a concrete
+body -- fires from both an ordinary concrete body via `check_word`, `src/check/terms.rs:613`,
+and `check_poly_combinator_standalone`'s i64 stand-in body, `src/check/terms.rs:1259-1267`;
+neither has an instantiator to ground one with).
 
-```text
-error: `Some` in `map` (line 3) constructs `Option['T]` with a type this combinator's own splice determines
-  a generic enum constructed inside a combinator body is not yet supported: each splice would need its own resolution, and none is recorded
-```
+Witnessed by `tests/phase7_slice12.rs`: the eliminate/destructure/construct false-rejection
+and segfault repros in both declaration orders, `is-some` over `Option['T]` at two
+instantiations with different payload layouts, a construct-and-eliminate poly word, a
+zero-field destructure (`None`), a two-field variant destructured in declared field order,
+and every rejection above asserted on message text.
 
--- and the same call reached from `check_poly_combinator_standalone`'s i64-stand-in body:
-
-```text
-error: `Option?` names the generic enum `Option`, which nothing in this program instantiates
-  a concrete body eliminates one grounded instantiation (`Option[i64]`), never the header: an ungrounded scrutinee needs a polymorphic body
-```
-
-The adjacency diagnostic also split in two: `eliminator_arm_outside_call_error` (unchanged
-text) still covers a written-adjacency mistake, and a new
-`eliminator_arm_names_no_eliminator_error` covers arms correctly adjacent to a call that
-names no eliminator at all (a typo'd `Optionn?`), so the brief's repro no longer misreports
-its cause as adjacency. `&`/`&!` narrowing of a generic scrutinee and field projection into
-a generic variant stay rejected, unchanged from before this slice.
-
-Witnessed by `tests/phase7_slice12.rs`: B1-B3 in both declaration orders (the order
-sensitivity was the defect), the brief's `is-some` over `Option['T]` at two instantiations
-with different payload layouts, a construct-and-eliminate poly word, a zero-field
-destructure (`None`), and every rejection above asserted on message text.
-
-CLAUDE.md's five split signals re-run, as this slice grew both files further. `poly.rs`
-stays at 3 of 5 (`poly_rs_split_deferred`'s import-divergence and circular-dependency
-signals still don't fire: the new `RefCell`/`Ordering`/`GenericTypes` imports are used
-throughout the file, not siloed to one section, and nothing forces a boundary), and this
-slice's additions -- registry widening, `GenericVariant`, the destructure intercept -- sit
-inside the eliminator/construction responsibility the file already carries, not a fourth
-axis; both previously-rejected splits (`poly/diagnostics.rs`, `poly/eliminator.rs`) are
-still wrong for the reasons already on record. `src/ir/func_builder/calls.rs` stays at 0 of
-5: the new `enum_words` read sits in the same `lower_resolved_word_call` -> `lower_enum_call`
--> `lower_eliminator` chain the existing bare-key lookup lived in, still one `use super::*`,
-no import divergence, no mixed high/low-level code. Neither splits.
+CLAUDE.md's five split signals, re-run over both files this slice grew. `src/check/poly.rs`
+is 9312 source lines, up from 3348 at the [P7.S3b split deferral](./P7/slice3b-spec.md),
+whose own stated expiry -- "the split point becomes real ... which adds a second quotation
+consumer" -- fired at P7.S3d and again at P7.S3b-follow; both re-runs re-argued the signals
+in full and reaffirmed the deferral. This slice's own re-run: `Ordering`'s non-test uses sit
+in one region (the `poly.rs:6524`/`7649-7710` specificity comparisons) and `RefCell` is five
+sites confined to the eliminator/instantiator threading this slice owns, so import
+divergence is weaker evidence than previously argued -- a single-region import is evidence
+*for* one responsibility, not for a split; `GenericTypes` remains genuinely spread. The
+mutual recursion `poly_call_term -> poly_eliminator_call -> poly_walk -> poly_call_term`
+still crosses this slice's own `poly_destructure_generic`, so a responsibility-shaped split
+still cuts that cycle. Given the file's growth since the last full re-run, the next slice
+that touches `poly.rs` meaningfully should re-argue all five signals from scratch rather
+than carry this one forward. `src/ir/func_builder/calls.rs` stays at 0 of 5: the `enum_words`
+read sits in the existing `lower_call` -> `lower_enum_call` -> `lower_eliminator` chain, one
+`use super::*`, no import divergence, no mixed high/low-level code. Neither splits.

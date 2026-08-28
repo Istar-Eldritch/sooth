@@ -1,6 +1,6 @@
 # P7.S12 -- Eliminating an ungrounded generic enum inside a poly body (spec)
 
-Status: **planned**. Input: [slice12-brief](./slice12-brief.md). Roadmap:
+Status: **done**. Input: [slice12-brief](./slice12-brief.md). Roadmap:
 [P7-language-prereqs](../P7-language-prereqs.md), P7.S12.
 
 ## Problem
