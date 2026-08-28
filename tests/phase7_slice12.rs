@@ -553,7 +553,7 @@ fn a_generic_eliminator_in_a_concrete_body_is_rejected() {
     let err = build_error(prog.path());
     assert!(
         err.contains("`Option?` names the generic enum `Option`")
-            && err.contains("nothing in this program instantiates")
+            && err.contains("cannot eliminate it while it is ungrounded")
             && !err.contains("arms are written together"),
         "expected R2.4's own located rejection, got: {err}"
     );
@@ -581,9 +581,39 @@ fn a_generic_eliminator_in_a_standalone_checked_combinator_is_rejected() {
     let err = build_error(prog.path());
     assert!(
         err.contains("`Option?` names the generic enum `Option`")
-            && err.contains("nothing in this program instantiates")
+            && err.contains("cannot eliminate it while it is ungrounded")
             && !err.contains("arms are written together"),
         "expected R2.4's own located rejection in the stand-in body, got: {err}"
+    );
+}
+
+/// `concrete_body_generic_eliminator_error` used to bake a literal `[i64]`
+/// into its second line as though it were a fact read off the program, when
+/// it is a hardcoded string the format! call never varies -- and its first
+/// line claimed "nothing in this program instantiates" the header even when a
+/// monomorph plainly exists here, minted by `wrap`'s own output and reachable
+/// from `main`'s call site (`eliminator_registry` is built before the poly
+/// pre-pass mints it, a separate, out-of-scope timing gap this message must
+/// not paper over by asserting something false). The scrutinee's own type
+/// parameter is never `i64` here -- it never appears at all in this program --
+/// so any concrete instantiation the message named would be invented, not
+/// computed. The fix drops the fabricated instantiation and the false
+/// nothing-instantiates claim, and states the one thing that is always true:
+/// a concrete body cannot eliminate the header while it is ungrounded.
+#[test]
+fn concrete_body_generic_eliminator_message_does_not_fabricate_an_instantiation() {
+    let src = "type: Pair['A] | Nil | One 'A ;\n\
+         : wrap ( 'T -- Pair['T] ) One ;\n\
+         : main ( -- ) 7 wrap ~[ ( One ) One> ] ~[ ( Nil ) 0 ] Pair? . ;\n";
+    let prog = Scratch::write("r86-poly-output", src);
+    let err = build_error(prog.path());
+    assert!(
+        err.contains("`Pair?` names the generic enum `Pair`")
+            && err.contains("cannot eliminate it while it is ungrounded")
+            && !err.contains("nothing in this program instantiates")
+            && !err.contains("i64")
+            && !err.contains("arms are written together"),
+        "expected the honest rejection with no fabricated instantiation, got: {err}"
     );
 }
 

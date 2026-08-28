@@ -1272,7 +1272,7 @@ fn concrete_body_generic_eliminator_error(ctx: &Ctx, span: Span, name: &str) -> 
     let call = crate::resolve::demangle_call(name);
     let enum_name = call.trim_end_matches('?');
     format!(
-        "error: `{call}` names the generic enum `{enum_name}`, which nothing in this program instantiates{} (line {})\n  a concrete body eliminates one grounded instantiation (`{enum_name}[i64]`), never the header: an ungrounded scrutinee needs a polymorphic body",
+        "error: `{call}` names the generic enum `{enum_name}`, but a concrete body cannot eliminate it while it is ungrounded{} (line {})\n  a concrete body eliminates a grounded instantiation of `{enum_name}`, never the header itself: an ungrounded scrutinee needs a polymorphic body",
         in_word(ctx),
         span.line,
     )

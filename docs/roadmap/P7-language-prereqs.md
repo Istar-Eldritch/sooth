@@ -1244,8 +1244,8 @@ routes: an ordinary concrete body via `check_word`, and
 walks. Neither has an instantiator to ground a scrutinee with.
 
 ```text
-error: `Option?` names the generic enum `Option`, which nothing in this program instantiates
-  a concrete body eliminates one grounded instantiation (`Option[i64]`), never the header: an ungrounded scrutinee needs a polymorphic body
+error: `Option?` names the generic enum `Option`, but a concrete body cannot eliminate it while it is ungrounded
+  a concrete body eliminates a grounded instantiation of `Option`, never the header itself: an ungrounded scrutinee needs a polymorphic body
 ```
 
 Witnessed by `tests/phase7_slice12.rs`: the eliminate/destructure/construct false-rejection
