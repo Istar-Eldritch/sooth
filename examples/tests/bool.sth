@@ -3,7 +3,6 @@
 \ `expect` alone (R5.1): each assertion's arm is chosen so the dispatch under
 \ test only reads back `True` when it picked the right branch.
 
-import: intrinsics * ;
 import: core::prelude * ;
 import: hosted::testing | expect | ;
 

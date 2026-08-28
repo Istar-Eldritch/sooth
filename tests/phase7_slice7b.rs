@@ -60,7 +60,7 @@ fn testing_fixture(t: &Tree) -> PathBuf {
     t.write(
         "main.sth",
         "import: core::prelude * ;\n\
-         import: hosted::testing t | expect expect-eq | ;\n\
+         import: hosted::testing | expect expect-eq | ;\n\
          : main ( -- )\n\
          True \"true is true\" expect\n\
          False \"false is true\" expect\n\
@@ -106,7 +106,7 @@ fn passing_entry(t: &Tree, rel: &str) -> PathBuf {
     t.write(
         rel,
         "import: core::prelude * ;\n\
-         import: hosted::testing t | expect expect-eq | ;\n\
+         import: hosted::testing | expect expect-eq | ;\n\
          : main ( -- )\n\
          True \"true is true\" expect\n\
          1 1 \"one equals one\" expect-eq ;\n",
@@ -119,7 +119,7 @@ fn failing_entry(t: &Tree, rel: &str) -> PathBuf {
     t.write(
         rel,
         "import: core::prelude * ;\n\
-         import: hosted::testing t | expect expect-eq | ;\n\
+         import: hosted::testing | expect expect-eq | ;\n\
          : main ( -- )\n\
          1 2 \"one equals two\" expect-eq ;\n",
     )
@@ -477,7 +477,7 @@ fn dogfood_suite_examples_tests_is_green() {
     );
     let stdout = String::from_utf8(output.stdout).expect("stdout is utf8");
     assert!(
-        stdout.contains("5 entries, 0 failed (19 ok, 0 not ok assertions)"),
+        stdout.contains("5 entries, 0 failed (31 ok, 0 not ok assertions)"),
         "the dogfood suite is green with every assertion counted: {stdout}"
     );
 }
