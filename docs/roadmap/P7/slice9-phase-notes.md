@@ -1694,14 +1694,17 @@ Carried, not re-run here: phases 2–6's per-test mutation proofs are recorded i
 sections of this document (phase 2's `Ctx::Word` migrations, phase 3's `ir::lower`
 migrations, phases 4–6's `run`-based rewrites), and every deleted test is classified there
 as retired-mechanism or duplicate-of-a-named-covering-test. "Phases 8–10 touch no test
-logic" is too broad, corrected here: phase 9 (`d170159`) deleted three unit tests
-(`instantiation_symbol_none_reproduces_native_spelling_expected`,
-`instantiation_symbol_some_appends_gen_component_expected`,
+logic" is too broad, corrected here: phase 9 (`d170159`) deleted **two** unit tests
+(`instantiation_symbol_some_appends_gen_component_expected`,
 `instantiation_symbol_distinct_generations_are_distinct_symbols_expected`) alongside the
-`generation` parameter they existed to cover, and edited a fourth's call site,
-`lower_call_uses_resolved_generation_symbol`, dropping the generation-suffix assertion phase
-3 deliberately migrated and kept green — all spec-ordered retirement of the mechanism itself,
-not an accidental edit to a surviving test's assertions. Phase 7's collapse is
+`generation` parameter they existed to cover, **renamed** the third to
+`instantiation_symbol_reproduces_native_spelling_expected` (`src/ast.rs:4196`) keeping its
+`sooth_mono_id__t0_i64` assertion verbatim — the one survivor R7 names, whose only edit is
+dropping the now-absent `None` argument — and **deleted**
+`lower_call_uses_resolved_generation_symbol` in full (`src/ir/driver.rs`, 41 lines), which
+phase 3 deliberately migrated and kept green as the field's only unit-level witness until
+the field itself died here. All spec-ordered retirement of the mechanism itself, not an
+accidental edit to a surviving test's assertions. Phase 7's collapse is
 diagnostic-text-preserving by construction, and phase 10 is comment/doc-only (`49431ce`'s
 `src/` diff is pure comment reflow). **Pass**, by inheritance.
 
