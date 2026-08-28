@@ -805,6 +805,22 @@ fn check_module(module: &mut Module) -> Result<Vec<WordObligations>, String> {
         // user bound has no trait obligations, and its body may use builtins
         // (`tag`/`branch` in `if`) that `poly_call_term` does not dispatch,
         // so it stays on the standalone-only path.
+        //
+        // P7.S12 review (R1.5 residual gap, not closed by this phase): a
+        // `Bound::Copy`-only combinator (no `Bound::User`) also takes this
+        // skip, so its own `is_combinator_splice` gate against constructing a
+        // still-ungrounded generic enum never runs either -- the same
+        // body/splice shape R1.5 rejects for a `Bound::User` combinator
+        // reaches lowering unrejected here and miscompiles (`qbe.rs:534`,
+        // reproduces at HEAD and at `afd3d52`, i.e. pre-existing). Widening
+        // this skip to `sig.bounds.is_empty()` was tried and reverted: it
+        // pulls a Copy-bounded combinator like `filter` into this pre-pass in
+        // word-declaration order ahead of other poly bodies, which shifts the
+        // `GenericTypes` ids those later bodies see and breaks `eq`/`cmp`
+        // (`Ordering?` mismatched against a stale `Ordering` id) -- the
+        // pre-pass's ordering assumptions are not safe to extend this way
+        // without the same care Phase 1's own R1.1/R1.2a fixes took. Left for
+        // a follow-up phase to close properly.
         if is_combinator(word) && !sig.bounds.iter().any(|(_, b)| matches!(b, Bound::User(_))) {
             continue;
         }

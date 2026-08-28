@@ -3024,9 +3024,28 @@ fn poly_eliminator_call(
     // one whose enum is not a member of this call name's base family, is the
     // same `type_mismatch_error` as before.
     let id = match &scrutinee.pt {
-        PolyType::Concrete(Type::Enum(found, _))
-            if generic_surface_name(&enums[found.index()].name)
-                == generic_surface_name(&enum_decl.name) =>
+        // Review fix (R1.1 hazard): `found` can be a monomorph this body's
+        // own walk minted moments ago -- `enums` only grows once the whole
+        // word returns and `check_module` flushes it (the same staleness
+        // `type_is_registered`, P7.S3k N1, guards against), so indexing it
+        // unconditionally would panic on exactly that id. Gated on
+        // `found.index() < enums.len()`, not on `Type::Enum`'s own carried
+        // name: that name is whatever spelling the mint site built the type
+        // with, which is not always the registry decl's own `.name` (they
+        // can differ in mangling), so comparing the two would compare
+        // apples to oranges for an *already-flushed* id -- the common case.
+        // Only a body-local mint, whose registry decl is not indexable at
+        // all yet, has no other name to fall back on.
+        PolyType::Concrete(Type::Enum(found, found_name))
+            if found.index() < enums.len()
+                && generic_surface_name(&enums[found.index()].name)
+                    == generic_surface_name(&enum_decl.name) =>
+        {
+            *found
+        }
+        PolyType::Concrete(Type::Enum(found, found_name))
+            if found.index() >= enums.len()
+                && generic_surface_name(found_name) == generic_surface_name(&enum_decl.name) =>
         {
             *found
         }
@@ -3068,7 +3087,27 @@ fn poly_eliminator_call(
     // (`id`, read off the scrutinee) dispatches. Everything below --
     // exhaustiveness, arm narrowing, arm walk -- resolves against the
     // scrutinee's own monomorph, never the gate.
-    let enum_decl = &enums[id.index()];
+    //
+    // Review fix (R1.1 hazard): `id` can itself be a body-local mint not yet
+    // flushed into `enums` -- gated the same way `type_is_registered`
+    // (P7.S3k N1) gates it, on `id.index() < enums.len()`, not on
+    // `GenericTypes::enum_base` alone: a caller that builds its own
+    // `GenericTypes` without going through `check::check`'s rebase
+    // discipline (several unit tests do) can leave `enum_base` at `0` while
+    // `enums` is already non-empty, and indexing `inst_enums` by
+    // `id.index() - enum_base` in that mismatched state would silently
+    // return the *wrong* decl for a small, already-flushed id instead of
+    // falling through.
+    let generics_guard = ctx
+        .generics()
+        .filter(|_| id.index() >= enums.len())
+        .map(|cell| cell.borrow());
+    let enum_decl: &EnumDecl = match &generics_guard {
+        Some(g) => g
+            .enum_decl(id)
+            .expect("an id past `enums.len()` names a mint this batch's own walk just made"),
+        None => &enums[id.index()],
+    };
     // P7.S12 (R1.2): record this eliminator call site so `check_poly_call`
     // can ground it against a concrete θ later. At this phase the scrutinee
     // is always already concrete (a generic scrutinee is P7.S12 R5, phase 3),
@@ -3136,7 +3175,11 @@ fn poly_eliminator_call(
         .iter()
         .zip(&variant_indices)
         .map(|((quot, _), vi)| {
-            let narrowed = variant_type(enums, id, *vi);
+            // Review fix: `variant_type` indexes `enums` unconditionally --
+            // the same hazard `enum_decl` above was just guarded against --
+            // so this builds the `Type::Variant` directly off the
+            // already-resolved `enum_decl` instead of re-indexing.
+            let narrowed = Type::Variant(id, *vi, enum_decl.variants[*vi].display_static);
             let mut input = row.clone();
             input.push(PolySlot::new(PolyType::Concrete(narrowed)));
             PolyArm {
@@ -4144,10 +4187,14 @@ fn poly_construct_generic(
         }
     };
     // P7.S12 (R1.2/R6.1): record this generated-enum-word call site so
-    // `check_poly_call` can ground it against a concrete θ later -- a struct
-    // constructor has no per-monomorph identity for lowering to lose (a
-    // struct is laid out by field order alone), so only the enum case is
-    // recorded.
+    // `check_poly_call` can ground it against a concrete θ later -- only the
+    // enum case is recorded, this phase's scope (B1/B2/B3 are all enum
+    // repros). Review note: a struct constructor is *not* actually safe from
+    // the same hazard -- `type: Cell['T] val 'T ;` with a `wrap` word
+    // constructing it at two asymmetric monomorphs (`i64` then `Pt`, or the
+    // reverse) segfaults or ICEs in the backend today, live at HEAD,
+    // measured pre-existing and out of this phase's enum-only scope. A
+    // struct twin of R1.1/R1.2/R1.3 is a follow-up phase's to close.
     if is_enum {
         // R1.5: a combinator's own construction of a still-ungrounded enum
         // varies per splice, which the `Span`-keyed record cannot represent.

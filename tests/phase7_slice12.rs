@@ -135,10 +135,16 @@ fn destructure_over_asymmetric_monomorphs_builds_mk1_then_mk2() {
     assert_eq!(stdout, "7\n");
 }
 
-/// B2 (`Destructure`): the `mk2`-then-`mk1` order -- live-clean at `afd3d52`,
-/// but reads `Pair[Pt]`'s field layout out of a `Pair[i64]` value once R1.1
-/// alone stops the false rejection above (R1.2/R1.3's fix). Must print the
-/// same `7` as the order above.
+/// B2 (`Destructure`): the `mk2`-then-`mk1` order -- live-clean at `afd3d52`.
+/// Must print the same `7` as the order above.
+///
+/// Review note: this witnesses R1.1 alone, not R1.2/R1.3. `use`'s own
+/// eliminator arm narrows `One>`'s operand to a concrete `Type::Variant`
+/// already carrying the scrutinee's real id (R1.1's fix, inside
+/// `poly_eliminator_call`) -- `use` never re-instantiates at a second enum
+/// monomorph, so there is no per-splice ambiguity left for `enum_words` to
+/// resolve at lowering. Confirmed by mutation: disabling R1.3's lowering
+/// override entirely still leaves both `destructure_*` tests green.
 #[test]
 fn destructure_over_asymmetric_monomorphs_builds_mk2_then_mk1() {
     let src = format!(
@@ -229,4 +235,30 @@ fn combinator_constructing_ungrounded_generic_enum_is_rejected() {
             && err.contains("this combinator's own splice determines"),
         "expected a located R1.5 rejection naming the enum and the restriction, got: {err}"
     );
+}
+
+/// R1.2a: a poly body's *own* generic instantiation, minted mid-walk (`mk`'s
+/// `One` here, inside `inner`), must still be visible to a poly-to-poly call
+/// reached later in the *same* body's walk (`outer` calling `inner`) --
+/// `check_poly_body` rebases `self.generics` to `Some(&generics_cell)` for
+/// exactly this, and the post-fixpoint block flushes it back onto the live
+/// `structs`/`enums` registries once nothing is still minting. Reverting
+/// either half (`self.generics` fixed at `None`, or dropping the flush
+/// block) leaves the whole suite green -- 2989 passed, 0 failed either way --
+/// so this is the one test load-bearing for R1.2a: without it, `sink`'s own
+/// unused `Pair[i64]` reference is what keeps the suite oblivious.
+#[test]
+fn poly_to_poly_call_sees_a_generic_instantiation_minted_mid_walk() {
+    let src = format!(
+        "{TYPES}\
+         : sink ( Pair[i64] -- i64 ) ~[ ( One ) One> ] ~[ ( Nil ) drop 0 ] Pair? ;\n\
+         : mk ( 'T -- Pair['T] i64 ) One 1 ;\n\
+         : inner ( 'T -- i64 ) One drop 5 ;\n\
+         : outer ( 'U -- i64 ) inner ;\n\
+         : main ( -- ) 1 2 Pt outer . ;\n"
+    );
+    let prog = Scratch::write("r12a", &src);
+    let (stdout, code) = build_and_run(prog.path());
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "5\n");
 }

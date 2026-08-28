@@ -915,6 +915,18 @@ impl GenericTypes {
         live.extend(std::mem::take(&mut self.inst_enums));
     }
 
+    /// P7.S12 (review, R1.1 fix): the decl for an `EnumId` this batch minted
+    /// but has not flushed into `Module::enums` yet -- a poly body's own
+    /// walk can mint one mid-walk (`GenericTypes::instantiate_enum`), and
+    /// `enum_base + inst_enums.len()` is exactly the range `flush_enums_into`
+    /// has not appended. `None` for an id already flushed (or a hand-written
+    /// concrete enum), which the caller falls back to indexing `enums` for.
+    pub fn enum_decl(&self, id: EnumId) -> Option<&EnumDecl> {
+        id.index()
+            .checked_sub(self.enum_base)
+            .and_then(|i| self.inst_enums.get(i))
+    }
+
     /// Read-only mint lookup: the already-resolved `Type` for one
     /// application of generic struct `idx`, if this exact `(idx, module,
     /// args)` key has ever been minted (parse-time or downstream). Used by
