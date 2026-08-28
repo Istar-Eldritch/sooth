@@ -7,7 +7,8 @@ fn usage() -> ! {
         "sooth — the Sooth compiler (bootstrap)\n\n\
          usage:\n\
          \x20 sooth build <file.sth> [--manifest <path>]   compile to a native binary\n\
-         \x20 sooth run   <file.sth> [--manifest <path>]   compile and run\n\n\
+         \x20 sooth run   <file.sth> [--manifest <path>]   compile and run\n\
+         \x20 sooth test  [path...]                        discover, build, and run tests\n\n\
          \x20 --manifest <path>  resolve the entry file's dependency-anchored\n\
          \x20                    imports against this manifest, overriding an\n\
          \x20                    ancestor manifest (entry file only)\n"
@@ -51,6 +52,25 @@ fn entry_and_manifest_or_usage(args: &[String]) -> (PathBuf, Option<PathBuf>) {
     parse_entry_and_manifest(args).unwrap_or_else(|()| usage())
 }
 
+/// Split `test`'s trailing arguments into a `[path...]` list (R3.2). No
+/// `--manifest`: each entry resolves through its own ancestor manifest.
+/// `Err` for any `--flag`, kept out of this function so it stays testable
+/// without exiting the process.
+fn parse_test_paths(args: &[String]) -> Result<Vec<PathBuf>, ()> {
+    let mut paths = Vec::new();
+    for arg in args {
+        if arg.starts_with("--") {
+            return Err(());
+        }
+        paths.push(PathBuf::from(arg));
+    }
+    Ok(paths)
+}
+
+fn test_paths_or_usage(args: &[String]) -> Vec<PathBuf> {
+    parse_test_paths(args).unwrap_or_else(|()| usage())
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let result = match args.get(1).map(String::as_str) {
@@ -62,6 +82,18 @@ fn main() {
             let (entry, manifest) = entry_and_manifest_or_usage(&args[2..]);
             match driver::run_with_manifest(&entry, manifest.as_deref()) {
                 Ok(status) => exit(status.code().unwrap_or(1)),
+                Err(e) => Err(e),
+            }
+        }
+        Some("test") => {
+            let paths = test_paths_or_usage(&args[2..]);
+            let outcome = std::env::current_dir()
+                .map_err(|e| format!("reading cwd: {e}"))
+                .and_then(|cwd| {
+                    driver::test(&cwd, &paths, &mut std::io::stdout(), &mut std::io::stderr())
+                });
+            match outcome {
+                Ok(code) => exit(code),
                 Err(e) => Err(e),
             }
         }
@@ -139,5 +171,25 @@ mod tests {
     fn unrecognized_flag_is_usage_error() {
         assert!(parse_entry_and_manifest(&args(&["--verbose"])).is_err());
         assert!(parse_entry_and_manifest(&args(&["a.sth", "--verbose"])).is_err());
+    }
+
+    #[test]
+    fn test_subcommand_collects_paths() {
+        let paths = parse_test_paths(&args(&["a.sth", "tests/dir"])).unwrap();
+        assert_eq!(
+            paths,
+            vec![PathBuf::from("a.sth"), PathBuf::from("tests/dir")]
+        );
+    }
+
+    #[test]
+    fn test_subcommand_no_paths_is_ok() {
+        let paths = parse_test_paths(&args(&[])).unwrap();
+        assert!(paths.is_empty());
+    }
+
+    #[test]
+    fn test_subcommand_rejects_flag() {
+        assert!(parse_test_paths(&args(&["--manifest", "m.pkg"])).is_err());
     }
 }
