@@ -203,8 +203,6 @@ fn forwarded_recursion_through_a_mid_body_bind_declines_the_loop_but_still_check
     assert!(!opens_a_loop_header(spin));
 }
 
-// -- E-P1-4: the REPL lowering path shares the predicate --------------------
-
 // -- E-P1-5: the linear spine across the spliced back-edge -------------------
 
 #[test]

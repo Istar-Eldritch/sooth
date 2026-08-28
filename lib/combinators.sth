@@ -28,8 +28,8 @@ export: each map fold filter while times times-helper ;
 \ over `times-helper`, a self-*tail* combinator carrying a from/to pair: the
 \ recursive `times-helper` in tail position lowers to a loop back-edge (D8),
 \ not an endless splice, so `times` runs in constant stack. `times-helper` is
-\ exported because the REPL's dlopen import path retains only a module's
-\ exported words, and every caller of `times` splices its body.
+\ exported because every caller of `times` splices its body, and a spliced
+\ body needs its own callees importable at the splice site.
 : times-helper inline ( ..s i64 i64 ~[ ..s i64 -- ..s ] -- ..s )
   | f | | to | | from |
   from to lt ~[
