@@ -122,6 +122,15 @@ fn empty_poly_calls() -> &'static HashMap<Span, CallInst> {
     EMPTY.get_or_init(HashMap::new)
 }
 
+/// P7.S12 (R1.2): the enum-words companion of `empty_trait_calls`, handed to
+/// every lowering path with no per-instantiation generated-enum-word
+/// resolutions to thread (every monomorphic word, the REPL, destructor
+/// synthesis, and unit tests).
+fn empty_enum_words() -> &'static HashMap<Span, EnumId> {
+    static EMPTY: std::sync::OnceLock<HashMap<Span, EnumId>> = std::sync::OnceLock::new();
+    EMPTY.get_or_init(HashMap::new)
+}
+
 /// P7 slice 1 (R2): the resolved-field companion of `empty_instantiations`,
 /// handed to every lowering path that resolved no field projection
 /// (destructor synthesis and unit tests).

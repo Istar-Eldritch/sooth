@@ -778,6 +778,26 @@ impl<'a> FuncBuilder<'a> {
                     self.lower_struct_word(sw);
                     return Ok(());
                 }
+                // P7.S12 (R1.3/R1.6): a poly body's own generated-enum-word
+                // call sites carry no `builtin_overloads` entry (the checker
+                // records nothing there for a poly body), so every one of
+                // them reaches here. `self.enum_words` is this instantiation's
+                // per-site resolution (R1.2); the bare-key lookup below is
+                // last-write-wins across every monomorph of one header
+                // (R1.4), so its `EnumId` is replaced with the recorded one
+                // and its variant kind/index kept (family-invariant). A miss
+                // in either map falls through to the bare-key monomorphic
+                // path unchanged rather than panicking.
+                if let Some(&found) = self.enum_words.get(&span) {
+                    if let Some(&ew) = self.enums.words.get(name) {
+                        let ew = match ew {
+                            EnumWord::Construct(_, vi) => EnumWord::Construct(found, vi),
+                            EnumWord::Destructure(_, vi) => EnumWord::Destructure(found, vi),
+                            EnumWord::Eliminate(_) => EnumWord::Eliminate(found),
+                        };
+                        return self.lower_enum_call(ew, span, tail);
+                    }
+                }
                 // A variant constructor lowers to alloc + tag store + field
                 // stores inline, parallel to a struct constructor (R14/R15).
                 if let Some(&ew) = self.enums.words.get(name) {
@@ -2302,6 +2322,108 @@ mod tests {
             "a trait member cannot dispatch back to itself (lowering would splice it forever): \
              `a` (member of trait `Cyc` for `i64`) exceeded the splice budget of 64 (line 11, col 5)",
             "the outermost member (`a`, the 0->1 transition) is named, not the firing frame (`b`)"
+        );
+    }
+
+    /// P7.S12 (R1.3/R8.8): a poly word (`wrap`) constructing a generic enum
+    /// header at two asymmetric monomorphs (a scalar field vs. an aggregate
+    /// field). `store_field` emits `Instr::FieldStore` for a scalar `i64`
+    /// field and `Instr::Blit` for an aggregate `Pt` field, so the two
+    /// instantiations' construction sites must disagree on which one they
+    /// emit -- if `lower_call` fell back to the bare-key `EnumWord` (last
+    /// write wins across both monomorphs), both instantiations would emit
+    /// the *same* one, or one would hit the `Blit`/`FieldStore` shape
+    /// mismatch that panics in the backend.
+    #[test]
+    fn enum_words_dispatches_construction_per_monomorph() {
+        let ir = lower_src(
+            "type: Pair['A] | Nil | One 'A ;\n\
+             type: Pt x i64 y i64 ;\n\
+             : wrap ( 'T -- Pair['T] ) One ;\n\
+             : mk1 ( i64 -- Pair[i64] ) wrap ;\n\
+             : mk2 ( Pt -- Pair[Pt] ) wrap ;\n\
+             : main ( -- )\n\
+             \x20 1 2 Pt mk2 drop\n\
+             \x20 7 mk1 drop ;\n",
+        );
+        let wrap_i64 = ir
+            .funcs
+            .iter()
+            .find(|f| f.name.contains("wrap") && f.name.contains("i64"))
+            .expect("wrap's i64 instantiation mints its own IrFunc");
+        let wrap_pt = ir
+            .funcs
+            .iter()
+            .find(|f| f.name.contains("wrap") && f.name.contains("Pt"))
+            .expect("wrap's Pt instantiation mints its own IrFunc");
+        assert!(
+            count(wrap_i64, |i| matches!(i, Instr::FieldStore(..))) >= 1,
+            "wrap<i64>'s `One` field is a scalar i64, stored via FieldStore: {:?}",
+            instrs(wrap_i64)
+        );
+        assert_eq!(
+            count(wrap_i64, |i| matches!(i, Instr::Blit(..))),
+            0,
+            "wrap<i64> must not blit an aggregate field: {:?}",
+            instrs(wrap_i64)
+        );
+        assert!(
+            count(wrap_pt, |i| matches!(i, Instr::Blit(..))) >= 1,
+            "wrap<Pt>'s `One` field is the aggregate `Pt`, stored via Blit: {:?}",
+            instrs(wrap_pt)
+        );
+    }
+
+    /// P7.S12 (R1.6/R8.8): a monomorphic word's own generated-enum-word call
+    /// has no `CallInst::enum_words` entry to record (it is never a poly
+    /// body), so `lower_call`'s `self.enum_words.get(&span)` misses and must
+    /// fall through to the bare-key `structs.words`/`enums.words` lookup
+    /// unchanged, not panic.
+    #[test]
+    fn enum_words_miss_falls_through_to_bare_key_lookup() {
+        let ir = lower_src(
+            "type: Pair['A] | Nil | One 'A ;\n\
+             : mk ( i64 -- Pair[i64] ) One ;\n\
+             : main ( -- ) 7 mk drop ;\n",
+        );
+        let mk = func(&ir, "mk");
+        assert!(
+            count(mk, |i| matches!(i, Instr::FieldStore(..))) >= 1,
+            "a monomorphic construction still stores its field via the bare-key path: {:?}",
+            instrs(mk)
+        );
+    }
+
+    /// P7.S12 (R1.4/R8.8, mutation 6's retirement): the family-invariant this
+    /// requirement actually rests on -- two monomorphs of one generic enum
+    /// header have equal variant counts, since `substituted_enum_variants`
+    /// emits one `VariantDecl` per header variant in header order for every
+    /// instantiation. No mutation witnesses this (a family-invariant read's
+    /// value cannot change under any input this slice controls); this is the
+    /// passing property instead.
+    #[test]
+    fn two_monomorphs_of_one_generic_enum_have_equal_variant_counts() {
+        let ir = lower_src(
+            "type: Pair['A] | Nil | One 'A ;\n\
+             type: Pt x i64 y i64 ;\n\
+             : mk1 ( i64 -- Pair[i64] ) One ;\n\
+             : mk2 ( Pt -- Pair[Pt] ) One ;\n\
+             : main ( -- ) 1 2 Pt mk2 drop 7 mk1 drop ;\n",
+        );
+        let counts: Vec<usize> = ir
+            .enums
+            .iter()
+            .filter(|l| l.name.starts_with("Pair"))
+            .map(|l| l.variants.len())
+            .collect();
+        assert_eq!(
+            counts.len(),
+            2,
+            "both `Pair[i64]` and `Pair[Pt]` are laid out: {counts:?}"
+        );
+        assert_eq!(
+            counts[0], counts[1],
+            "every monomorph of one header shares the same variant count"
         );
     }
 }

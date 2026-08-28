@@ -216,6 +216,14 @@ pub(super) struct FuncBuilder<'a> {
     /// the ordinary-user-call arm, which would look a polymorphic callee up in
     /// the name-keyed `env` it has no entry in.
     pub(super) poly_calls: &'a HashMap<Span, CallInst>,
+    /// P7.S12 (R1.2/R1.3): this instantiation's own generated-enum-word call
+    /// resolutions (`CallInst::enum_words`), span -> the concrete `EnumId`
+    /// that call site constructs or eliminates. Threaded per instantiation
+    /// like `trait_calls`, and consulted before the bare-surface-name
+    /// `structs.words`/`enums.words` lookup, which is last-write-wins across
+    /// every monomorph of one header and therefore wrong once a poly body
+    /// reaches more than one.
+    pub(super) enum_words: &'a HashMap<Span, EnumId>,
     /// P7 slice 1 (R2): the receiver-directed field projections the checker
     /// resolved, span -> `(StructId, field index)`. `lower_reference_word`
     /// reads a `&hp` site's receiver type back from here: the name alone does
@@ -447,6 +455,7 @@ impl<'a> FuncBuilder<'a> {
             builtin_overloads: empty_builtin_overloads(),
             trait_calls: empty_trait_calls(),
             poly_calls: empty_poly_calls(),
+            enum_words: empty_enum_words(),
             resolved_fields: empty_resolved_fields(),
             resolved_variant_fields: empty_resolved_variant_fields(),
             poly_arities: empty_poly_arities(),
@@ -936,6 +945,7 @@ pub(super) fn lower_word_parts(
     builtin_overloads: &HashMap<Span, String>,
     trait_calls: &HashMap<Span, String>,
     poly_calls: &HashMap<Span, CallInst>,
+    enum_words: &HashMap<Span, EnumId>,
     resolved_fields: &HashMap<Span, (StructId, usize)>,
     resolved_variant_fields: &HashMap<Span, (EnumId, usize, usize)>,
     poly_arities: &HashMap<String, usize>,
@@ -969,6 +979,7 @@ pub(super) fn lower_word_parts(
     b.builtin_overloads = builtin_overloads;
     b.trait_calls = trait_calls;
     b.poly_calls = poly_calls;
+    b.enum_words = enum_words;
     b.resolved_fields = resolved_fields;
     b.resolved_variant_fields = resolved_variant_fields;
     b.poly_arities = poly_arities;
@@ -1112,6 +1123,7 @@ pub(super) fn lower_word_parts(
         builtin_overloads,
         trait_calls,
         poly_calls,
+        enum_words,
         resolved_fields,
         resolved_variant_fields,
         poly_arities,
@@ -1138,6 +1150,7 @@ pub(super) fn lower_materialized(
     builtin_overloads: &HashMap<Span, String>,
     trait_calls: &HashMap<Span, String>,
     poly_calls: &HashMap<Span, CallInst>,
+    enum_words: &HashMap<Span, EnumId>,
     resolved_fields: &HashMap<Span, (StructId, usize)>,
     resolved_variant_fields: &HashMap<Span, (EnumId, usize, usize)>,
     poly_arities: &HashMap<String, usize>,
@@ -1183,6 +1196,7 @@ pub(super) fn lower_materialized(
             builtin_overloads,
             trait_calls,
             poly_calls,
+            enum_words,
             resolved_fields,
             resolved_variant_fields,
             poly_arities,

@@ -2119,6 +2119,15 @@ pub struct CallInst {
     /// Empty on every monomorphic word and on every instantiation whose body
     /// calls no generic word, so the existing corpus lowers unchanged.
     pub poly_calls: std::collections::HashMap<Span, CallInst>,
+    /// P7.S12 (R1.2): the generated struct/enum word call sites inside the
+    /// callee's own body that this instantiation's θ resolves, span -> the
+    /// concrete `EnumId` that call site constructs or eliminates at this
+    /// monomorph. A pure function of `(callee, θ)` over the *callee body's*
+    /// spans, mirroring `trait_calls` for the same reason: two call sites
+    /// sharing a `(callee, θ)` record identical maps. Empty on every
+    /// monomorphic word and on every instantiation whose body reaches no
+    /// generated enum word, so the existing corpus lowers unchanged.
+    pub enum_words: std::collections::HashMap<Span, EnumId>,
 }
 
 /// P7.S3k (R2): what one *callee* type variable was matched to at a

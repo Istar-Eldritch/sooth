@@ -788,6 +788,10 @@ fn check_module(module: &mut Module) -> Result<Vec<WordObligations>, String> {
     // `check_poly_combinator_standalone` path, which records nothing that
     // survives it (R9's scope cut).
     let mut trait_obligations: Vec<WordObligations> = Vec::new();
+    // P7.S12 (R1.2): the generated-enum-word call sites each of those bodies
+    // makes, recorded the same way and for the same reason as
+    // `trait_obligations`.
+    let mut word_enum_sites: Vec<WordEnumSites> = Vec::new();
     // P7.S3k (R2): the generic-to-generic calls each of those bodies makes,
     // recorded symbolically as it is walked (its own `'T` is still rigid here,
     // so there is no θ to ground them against) and relayed to the module for
@@ -805,6 +809,7 @@ fn check_module(module: &mut Module) -> Result<Vec<WordObligations>, String> {
             continue;
         }
         let mut obligations = Vec::new();
+        let mut enum_sites = Vec::new();
         let mut cross_calls = Vec::new();
         // P7 slice 3a phase 2 (R2): `check_poly_body` rebases itself at entry
         // (to the live registries' current length); flushed right after it
@@ -827,6 +832,8 @@ fn check_module(module: &mut Module) -> Result<Vec<WordObligations>, String> {
             &mut TraitCtx {
                 traits,
                 obligations: &mut obligations,
+                enum_sites: &mut enum_sites,
+                is_combinator_splice: is_combinator(word),
             },
             &mut CrossCtx {
                 env: &poly_env,
@@ -850,6 +857,11 @@ fn check_module(module: &mut Module) -> Result<Vec<WordObligations>, String> {
             sig: (**sig).clone(),
             obligations,
         });
+        word_enum_sites.push(WordEnumSites {
+            name: word.name.clone(),
+            sig: (**sig).clone(),
+            sites: enum_sites,
+        });
     }
     // P7.S3e (R8): the tables every bound-directed call site below resolves
     // against, complete only now that the pre-pass has recorded every
@@ -865,6 +877,7 @@ fn check_module(module: &mut Module) -> Result<Vec<WordObligations>, String> {
         impls,
         word_symbols: &symbols,
         recorded: &trait_obligations,
+        enum_sites_recorded: &word_enum_sites,
     };
     for (word_idx, word) in words.iter().enumerate() {
         let mut sites = Vec::new();
@@ -974,11 +987,6 @@ fn check_module(module: &mut Module) -> Result<Vec<WordObligations>, String> {
         }
         dropped.push(sites);
     }
-    // P7 slice 3a phase 2 (R2): restored onto the module once nothing is
-    // still minting, so it survives into `ir::lower` (which reads it
-    // read-only, `subst_polytype`'s find-only lookup).
-    *generics = generics_cell.into_inner();
-
     // R6: only now, with every `drop` call site's operand type known, can the
     // `drop`-reachability graph be built.
     let word_refs: Vec<&WordDef> = words.iter().collect();
@@ -1039,8 +1047,18 @@ fn check_module(module: &mut Module) -> Result<Vec<WordObligations>, String> {
         &mut splice_records,
         &symbols,
         &trait_obligations,
+        &word_enum_sites,
         std::mem::take(&mut impl_monos),
+        Some(&generics_cell),
     )?;
+    // P7 slice 3a phase 2 (R2), P7.S12 (R1.2a): restored onto the module
+    // once nothing is still minting -- moved past the transitive-fixpoint
+    // call above (which may itself mint while grounding a cross-called
+    // body's `enum_words`) -- so it survives into `ir::lower` (which reads
+    // it read-only, `subst_polytype`'s find-only lookup). Written through
+    // `module` directly (not the `generics` binding split off it earlier,
+    // whose reborrow the call above needs to have already ended).
+    module.generics = generics_cell.into_inner();
     module.instantiations = insts;
     module.splice_records = splice_records;
     module.splice_trait_calls = splice_trait_calls;

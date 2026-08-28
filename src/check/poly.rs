@@ -27,6 +27,19 @@ pub(crate) struct TraitObligation {
 pub(crate) struct TraitCtx<'a> {
     pub traits: &'a [TraitDecl],
     pub obligations: &'a mut Vec<TraitObligation>,
+    /// P7.S12 (R1.2): the generated struct/enum word call sites recorded
+    /// abstractly while this polymorphic body is walked, span -> the header
+    /// and (still-abstract) type arguments as `poly_construct_generic` and
+    /// `poly_eliminator_call` resolve them. Rides the same struct as
+    /// `obligations` for the identical reason: both are per-word records a
+    /// call site grounds later against a concrete θ.
+    pub enum_sites: &'a mut Vec<(Span, PolyType)>,
+    /// P7.S12 (R1.5): whether the body currently being walked is a
+    /// combinator's -- its own generic construction of an enum can vary per
+    /// splice, which `enum_sites`/`CallInst::enum_words` (`Span`-keyed, not
+    /// `(uid, span)`) cannot represent, so `poly_construct_generic` rejects
+    /// that shape here instead of recording it.
+    pub is_combinator_splice: bool,
 }
 
 /// P7.S3k (R1/R2): the generic-callee side of a polymorphic body's walk --
@@ -48,10 +61,15 @@ impl TraitCtx<'_> {
     /// The scratch context for a walk that records no obligation: a unit-test
     /// fixture whose body can carry no `Bound::User` in the first place.
     #[cfg(test)]
-    pub(crate) fn scratch(obligations: &mut Vec<TraitObligation>) -> TraitCtx<'_> {
+    pub(crate) fn scratch<'a>(
+        obligations: &'a mut Vec<TraitObligation>,
+        enum_sites: &'a mut Vec<(Span, PolyType)>,
+    ) -> TraitCtx<'a> {
         TraitCtx {
             traits: crate::ast::predicate_traits(),
             obligations,
+            enum_sites,
+            is_combinator_splice: false,
         }
     }
 }
@@ -70,6 +88,17 @@ pub(crate) struct WordObligations {
     pub obligations: Vec<TraitObligation>,
 }
 
+/// P7.S12 (R1.2): one polymorphic word's recorded generated-enum-word call
+/// sites, tagged with the identity a call site rediscovers them by -- the
+/// same `(name, sig)` key `WordObligations` uses, and for the identical
+/// reason.
+#[derive(Debug)]
+pub(crate) struct WordEnumSites {
+    pub name: String,
+    pub sig: PolySig,
+    pub sites: Vec<(Span, PolyType)>,
+}
+
 /// P7.S3e (R8): the tables `check_poly_call` resolves a recorded obligation
 /// against once θ is concrete -- the trait registry (which the diagnostic for
 /// a missing `impl:` reads), the whole-program `impl:` registry, every word's
@@ -81,6 +110,10 @@ pub(crate) struct TraitResolveCtx<'a> {
     pub impls: &'a [ImplDecl],
     pub word_symbols: &'a [String],
     pub recorded: &'a [WordObligations],
+    /// P7.S12 (R1.2): the generated-enum-word call sites recorded for every
+    /// non-combinator polymorphic word, resolved against a concrete θ at
+    /// `check_poly_call` the same way `recorded` is.
+    pub enum_sites_recorded: &'a [WordEnumSites],
 }
 
 impl TraitResolveCtx<'_> {
@@ -96,6 +129,7 @@ impl TraitResolveCtx<'_> {
             impls: &[],
             word_symbols: &[],
             recorded: &[],
+            enum_sites_recorded: &[],
         }
     }
 
@@ -109,6 +143,16 @@ impl TraitResolveCtx<'_> {
             .iter()
             .find(|w| w.name == name && &w.sig == sig)
             .map(|w| w.obligations.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// The generated-enum-word call sites recorded for the callee this call
+    /// site resolved to. Mirrors `obligations_of` exactly.
+    fn enum_sites_of(&self, name: &str, sig: &PolySig) -> &[(Span, PolyType)] {
+        self.enum_sites_recorded
+            .iter()
+            .find(|w| w.name == name && &w.sig == sig)
+            .map(|w| w.sites.as_slice())
             .unwrap_or(&[])
     }
 }
@@ -1839,7 +1883,7 @@ pub(super) fn poly_call_term(
     // program) commits unconditionally below and errors on a `'T` operand
     // mismatch rather than falling through.
     if let Some(next) = poly_construct_generic(
-        name, span, &mut stack, sig, ctx, env, structs, enums, arrays, cells, refs,
+        name, span, &mut stack, sig, ctx, env, structs, enums, arrays, cells, refs, tctx,
     )? {
         return Ok(next);
     }
@@ -2899,7 +2943,7 @@ fn poly_call_abstract_quotation_param(
 /// no per-arm clone can diverge on one.
 #[allow(clippy::too_many_arguments)]
 fn poly_eliminator_call(
-    id: EnumId,
+    gate_id: EnumId,
     name: &str,
     span: Span,
     mut stack: Vec<PolySlot>,
@@ -2919,7 +2963,15 @@ fn poly_eliminator_call(
     cross: &mut CrossCtx,
     tail: bool,
 ) -> Result<Vec<PolySlot>, String> {
-    let enum_decl = &enums[id.index()];
+    // P7.S12 (R1.1): `gate_id` is the registry's entry for this call name --
+    // a base-family key, since two monomorphs of one generic enum share one
+    // registry entry (last write wins). It gates that this call names an
+    // eliminator of the right family and supplies the variant count for the
+    // underflow diagnostic (identical across every instantiation of the
+    // family); the operative `EnumId` this call actually eliminates is read
+    // off the scrutinee's own type once found, mirroring `check_eliminator_call`
+    // (S3b R5) one path over.
+    let enum_decl = &enums[gate_id.index()];
     let enum_name = crate::resolve::demangle_word(generic_surface_name(&enum_decl.name));
     let held = stack.len();
     // Step 1, the concrete path's variable-arity arm collection: a fixed pop
@@ -2964,8 +3016,20 @@ fn poly_eliminator_call(
         // does not have.
         return Err(eliminator_untagged_arm_error(ctx, span, name));
     }
-    match &scrutinee.pt {
-        PolyType::Concrete(Type::Enum(found, _)) if *found == id => {}
+    // P7.S12 (R1.1): the operative `EnumId` is the scrutinee's own -- not
+    // `gate_id` -- so two asymmetric monomorphs of one generic enum
+    // eliminate independently in the same poly body: the registry's one
+    // entry is only consulted by the caller to reach this call at all, never
+    // to decide which instantiation it narrows to. A non-enum scrutinee, or
+    // one whose enum is not a member of this call name's base family, is the
+    // same `type_mismatch_error` as before.
+    let id = match &scrutinee.pt {
+        PolyType::Concrete(Type::Enum(found, _))
+            if generic_surface_name(&enums[found.index()].name)
+                == generic_surface_name(&enum_decl.name) =>
+        {
+            *found
+        }
         // P7 slice 3c (R1.4): a slice reaches the `Concrete(_)` reference arm
         // below through the widened `is_ref()`, but the advice there ("pass
         // the owned `Enum` instead") names nothing real for a view over a
@@ -2976,7 +3040,7 @@ fn poly_eliminator_call(
                 ctx,
                 span,
                 name,
-                Type::Enum(id, enum_decl.name_static),
+                Type::Enum(gate_id, enum_decl.name_static),
                 *t,
             ));
         }
@@ -2999,7 +3063,22 @@ fn poly_eliminator_call(
                 &poly_type_str(&scrutinee.pt, sig),
             ));
         }
-    }
+    };
+    // R1.4: the family id (`gate_id`) locates and gates; the recorded id
+    // (`id`, read off the scrutinee) dispatches. Everything below --
+    // exhaustiveness, arm narrowing, arm walk -- resolves against the
+    // scrutinee's own monomorph, never the gate.
+    let enum_decl = &enums[id.index()];
+    // P7.S12 (R1.2): record this eliminator call site so `check_poly_call`
+    // can ground it against a concrete θ later. At this phase the scrutinee
+    // is always already concrete (a generic scrutinee is P7.S12 R5, phase 3),
+    // so the recorded shape is trivially ground already -- `apply_subst`'s
+    // `Concrete` arm is a no-op -- but it still needs the same map entry so
+    // lowering does not have to special-case "resolved at check time, not θ".
+    tctx.enum_sites.push((
+        span,
+        PolyType::Concrete(Type::Enum(id, enum_decl.name_static)),
+    ));
 
     // Step 3: exhaustiveness and duplication, in written source order and
     // before any arm body is checked.
@@ -3939,6 +4018,7 @@ fn poly_construct_generic(
     arrays: &mut Vec<ArrayDecl>,
     cells: &mut Vec<OwnedCellDecl>,
     refs: &mut Vec<RefDecl>,
+    tctx: &mut TraitCtx,
 ) -> Result<Option<Vec<PolySlot>>, String> {
     let Some(cell) = ctx.generics() else {
         return Ok(None);
@@ -4063,6 +4143,24 @@ fn poly_construct_generic(
             name: header_name,
         }
     };
+    // P7.S12 (R1.2/R6.1): record this generated-enum-word call site so
+    // `check_poly_call` can ground it against a concrete θ later -- a struct
+    // constructor has no per-monomorph identity for lowering to lose (a
+    // struct is laid out by field order alone), so only the enum case is
+    // recorded.
+    if is_enum {
+        // R1.5: a combinator's own construction of a still-ungrounded enum
+        // varies per splice, which the `Span`-keyed record cannot represent.
+        if tctx.is_combinator_splice && matches!(result_pt, PolyType::Generic { .. }) {
+            return Err(poly_combinator_generic_enum_construction_error(
+                ctx,
+                span,
+                name,
+                header_name,
+            ));
+        }
+        tctx.enum_sites.push((span, result_pt.clone()));
+    }
     stack.push(PolySlot::new(result_pt));
     Ok(Some(std::mem::take(stack)))
 }
@@ -5097,6 +5195,18 @@ pub(super) fn check_poly_call(
             &sig, pty, &subst, name, span, ctx, arrays, cells, refs,
         )?);
     }
+    // P7.S12 (R1.2): the generated-enum-word call sites in the callee's own
+    // body that this instantiation's θ resolves, filled the same way and at
+    // the same point `trait_calls` is -- θ is complete, and the live
+    // instantiator any of these sites needs (`apply_subst`'s `Generic` arm)
+    // is exactly what `ctx.generics()` already carries here.
+    let mut enum_words: HashMap<Span, EnumId> = HashMap::new();
+    for (site_span, site_pty) in poly.trait_resolve.enum_sites_of(name, &sig) {
+        let grounded = apply_subst(&sig, site_pty, &subst, name, span, ctx, arrays, cells, refs)?;
+        if let Type::Enum(found, _) = grounded {
+            enum_words.insert(*site_span, found);
+        }
+    }
     // Review fix (P7 slice 1): a polymorphic word consumes its operands
     // exactly as a concrete one does, so it needs the same guard against
     // moving a place a live projection still reaches -- `'T` binds to the
@@ -5146,6 +5256,7 @@ pub(super) fn check_poly_call(
                     quot_inputs,
                     trait_calls,
                     poly_calls: HashMap::new(),
+                    enum_words,
                 },
             );
             stack.truncate(base);
@@ -5180,6 +5291,7 @@ pub(super) fn check_poly_call(
             bundle: None,
             quot_inputs,
             trait_calls,
+            enum_words,
             // P7.S3k (R4): the concrete path records none. A cross-call is
             // discovered by the transitive fixpoint, which fills this in
             // afterwards for the instantiations whose body has one.
@@ -5220,13 +5332,16 @@ pub(super) fn check_poly_call(
 /// than read off `module`, since the `TraitResolveCtx` built from them below
 /// must not borrow `module` while the destructure above still needs `&mut`
 /// access to it.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn discover_transitive_instantiations(
     module: &mut Module,
     insts: &mut HashMap<Span, CallInst>,
     splice_records: &mut HashMap<(u32, Span), CallInst>,
     word_symbols: &[String],
     trait_obligations: &[WordObligations],
+    word_enum_sites: &[WordEnumSites],
     impl_monos: Vec<(String, Subst)>,
+    generics: Option<&RefCell<GenericTypes>>,
 ) -> Result<Vec<CallInst>, String> {
     // P7.S4 (R6): build CallInsts for generic-impl member-word monomorphs
     // before the fixpoint, so their bodies' poly cross-calls get composed.
@@ -5255,6 +5370,7 @@ pub(super) fn discover_transitive_instantiations(
         impls,
         word_symbols,
         recorded: trait_obligations,
+        enum_sites_recorded: word_enum_sites,
     };
     let ground = CrossGround {
         words,
@@ -5264,6 +5380,7 @@ pub(super) fn discover_transitive_instantiations(
         modules: Some(modules),
         records: poly_cross_calls,
         tr,
+        generics,
     };
     // P7.S4 (R6): build CallInsts for each generic-impl member-word monomorph.
     let mut extra_seeds: Vec<CallInst> = Vec::new();
@@ -5317,6 +5434,15 @@ pub(super) fn discover_transitive_instantiations(
     for inst in splice_records.values_mut() {
         intern_composed_bundles(structs, inst);
     }
+    // P7.S12 (R1.2a): flush whatever `compose`/`impl_mono_seed` minted while
+    // grounding `enum_words`, after the fixpoint (so a mint mid-fixpoint
+    // never needs to be visible to a sibling grounding step within it, which
+    // this slice does not attempt) and before layout reads `module.enums`.
+    if let Some(cell) = generics {
+        let mut g = cell.borrow_mut();
+        g.flush_structs_into(structs);
+        g.flush_enums_into(enums);
+    }
     Ok(transitive)
 }
 
@@ -5345,6 +5471,12 @@ struct CrossGround<'a> {
     modules: Option<&'a [ModuleInfo]>,
     records: &'a HashMap<String, Vec<PolyCrossCall>>,
     tr: TraitResolveCtx<'a>,
+    /// P7.S12 (R1.2a): the live instantiator, threaded here rather than left
+    /// `None` as `word_ctx`'s two call sites below used to. `compose` grounds
+    /// a cross-called generic word's own body spans (`enum_words`), which
+    /// needs the same find-or-mint door `check_poly_call` uses -- there is no
+    /// find-only alternative (`apply_subst`'s `Generic` arm).
+    generics: Option<&'a RefCell<GenericTypes>>,
 }
 
 impl CrossGround<'_> {
@@ -5456,6 +5588,10 @@ impl CrossGround<'_> {
             return Ok(None);
         };
         let combs = CombinatorIndex::new();
+        // P7.S12 (R1.2a): `self.generics` rather than `None` -- this member
+        // word's own body may hold a generated enum word call site
+        // (`enum_words`), and grounding one needs the live instantiator, not
+        // just a declared output shape.
         let ctx = word_ctx(
             word,
             self.structs,
@@ -5463,7 +5599,7 @@ impl CrossGround<'_> {
             self.statics,
             self.modules,
             &combs,
-            None,
+            self.generics,
         );
         let mut outputs = Vec::with_capacity(sig.outputs.len());
         for pty in &sig.outputs {
@@ -5504,6 +5640,18 @@ impl CrossGround<'_> {
                 impl_monos,
             )?;
         }
+        // P7.S12 (R1.2/R1.2a): the same grounding `check_poly_call` does for
+        // an ordinary instantiation, run here for the member word's own
+        // monomorph.
+        let mut enum_words: HashMap<Span, EnumId> = HashMap::new();
+        for (site_span, site_pty) in self.tr.enum_sites_of(word_name, sig) {
+            let grounded = apply_subst(
+                sig, site_pty, subst, word_name, word.span, &ctx, arrays, cells, refs,
+            )?;
+            if let Type::Enum(found, _) = grounded {
+                enum_words.insert(*site_span, found);
+            }
+        }
         let symbol = instantiation_symbol(word_name, subst);
         Ok(Some(CallInst {
             callee: word_name.to_string(),
@@ -5515,6 +5663,7 @@ impl CrossGround<'_> {
             quot_inputs: Vec::new(),
             trait_calls,
             poly_calls: HashMap::new(),
+            enum_words,
         }))
     }
 
@@ -5543,9 +5692,10 @@ impl CrossGround<'_> {
         // Every diagnostic a grounding failure raises names the *caller's*
         // body, since that is where the call site is; `word_ctx`'s combinator
         // view is only read by the back-edge guards, which nothing here
-        // reaches. `None` for generics: `compose` only ever grounds a
-        // callee's declared *output*, and phase 1 already rejects every
-        // output shape that could mint one (review finding 2).
+        // reaches. P7.S12 (R1.2a): `self.generics` rather than `None` --
+        // `compose` used to ground only a callee's declared *output*, but now
+        // also grounds the callee body's own `enum_words` sites, which needs
+        // the live instantiator (there is no find-only door).
         let ctx = word_ctx(
             caller_word,
             self.structs,
@@ -5553,7 +5703,7 @@ impl CrossGround<'_> {
             self.statics,
             self.modules,
             &CombinatorIndex::new(),
-            None,
+            self.generics,
         );
         let mut routed = HashMap::new();
         for record in records {
@@ -5713,6 +5863,25 @@ impl CrossGround<'_> {
                 impl_monos,
             )?;
         }
+        // P7.S12 (R1.2/R1.2a): the same grounding `check_poly_call` does for
+        // an ordinary instantiation, run here for the composed callee.
+        let mut enum_words: HashMap<Span, EnumId> = HashMap::new();
+        for (site_span, site_pty) in self.tr.enum_sites_of(&record.callee, sig) {
+            let grounded = apply_subst(
+                sig,
+                site_pty,
+                &subst,
+                &record.callee,
+                record.span,
+                ctx,
+                arrays,
+                cells,
+                refs,
+            )?;
+            if let Type::Enum(found, _) = grounded {
+                enum_words.insert(*site_span, found);
+            }
+        }
         let symbol = instantiation_symbol(&record.callee, &subst);
         Ok(CallInst {
             callee: record.callee.clone(),
@@ -5727,6 +5896,7 @@ impl CrossGround<'_> {
             quot_inputs: Vec::new(),
             trait_calls,
             poly_calls: HashMap::new(),
+            enum_words,
         })
     }
 }
@@ -8079,6 +8249,27 @@ pub(super) fn poly_reference_scrutinee_error(
     )
 }
 
+/// P7.S12 (R1.5): a generated enum word constructed with an ungrounded
+/// generic argument inside a combinator's own body. The construction's
+/// concrete identity depends on the combinator's own type variable, so it
+/// varies per splice -- and `CallInst::enum_words` is keyed by `Span` alone
+/// (not `(uid, span)`, R1.5's deliberate non-goal), which cannot hold two
+/// splices' distinct resolutions for the one body span this call sits at. A
+/// located restriction rather than a silent last-write-wins collision.
+pub(super) fn poly_combinator_generic_enum_construction_error(
+    ctx: &Ctx,
+    span: Span,
+    word: &str,
+    header: &str,
+) -> String {
+    let word = crate::resolve::demangle_call(word);
+    let where_ = ctx.rendered_word();
+    format!(
+        "error: `{word}` in {where_} (line {}) constructs `{header}` with a type this combinator's own splice determines\n  a generic enum constructed inside a combinator body is not yet supported: each splice would need its own resolution, and none is recorded",
+        span.line
+    )
+}
+
 /// P7 slice 3b (R3/L1): two eliminator arms leaving structurally different
 /// types at one exit position, under rigid type variables -- `'T` against
 /// `'U`, or `'T` against `i64`. Binding either would be a mid-body
@@ -9895,7 +10086,7 @@ mod tests {
             &mut Vec::new(),
             &mut Vec::new(),
             &mut overloads,
-            &mut TraitCtx::scratch(&mut Vec::new()),
+            &mut TraitCtx::scratch(&mut Vec::new(), &mut Vec::new()),
             scratch_cross!(),
             false,
         )
@@ -9946,7 +10137,7 @@ mod tests {
                 &mut Vec::new(),
                 &mut Vec::new(),
                 &mut overloads,
-                &mut TraitCtx::scratch(&mut Vec::new()),
+                &mut TraitCtx::scratch(&mut Vec::new(), &mut Vec::new()),
                 scratch_cross!(),
                 false,
             )
@@ -10125,7 +10316,7 @@ mod tests {
             &mut Vec::new(),
             &mut Vec::new(),
             &mut HashMap::new(),
-            &mut TraitCtx::scratch(&mut Vec::new()),
+            &mut TraitCtx::scratch(&mut Vec::new(), &mut Vec::new()),
             scratch_cross!(),
             &mut |_, exit| {
                 exits.push(exit.into_iter().map(|slot| slot.pt).collect());
@@ -10171,7 +10362,7 @@ mod tests {
             &mut Vec::new(),
             &mut Vec::new(),
             &mut HashMap::new(),
-            &mut TraitCtx::scratch(&mut Vec::new()),
+            &mut TraitCtx::scratch(&mut Vec::new(), &mut Vec::new()),
             scratch_cross!(),
             &mut |_, _| Ok(()),
         )
@@ -10383,7 +10574,7 @@ mod tests {
             &mut Vec::new(),
             &mut Vec::new(),
             &mut overloads,
-            &mut TraitCtx::scratch(&mut Vec::new()),
+            &mut TraitCtx::scratch(&mut Vec::new(), &mut Vec::new()),
             scratch_cross!(),
             false,
         )
@@ -10411,7 +10602,7 @@ mod tests {
             &mut Vec::new(),
             &mut Vec::new(),
             &mut overloads,
-            &mut TraitCtx::scratch(&mut Vec::new()),
+            &mut TraitCtx::scratch(&mut Vec::new(), &mut Vec::new()),
             scratch_cross!(),
             false,
         )
@@ -12323,7 +12514,7 @@ mod tests {
             &mut Vec::new(),
             &mut Vec::new(),
             &mut overloads,
-            &mut TraitCtx::scratch(&mut Vec::new()),
+            &mut TraitCtx::scratch(&mut Vec::new(), &mut Vec::new()),
             scratch_cross!(),
             false,
         )

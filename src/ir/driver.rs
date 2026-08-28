@@ -233,6 +233,11 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
             // only a *generic* body's cross-call needs per-instantiation
             // routing.
             empty_poly_calls(),
+            // A monomorphic word's own generated-enum-word call sites
+            // resolve through `module.builtin_overloads` (the concrete
+            // path), never through a per-instantiation map -- empty here,
+            // as `poly_calls` is above.
+            empty_enum_words(),
             &module.resolved_fields,
             &module.resolved_variant_fields,
             &poly_arities,
@@ -371,6 +376,11 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
             // against the same θ -- likewise identical across two call sites
             // sharing a `(callee, θ)`.
             &inst.poly_calls,
+            // P7.S12 (R1.2): this instantiation's own generated-enum-word
+            // resolutions, identical across every call site sharing this
+            // `(callee, θ)` pair for the same reason `trait_calls`/`poly_calls`
+            // are.
+            &inst.enum_words,
             &module.resolved_fields,
             &module.resolved_variant_fields,
             &poly_arities,
