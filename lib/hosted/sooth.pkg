@@ -1,3 +1,5 @@
+\ `hosted`: bindings to the host platform's C runtime, for programs that need it.
+\ Depends on `core`; a `layer: core` package may not depend on this one.
 package: hosted ;
 layer: hosted ;
 depends: core path "../core" ;

@@ -196,7 +196,7 @@ fn private_module_is_error_against_a_fixture_dependency() {
     );
     let entry = t.write(
         "main.sth",
-        "\n  import: dep::secret d ;\n: main ( -- ) d::sw . ;\n",
+        "import: dep::secret d ;\n: main ( -- ) d::sw . ;\n",
     );
     let err = build_err(&entry);
     assert!(

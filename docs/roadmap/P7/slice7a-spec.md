@@ -186,11 +186,14 @@ Three, each classified on a named `test result: FAILED`, against a committed tre
 mutated binary confirmed rebuilt:
 
 1. Widen `exit` to `( i64 -- )` -- R5.4 must fail.
-2. Drop `libc` from `lib/hosted/sooth.pkg`'s `module:` list -- R5.1 must fail. R5.5's
-   private-module case staying green is *not* a discriminator (it reads a fixture package,
-   never the real manifest); the discriminator is that R5.1 is the only test that reads the
-   shipped `module:` list at all, so a lone R5.1 `FAILED` is the expected signature and any
-   second failure means the mutation reached further than intended.
+2. Drop `libc` from `lib/hosted/sooth.pkg`'s `module:` list -- both R5.1 cases
+   (`hosted_libc_exit_nonzero_code_observed`, `hosted_libc_exit_zero_code_observed`) must
+   fail, since both import `hosted::libc` from the real package. R5.4's
+   `exit_without_cast_is_located_type_error` fails too: it also imports `hosted::libc` from
+   the real package, so it dies on the `PrivateModule` error before it ever reaches the
+   `exit` type check. Three named failures is the expected signature; R5.5's private-module
+   case staying green is *not* a discriminator (it reads a fixture package, never the real
+   manifest).
 3. Flip `lib/hosted/sooth.pkg` to `layer: core` -- both halves of R5.8 must fail. It
    survives today: nothing observes the shipped manifest's layer.
 

@@ -1,2 +1,3 @@
+\ `libc`: raw extern bindings to host C functions.
 extern: exit ( i32 -- ) "exit" ;
 export: exit ;
