@@ -66,8 +66,9 @@ Call sites cast: `1` is `i64` and `exit` takes `i32`, so it is `7 >i32 exit`
   effect and drop its linear values on a path that never executes. A `!`/`Never` output
   shape is a type-system change, out of scope. S7b's "abort a suite early" hits this.
 - **A `depends:` table is not transitive.** The lookup resolves an import's first segment
-  against the *importer's own* table, so a package importing `hosted::libc` needs entries
-  for both `hosted` and `core`.
+  against the *importer's own* table, so a package importing `hosted::libc` needs only a
+  `hosted` entry; `core` is only required if the package also imports a `core` module
+  directly.
 
 ## Path sweep, and the line the inventory got wrong
 
@@ -138,10 +139,11 @@ confirmed rebuilt.
    dies on "build should have failed"; both exit-code cases spell `7 >i32 exit` and are now
    rejected with `` `exit` expected `i64`, found `i32` ``.
 2. Drop `libc` from the `module:` list: the *same three names*, all dying on the
-   `PrivateModule` error (R5.4 imports `hosted::libc` too, so it never reaches the type
-   check). This is what proves `exit_fixture`'s `import: intrinsics * ;` does not disable the
-   gate: the `hosted::libc` import is load-bearing. The private-module test staying green is
-   not a discriminator, it reads a fixture package.
+   `PrivateModule` error (`exit_without_cast_is_located_type_error` also imports
+   `hosted::libc`, so it never reaches the type check). This is what proves
+   `exit_fixture`'s `import: intrinsics * ;` does not disable the gate: the `hosted::libc`
+   import is load-bearing. The private-module test staying green is not a discriminator, it
+   reads a fixture package.
 3. Flip `lib/hosted/sooth.pkg` to `layer: core`: `lib_hosted_manifest_parses_as_hosted_layer`
    and `layer_core_depends_on_real_hosted_is_error` both fail. It survived before phase 2,
    nothing observed the shipped manifest's layer.

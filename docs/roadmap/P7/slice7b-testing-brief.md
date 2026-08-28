@@ -35,7 +35,7 @@ loop is run-the-program.
 A test program that traps or aborts already exits non-zero, which the runner
 reports as failure; build errors are failures on their own channel. A suite that
 wants to abort itself deliberately (a fatal precondition, not an assertion) reaches
-for S7a's `exit`, not a new primitive here. `exit` does not diverge (S7a R3.3): the
+for S7a's `exit`, not a new primitive here. `exit` does not diverge (per S7a's spec): the
 checker still requires the calling word's own body to satisfy its declared effect at
 body end, including dropping any linear values already pushed before the call, even
 though that path never runs. In particular, values pushed before the call must still

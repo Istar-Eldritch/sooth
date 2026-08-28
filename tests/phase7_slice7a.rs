@@ -1,4 +1,4 @@
-//! P7.S7a phase 2 (R2/R3/R4): `lib/hosted/` as a sibling package exporting
+//! P7.S7a phase 3: `lib/hosted/` as a sibling package exporting
 //! `exit ( i32 -- )`, the layer check against it, and the located type
 //! error on `1 exit` without `>i32`.
 
@@ -44,8 +44,9 @@ fn checkout() -> &'static str {
     env!("CARGO_MANIFEST_DIR")
 }
 
-/// R2.3's manifest, verbatim: **both** `depends:` entries, since the table
-/// is not transitive.
+/// A manifest with both a `core` and a `hosted` `depends:` entry, matching the shape a
+/// real hosted-layer package would carry. Fixtures below use whichever entries their case
+/// needs; the unused entry is otherwise inert.
 fn s7a_manifest() -> String {
     format!(
         "package: s7a ;\nlayer: hosted ;\ndepends: core path \"{}/lib/core\" ;\ndepends: hosted path \"{}/lib/hosted\" ;\n",
@@ -61,10 +62,9 @@ fn build_err(entry: &Path) -> String {
     }
 }
 
-/// R5.1: a program that imports `hosted::libc`'s `exit`, prints something
-/// first, then calls `exit` with its argument -- run with a nonzero and a
-/// zero value. The stdout assertion rules out a program that never ran
-/// passing case one by exiting 7 for another reason.
+/// A program that imports `hosted::libc`'s `exit`, prints something first, then calls
+/// `exit` with its argument -- run with a nonzero and a zero value. The stdout assertion
+/// rules out a program that never ran passing case one by exiting 7 for another reason.
 fn run_exit(entry: &Path) -> (Option<i32>, String) {
     let binary = driver::build(entry).expect("build should succeed");
     let output = std::process::Command::new(&binary)
@@ -105,11 +105,10 @@ fn hosted_libc_exit_zero_code_observed() {
     assert_eq!(code, Some(0));
 }
 
-/// R5.3/R5.8(2), deliberately one test rather than two: this *is* a
-/// harness-written `layer: core` fixture tree (R5.3), aimed at the real
-/// `lib/hosted` (R5.8(2)), which is the half a fixture dependency cannot
-/// stand in for. A pure-sandbox witness already exists and pins the whole
-/// message including the trailing rule line
+/// Deliberately one test rather than two: this *is* a harness-written `layer: core`
+/// fixture tree, aimed at the real `lib/hosted`, which is the half a fixture dependency
+/// cannot stand in for. A pure-sandbox witness already exists and pins the whole message
+/// including the trailing rule line
 /// (`packages::tests::check_package_graph_layer_violation_is_error`), so
 /// splitting this one would only duplicate it.
 #[test]
@@ -132,7 +131,7 @@ fn layer_core_depends_on_real_hosted_is_error() {
     );
 }
 
-/// R5.4: `1 exit` without the `>i32` cast is a located type error, pinned to
+/// `1 exit` without the `>i32` cast is a located type error, pinned to
 /// the exact two lines (not the doubled `error: ` prefix).
 #[test]
 fn exit_without_cast_is_located_type_error() {
@@ -153,8 +152,11 @@ fn exit_without_cast_is_located_type_error() {
     );
 }
 
-/// R5.5 (missing `depends:`, against the real `lib/hosted`): a package
-/// naming only `core` in its own `depends:` table imports `hosted::libc`.
+/// Missing `depends:`: a package naming only `core` in its own `depends:` table imports
+/// `hosted::libc`. The `depends:` lookup is a name check against the importer's own
+/// manifest and never touches `lib/hosted` on disk (a nonexistent package name produces
+/// the identical diagnostic); this test exercises the driver-level error path and remedy
+/// message, not the real package's presence.
 #[test]
 fn hosted_import_without_depends_entry_is_error() {
     let t = Tree::new("no-depends-real-hosted");
@@ -183,11 +185,10 @@ fn hosted_import_without_depends_entry_is_error() {
     );
 }
 
-/// R5.5 (private module, against a harness-written fixture, never the real
-/// `lib/hosted`): a dependency whose `module:` list omits a module file
-/// present on disk. `lib/hosted` cannot witness this case at all -- R2.1
-/// lists `libc`, R3.4 forbids a second module, and resolution requires the
-/// file to exist before consulting `module:`.
+/// Private module, against a harness-written fixture, never the real `lib/hosted`: a
+/// dependency whose `module:` list omits a module file present on disk. `lib/hosted`
+/// cannot witness this case at all -- it lists only `libc`, a second module is not
+/// allowed, and resolution requires the file to exist before consulting `module:`.
 #[test]
 fn private_module_is_error_against_a_fixture_dependency() {
     let t = Tree::new("private-module-fixture");

@@ -818,8 +818,8 @@ mod tests {
         assert_eq!(find_package_root(&file), None);
     }
 
-    /// R1.2/R5.2a: `lib/` is not itself a package (only `lib/core/` is), and
-    /// the real, committed `lib/core/sooth.pkg` parses.
+    /// `lib/` is not itself a package (only `lib/core/` is), and the real, committed
+    /// `lib/core/sooth.pkg` parses.
     #[test]
     fn lib_holds_no_manifest_and_lib_core_manifest_parses() {
         let lib_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
@@ -833,9 +833,8 @@ mod tests {
         manifest::parse_manifest(&src, &manifest_path).expect("lib/core/sooth.pkg should parse");
     }
 
-    /// R5.2b/R5.8(1): the real, committed `lib/hosted/sooth.pkg` parses, and
-    /// parses as `layer: hosted` -- asserted on the parsed `PackageLayer`,
-    /// not on the manifest text, per R5.8's own distinction.
+    /// The real, committed `lib/hosted/sooth.pkg` parses, and parses as `layer: hosted`
+    /// -- asserted on the parsed `PackageLayer`, not on the manifest text.
     #[test]
     fn lib_hosted_manifest_parses_as_hosted_layer() {
         let manifest_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("lib/hosted/sooth.pkg");
@@ -846,8 +845,8 @@ mod tests {
         assert_eq!(manifest.layer, PackageLayer::Hosted);
     }
 
-    /// R5.6: `find_package_root` on `lib/hosted/libc.sth` returns
-    /// `lib/hosted`, the sibling package, not `lib`.
+    /// `find_package_root` on `lib/hosted/libc.sth` returns `lib/hosted`, the sibling
+    /// package, not `lib`.
     #[test]
     fn find_package_root_lib_hosted_libc_returns_lib_hosted() {
         let libc = Path::new(env!("CARGO_MANIFEST_DIR")).join("lib/hosted/libc.sth");
