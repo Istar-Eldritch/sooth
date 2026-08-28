@@ -598,7 +598,20 @@ fn check_term(
             // arms are matched to variants by annotation tag rather than by
             // slot position, so the ordinary poly-call unification it is
             // registered under is never what checks a call site.
-            if let Some(enum_id) = poly.eliminators.get(name).copied() {
+            //
+            // P7.S12 (R2.4): the registry now also keys a generic header no
+            // instantiation has grounded, and this is the *concrete* consumer:
+            // a concrete body's scrutinee is always some monomorph, so a
+            // `Generic` entry means there is no monomorph to eliminate here at
+            // all. Located and named rather than fallen through to the unknown-
+            // word path or the adjacency message, both of which describe a
+            // different mistake. `check_poly_combinator_standalone`'s i64
+            // stand-in body reaches this too, and has no instantiator to
+            // ground a scrutinee with even in principle.
+            if let Some(target) = poly.eliminators.get(name).copied() {
+                let EliminatorTarget::Concrete(enum_id) = target else {
+                    return Err(concrete_body_generic_eliminator_error(ctx, span, name));
+                };
                 let granted = releasable_into(
                     scope,
                     base_depth,
@@ -1156,7 +1169,7 @@ fn poly_call_takes_type_args(
 pub(super) fn tagged_literal_reaches_an_eliminator_call(
     siblings: &[Term],
     at: usize,
-    eliminators: &HashMap<String, EnumId>,
+    eliminators: &HashMap<String, EliminatorTarget>,
 ) -> bool {
     let mut j = at + 1;
     while let Some(term) = siblings.get(j) {
@@ -1178,6 +1191,28 @@ pub(super) fn tagged_literal_reaches_an_eliminator_call(
 pub(super) fn eliminator_arm_outside_call_error(ctx: &Ctx, span: Span, tag: &str) -> String {
     format!(
         "error: this quotation is annotated `( {tag} )`, an eliminator-arm tag, but it is not consumed by a call to a generated eliminator{} (line {})\n  arms are written together, immediately before the call: `~[ ( A ) .. ] ~[ ( B ) .. ] Enum?`",
+        in_word(ctx),
+        span.line,
+    )
+}
+
+/// P7.S12 (R2.4/R7.4): a call to a generic enum's eliminator from a body the
+/// *concrete* checker walks -- an ordinary monomorphic word, or
+/// `check_poly_combinator_standalone`'s i64 stand-in. The registry keys the
+/// header now (R2.1), so the call *name* resolves; what cannot is the
+/// scrutinee. A concrete body's operand is always some monomorph, and a
+/// `Generic` registry entry means no monomorph of this header exists to be
+/// one (R2.3 registers `Concrete` whenever one does); the stand-in has no
+/// instantiator to ground one with even in principle.
+///
+/// Its own message rather than the adjacency one: the arms are written
+/// correctly, immediately before the call, and nothing here is a
+/// written-adjacency mistake.
+fn concrete_body_generic_eliminator_error(ctx: &Ctx, span: Span, name: &str) -> String {
+    let call = crate::resolve::demangle_call(name);
+    let enum_name = call.trim_end_matches('?');
+    format!(
+        "error: `{call}` names the generic enum `{enum_name}`, which nothing in this program instantiates{} (line {})\n  a concrete body eliminates one grounded instantiation (`{enum_name}[i64]`), never the header: an ungrounded scrutinee needs a polymorphic body",
         in_word(ctx),
         span.line,
     )

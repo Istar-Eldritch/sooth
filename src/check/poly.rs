@@ -612,6 +612,19 @@ pub fn check_poly_body(
     Ok(())
 }
 
+/// P7.S12 (R2.2): the eliminator registry over both the monomorphized `enums`
+/// this walk carries and the live instantiator's own generic headers, so a
+/// call to `Option?` gates even where nothing instantiates `Option`
+/// concretely. `Ctx::generics` is `None` on the REPL and stand-in paths, where
+/// no generic header exists to name; the borrow is released here, before any
+/// caller can re-enter the instantiator.
+fn ctx_eliminator_registry(ctx: &Ctx, enums: &[EnumDecl]) -> HashMap<String, EliminatorTarget> {
+    match ctx.generics() {
+        Some(cell) => eliminator_registry(enums, &cell.borrow().enums),
+        None => eliminator_registry(enums, &[]),
+    }
+}
+
 /// `tail` marks this term sequence as occupying its word's tail position, so
 /// its final term sits on the self-tail-call back-edge -- the poly twin of
 /// `check_terms_relaxed`'s own `tail`, computed per term the same way
@@ -644,7 +657,7 @@ pub(super) fn poly_walk(
     // collects is never checked against anything -- and admitting quotation
     // literals here is exactly what would let one through. Applied over this
     // term list, so an arm body re-entering `poly_walk` is held to it too.
-    let eliminators = eliminator_registry(enums);
+    let eliminators = ctx_eliminator_registry(ctx, enums);
     for (at, term) in terms.iter().enumerate() {
         if let TermKind::Quotation(_, _, Some(annot)) = &term.kind {
             if let Some(tag) = &annot.variant_tag {
@@ -1797,9 +1810,9 @@ pub(super) fn poly_call_term(
     // call site. Unlike `check_term` there is no `PolyCtx` here to read a
     // precomputed registry off, so it is built from the `enums` this walk
     // already carries -- one keying rule, in `eliminator_registry`.
-    if let Some(id) = eliminator_registry(enums).get(name).copied() {
+    if let Some(target) = ctx_eliminator_registry(ctx, enums).get(name).copied() {
         return poly_eliminator_call(
-            id,
+            target,
             name,
             span,
             stack,
@@ -2979,9 +2992,17 @@ fn poly_call_abstract_quotation_param(
 /// the `PolyType`s are structurally equal; `'T` against `i64` is a rejection,
 /// not a mid-body bind, so no `Subst` is built or applied in the term walk and
 /// no per-arm clone can diverge on one.
+///
+/// P7.S12 (R5): the scrutinee no longer has to be concrete. An ungrounded
+/// `Option['T]` arrives as `PolyType::Generic { is_enum: true, .. }`, naming
+/// the *header*, and each arm narrows to a `GenericVariant` carrying the
+/// scrutinee's own arguments unchanged. Everything else -- arm collection,
+/// written-order normalization, duplication, unknown-variant, exhaustiveness,
+/// the arm walk and the escape check -- is the same code either way, reading
+/// the header's variant list instead of the monomorph's (R5.2).
 #[allow(clippy::too_many_arguments)]
 fn poly_eliminator_call(
-    gate_id: EnumId,
+    gate: EliminatorTarget,
     name: &str,
     span: Span,
     mut stack: Vec<PolySlot>,
@@ -3001,16 +3022,48 @@ fn poly_eliminator_call(
     cross: &mut CrossCtx,
     tail: bool,
 ) -> Result<Vec<PolySlot>, String> {
-    // P7.S12 (R1.1): `gate_id` is the registry's entry for this call name --
-    // a base-family key, since two monomorphs of one generic enum share one
-    // registry entry (last write wins). It gates that this call names an
-    // eliminator of the right family and supplies the variant count for the
-    // underflow diagnostic (identical across every instantiation of the
-    // family); the operative `EnumId` this call actually eliminates is read
-    // off the scrutinee's own type once found, mirroring `check_eliminator_call`
+    // P7.S12 (R1.1/R5.1): `gate` is the registry's entry for this call name --
+    // a base-family key, since every monomorph of one generic enum and the
+    // header itself share one registry entry (R2.1/R2.3). It gates that this
+    // call names an eliminator of the right family and supplies the variant
+    // count for the underflow diagnostic (identical across every
+    // instantiation of the family, and equal to the header's own); the
+    // operative header this call actually eliminates is read off the
+    // scrutinee's own type once found, mirroring `check_eliminator_call`
     // (S3b R5) one path over.
-    let enum_decl = &enums[gate_id.index()];
-    let enum_name = crate::resolve::demangle_word(generic_surface_name(&enum_decl.name));
+    //
+    // `gate_ty` is the concrete `Type::Enum` the non-enum-scrutinee mismatch
+    // names, and exists only for a `Concrete` gate: a header with no
+    // monomorph has no `Type` at all, so that rejection goes through the
+    // rendered sibling instead.
+    let (family_name, family_variants, gate_ty) = match gate {
+        EliminatorTarget::Concrete(gate_id) => {
+            let decl = &enums[gate_id.index()];
+            (
+                generic_surface_name(&decl.name).to_string(),
+                decl.variants.len(),
+                Some(Type::Enum(gate_id, decl.name_static)),
+            )
+        }
+        EliminatorTarget::Generic { idx, .. } => {
+            // `ctx_eliminator_registry` builds the header half of the registry
+            // out of `ctx.generics()` itself, so a `Generic` entry reaching
+            // this call implies the instantiator is live: the two Ctx-less
+            // paths (the REPL, `check_poly_combinator_standalone`'s stand-in)
+            // register no header at all.
+            let cell = ctx
+                .generics()
+                .expect("a `Generic` registry entry is only built from a live instantiator");
+            let generics = cell.borrow();
+            let decl = &generics.enums[idx as usize];
+            (
+                generic_surface_name(&decl.name).to_string(),
+                decl.variants.len(),
+                None,
+            )
+        }
+    };
+    let enum_name = crate::resolve::demangle_word(&family_name).to_string();
     let held = stack.len();
     // Step 1, the concrete path's variable-arity arm collection: a fixed pop
     // cannot tell "an arm is missing" from "the stack is short below the
@@ -3035,13 +3088,7 @@ fn poly_eliminator_call(
 
     // Step 2: the scrutinee.
     let Some(scrutinee) = stack.last().cloned() else {
-        return Err(underflow_error(
-            ctx,
-            span,
-            name,
-            enum_decl.variants.len() + 1,
-            held,
-        ));
+        return Err(underflow_error(ctx, span, name, family_variants + 1, held));
     };
     if scrutinee.quot.is_some() || matches!(scrutinee.pt, PolyType::QuotLit) {
         // The operand that stopped collection is a quotation, so it was meant
@@ -3054,14 +3101,17 @@ fn poly_eliminator_call(
         // does not have.
         return Err(eliminator_untagged_arm_error(ctx, span, name));
     }
-    // P7.S12 (R1.1): the operative `EnumId` is the scrutinee's own -- not
-    // `gate_id` -- so two asymmetric monomorphs of one generic enum
+    // P7.S12 (R1.1/R5.1): the operative header is the scrutinee's own -- not
+    // the gate's -- so two asymmetric monomorphs of one generic enum
     // eliminate independently in the same poly body: the registry's one
     // entry is only consulted by the caller to reach this call at all, never
-    // to decide which instantiation it narrows to. A non-enum scrutinee, or
-    // one whose enum is not a member of this call name's base family, is the
-    // same `type_mismatch_error` as before.
-    let id = match &scrutinee.pt {
+    // to decide which instantiation it narrows to. Which of the two branches
+    // below runs is decided here and only here, by the scrutinee's own shape:
+    // a `Concrete` gate with a `Generic` scrutinee takes the generic branch,
+    // and the reverse takes the concrete one. A non-enum scrutinee, or one
+    // whose *family* differs from the gate's, is the same
+    // `type_mismatch_error` as before.
+    let operative = match &scrutinee.pt {
         // Review fix (R1.1 hazard): `found` can be a monomorph this body's
         // own walk minted moments ago -- `enums` only grows once the whole
         // word returns and `check_module` flushes it (the same staleness
@@ -3076,16 +3126,44 @@ fn poly_eliminator_call(
         // all yet, has no other name to fall back on.
         PolyType::Concrete(Type::Enum(found, found_name))
             if found.index() < enums.len()
-                && generic_surface_name(&enums[found.index()].name)
-                    == generic_surface_name(&enum_decl.name) =>
+                && generic_surface_name(&enums[found.index()].name) == family_name =>
         {
-            *found
+            Operative::Concrete(*found)
         }
         PolyType::Concrete(Type::Enum(found, found_name))
-            if found.index() >= enums.len()
-                && generic_surface_name(found_name) == generic_surface_name(&enum_decl.name) =>
+            if found.index() >= enums.len() && generic_surface_name(found_name) == family_name =>
         {
-            *found
+            Operative::Concrete(*found)
+        }
+        // P7.S12 (R5.1): the ungrounded scrutinee this slice exists for --
+        // `Option['T]`, naming the header by `(idx, module)` rather than any
+        // monomorph by `EnumId`. The family is compared through the carried
+        // header spelling, exactly as the out-of-range concrete arm above
+        // compares `found_name`: `module` here is the *instantiating* module
+        // (`PolyType::Generic`'s own doc), so it is not the declaring
+        // module a gate could be matched against.
+        PolyType::Generic {
+            is_enum: true,
+            idx,
+            module,
+            args,
+            name: header,
+        } if generic_surface_name(header) == family_name => Operative::Generic {
+            idx: *idx,
+            module: *module,
+            args: args.clone(),
+        },
+        // R5.1: a generic *struct* application, or a generic enum of another
+        // family, is an ordinary mismatch -- rendered rather than interned,
+        // since neither side need have a `Type`.
+        PolyType::Generic { .. } | PolyType::GenericVariant { .. } => {
+            return Err(poly_rendered_type_mismatch_error(
+                ctx,
+                span,
+                name,
+                &family_name,
+                &poly_type_str(&scrutinee.pt, sig),
+            ));
         }
         // P7 slice 3c (R1.4): a slice reaches the `Concrete(_)` reference arm
         // below through the widened `is_ref()`, but the advice there ("pass
@@ -3093,13 +3171,18 @@ fn poly_eliminator_call(
         // buffer. It gets the plain mismatch instead -- the same message the
         // concrete path already gives a slice scrutinee.
         PolyType::Concrete(t) if !t.is_ref() || matches!(t, Type::Slice(..)) => {
-            return Err(type_mismatch_error(
-                ctx,
-                span,
-                name,
-                Type::Enum(gate_id, enum_decl.name_static),
-                *t,
-            ));
+            // P7.S12 (R2.1): a gate with no monomorph has no `Type::Enum` to
+            // name as the expectation, so it renders the family instead.
+            return Err(match gate_ty {
+                Some(want) => type_mismatch_error(ctx, span, name, want, *t),
+                None => poly_rendered_type_mismatch_error(
+                    ctx,
+                    span,
+                    name,
+                    &family_name,
+                    &poly_type_str(&scrutinee.pt, sig),
+                ),
+            });
         }
         // A *reference* scrutinee is the concrete path's decision 6, and it
         // buys nothing here: reading a field out of the narrowed variant it
@@ -3108,19 +3191,21 @@ fn poly_eliminator_call(
         // already unwritable. Located rather than silently narrowed to an
         // owning scrutinee, which would let an arm consume a borrowed enum.
         PolyType::Ref(..) | PolyType::Concrete(_) => {
-            return Err(poly_reference_scrutinee_error(ctx, span, name, enum_name));
+            return Err(poly_reference_scrutinee_error(ctx, span, name, &enum_name));
         }
         // OQ2: an abstract scrutinee is a `'T` that is *some* enum, which is
         // not constructible without an enum-kind bound (P7.S3d).
         //
-        // P7.S12 phase 2 (R3.4): a `GenericVariant` scrutinee falls through
-        // to this arm too, and today reads as the same "abstract enum, not
-        // yet grounded" rejection -- wrong wording (it names a real enum,
-        // just an ungrounded one), but not unsound: nothing in this phase
-        // constructs a `GenericVariant` (R3.5), so the arm is unreached.
-        // Deferred to phase 3, which is where a `GenericVariant` scrutinee
-        // first becomes reachable at all (R5.1's own branch site).
-        _ => {
+        // P7.S12 phase 3 (R3.4): enumerated rather than left as a `_ =>`, so
+        // a `PolyType` added later cannot silently read as "abstract enum".
+        // `QuotLit` is already answered above (an untagged arm), and the two
+        // narrowed-variant shapes have their own arm; what is left is a bare
+        // variable and the three composites, none of which is an enum.
+        PolyType::Var(_)
+        | PolyType::Array(..)
+        | PolyType::Quotation(..)
+        | PolyType::OwnedCell(_)
+        | PolyType::QuotLit => {
             return Err(poly_abstract_enum_scrutinee_error(
                 ctx,
                 span,
@@ -3129,41 +3214,113 @@ fn poly_eliminator_call(
             ));
         }
     };
-    // R1.4: the family id (`gate_id`) locates and gates; the recorded id
-    // (`id`, read off the scrutinee) dispatches. Everything below --
-    // exhaustiveness, arm narrowing, arm walk -- resolves against the
-    // scrutinee's own monomorph, never the gate.
+    // R1.5: a generic enum eliminated inside an `inline` combinator body
+    // varies per splice, and the `Span`-keyed `enum_words` record cannot
+    // represent that (`splice_trait_calls` is keyed `(uid, span)` for exactly
+    // this reason). Widening the key is out of scope for this slice, so the
+    // call is rejected here -- silence would reinstate the B3 miscompile
+    // behind a different door. The concrete branch is unaffected: its
+    // resolution is already fixed at check time.
+    if matches!(operative, Operative::Generic { .. }) && tctx.is_combinator_splice {
+        return Err(poly_combinator_generic_enum_elimination_error(
+            ctx, span, name, &enum_name,
+        ));
+    }
+    // R1.4: the family gate locates and gates; the operative header, read off
+    // the scrutinee, dispatches. Everything below -- exhaustiveness, arm
+    // narrowing, arm walk -- resolves against it, never against the gate.
     //
-    // Review fix (R1.1 hazard): `id` can itself be a body-local mint not yet
-    // flushed into `enums` -- gated the same way `type_is_registered`
-    // (P7.S3k N1) gates it, on `id.index() < enums.len()`, not on
-    // `GenericTypes::enum_base` alone: a caller that builds its own
-    // `GenericTypes` without going through `check::check`'s rebase
-    // discipline (several unit tests do) can leave `enum_base` at `0` while
-    // `enums` is already non-empty, and indexing `inst_enums` by
+    // R5.2: the variant list is *copied out* here, so both branches hand the
+    // shared code below the same two parallel vectors -- surface names for
+    // arm-tag matching and exhaustiveness, and each variant's narrowed arm
+    // input. Copied rather than borrowed because the generic branch reads it
+    // through the instantiator's `RefCell`, and the arm walk below re-enters
+    // that instantiator (`poly_construct_generic`'s own `drop(generics)` is
+    // the precedent).
+    //
+    // Review fix (R1.1 hazard): a concrete `id` can itself be a body-local
+    // mint not yet flushed into `enums` -- gated the same way
+    // `type_is_registered` (P7.S3k N1) gates it, on `id.index() <
+    // enums.len()`, not on `GenericTypes::enum_base` alone: a caller that
+    // builds its own `GenericTypes` without going through `check::check`'s
+    // rebase discipline (several unit tests do) can leave `enum_base` at `0`
+    // while `enums` is already non-empty, and indexing `inst_enums` by
     // `id.index() - enum_base` in that mismatched state would silently
     // return the *wrong* decl for a small, already-flushed id instead of
     // falling through.
-    let generics_guard = ctx
-        .generics()
-        .filter(|_| id.index() >= enums.len())
-        .map(|cell| cell.borrow());
-    let enum_decl: &EnumDecl = match &generics_guard {
-        Some(g) => g
-            .enum_decl(id)
-            .expect("an id past `enums.len()` names a mint this batch's own walk just made"),
-        None => &enums[id.index()],
-    };
+    let (variant_names, narrowed, site_pty): (Vec<String>, Vec<PolyType>, PolyType) =
+        match &operative {
+            Operative::Concrete(id) => {
+                let generics_guard = ctx
+                    .generics()
+                    .filter(|_| id.index() >= enums.len())
+                    .map(|cell| cell.borrow());
+                let enum_decl: &EnumDecl = match &generics_guard {
+                    Some(g) => g.enum_decl(*id).expect(
+                        "an id past `enums.len()` names a mint this batch's own walk just made",
+                    ),
+                    None => &enums[id.index()],
+                };
+                (
+                    enum_decl
+                        .variants
+                        .iter()
+                        .map(|v| generic_surface_name(&v.name).to_string())
+                        .collect(),
+                    enum_decl
+                        .variants
+                        .iter()
+                        .enumerate()
+                        // Review fix: `variant_type` indexes `enums`
+                        // unconditionally -- the same hazard guarded against just
+                        // above -- so this builds the `Type::Variant` directly off
+                        // the already-resolved decl instead of re-indexing.
+                        .map(|(vi, v)| PolyType::Concrete(Type::Variant(*id, vi, v.display_static)))
+                        .collect(),
+                    PolyType::Concrete(Type::Enum(*id, enum_decl.name_static)),
+                )
+            }
+            // R5.4: each arm's narrowed input carries the *scrutinee's own*
+            // argument list, unchanged. Nothing re-unifies: the scrutinee already
+            // carries the substitution.
+            Operative::Generic { idx, module, args } => {
+                // A `PolyType::Generic` slot exists only where the parser resolved
+                // a generic header into `GenericTypes`, which is the build path
+                // `check_module` threads the live cell through. The two Ctx-less
+                // walks cannot hold one: the REPL declares no generic `type:`
+                // (P7.S3a D2) and the stand-in runs the concrete checker.
+                let cell = ctx
+                    .generics()
+                    .expect("a `Generic` scrutinee is only built from a live instantiator");
+                let generics = cell.borrow();
+                let count = generics.enums[*idx as usize].variants.len();
+                (
+                    generics.enums[*idx as usize]
+                        .variants
+                        .iter()
+                        .map(|v| generic_surface_name(&v.name).to_string())
+                        .collect(),
+                    (0..count)
+                        .map(|vi| {
+                            crate::ast::generic_variant_type(
+                                &generics,
+                                *idx,
+                                *module,
+                                vi,
+                                args.clone(),
+                            )
+                        })
+                        .collect(),
+                    scrutinee.pt.clone(),
+                )
+            }
+        };
     // P7.S12 (R1.2): record this eliminator call site so `check_poly_call`
-    // can ground it against a concrete θ later. At this phase the scrutinee
-    // is always already concrete (a generic scrutinee is P7.S12 R5, phase 3),
-    // so the recorded shape is trivially ground already -- `apply_subst`'s
-    // `Concrete` arm is a no-op -- but it still needs the same map entry so
-    // lowering does not have to special-case "resolved at check time, not θ".
-    tctx.enum_sites.push((
-        span,
-        PolyType::Concrete(Type::Enum(id, enum_decl.name_static)),
-    ));
+    // can ground it against a concrete θ later. A concrete scrutinee is
+    // already ground, and `apply_subst`'s `Concrete` arm is a no-op on it;
+    // an ungrounded one grounds through the same `apply_subst` route that
+    // mints the monomorph, so lowering reads one map either way.
+    tctx.enum_sites.push((span, site_pty));
 
     // Step 3: exhaustiveness and duplication, in written source order and
     // before any arm body is checked.
@@ -3171,39 +3328,48 @@ fn poly_eliminator_call(
     let mut variant_indices = Vec::with_capacity(arms.len());
     for (quot, tag) in &arms {
         let literal_span = scope.quotation(*quot).span;
-        let Some(vi) = enum_decl
-            .variants
-            .iter()
-            .position(|v| generic_surface_name(&v.name) == tag.name)
-        else {
+        let Some(vi) = variant_names.iter().position(|v| *v == tag.name) else {
             return Err(eliminator_unknown_variant_error(
                 ctx,
                 literal_span,
                 name,
                 &tag.name,
-                enum_name,
+                &enum_name,
             ));
         };
-        if !seen.insert(generic_surface_name(&enum_decl.variants[vi].name)) {
+        // R5.7: this slice narrows a generic scrutinee in the **owning** mode
+        // only. A `&`/`&!` tag would need `intern_ref_type` over a shape that
+        // has no `Type` yet (R4.3's explicit non-goal), so it is a located
+        // rejection rather than silently narrowed to owning -- which would
+        // let an arm consume a borrowed enum.
+        if matches!(operative, Operative::Generic { .. }) && tag.mode != VariantTagMode::Owning {
+            return Err(poly_generic_scrutinee_ref_tag_error(
+                ctx,
+                literal_span,
+                name,
+                &tag.name,
+                &enum_name,
+            ));
+        }
+        if !seen.insert(variant_names[vi].as_str()) {
             return Err(eliminator_duplicate_arm_error(
                 ctx,
                 literal_span,
                 name,
                 &tag.name,
-                enum_name,
+                &enum_name,
             ));
         }
         variant_indices.push(vi);
     }
-    for variant in &enum_decl.variants {
-        let variant_surface = generic_surface_name(&variant.name);
-        if !seen.contains(variant_surface) {
+    for variant_surface in &variant_names {
+        if !seen.contains(&variant_surface.as_str()) {
             return Err(eliminator_non_exhaustive_error(
                 ctx,
                 span,
                 name,
                 variant_surface,
-                enum_name,
+                &enum_name,
             ));
         }
     }
@@ -3221,17 +3387,12 @@ fn poly_eliminator_call(
         .iter()
         .zip(&variant_indices)
         .map(|((quot, _), vi)| {
-            // Review fix: `variant_type` indexes `enums` unconditionally --
-            // the same hazard `enum_decl` above was just guarded against --
-            // so this builds the `Type::Variant` directly off the
-            // already-resolved `enum_decl` instead of re-indexing.
-            let narrowed = Type::Variant(id, *vi, enum_decl.variants[*vi].display_static);
             let mut input = row.clone();
-            input.push(PolySlot::new(PolyType::Concrete(narrowed)));
+            input.push(PolySlot::new(narrowed[*vi].clone()));
             PolyArm {
                 quot: *quot,
                 input,
-                declared_inputs: vec![narrowed],
+                declared_inputs: vec![narrowed[*vi].clone()],
                 // Every eliminator arm runs at most once, in place, in the
                 // call's own position -- so all of them inherit the call
                 // site's tail-ness (the concrete twin pins `is_arm: true`
@@ -3275,6 +3436,20 @@ fn poly_eliminator_call(
     Ok(baseline.unwrap_or(row))
 }
 
+/// P7.S12 (R1.1/R5.1): which enum header one eliminator *call site*
+/// eliminates, read off its own scrutinee rather than off the registry's
+/// family gate. A monomorph names itself by `EnumId`; an ungrounded generic
+/// names its header by `(idx, module)` and carries the argument list every arm
+/// narrows against (R5.4).
+enum Operative {
+    Concrete(EnumId),
+    Generic {
+        idx: u32,
+        module: u32,
+        args: Vec<PolyType>,
+    },
+}
+
 /// P7 slice 3b-follow (R1): one arm handed to `poly_walk_arms` -- the literal
 /// to walk, the abstract stack its body walks over, and the inline parameter
 /// it stands at.
@@ -3286,7 +3461,13 @@ struct PolyArm {
     /// `inline_quotation_type` leaks its spelling and its effect for the
     /// program's lifetime, so the `Type` is built only when the diagnostic
     /// fires.
-    declared_inputs: Vec<Type>,
+    ///
+    /// P7.S12 (R5.3): `PolyType`, not `Type` -- an eliminator arm over an
+    /// ungrounded generic scrutinee narrows to a `GenericVariant`, which has
+    /// no `Type`. The two pre-existing producers (a concrete narrowed variant,
+    /// a combinator's grounded declared row) wrap in `PolyType::Concrete`, and
+    /// the consumer keeps today's message for the all-`Concrete` case.
+    declared_inputs: Vec<PolyType>,
     /// P7.S3g-follow (1a): whether this arm's body occupies the *caller's*
     /// tail position. Per arm, not per call, exactly as the concrete
     /// `LiteralBoundary::is_arm` is: `if`'s two arms do when the `if` does,
@@ -3341,13 +3522,38 @@ fn poly_walk_arms(
         // ordinary `[ ... ]` arm is the wrong bracket here exactly as it is on
         // the concrete path -- same diagnostic, so the two paths do not
         // disagree about one spelling.
+        //
+        // P7.S12 (R5.3): the parameter is spelled out of `declared_inputs`,
+        // which is `PolyType` now. An all-`Concrete` row still builds the real
+        // interned `Type::InlineQuotation` and keeps today's message
+        // byte-identical; a row holding a narrowed `GenericVariant` has no
+        // `Type` to intern, so it renders through the `poly_type_str` sibling.
         if !is_inline {
-            return Err(ordinary_literal_at_inline_param_error(
-                ctx,
-                literal_span,
-                name,
-                crate::ast::inline_quotation_type(arm.declared_inputs, vec![]),
-            ));
+            let concrete: Option<Vec<Type>> = arm
+                .declared_inputs
+                .iter()
+                .map(|pt| match pt {
+                    PolyType::Concrete(t) => Some(*t),
+                    _ => None,
+                })
+                .collect();
+            return Err(match concrete {
+                Some(ins) => ordinary_literal_at_inline_param_error(
+                    ctx,
+                    literal_span,
+                    name,
+                    crate::ast::inline_quotation_type(ins, vec![]),
+                ),
+                None => poly_ordinary_literal_at_inline_param_error(
+                    ctx,
+                    literal_span,
+                    name,
+                    &poly_type_str(
+                        &PolyType::Quotation(arm.declared_inputs, Vec::new(), true, None, None),
+                        sig,
+                    ),
+                ),
+            });
         }
         // Each arm walks its own clone of the enclosing scope, exactly as the
         // concrete path clones `scope` per arm; the join below reconciles the
@@ -3852,7 +4058,8 @@ fn poly_combinator_call(
         arms.push(PolyArm {
             quot,
             input,
-            declared_inputs: decl.ins,
+            // R5.3: a combinator's declared row is already ground `Type`s.
+            declared_inputs: decl.ins.iter().copied().map(PolyType::Concrete).collect(),
             tail: tail && tail_slots.contains(&i),
         });
     }
@@ -8505,6 +8712,66 @@ pub(super) fn poly_combinator_generic_enum_construction_error(
     )
 }
 
+/// P7.S12 (R1.5/R7.4): the elimination twin of
+/// `poly_combinator_generic_enum_construction_error`, and rejected for the
+/// identical reason -- the operative monomorph depends on the combinator's own
+/// type variable, so it varies per splice, and `CallInst::enum_words` is keyed
+/// by `Span` alone.
+pub(super) fn poly_combinator_generic_enum_elimination_error(
+    ctx: &Ctx,
+    span: Span,
+    word: &str,
+    enum_name: &str,
+) -> String {
+    let word = crate::resolve::demangle_call(word);
+    let where_ = ctx.rendered_word();
+    format!(
+        "error: `{word}` in {} (line {}) eliminates `{enum_name}` at a type this combinator's own splice determines\n  a generic enum eliminated inside a combinator body is not yet supported: each splice would need its own resolution, and none is recorded",
+        where_,
+        span.line
+    )
+}
+
+/// P7.S12 (R5.7/R7.4): a `&`/`&!`-mode arm tag over an *ungrounded* generic
+/// scrutinee. Narrowing one needs `intern_ref_type` over a shape that has no
+/// `Type` yet, so this slice admits the owning mode only. Located rather than
+/// silently narrowed to owning, which would let an arm consume a value the
+/// caller only lent.
+pub(super) fn poly_generic_scrutinee_ref_tag_error(
+    ctx: &Ctx,
+    span: Span,
+    word: &str,
+    tag: &str,
+    enum_name: &str,
+) -> String {
+    let word = crate::resolve::demangle_call(word);
+    let where_ = ctx.rendered_word();
+    format!(
+        "error: this arm of `{word}` is tagged `( &{tag} )`, but `{word}` eliminates the ungrounded `{enum_name}` in {where_} (line {})\n  a reference-mode arm over a generic scrutinee is not yet supported: write `( {tag} )` and take the variant by value",
+        span.line,
+    )
+}
+
+/// P7.S12 (R5.3): the `PolyType` sibling of
+/// `ordinary_literal_at_inline_param_error` -- an eliminator arm written with
+/// an ordinary `[ ... ]` bracket whose narrowed input is a `GenericVariant`,
+/// which has no `Type` to intern a real `~[ ... ]` parameter from. Same
+/// rendering split `poly_rendered_type_mismatch_error` draws against
+/// `type_mismatch_error`; the concrete case keeps the original message.
+pub(super) fn poly_ordinary_literal_at_inline_param_error(
+    ctx: &Ctx,
+    span: Span,
+    word: &str,
+    param: &str,
+) -> String {
+    let word = crate::resolve::render_call(word);
+    let where_ = ctx.rendered_word();
+    format!(
+        "error: this argument is an ordinary `[ ... ]` quotation but {word} declares parameter `{param}` as inline `~[ ... ]`; write it `~[ ... ]` in {where_} (line {})",
+        span.line,
+    )
+}
+
 /// P7 slice 3b (R3/L1): two eliminator arms leaving structurally different
 /// types at one exit position, under rigid type variables -- `'T` against
 /// `'U`, or `'T` against `i64`. Binding either would be a mid-body
@@ -10517,7 +10784,7 @@ mod tests {
         PolyArm {
             quot,
             input: vec![PolySlot::new(PolyType::Var(0))],
-            declared_inputs: vec![Type::I64],
+            declared_inputs: vec![PolyType::Concrete(Type::I64)],
             tail: false,
         }
     }
@@ -13307,6 +13574,83 @@ mod tests {
              `Shape?` expected `Shape`, found `Slice[i64]`\n  \
              note: declared ( -- )"
         );
+    }
+
+    /// P7.S12 (R1.1/R5.1, R8.8): the branch is selected by the *scrutinee*,
+    /// never by the registry entry that got the call here. `Option` has a
+    /// monomorph, so R2.3 registers `EliminatorTarget::Concrete` -- and
+    /// `probe`'s scrutinee is still the ungrounded header, so the generic
+    /// branch has to run under a concrete gate.
+    #[test]
+    fn poly_eliminator_takes_the_generic_branch_under_a_concrete_gate() {
+        check_src(
+            "type: Option['T] | None | Some 'T ;\n\
+             : mki ( i64 -- Option[i64] ) Some ;\n\
+             : probe ( Option['T] -- i64 )\n  \
+               ~[ ( Some ) drop 1 ] ~[ ( None ) drop 0 ] Option? ;\n\
+             : main ( -- ) 7 mki probe drop ;\n",
+        )
+        .expect("an ungrounded scrutinee eliminates under a monomorph's gate");
+    }
+
+    /// The reverse direction (R8.8): nothing instantiates `Option` at parse
+    /// time, so the gate is `EliminatorTarget::Generic` -- and the scrutinee
+    /// is the concrete `Option[i64]` this body's own walk minted one term
+    /// earlier, so the *concrete* branch has to run under a generic gate.
+    #[test]
+    fn poly_eliminator_takes_the_concrete_branch_under_a_generic_gate() {
+        check_src(
+            "type: Option['T] | None | Some 'T ;\n\
+             : probe ( 'T -- i64 )\n  \
+               drop 5 Some ~[ ( Some ) drop 1 ] ~[ ( None ) drop 0 ] Option? ;\n\
+             : main ( -- ) 7 probe drop ;\n",
+        )
+        .expect("a body-local mint eliminates under its header's gate");
+    }
+
+    /// R1.1: the gate still gates. A scrutinee of a *different* family is the
+    /// plain mismatch it always was -- only a different monomorph, or the
+    /// header, of the *same* family is admitted.
+    #[test]
+    fn poly_eliminator_rejects_a_scrutinee_of_another_generic_family() {
+        let err = check_src(
+            "type: Option['T] | None | Some 'T ;\n\
+             type: Pair['A] | Nil | One 'A ;\n\
+             : probe ( Pair['T] -- i64 )\n  \
+               ~[ ( Some ) drop 1 ] ~[ ( None ) drop 0 ] Option? ;\n\
+             : main ( -- ) ;\n",
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            "error: type mismatch in `probe` (line 4)\n  \
+             `Option?` expected `Option`, found `Pair['T]`\n  \
+             note: declared ( -- )"
+        );
+    }
+
+    /// R5.2/R5.4 (R8.8): a **two**-parameter header, eliminated at two
+    /// monomorphs that are each other's argument swap (`Res[i64 Pt]` and
+    /// `Res[Pt i64]`). The variant list comes off the header rather than off
+    /// any monomorph, and each arm's narrowed input carries the scrutinee's
+    /// own argument list unchanged (`args.clone()`, arity 2).
+    ///
+    /// This pins arity and family, not positionality: nothing in this phase
+    /// *reads* a narrowed variant's fields, so a swap of the carried `args` is
+    /// unobservable until the destructure intercept lands (R8.3, whose
+    /// asymmetric instantiation is mutation 3's witness).
+    #[test]
+    fn poly_eliminator_narrows_a_two_parameter_header_at_swapped_monomorphs() {
+        check_src(
+            "type: Res['A 'B] | Ok v 'A | Err e 'B ;\n\
+             type: Pt x i64 y i64 ;\n\
+             : oki ( i64 -- Res[i64 Pt] ) Ok ;\n\
+             : okp ( Pt -- Res[Pt i64] ) Ok ;\n\
+             : is-ok ( Res['T 'U] -- i64 )\n  \
+               ~[ ( Ok ) drop 1 ] ~[ ( Err ) drop 0 ] Res? ;\n\
+             : main ( -- ) 7 oki is-ok drop 1 2 Pt okp is-ok drop ;\n",
+        )
+        .expect("one poly body eliminates two swapped monomorphs of one header");
     }
 
     #[test]

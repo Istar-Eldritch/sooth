@@ -140,11 +140,15 @@ struct PolyCtx<'a> {
     /// combinator registry.
     combinators: &'a CombinatorEnv<'a>,
     /// Phase 6 slice 3 (R3): the generated eliminator words, bare surface name
-    /// (`Shape?`) -> the enum they eliminate, so a call to one is routed to
-    /// `check_eliminator_call` ahead of the env/combinator/poly paths. An
+    /// (`Shape?`) -> the enum family they eliminate, so a call to one is routed
+    /// to `check_eliminator_call` ahead of the env/combinator/poly paths. An
     /// eliminator has no body, so it is not a `Combinator` and must never be
     /// spliced.
-    eliminators: &'a HashMap<String, EnumId>,
+    ///
+    /// P7.S12 (R2.5): the value is an `EliminatorTarget`, so a generic header
+    /// with no monomorph is a key here too. It gates the *name* only; the
+    /// operative header is read off the scrutinee at the call site.
+    eliminators: &'a HashMap<String, EliminatorTarget>,
     /// P7.S3e (R8): the tables a `Bound::User` at a resolved call site is
     /// decided and resolved against. `TraitResolveCtx::scratch()` in a unit
     /// test that probes a body through `infer_probe_body`, which carries no
@@ -647,7 +651,12 @@ fn check_module(module: &mut Module) -> Result<Vec<WordObligations>, String> {
     for (name, _symbol, sig) in enum_eliminator_sigs(&module.enums) {
         poly_env.entry(name).or_default().push(sig);
     }
-    let eliminators = eliminator_registry(&module.enums);
+    // P7.S12 (R2.1/R2.2): built from the instantiator's own headers as well
+    // as the monomorphized `enums`, so `Option?` gates even where nothing
+    // instantiates `Option` concretely. Read straight off `module.generics`,
+    // which is still in place here -- `generics_cell` takes it below, after
+    // this registry is built.
+    let eliminators = eliminator_registry(&module.enums, &module.generics.enums);
     // Slice 8a fix 1 (R1): each word's distinct lowering symbol, aligned by
     // index -- equal to its own name unless it shares that name with another
     // word in this module (an overload set), in which case each candidate's

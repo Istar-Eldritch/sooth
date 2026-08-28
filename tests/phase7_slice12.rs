@@ -298,3 +298,370 @@ fn eliminating_a_body_local_monomorph_diagnoses_rather_than_ices() {
         "expected a diagnostic naming the body-local monomorph, got: {err}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Phase 3 (R2 + R5): the registry admits a generic header, and an ungrounded
+// generic scrutinee is eliminated inside a polymorphic body.
+// ---------------------------------------------------------------------------
+
+/// The build error a fixture that must be rejected produces.
+fn build_error(src: &Path) -> String {
+    driver::build_with_manifest(src, common::manifest_for(src).as_deref())
+        .expect_err("this fixture must be rejected")
+}
+
+const OPTION: &str = "type: Option['T] | None | Some 'T ;\n\
+     type: Pt x i64 y i64 ;\n";
+
+/// The brief's own repro, and this slice's exit criterion (R8.2): `is-some`
+/// over an ungrounded `Option['T]`, run at **two** instantiations whose
+/// payload layouts differ (`i64`, and a two-field struct). One instantiation
+/// cannot witness R1 -- S3a R4's rule: an all-`i64` pair is a layout placebo.
+/// Both arms are exercised, so neither the `Some` nor the `None` narrowing is
+/// merely registered.
+#[test]
+fn is_some_over_an_ungrounded_option_runs_at_two_payload_layouts() {
+    let src = format!(
+        "{OPTION}\
+         : is-some ( Option['T] -- i64 )\n\
+           ~[ ( Some ) drop 1 ]\n\
+           ~[ ( None ) drop 0 ]\n\
+           Option? ;\n\
+         : mki ( i64 -- Option[i64] ) Some ;\n\
+         : nonei ( -- Option[i64] ) None ;\n\
+         : mkp ( Pt -- Option[Pt] ) Some ;\n\
+         : main ( -- )\n\
+           7 mki is-some .\n\
+           nonei is-some .\n\
+           1 2 Pt mkp is-some . ;\n"
+    );
+    let prog = Scratch::write("r82", &src);
+    let (stdout, code) = build_and_run(prog.path());
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "1\n0\n1\n");
+}
+
+/// R8.2, the other declaration order: the struct instantiation is minted
+/// first. The defect this slice closes *is* order sensitivity, so an exit
+/// criterion asserted in one order only would not say the registry entry has
+/// stopped deciding identity.
+#[test]
+fn is_some_over_an_ungrounded_option_runs_with_the_struct_monomorph_first() {
+    let src = format!(
+        "{OPTION}\
+         : is-some ( Option['T] -- i64 )\n\
+           ~[ ( Some ) drop 1 ]\n\
+           ~[ ( None ) drop 0 ]\n\
+           Option? ;\n\
+         : mkp ( Pt -- Option[Pt] ) Some ;\n\
+         : mki ( i64 -- Option[i64] ) Some ;\n\
+         : main ( -- )\n\
+           1 2 Pt mkp is-some .\n\
+           7 mki is-some . ;\n"
+    );
+    let prog = Scratch::write("r82b", &src);
+    let (stdout, code) = build_and_run(prog.path());
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "1\n1\n");
+}
+
+/// R1.1/R5.1, the branch selection's *other* direction, end to end: nothing
+/// in this program instantiates `Option` at parse time, so the registry gate
+/// is `EliminatorTarget::Generic` -- yet the scrutinee `probe` eliminates is
+/// the concrete `Option[i64]` its own walk minted one term earlier. The
+/// concrete branch has to run under a generic gate, which is what "the
+/// registry entry gates the name, the scrutinee decides the header" buys.
+#[test]
+fn a_generic_gate_eliminates_a_scrutinee_its_own_walk_minted() {
+    let src = format!(
+        "{OPTION}\
+         : probe ( 'T -- i64 )\n\
+           drop\n\
+           5 Some\n\
+           ~[ ( Some ) drop 1 ]\n\
+           ~[ ( None ) drop 0 ]\n\
+           Option? ;\n\
+         : main ( -- ) 1 2 Pt probe . ;\n"
+    );
+    let prog = Scratch::write("r11-generic-gate", &src);
+    let (stdout, code) = build_and_run(prog.path());
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "1\n");
+}
+
+/// R8.6: an ungrounded scrutinee with a missing arm. The exhaustiveness pass
+/// reads the *header's* variant list, so it names the absent variant exactly
+/// as the concrete branch does.
+#[test]
+fn ungrounded_scrutinee_with_a_missing_arm_is_rejected() {
+    let src = format!(
+        "{OPTION}\
+         : probe ( Option['T] -- i64 )\n\
+           ~[ ( Some ) drop 1 ]\n\
+           Option? ;\n\
+         : mki ( i64 -- Option[i64] ) Some ;\n\
+         : main ( -- ) 7 mki probe . ;\n"
+    );
+    let prog = Scratch::write("r86-miss", &src);
+    let err = build_error(prog.path());
+    assert!(
+        err.contains("non-exhaustive call to `Option?`")
+            && err.contains("missing variant `None` of enum `Option`"),
+        "expected a located rejection naming the enum and the call, got: {err}"
+    );
+}
+
+/// R8.6: two arms tagged with one variant of an ungrounded scrutinee.
+#[test]
+fn ungrounded_scrutinee_with_a_duplicate_arm_is_rejected() {
+    let src = format!(
+        "{OPTION}\
+         : probe ( Option['T] -- i64 )\n\
+           ~[ ( Some ) drop 1 ]\n\
+           ~[ ( Some ) drop 2 ]\n\
+           ~[ ( None ) drop 0 ]\n\
+           Option? ;\n\
+         : mki ( i64 -- Option[i64] ) Some ;\n\
+         : main ( -- ) 7 mki probe . ;\n"
+    );
+    let prog = Scratch::write("r86-dup", &src);
+    let err = build_error(prog.path());
+    assert!(
+        err.contains("duplicate arm for variant `Some` of enum `Option`")
+            && err.contains("call to `Option?`"),
+        "expected a located rejection naming the enum and the call, got: {err}"
+    );
+}
+
+/// R8.6: an arm tagged with a variant that is not the scrutinee's. A *typo'd*
+/// tag cannot witness this -- an unresolvable tag is a parse error ("unknown
+/// type `Somme`") long before the checker sees it -- so the tag names a real
+/// variant of an unrelated enum, which is what the concrete branch's own
+/// witness does.
+#[test]
+fn ungrounded_scrutinee_with_an_unknown_variant_tag_is_rejected() {
+    let src = format!(
+        "{OPTION}\
+         type: Other | Alt n i64 ;\n\
+         : probe ( Option['T] -- i64 )\n\
+           ~[ ( Alt ) drop 1 ]\n\
+           ~[ ( None ) drop 0 ]\n\
+           Option? ;\n\
+         : mki ( i64 -- Option[i64] ) Some ;\n\
+         : main ( -- ) 7 mki probe . ;\n"
+    );
+    let prog = Scratch::write("r86-unknown", &src);
+    let err = build_error(prog.path());
+    assert!(
+        err.contains("unknown variant `Alt` of enum `Option`") && err.contains("call to `Option?`"),
+        "expected a located rejection naming the enum and the call, got: {err}"
+    );
+}
+
+/// R8.6/R5.5: a narrowed `GenericVariant` leaving its arm. This is the
+/// load-bearing escape check (R3.4): outside the call every type-directed
+/// predicate is written over `Type::Enum`, so an escaped variant reads as
+/// trivially `Copy` and a later `dup` double-drops a linear payload. Also the
+/// only witness that the arm input really is the narrowed variant -- the
+/// message renders it `Option.Some` through `poly_type_str`.
+#[test]
+fn a_generic_variant_escaping_its_arm_is_rejected() {
+    let src = format!(
+        "{OPTION}\
+         : probe ( Option['T] -- i64 )\n\
+           ~[ ( Some ) ]\n\
+           ~[ ( None ) ]\n\
+           Option? drop 1 ;\n\
+         : mki ( i64 -- Option[i64] ) Some ;\n\
+         : main ( -- ) 7 mki probe . ;\n"
+    );
+    let prog = Scratch::write("r86-escape", &src);
+    let err = build_error(prog.path());
+    assert!(
+        err.contains("an arm of `Option?` leaves `Option.Some` on the stack"),
+        "expected a located rejection naming the narrowed variant, got: {err}"
+    );
+}
+
+/// R8.6/R5.7: a `&`-mode arm tag over a generic scrutinee. Narrowing one
+/// needs `intern_ref_type` over a shape with no `Type` yet (R4.3's explicit
+/// non-goal), so this slice admits the owning mode only -- a located
+/// restriction, not silence and not a fallthrough into the concrete branch,
+/// which would let the arm consume a value the caller only lent.
+#[test]
+fn a_reference_mode_tag_over_a_generic_scrutinee_is_rejected() {
+    let src = format!(
+        "{OPTION}\
+         : probe ( Option['T] -- i64 )\n\
+           ~[ ( &Some ) drop 1 ]\n\
+           ~[ ( None ) drop 0 ]\n\
+           Option? ;\n\
+         : mki ( i64 -- Option[i64] ) Some ;\n\
+         : main ( -- ) 7 mki probe . ;\n"
+    );
+    let prog = Scratch::write("r86-refmode", &src);
+    let err = build_error(prog.path());
+    assert!(
+        err.contains("tagged `( &Some )`")
+            && err.contains("eliminates the ungrounded `Option`")
+            && err.contains("not yet supported"),
+        "expected a located rejection naming the tag and the enum, got: {err}"
+    );
+}
+
+/// R8.6/R2.4: a generic eliminator call from a body the **concrete** checker
+/// walks. The registry keys the header, so the call name resolves; what
+/// cannot is a scrutinee, since a concrete body's operand is always some
+/// monomorph and this header has none. Its own message, not the adjacency one
+/// (the arms here are written correctly) and not the unknown-word path.
+#[test]
+fn a_generic_eliminator_in_a_concrete_body_is_rejected() {
+    let src = format!(
+        "{OPTION}\
+         : probe ( i64 -- i64 )\n\
+           ~[ ( Some ) drop 1 ]\n\
+           ~[ ( None ) drop 0 ]\n\
+           Option? ;\n\
+         : main ( -- ) 7 probe . ;\n"
+    );
+    let prog = Scratch::write("r86-concrete", &src);
+    let err = build_error(prog.path());
+    assert!(
+        err.contains("`Option?` names the generic enum `Option`")
+            && err.contains("nothing in this program instantiates")
+            && !err.contains("arms are written together"),
+        "expected R2.4's own located rejection, got: {err}"
+    );
+}
+
+/// R8.6/R2.4, the same rejection reached through
+/// `check_poly_combinator_standalone`'s `i64` stand-in body: a combinator is
+/// checked standalone by the *concrete* checker, so the widened registry's
+/// `Generic` entry reaches that consumer here too, and the stand-in has no
+/// instantiator to ground a scrutinee with even in principle. R2.2's withdrawn
+/// claim -- that P7.S11's combinator path "shares no code with this" -- is
+/// what this pins: the name gate is shared code.
+#[test]
+fn a_generic_eliminator_in_a_standalone_checked_combinator_is_rejected() {
+    let src = format!(
+        "{OPTION}\
+         : probe inline ( 'T ~[ -- i64 ] -- i64 )\n\
+           | f | drop\n\
+           ~[ ( Some ) drop f call ]\n\
+           ~[ ( None ) drop 0 ]\n\
+           Option? ;\n\
+         : main ( -- ) 7 ~[ 5 ] probe . ;\n"
+    );
+    let prog = Scratch::write("r86-standalone", &src);
+    let err = build_error(prog.path());
+    assert!(
+        err.contains("`Option?` names the generic enum `Option`")
+            && err.contains("nothing in this program instantiates")
+            && !err.contains("arms are written together"),
+        "expected R2.4's own located rejection in the stand-in body, got: {err}"
+    );
+}
+
+/// R1.5, and the limit of what it can be held to today: a generic enum
+/// eliminated inside a combinator body would need a per-splice resolution
+/// `enum_words`' `Span` key cannot hold, so `poly_eliminator_call` rejects it
+/// -- but that gate is unreachable, exactly as its construction twin is
+/// (phase 1's own note at `check_module`'s combinator skip). A combinator
+/// carrying an `Option['T]` slot is rejected first, by the standing
+/// variable-bearing-application restriction, during its standalone check.
+/// R1.5 sharpens a message here; it is not a safety net. If that restriction
+/// is lifted, this fixture is what should start reporting R1.5's own text.
+#[test]
+fn a_combinator_over_a_generic_enum_slot_is_rejected_before_r15_can_fire() {
+    let src = format!(
+        "{OPTION}\
+         : probe inline ( Option['T] ~[ -- i64 ] -- i64 )\n\
+           | f |\n\
+           ~[ ( Some ) drop f call ]\n\
+           ~[ ( None ) drop 0 ]\n\
+           Option? ;\n\
+         : mki ( i64 -- Option[i64] ) Some ;\n\
+         : main ( -- ) 7 mki ~[ 5 ] probe . ;\n"
+    );
+    let prog = Scratch::write("r15-eliminate", &src);
+    let err = build_error(prog.path());
+    assert!(
+        err.contains("names the generic type `Option['T]`")
+            && err.contains("cannot yet be instantiated at a variable-bearing application"),
+        "expected the standing variable-bearing restriction, got: {err}"
+    );
+}
+
+/// R8.2 with a **two-parameter** header, at two monomorphs that are each
+/// other's argument swap (`Res[i64 Pt]`, `Res[Pt i64]`). One poly body
+/// eliminates both: the variant list comes off the header, and each arm's
+/// narrowed input carries the scrutinee's own two arguments (R5.2/R5.4).
+#[test]
+fn a_two_parameter_generic_enum_is_eliminated_at_swapped_monomorphs() {
+    let src = "type: Res['A 'B] | Ok v 'A | Err e 'B ;\n\
+         type: Pt x i64 y i64 ;\n\
+         : is-ok ( Res['T 'U] -- i64 )\n\
+           ~[ ( Ok ) drop 1 ]\n\
+           ~[ ( Err ) drop 0 ]\n\
+           Res? ;\n\
+         : oki ( i64 -- Res[i64 Pt] ) Ok ;\n\
+         : errp ( Pt -- Res[i64 Pt] ) Err ;\n\
+         : okp ( Pt -- Res[Pt i64] ) Ok ;\n\
+         : main ( -- )\n\
+           7 oki is-ok .\n\
+           1 2 Pt errp is-ok .\n\
+           1 2 Pt okp is-ok . ;\n";
+    let prog = Scratch::write("r82-two-params", src);
+    let (stdout, code) = build_and_run(prog.path());
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "1\n0\n1\n");
+}
+
+/// R5.3: `PolyArm.declared_inputs` is `Vec<PolyType>` now, because an arm over
+/// an ungrounded scrutinee narrows to a `GenericVariant`, which has no `Type`
+/// to intern a real `~[ ... ]` parameter from. An arm written with an ordinary
+/// `[ ... ]` bracket is what makes that field observable: the all-`Concrete`
+/// case keeps the original interned message, and this case renders the
+/// parameter through `poly_type_str` instead.
+#[test]
+fn an_ordinary_bracket_arm_over_a_generic_scrutinee_names_the_narrowed_parameter() {
+    let src = format!(
+        "{OPTION}\
+         : probe ( Option['T] -- i64 )\n\
+           [ ( Some ) drop 1 ]\n\
+           ~[ ( None ) drop 0 ]\n\
+           Option? ;\n\
+         : mki ( i64 -- Option[i64] ) Some ;\n\
+         : main ( -- ) 7 mki probe . ;\n"
+    );
+    let prog = Scratch::write("r53-bracket", &src);
+    let err = build_error(prog.path());
+    assert!(
+        err.contains("declares parameter `~[ Option.Some -- ]` as inline `~[ ... ]`"),
+        "expected the narrowed parameter rendered through `poly_type_str`, got: {err}"
+    );
+}
+
+/// R5.6: `drop` of a narrowed `GenericVariant` inside its arm is accepted (the
+/// concrete twin accepts `drop` of a `Type::Variant`) and lowers per
+/// instantiation -- here through a `| v |` bind, so the variant is also
+/// move-tracked as a local at two payload layouts.
+#[test]
+fn a_narrowed_variant_binds_and_drops_at_two_instantiations() {
+    let src = format!(
+        "{OPTION}\
+         : probe ( Option['T] -- i64 )\n\
+           ~[ ( Some ) | v | v drop 1 ]\n\
+           ~[ ( None ) drop 0 ]\n\
+           Option? ;\n\
+         : mki ( i64 -- Option[i64] ) Some ;\n\
+         : mkp ( Pt -- Option[Pt] ) Some ;\n\
+         : main ( -- )\n\
+           7 mki probe .\n\
+           1 2 Pt mkp probe . ;\n"
+    );
+    let prog = Scratch::write("r56-bind-drop", &src);
+    let (stdout, code) = build_and_run(prog.path());
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "1\n1\n");
+}

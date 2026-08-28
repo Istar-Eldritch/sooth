@@ -1874,29 +1874,63 @@ pub fn enum_eliminator_sigs(enums: &[EnumDecl]) -> Vec<(String, String, PolySig)
     sigs
 }
 
-/// Phase 6 slice 3 (R3): the checker-side eliminator registry, bare surface
-/// name (`Shape?`) -> the enum it eliminates. `check_term` consults this
-/// before the ordinary env/combinator/poly paths, since an eliminator call is
-/// neither a user word nor an ordinary poly call: its arms are matched to
-/// variants by annotation tag, not by slot position.
+/// P7.S12 (R2.1): what a name in the eliminator registry names -- one
+/// monomorph, or a generic header no instantiation has grounded yet. `u32`
+/// throughout the `Generic` arm, matching `PolyType::Generic`'s own field
+/// types, since `(idx, module)` is exactly the header identity a
+/// `Generic { is_enum: true, .. }` scrutinee carries.
 ///
-/// Review fix (Phase 2, smaller point 2): unlike `enum_eliminator_sigs`'s
-/// lowering symbol, this key is `generic_surface_name`-only, so two
-/// instantiations of one generic enum collide here (`Result[i64 i64]?` and
-/// `Result[bool i64]?` both key `"Result?"`, last write wins). See that
-/// function's doc for why this is unreachable today and whose problem it is
-/// once it becomes reachable.
-pub fn eliminator_registry(enums: &[EnumDecl]) -> HashMap<String, EnumId> {
-    enums
+/// R2 second half: this value never decides *identity*. Both consumers read
+/// the operative header off the scrutinee's own type
+/// (`check_eliminator_call`'s S3b R5 rule, restated in `poly_eliminator_call`
+/// by R1.1); the registry entry gates the call *name* and supplies the
+/// family-invariant variant count the underflow diagnostic needs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EliminatorTarget {
+    Concrete(EnumId),
+    Generic { idx: u32, module: u32 },
+}
+
+/// Phase 6 slice 3 (R3): the checker-side eliminator registry, bare surface
+/// name (`Shape?`) -> the enum family it eliminates. `check_term` consults
+/// this before the ordinary env/combinator/poly paths, since an eliminator
+/// call is neither a user word nor an ordinary poly call: its arms are matched
+/// to variants by annotation tag, not by slot position.
+///
+/// P7.S12 (R2.1): built from the module's monomorphized `enums` **and** from
+/// the instantiator's own `GenericEnumDecl` headers, so `Option?` is a key
+/// even where nothing in the program instantiates `Option` concretely -- the
+/// brief's whole defect A.
+///
+/// R2.3: a header that also has monomorphs registers **once**, as `Concrete`.
+/// That is what the concrete consumer expects, and R1.1/R5.1 make the choice
+/// non-load-bearing: whichever way a name is classified, the branch a call
+/// site takes is selected by its scrutinee, not by this value. The key stays
+/// `generic_surface_name`-only, so every monomorph of one header shares one
+/// entry -- a family gate, deliberately, not an identity.
+pub fn eliminator_registry(
+    enums: &[EnumDecl],
+    generic_enums: &[GenericEnumDecl],
+) -> HashMap<String, EliminatorTarget> {
+    let mut registry: HashMap<String, EliminatorTarget> = enums
         .iter()
         .enumerate()
         .map(|(idx, decl)| {
             (
                 format!("{}?", generic_surface_name(&decl.name)),
-                EnumId::from_index(idx),
+                EliminatorTarget::Concrete(EnumId::from_index(idx)),
             )
         })
-        .collect()
+        .collect();
+    for (idx, decl) in generic_enums.iter().enumerate() {
+        registry
+            .entry(format!("{}?", generic_surface_name(&decl.name)))
+            .or_insert(EliminatorTarget::Generic {
+                idx: idx as u32,
+                module: decl.module,
+            });
+    }
+    registry
 }
 
 /// Phase 6 slice 3 review fix (smaller point 1): a user word whose surface
@@ -2063,14 +2097,56 @@ mod tests {
     fn eliminator_registry_keys_the_bare_surface_name() {
         let src = "type: Shape | Circle r i64 | Rect w i64 h i64 ;\n: main ( -- ) ;\n";
         let module = parse(&lex(src).unwrap()).unwrap();
-        let registry = eliminator_registry(&module.enums);
+        let registry = eliminator_registry(&module.enums, &[]);
         let id = module
             .enums
             .iter()
             .position(|e| e.name == "Shape")
             .map(EnumId::from_index)
             .unwrap();
-        assert_eq!(registry.get("Shape?"), Some(&id));
+        assert_eq!(
+            registry.get("Shape?"),
+            Some(&EliminatorTarget::Concrete(id))
+        );
+    }
+
+    /// P7.S12 (R2.3, R8.8): a generic header with a monomorph registers as
+    /// `Concrete` -- once, under the one shared surface key -- and one with
+    /// no monomorph registers as `Generic`. Both directions, since the whole
+    /// point of the `Generic` arm is the header nothing has grounded.
+    #[test]
+    fn eliminator_registry_prefers_a_monomorph_over_its_own_header() {
+        let src = "type: Grounded['A] | GNil | GOne 'A ;\n\
+             type: Bare['A] | BNil | BOne 'A ;\n\
+             : mk ( i64 -- Grounded[i64] ) GOne ;\n\
+             : main ( -- ) ;\n";
+        let module = parse(&lex(src).unwrap()).unwrap();
+        let generics = &module.generics;
+        let registry = eliminator_registry(&module.enums, &generics.enums);
+        let mono = module
+            .enums
+            .iter()
+            .position(|e| generic_surface_name(&e.name) == "Grounded")
+            .map(EnumId::from_index)
+            .expect("`Grounded[i64]` is instantiated at parse time");
+        assert_eq!(
+            registry.get("Grounded?"),
+            Some(&EliminatorTarget::Concrete(mono)),
+            "a header with a monomorph registers as that monomorph"
+        );
+        let bare = generics
+            .enums
+            .iter()
+            .position(|e| generic_surface_name(&e.name) == "Bare")
+            .expect("`Bare`'s header is staged by the parse-time prepass");
+        assert_eq!(
+            registry.get("Bare?"),
+            Some(&EliminatorTarget::Generic {
+                idx: bare as u32,
+                module: generics.enums[bare].module,
+            }),
+            "a header with no monomorph registers as the header itself"
+        );
     }
 
     #[test]
