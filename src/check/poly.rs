@@ -15549,13 +15549,13 @@ mod tests {
             &module.owned_cells,
             &module.refs,
             &module.slices,
-            |scratch, _arrays, _cells, _refs| {
+            |scratch, arrays, cells, refs| {
                 let regs = crate::ast::MutRegistries {
                     structs: &module.structs,
                     enums: &module.enums,
-                    arrays: _arrays,
-                    cells: _cells,
-                    refs: _refs,
+                    arrays,
+                    cells,
+                    refs,
                 };
                 Ok(scratch
                     .expect("R1 threads the live cell in")
@@ -15697,12 +15697,58 @@ mod tests {
     fn standalone_grounding_a_cell_through_the_body_leaves_the_live_cells_untouched() {
         let src = "type: Result['T 'E] | Ok 'T | Err 'E ;\n\
              : hold inline ( 'T ~[ 'T -- Result['T i64] ] -- i64 ) call ^ drop 0 ;\n";
+        let tokens = lex(src).unwrap();
+        let parsed = crate::test_support::parse_with_core(&tokens).unwrap();
+        let live_cell_len = parsed.owned_cells.len();
         let (checked, _) =
             checked_like_a_build(src).expect("hold checks standalone and the module compiles");
         assert_eq!(
             checked.owned_cells.len(),
-            0,
+            live_cell_len,
             "check_poly_combinator_standalone must not intern the body's cell into the live registry"
+        );
+    }
+
+    /// R6's remaining halves: `refs` and `slices` (R6.4). A borrow and a slice
+    /// taken over a body local whose element is the combinator's own grounded
+    /// monomorph must intern into the word-scoped `local.refs`/`local.slices`,
+    /// never into the live registries. It has to go through the body, like the
+    /// cell test above: `-- &Result['T i64]` is rejected at the header with
+    /// `unknown type 'T` (the standing poly borrow-sigil gap), and a slice type
+    /// has no signature spelling at all -- one exists only where the `slice`
+    /// word mints it. The
+    /// `slices` half is what R6.4 added beyond the reported finding: a leaked
+    /// slice of a scratch monomorph reaches `build_slices`, which indexes
+    /// `enums.layouts[id.index()]` off the *live* registry the monomorph never
+    /// entered. The `4 fill` also witnesses `arrays` through the body, where
+    /// the signature-side array test covers only the declared-output route.
+    #[test]
+    fn standalone_grounding_a_borrow_and_a_slice_through_the_body_leaves_the_live_registries_untouched(
+    ) {
+        let src = "type: Result['T 'E] | Ok 'T | Err 'E ;\n\
+             : hold inline ( 'T ~[ 'T -- Result['T i64] ] -- i64 )\n\
+               call 4 fill | a | &a slice drop a drop 0 ;\n";
+        let tokens = lex(src).unwrap();
+        let parsed = crate::test_support::parse_with_core(&tokens).unwrap();
+        let live_ref_len = parsed.refs.len();
+        let live_slice_len = parsed.slices.len();
+        let live_array_len = parsed.arrays.len();
+        let (checked, _) =
+            checked_like_a_build(src).expect("hold checks standalone and the module compiles");
+        assert_eq!(
+            checked.refs.len(),
+            live_ref_len,
+            "check_poly_combinator_standalone must not intern the body's borrow into the live registry"
+        );
+        assert_eq!(
+            checked.slices.len(),
+            live_slice_len,
+            "check_poly_combinator_standalone must not intern the body's slice into the live registry"
+        );
+        assert_eq!(
+            checked.arrays.len(),
+            live_array_len,
+            "nor the body's array, on the route the declared-output array test does not cover"
         );
     }
 }
