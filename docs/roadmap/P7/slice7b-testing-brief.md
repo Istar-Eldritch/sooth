@@ -38,10 +38,11 @@ wants to abort itself deliberately (a fatal precondition, not an assertion) reac
 for S7a's `exit`, not a new primitive here. `exit` does not diverge (S7a R3.3): the
 checker still requires the calling word's own body to satisfy its declared effect at
 body end, including dropping any linear values already pushed before the call, even
-though that path never runs. In particular, a word that calls `exit` cannot declare
-any outputs at all — `: give-up ( -- i64 ) 1 >i32 exit ;` fails with `body leaves 0
-values, but ( … ) declares 1 outputs`. A suite-abort helper must therefore be
-`( -- )` and called only where the caller's residual stack is already empty; no
+though that path never runs. In particular, values pushed before the call must still
+be disposed after it, and declared outputs must still be produced after it:
+`: give-up ( -- i64 ) 1 >i32 exit 0 ;` builds, `: give-up ( -- i64 ) 1 >i32 exit ;`
+fails with `body leaves 0 values, but ( … ) declares 1 outputs`. A suite-abort helper
+is therefore ordinary code with an ordinary effect, not a hole in the linear spine; no
 `!`/`Never` output shape exists to let unreachable code skip the checker.
 
 ### R2 — The vocabulary is `hosted::testing`, two words

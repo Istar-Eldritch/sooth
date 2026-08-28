@@ -1063,8 +1063,8 @@ failure wants a `Show` trait, whose naive one-impl-per-type shape collides with 
 existing orphan rule the moment a second target (embedded, UART) wants its own sink.
 Sequenced so nothing but the last subslice touches the compiler:
 
-- **S7a** -- `lib/core`/`lib/hosted` package split, `lib/hosted/libc.sth` with `exit`.
-  `[ done ]` Detail: [slice7a-libc-brief](./P7/slice7a-libc-brief.md),
+- **S7a** `[ done ]` -- `lib/core`/`lib/hosted` package split, `lib/hosted/libc.sth` with
+  `exit`. Detail: [slice7a-libc-brief](./P7/slice7a-libc-brief.md),
   [slice7a-spec](./P7/slice7a-spec.md).
 - **S7b** -- `hosted::testing`'s `expect`/`expect-eq` and the `sooth test` driver, label-only
   output, printing via the still-intrinsic `.`. Detail:
