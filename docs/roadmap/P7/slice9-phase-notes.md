@@ -1159,22 +1159,26 @@ spec's one — `parser.rs:1353` (inside `parse_typedef_line`) and `:1436` (insid
 about scope; `repl_unknown_capability_error` was called only from the two `is_repl`
 readers. Deleted: `ast::Line`; `parse_line`, `parse_line_with_structs`;
 `reject_generic_typedef_in_repl`; `repl_unknown_capability_error`; the `is_repl` field
-with all 8 assignments and both readers; `ir::lower_line` and its `ir.rs` re-export.
+with all 8 assignments and both readers; `ir::lower_line` and its `ir.rs` re-export; and
+`Parser::declares_type` (its only caller was the deleted REPL `Ord` arm above) —
+omitted from this section in the phase's first pass and recorded here on review.
 
-### An unnamed fourth of the family: the REPL `type:`-line parsers
+### `parse_typedef_line` and its family are in scope by the spec's own range clause
 
-The spec's deletion list does not name `parse_typedef_line`, `parse_enum_typedef_line`,
-`typedef_line_is_enum` or `enum_variant_names`, but all four are REPL-only entry points
-in exactly the sense R5b describes, and all four construct `is_repl: true` and (the
-first two) call `reject_generic_typedef_in_repl`. `grep -rn` for each, over `src/` and
-`tests/`, found zero callers anywhere once `repl.rs` was gone — not even a test. Leaving
-them would have meant either resurrecting `is_repl`/`reject_generic_typedef_in_repl` for
-their sake (defeating the phase) or open-coding a stub, so they were deleted alongside
-the four named items, and `ImportCtx` (the import/selective/exports bundle threaded only
-to these four parsers and their tests) went with them. This is the same class of gap
-phase 7 found in its own forced list (the spec's four items there were incomplete too);
-it is recorded here so a later reader does not read the spec's silence on these four as
-a ruling that they should stay.
+`parse_typedef_line`, `parse_enum_typedef_line`, `typedef_line_is_enum` and
+`enum_variant_names` are REPL-only entry points in exactly the sense R5b describes, and
+all four construct `is_repl: true` and (the first two) call
+`reject_generic_typedef_in_repl`. An earlier pass of this section called these
+"unnamed" by the spec — wrong: the spec's R5b bullet reads "`parse_line` and
+`parse_line_with_structs` (both `pub fn`) and *the rest of the family through `:1436`*",
+and old `parser.rs:1436` is the `reject_generic_typedef_in_repl` call site *inside*
+`parse_enum_typedef_line`. The range clause covers the family; only `ImportCtx` (the
+import/selective/exports bundle threaded only to these four parsers and their tests) and
+`Parser::declares_type` were truly unnamed by the spec. `grep -rn` for each, over `src/`
+and `tests/`, found zero callers anywhere once `repl.rs` was gone — not even a test.
+Leaving them would have meant either resurrecting `is_repl`/`reject_generic_typedef_in_repl`
+for their sake (defeating the phase) or open-coding a stub, so all were deleted alongside
+the named items.
 
 ### A second unnamed forcing: `carried_slot_bytes`
 
@@ -1232,7 +1236,7 @@ wording, not a retyped REPL string.
 
 ### Deletion proof (E5, this phase's items)
 
-`grep -rn 'parse_line\|InferredLine\|lower_line\|is_repl\|ast::Line\|Line::Def\|Line::Expr\|ImportCtx\|reject_generic_typedef_in_repl\|repl_unknown_capability_error\|carried_slot_bytes' src/` and the same over `tests/`: **both empty.** `docs/roadmap/` still names
+`grep -rn 'parse_line\|InferredLine\|lower_line\|is_repl\|ast::Line\|Line::Def\|Line::Expr\|ImportCtx\|reject_generic_typedef_in_repl\|repl_unknown_capability_error\|carried_slot_bytes\|declares_type' src/` and the same over `tests/`: **both empty.** `docs/roadmap/` still names
 several of these (this slice's own spec/brief/phase-notes, plus historical `P2`/`P3`/`P4`/
 `P7` implementation specs recording what was built at the time) — out of scope per the
 spec, not a statement of current design.
