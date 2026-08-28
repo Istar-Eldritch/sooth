@@ -46,9 +46,9 @@ impl<'a> FromIterator<(String, Vec<Combinator<'a>>)> for CombinatorEnv<'a> {
 
 /// Slice 10c (R-P1-1): one always-spliced word as the shared tail-splice
 /// predicate and both splice sites need it. Owned rather than borrowed so the
-/// checker, the native lowering driver and the REPL can each build one from
-/// whatever they hold (`&[WordDef]`, a `CombinatorEnv`, a session store)
-/// without a lifetime running through the whole lowering stack.
+/// checker and the native lowering driver can each build one from whatever
+/// they hold (`&[WordDef]`, a `CombinatorEnv`) without a lifetime running
+/// through the whole lowering stack.
 #[derive(Clone)]
 pub struct CombinatorEntry {
     /// The body spliced at every call site.

@@ -300,11 +300,10 @@ fn array_type_symbol(idx: usize) -> String {
 /// same symbol (`+` and `-` used to both sanitize to the bare symbol `_`;
 /// they now produce `.2b.` and `.2d.`). `.` is deliberately the escape
 /// character rather than `_`: every compiler-generated symbol this function
-/// also has to leave alone (`sooth_line_{seq}`'s dlopen lookup in `repl.rs`,
-/// the resolver's `__m{module}`/`__import{epoch}` mangle suffix, the alloc/
-/// free/OOB-trap shims below, all `_`-only) would otherwise need to move in
-/// lockstep with a change here; none of them contain `.`, so none of them
-/// are affected by fixing this. Applied identically at both the function
+/// also has to leave alone (the resolver's `__m{module}` mangle suffix, the
+/// alloc/free/OOB-trap shims below, all `_`-only) would otherwise need to
+/// move in lockstep with a change here; none of them contain `.`, so none of
+/// them are affected by fixing this. Applied identically at both the function
 /// definition and every call site, so a lookup by name always finds the
 /// symbol that source name actually owns.
 fn qbe_name(name: &str) -> std::borrow::Cow<'_, str> {

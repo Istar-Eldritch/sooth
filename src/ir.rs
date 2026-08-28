@@ -52,9 +52,8 @@ pub(crate) use self::layout::{
 pub(crate) use self::layout::{empty_slices, empty_statics, Refs};
 
 /// A shared empty instantiation table for lowering paths with no polymorphic
-/// call sites (the REPL, D2; destructor synthesis; unit tests), so
-/// `FuncBuilder::new` can hand out a valid reference without every caller
-/// threading one.
+/// call sites (D2; destructor synthesis; unit tests), so `FuncBuilder::new`
+/// can hand out a valid reference without every caller threading one.
 fn empty_instantiations() -> &'static HashMap<Span, CallInst> {
     static EMPTY: std::sync::OnceLock<HashMap<Span, CallInst>> = std::sync::OnceLock::new();
     EMPTY.get_or_init(HashMap::new)
@@ -62,8 +61,8 @@ fn empty_instantiations() -> &'static HashMap<Span, CallInst> {
 
 /// P7.S3o (R1/R2): the splice-records companion of `empty_instantiations`,
 /// handed to every lowering path with no spliced-combinator inner poly calls
-/// (the REPL, destructor synthesis, unit tests, and every program whose
-/// combinators call no polymorphic word).
+/// (destructor synthesis, unit tests, and every program whose combinators
+/// call no polymorphic word).
 pub(crate) fn empty_splice_records() -> &'static HashMap<(u32, Span), CallInst> {
     static EMPTY: std::sync::OnceLock<HashMap<(u32, Span), CallInst>> = std::sync::OnceLock::new();
     EMPTY.get_or_init(HashMap::new)
@@ -71,8 +70,8 @@ pub(crate) fn empty_splice_records() -> &'static HashMap<(u32, Span), CallInst> 
 
 /// P7.S3o Phase 3: the splice-trait-calls companion of `empty_splice_records`,
 /// handed to every lowering path with no spliced-combinator bare trait member
-/// calls (the REPL, destructor synthesis, unit tests, and every program
-/// whose combinators call no bare trait member).
+/// calls (destructor synthesis, unit tests, and every program whose
+/// combinators call no bare trait member).
 pub(crate) fn empty_splice_trait_calls() -> &'static HashMap<(u32, Span), String> {
     static EMPTY: std::sync::OnceLock<HashMap<(u32, Span), String>> = std::sync::OnceLock::new();
     EMPTY.get_or_init(HashMap::new)
@@ -80,17 +79,17 @@ pub(crate) fn empty_splice_trait_calls() -> &'static HashMap<(u32, Span), String
 
 /// P7.S8 (R2): the member-seed companion of `empty_splice_trait_calls`. A
 /// member splice reached from a path with no seed map reuses the enclosing
-/// splice's uid, which is today's behaviour and is the REPL's state: both REPL
-/// lowering paths already hand out `empty_splice_trait_calls`, so no member
-/// splice there has an entry to miss.
+/// splice's uid, which is today's behaviour on any path that already hands
+/// out `empty_splice_trait_calls`, so no member splice there has an entry to
+/// miss.
 pub(crate) fn empty_member_uid_seeds() -> &'static HashMap<String, u32> {
     static EMPTY: std::sync::OnceLock<HashMap<String, u32>> = std::sync::OnceLock::new();
     EMPTY.get_or_init(HashMap::new)
 }
 
 /// Slice 8a phase 2: the builtin-overload companion of `empty_instantiations`,
-/// handed to every lowering path with no user builtin overloads (the REPL,
-/// destructor synthesis, unit tests, and every corpus program).
+/// handed to every lowering path with no user builtin overloads (destructor
+/// synthesis, unit tests, and every corpus program).
 fn empty_builtin_overloads() -> &'static HashMap<Span, String> {
     static EMPTY: std::sync::OnceLock<HashMap<Span, String>> = std::sync::OnceLock::new();
     EMPTY.get_or_init(HashMap::new)
@@ -98,8 +97,8 @@ fn empty_builtin_overloads() -> &'static HashMap<Span, String> {
 
 /// P7.S3e (R9): the trait-call companion of `empty_builtin_overloads`, handed
 /// to every lowering path with no instantiation-specific bound-dispatch
-/// resolutions to thread (every monomorphic word, the REPL, destructor
-/// synthesis, and unit tests).
+/// resolutions to thread (every monomorphic word, destructor synthesis, and
+/// unit tests).
 fn empty_trait_calls() -> &'static HashMap<Span, String> {
     static EMPTY: std::sync::OnceLock<HashMap<Span, String>> = std::sync::OnceLock::new();
     EMPTY.get_or_init(HashMap::new)
@@ -107,7 +106,7 @@ fn empty_trait_calls() -> &'static HashMap<Span, String> {
 
 /// P7.S3k (R4): the cross-call companion of `empty_trait_calls`, handed to
 /// every lowering path with no generic-to-generic call to route (every
-/// monomorphic word, the REPL, destructor synthesis, and unit tests).
+/// monomorphic word, destructor synthesis, and unit tests).
 fn empty_poly_calls() -> &'static HashMap<Span, CallInst> {
     static EMPTY: std::sync::OnceLock<HashMap<Span, CallInst>> = std::sync::OnceLock::new();
     EMPTY.get_or_init(HashMap::new)
@@ -138,8 +137,8 @@ fn empty_poly_arities() -> &'static HashMap<String, usize> {
 }
 
 /// R19: the combinator-body companion of `empty_instantiations`. A path with
-/// no monomorphic quotation-taking words to inline (the REPL, D2; destructor
-/// synthesis; unit tests) hands out this empty map.
+/// no monomorphic quotation-taking words to inline (D2; destructor synthesis;
+/// unit tests) hands out this empty map.
 fn empty_combinators() -> &'static crate::check::CombinatorIndex {
     static EMPTY: std::sync::OnceLock<crate::check::CombinatorIndex> = std::sync::OnceLock::new();
     EMPTY.get_or_init(HashMap::new)

@@ -63,5 +63,5 @@ produces it.
   explicit destructor and every value is used exactly once (forgetting is an error,
   nothing auto-drops).
 - `core` is **`no_std`**; layers are `core` / `fixed` / `alloc` / `hosted`.
-- **No in-process JIT** and no comptime interpreter; the REPL loads freshly compiled
-  words in-process via `dlopen` (there are no immediate words).
+- **No in-process JIT** and no comptime interpreter; `driver::Library` loads a
+  compiled `.so` in-process via `dlopen` (there are no immediate words).

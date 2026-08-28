@@ -108,7 +108,7 @@ sitting inside its package's own tree (a test harness fixture written to a temp 
 a one-off script pointed at a project without living in it). Failing that, a file's package
 is the nearest ancestor manifest. Failing that, the **user-level manifest** at
 `$XDG_CONFIG_HOME/sooth/global_sooth.pkg` supplies the `depends:` a scratch file resolves
-against, which is the same manifest the REPL reads for a session. Failing *all three*, the
+against. Failing *all three*, the
 file is an **implicit anonymous package** with no dependencies: it can import `intrinsics`
 and its own path-derived siblings, and naming any other package is a located error whose
 remedy is a manifest, `--manifest`, or the user-level file. A scratch file therefore stays
@@ -172,8 +172,8 @@ hard error, so it moves with the corpus migration to module names.
 
 **P8.S1b — The `--manifest` CLI flag and the fallback chain.** `sooth build`/`run` gain an
 explicit `--manifest <path>` flag ranked above discovery, then the nearest ancestor
-manifest, then the user-level manifest (`$XDG_CONFIG_HOME/sooth/global_sooth.pkg`, also read
-by the REPL for a session), then an implicit anonymous package with no dependencies. This is
+manifest, then the user-level manifest (`$XDG_CONFIG_HOME/sooth/global_sooth.pkg`), then an
+implicit anonymous package with no dependencies. This is
 what lets S2's ~460-inline-test-fixture migration point at one shared manifest instead of
 generating one per fixture. Brief: `docs/roadmap/P8/slice1b-brief.md`.
 **Exit:** `sooth build entry.sth --manifest path/to/sooth.pkg` resolves against the named
@@ -289,6 +289,5 @@ module would need, so both wait.
 **Semver enforcement itself** (the API diff and `sooth publish --check`) is tooling on top
 of P8.S3's format, specified in `docs/dependency-management.md`. **Git dependencies** are an
 additive grammar extension to `depends:`, not a redesign. **A REPL exemption in the
-compiler** stays declined, since that is the special case this phase deletes; the REPL gets
-its session imports from the user-level manifest above, like any other file without an
-ancestor manifest.
+compiler** is moot: the REPL no longer exists (P7.S9), so every file resolves manifests
+through the ordinary fallback chain above with no special case.

@@ -47,8 +47,8 @@ pub(super) fn check_terms(
 /// (a spliced quotation or combinator body), which changes how a granted
 /// name's use inside is tracked (see the `Liveness` struct doc).
 /// `check_terms` above is the plain entry point every root invocation (a
-/// word body, a REPL line, a `case` clause) uses: nothing is ancestor to
-/// those, so both are empty/`false`.
+/// word body, a `case` clause) uses: nothing is ancestor to those, so both
+/// are empty/`false`.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn check_terms_relaxed(
     terms: &[Term],
@@ -515,8 +515,8 @@ fn check_term(
             // R12 (slice 8b, 8a): a bare operator resolves against the
             // overloads visible to the calling module, not the flat `env`
             // lookup that misses a per-module-mangled decl in a multi-module
-            // build. `None` (REPL / single-module) falls back to the flat
-            // lookup unchanged.
+            // build. `None` (single-module, or any standalone probe with no
+            // module view) falls back to the flat lookup unchanged.
             // P8 S2 (R2): an unimported intrinsic gets no operator candidates
             // either. The operator dispatch is the intrinsics' own machinery --
             // a module-visible overload of `add` is an overload *of the

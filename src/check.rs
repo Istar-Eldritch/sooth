@@ -110,8 +110,8 @@ struct PolyCtx<'a> {
     /// overload of a builtin-named word (`Vec2 add` -> the user `add`), span ->
     /// resolved callee name, relayed onto `Module::builtin_overloads` so
     /// lowering emits an `Instr::Call` there instead of the builtin
-    /// instruction. Scratch (discarded) on the REPL/combinator paths, which do
-    /// not lower a builtin overload (out of scope this slice).
+    /// instruction. Scratch (discarded) on the combinator-body-walk paths,
+    /// which do not lower a builtin overload (out of scope this slice).
     builtin_overloads: &'a mut HashMap<Span, String>,
     /// P7 slice 1 (R2): the receiver-directed field projections this walk
     /// resolved (`&hp` against a `&Sprite` on the stack), span -> the struct
@@ -131,8 +131,8 @@ struct PolyCtx<'a> {
     /// Slice 6a (R18): the monomorphic quotation-taking words, keyed by name,
     /// so a call to one is intercepted and its body spliced against the live
     /// stack (the compiler's only inliner) rather than lowered to an
-    /// `Instr::Call` to a word that mints no `IrFunc` (R20). Empty on the REPL
-    /// paths, where defining such a word is rejected up front (R23).
+    /// `Instr::Call` to a word that mints no `IrFunc` (R20). Empty on the
+    /// standalone/scratch paths, which populate no combinator registry.
     combinators: &'a CombinatorEnv<'a>,
     /// Phase 6 slice 3 (R3): the generated eliminator words, bare surface name
     /// (`Shape?`) -> the enum they eliminate, so a call to one is routed to
@@ -141,21 +141,23 @@ struct PolyCtx<'a> {
     /// spliced.
     eliminators: &'a HashMap<String, EnumId>,
     /// P7.S3e (R8): the tables a `Bound::User` at a resolved call site is
-    /// decided and resolved against. `TraitResolveCtx::scratch()` on the REPL
-    /// paths, which can carry no user bound at all.
+    /// decided and resolved against. `TraitResolveCtx::scratch()` on the
+    /// standalone/scratch paths, which can carry no user bound at all.
     trait_resolve: TraitResolveCtx<'a>,
     /// P7.S4 (R6): the `(member_word_name, subst)` pairs for generic-impl
     /// dispatches discovered during this walk, collected so lowering can emit
     /// the polymorphic member word's body under the instantiation symbol.
-    /// Empty on the REPL/combinator-scratch paths, which declare no `impl:`.
+    /// Empty on the standalone/combinator-scratch paths, which declare no
+    /// `impl:`.
     impl_monos: &'a mut Vec<(String, crate::ast::Subst)>,
     /// P7.S3o (R1/R2): per-splice instantiation records, written by
     /// `check_poly_call` when `prov.splice_uid` is `Some`. Scratch (discarded)
-    /// on the standalone/REPL paths; the module-level table on the main path.
+    /// on the standalone/scratch paths; the module-level table on the main
+    /// path.
     splice_records: &'a mut HashMap<(u32, Span), CallInst>,
     /// P7.S3o Phase 3: per-splice trait-member-call resolutions, written by
     /// the dispatch injection in `check_term` when a bare trait member is
-    /// resolved at a splice site. Scratch (discarded) on the standalone/REPL
+    /// resolved at a splice site. Scratch (discarded) on the standalone/scratch
     /// paths; the module-level table on the main path.
     splice_trait_calls: &'a mut HashMap<(u32, Span), String>,
     /// P7.S3o Phase 3: the combinator's own `PolySig` and concrete θ, set
@@ -520,8 +522,8 @@ fn check_module(module: &mut Module) -> Result<Vec<WordObligations>, String> {
     let drop_overload_indices: HashSet<usize> = drop_overloads.values().copied().collect();
     // R3: defining `drop` for a struct forces it linear, so the fact is
     // recorded on the declaration itself rather than re-derived: every
-    // `is_copy` call site, `ir`'s layout fold, and the REPL's persistent
-    // registries all read the same `StructDecl`.
+    // `is_copy` call site, `ir`'s layout fold, and any standalone registry
+    // built directly from a `StructDecl` all read the same flag.
     for id in drop_overloads.keys() {
         module.structs[id.index()].has_drop_overload = true;
     }
@@ -630,8 +632,9 @@ fn check_module(module: &mut Module) -> Result<Vec<WordObligations>, String> {
     // dispatch -- `check_term`'s interception precedes every env/poly lookup
     // unconditionally, and a user word colliding with the name is rejected
     // outright by `check_no_word_shadows_eliminator` above. It is the
-    // generator's only consumer in this phase (the REPL's own env assembly
-    // builds the registry without it), and the `PolySig` becomes load-bearing
+    // generator's only consumer in this phase (a standalone single-word
+    // check probe builds the registry without it), and the `PolySig` becomes
+    // load-bearing
     // in Phase 4, where the lowering symbol beside it mints `EnumWord::
     // Eliminate`. Deleted, nothing observable changes and the generator R2
     // exists to add becomes dead code.
@@ -3104,9 +3107,9 @@ fn check_shuffle(
                 // D1 (R3/R4): disposing a value whose struct owns a `drop`
                 // override runs that destructor, so the override must be
                 // visible to the calling module (declared locally or imported
-                // by name). On the REPL path `ctx.modules()` is `None` (R8) and
-                // the arm is exactly what it was before this slice. The
-                // `prov.dropped` recording below is unchanged either way.
+                // by name). On any path with no module view `ctx.modules()`
+                // is `None` (R8) and the arm is a no-op. The `prov.dropped`
+                // recording below is unchanged either way.
                 if let (Type::Struct(id, _), Some(m)) = (top.ty, ctx.modules()) {
                     if ctx.structs()[id.index()].has_drop_overload {
                         let decl = &ctx.structs()[id.index()];

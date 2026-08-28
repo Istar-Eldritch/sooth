@@ -112,8 +112,7 @@ fn header_ty_var_count(tokens: &[(Token, Span)], start: usize) -> usize {
 
 /// A located error for a name reserved by the owning-cell syntax (`^`, `^>`,
 /// `^|>`, or any name beginning with `^`), used at every declaration site it
-/// can arise: a `type:` name, a `:` word name, a local binding, or the
-/// REPL's own `type:`-line path.
+/// can arise: a `type:` name, a `:` word name, or a local binding.
 fn reserved_caret_name_error(kind: &str, name: &str, span: Span) -> String {
     format!(
         "error: `{name}` is reserved for the owning-cell syntax (`^`, `^>`, `^|>`) and cannot be used as a {kind} name at line {}, col {}",
@@ -1061,8 +1060,8 @@ pub fn parse(tokens: &[(Token, Span)]) -> Result<Module, String> {
             imports: HashMap::new(),
             exports: bodies.exports,
             selective: HashMap::new(),
-            // P8 S2 (R2): the single-file, no-driver path (the REPL's own
-            // parse, and every in-process test). It resolves no `import:` at
+            // P8 S2 (R2): the single-file, no-driver path (`parser::parse`,
+            // used by every in-process test). It resolves no `import:` at
             // all, so it has nothing to derive a gate from; the driver builds
             // its own `ModuleInfo` per file in `assemble_module` and never
             // reaches this one, so the gate still holds where files are built.
@@ -1871,29 +1870,28 @@ struct Parser<'t> {
     /// The struct registry (names always populated by the pre-pass, fields
     /// populated for the `type:` bodies already parsed at the point of
     /// lookup, but resolution only needs the id/name so declaration order
-    /// among structs doesn't matter). Empty for a REPL line (struct
-    /// declarations are not yet supported at REPL scope).
+    /// among structs doesn't matter). Empty only in a unit test that passes
+    /// no struct registry at all.
     structs: &'t [StructDecl],
     /// The enum registry, parallel to `structs` (names, and each enum's
-    /// variant names, always populated by the pre-pass; empty for a REPL
-    /// line, enum declarations are not yet supported at REPL scope).
+    /// variant names, always populated by the pre-pass; empty only in a unit
+    /// test that passes no enum registry at all).
     enums: &'t [EnumDecl],
     /// The interned array-type registry (D3, M1): unlike `structs`/`enums`,
     /// an array shape has no declared name a pre-pass could register ahead
     /// of time, so this grows during type-expression resolution rather than
     /// being pre-populated. A mutable borrow of the caller's registry (the
-    /// whole-module `Module.arrays` for a native build, the session's
-    /// `arrays` for a REPL line), so interning persists across REPL lines
-    /// (R22/R23).
+    /// whole-module `Module.arrays` for a native build), so interning
+    /// persists across every parse of the same closure (R22/R23).
     arrays: &'t mut Vec<ArrayDecl>,
     /// The interned owning-cell registry, mirroring `arrays` for the same
     /// reason: a `^T` shape has no declared name a pre-pass could register
     /// ahead of time, so it grows during type-expression resolution and
-    /// persists across REPL lines exactly like `arrays`.
+    /// persists exactly like `arrays`.
     owned_cells: &'t mut Vec<OwnedCellDecl>,
     /// The interned reference registry, mirroring `owned_cells`: a `&T`/`&!T`
     /// shape has no declared name either, so it grows as type expressions
-    /// resolve and persists across REPL lines.
+    /// resolve and persists across the whole closure's parse.
     refs: &'t mut Vec<RefDecl>,
     /// P7 slice 3c (R1.2): the interned slice registry, mirroring `refs` --
     /// a `Slice[T]` shape has no declared name, so it grows as type
@@ -1902,26 +1900,24 @@ struct Parser<'t> {
     /// in a signature share a `SliceId`.
     slices: &'t mut Vec<SliceDecl>,
     /// Phase 4 slice 5a (R11): the module id whose body this parser is
-    /// currently reading. `0` for a single-file program and every REPL line;
-    /// the driver's closure assembly sets it per file. An unqualified type
-    /// name resolves against this module first.
+    /// currently reading. `0` for a single-file program; the driver's closure
+    /// assembly sets it per file. An unqualified type name resolves against
+    /// this module first.
     module: u32,
     /// Phase 4 slice 5a (R8): this module's qualifier->module import map, used
-    /// to resolve a `q::Type` type name. Empty for a single-file program and
-    /// REPL line.
+    /// to resolve a `q::Type` type name. Empty for a single-file program.
     imports: &'t std::collections::HashMap<String, u32>,
     /// Phase 4 slice 5a phase 2 (R16): every module's `export:` list, indexed
     /// by module id, scanned ahead of any body parse (`scan_exports`) so a
     /// cross-module type name in an effect can be visibility-checked even
     /// though the exporting file's own body may not have parsed yet. Empty for
-    /// a single-file program and every REPL line, where no qualified name can
-    /// occur.
+    /// a single-file program, where no qualified name can occur.
     exports: &'t [Vec<(String, Span)>],
     /// Phase 4 slice 5a phase 4 (R20/R15c): this module's selectively-imported
     /// unqualified names, each mapping to the target module it resolves in. A
     /// bare `Type` (or word) exposed by `import: "..." q | Type | ` resolves
     /// here after the own-module lookup fails (own-module-first, R11). Empty
-    /// for a single-file program and every REPL line.
+    /// for a single-file program.
     selective: &'t std::collections::HashMap<String, u32>,
     /// P7.S3q-follow: for a module reached through `imports`/`selective`,
     /// the true declaring module of a name on *its* `export:` list, when that
@@ -1930,28 +1926,26 @@ struct Parser<'t> {
     /// fine in term position (the late, whole-program `resolve.rs` pass
     /// already walks a hub chain there) but not in an effect signature,
     /// which resolves during this early parse via a single hop. Indexed by
-    /// module id, empty for a REPL line and any parse path with no real
-    /// cross-module data.
+    /// module id, empty for any parse path with no real cross-module data.
     type_origin: &'t [std::collections::HashMap<String, u32>],
     /// P7.S3s (R1): the trait twin of `type_origin` -- for a module reached
     /// through `imports`/`selective`, the true declaring module of a trait
     /// name on *its* `export:` list when that name is a re-export rather
-    /// than something it declares itself. Indexed by module id, empty for a
-    /// REPL line and any parse path with no real cross-module data.
+    /// than something it declares itself. Indexed by module id, empty for
+    /// any parse path with no real cross-module data.
     trait_origin: &'t [std::collections::HashMap<String, u32>],
     /// Phase 5 slice 1 (R2/D5): the generic `type:` declarations in scope and
     /// the concrete struct/enum registry each application of one mints. A
     /// mutable borrow for the same reason `arrays` is one: an instantiation
     /// is minted *while* a field or slot type expression resolves. Empty (and
-    /// never written) for a REPL line and for the import/export scans, which
-    /// have no generic declaration to apply.
+    /// never written) for the import/export scans, which have no generic
+    /// declaration to apply.
     generics: &'t mut GenericTypes,
     /// P7.S3e (R3): the whole-program trait registry (pre-seeded `Copy`
     /// plus every user `trait:` declaration in the closure), populated by
     /// `prepass_trait_decls` before any body parses -- mirrors `structs`/
-    /// `enums`. Empty for a REPL line (`trait:` is not yet supported at REPL
-    /// scope, the same bypass pattern `structs`/`enums` already follow
-    /// there).
+    /// `enums`. Empty only in a unit test that passes no trait registry at
+    /// all.
     traits: &'t [TraitDecl],
 }
 
@@ -4036,9 +4030,9 @@ impl<'t> Parser<'t> {
 
     /// One module's worth of `variant_name_is_visible`'s search, over the
     /// concrete and the generic enum registry alike. The concrete side
-    /// mirrors `find_type_in_module`'s `name_static` match (R8d, slice 5b): a
-    /// REPL-spliced enum's `.name` carries an import-epoch tag but its
-    /// variants' `.name_static` stays the user-typed spelling.
+    /// mirrors `find_type_in_module`'s `name_static` match (R8d, slice 5b): an
+    /// imported enum's `.name` carries `resolve::mangle`'s module suffix but
+    /// its variants' `.name_static` stays the user-typed spelling.
     fn module_declares_variant(&self, name: &str, module: u32) -> bool {
         self.enums
             .iter()
@@ -6537,10 +6531,10 @@ mod tests {
         assert!(matches!(&body[0].kind, TermKind::Call(w, _) if w == "if"));
     }
 
-    /// Migrated off the retired REPL bare-line path (R5b): a bare term
+    /// Migrated off the retired bare-line path (R5b): a bare term
     /// sequence's own shape (multiple terms, an int literal, a trailing
-    /// call) is a general parsing fact with no REPL-only content, so it moves
-    /// onto a one-word module body.
+    /// call) is a general parsing fact with no line-only content, so it
+    /// moves onto a one-word module body.
     #[test]
     fn parse_bare_term_sequence_is_a_multi_term_body() {
         let module = parse_src(": w ( i64 i64 -- i64 ) 2 3 add ;").unwrap();
@@ -6550,9 +6544,9 @@ mod tests {
         assert!(matches!(&body[2].kind, TermKind::Call(w, _) if w == "add"));
     }
 
-    /// Migrated off the retired REPL bare-line path (R5b): a float literal
+    /// Migrated off the retired bare-line path (R5b): a float literal
     /// token parses to `TermKind::FloatLit`, a general lexing/parsing fact,
-    /// not a REPL one.
+    /// not a line-only one.
     #[test]
     fn parse_float_lit_term_is_float_lit() {
         let module = parse_src(": w ( -- f64 ) 2.5 ;").unwrap();

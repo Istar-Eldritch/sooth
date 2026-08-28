@@ -1195,7 +1195,8 @@ pub(super) fn ungated_intrinsic_error(ctx: &Ctx, span: Span, name: &str) -> Stri
 
 /// R12 (slice 8b, 8a): the operator overloads of `name` visible to the calling
 /// module. `None` means "module scoping does not apply -- use the flat
-/// `env.get(name)`": only the REPL path, where `ctx.modules()` is `None`.
+/// `env.get(name)`": only a standalone probe with no module view, where
+/// `ctx.modules()` is `None`.
 /// Every operator decl is mangled per module, so a bare lookup of `add` is
 /// `None`; assemble the caller's own overload (under `mangle(name, M)`) plus
 /// one it selectively imported, membership decided by
@@ -1707,7 +1708,7 @@ mod tests {
     /// into an example checks the caller's quotation arguments under the
     /// library's module, and none of them imports the whole intrinsic surface.
     #[test]
-    fn intrinsic_gate_exempts_the_repl_synthesized_terms_and_importing_modules() {
+    fn intrinsic_gate_exempts_a_moduleless_ctx_and_synthesized_terms() {
         let effect = StackEffect::default();
         let unimported = vec![ModuleInfo {
             intrinsics: IntrinsicVisibility::None,
@@ -1737,7 +1738,7 @@ mod tests {
         );
         assert!(
             !intrinsic_is_gated_out(&ctx(&effect, None), at(1), "add"),
-            "the REPL path has no module view, so the gate never fires there"
+            "a ctx with no module view never fires the gate"
         );
         assert!(
             !intrinsic_is_gated_out(&ctx(&effect, Some(&unimported)), at(0), "add"),

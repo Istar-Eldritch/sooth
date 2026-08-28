@@ -511,8 +511,8 @@ fn walk_trait_export_origin(
 /// `always_mangle` forces the resolver to mangle even a single-file closure: the
 /// native build path sets it so a user word named like a libc symbol (`close`)
 /// or a runtime shim's callee (`free`) cannot be emitted as that bare symbol and
-/// hijack it at link time. The REPL import path leaves it unset, keeping the R22
-/// single-file no-op (it renames imported words to epoch symbols itself).
+/// hijack it at link time. Leaving it unset keeps the R22 single-file no-op;
+/// only this module's own unit tests exercise that path now.
 pub(crate) fn assemble_module(closure: &Closure, always_mangle: bool) -> Result<Module, String> {
     let mut structs = Vec::new();
     let mut enums = Vec::new();
@@ -890,8 +890,7 @@ pub fn emit_ssa_with_manifest(path: &Path, manifest: Option<&Path>) -> Result<St
     let mut module = assemble_module(&closure, true)?;
     check::check(&mut module)?;
     // R14/D4 (native-build fix): only the entry file (module 0) may declare
-    // `main`; an imported file that also declares one is rejected here,
-    // mirroring the REPL import path's own scan.
+    // `main`; an imported file that also declares one is rejected here.
     check_no_main_in_closure(&module, &closure, Some(0))?;
     let ir = ir::lower(&module)?;
     backend::qbe::emit(&ir)
@@ -1259,8 +1258,8 @@ mod tests {
     /// End-to-end regression guard, through `build` itself rather than the
     /// helper directly: the bug this whole fix exists for was that
     /// `cargo run -- build` never called `check_no_main_in_closure` on the
-    /// native path at all (only `Session::eval_import`, the REPL path, did),
-    /// so an imported file's `main` reached codegen silently. Calling
+    /// native path at all, so an imported file's `main` reached codegen
+    /// silently. Calling
     /// `check_no_main_in_closure` in isolation (the two tests above) cannot
     /// catch a missing call site; only driving `build` proves it is wired in.
     #[test]
@@ -2016,7 +2015,8 @@ mod tests {
     /// the checker's gate is only as good as this, and a module that silently
     /// came out `All` would make the gate untestable from the outside.
     /// `assemble_module` sets the field for *every* file, so no build path can
-    /// inherit `Default` (which is `All`, the in-process/REPL exemption).
+    /// inherit `Default` (which is `All`, the exemption a file with no scan
+    /// would otherwise get).
     #[test]
     fn assemble_module_records_each_intrinsics_import_shape() {
         let cases = [

@@ -357,8 +357,8 @@ pub(super) fn check_operator(
             // element loop and no separator policy; printing a view means
             // printing N elements and choosing delimiters, which is a library
             // word's decision, not an operator's. So a slice reaches
-            // `print_requires_printable_error` here, and the print/REPL
-            // renderers match that with their own "not printable" arms.
+            // `print_requires_printable_error` here, and the print renderer
+            // matches that with its own "not printable" arm.
             if !a.ty.is_numeric() && !matches!(a.ty, Type::Str | Type::Cstr) {
                 return Err(print_requires_printable_error(ctx, span, a.ty));
             }
@@ -502,8 +502,8 @@ mod tests {
     /// P7 slice 3c (R7): the printability ruling. A slice is **not**
     /// printable: `.` prints one value with no element loop and no separator
     /// policy, so rendering a view is a library word's job. Encoded by the
-    /// allowlist, asserted here as the exact located diagnostic so the
-    /// print/REPL renderers have a decision to match.
+    /// allowlist, asserted here as the exact located diagnostic so the print
+    /// renderer has a decision to match.
     #[test]
     fn dot_printable_set_slice_decision() {
         let mut slices = Vec::new();

@@ -267,8 +267,8 @@ Compile-time virtual stack to native; words as functions. Backend is QBE (small,
 legible, multi-arch) — no LLVM, no hand-written backend (deferred, reconsider after
 self-hosting). WASM is a sibling lowering off the neutral IR, not routed through
 QBE. The IR keeps `Ptr[T]` abstract and never assumes a 64-bit machine word, so
-both lowerings concretise it. No in-process JIT; the REPL loads freshly compiled
-words via `dlopen`. Full detail: [codegen and backend](./docs/design/codegen.md).
+both lowerings concretise it. No in-process JIT; `driver::Library` can load a
+compiled `.so` in-process via `dlopen`. Full detail: [codegen and backend](./docs/design/codegen.md).
 
 ## Concurrency: a library, not a core feature
 
@@ -344,7 +344,7 @@ The failure mode with this project's name on it is a beautiful half-built compil
 that no one ever writes a program in, because building the compiler is more
 immediately rewarding than using the language. The antidote is a hard requirement:
 
-- A REPL / immediate feedback from day one.
+- Fast local iteration (`sooth run`) / immediate feedback from day one.
 - Write real small programs in Sooth (a raymarcher, a text adventure, the classic
   demos, an LED blink on bare metal) *before* the compiler is "done."
 
@@ -385,7 +385,7 @@ rows, no borrow analysis needed to write the compiler in it.
 - **Closure captures**: a closure owning a linear capture says so in its *type* (the obligation is visible to whoever must discharge it, since the env itself is erased so combinators can exist), and says nothing about *where* the env lives (so an inline, static, or heap env are all one type). Such a closure is linear, with two consuming uses that run different code: `call` runs the body, which disposes what it captured exactly as a word body disposes a linear argument, and `drop` runs only the disposer, discarding the closure unexecuted. It may be a struct field, an enum variant field, or an owned-cell payload, where the container's synthesized destructor disposes it; an array or slice element waits on linear elements generally (Phase 7 Slice 5). Storing one in an aggregate, or discarding one unexecuted, needs a disposer synthesized glue can invoke without running the body: the closure value carries a per-construction-site disposer symbol alongside its code and env pointers, minted where the capture's concrete type is known. Not trait objects and not runtime type info: one statically-known function pointer, one indirect call on the disposal path.
 - **Foreign calls**: `extern:` (symbol + stack effect). Scalars and refs cross; owned aggregates and `^` returns may not. Declaration site is the trust boundary; no separate `unsafe` marker.
 - **Codegen**: compile-time virtual stack to native; words as functions. Detail: [codegen](./docs/design/codegen.md).
-- **Backend**: QBE (small, legible, multi-arch). No LLVM. Hand-written backend deferred (reconsider after self-hosting). WASM is a sibling lowering off the neutral IR via binaryen. IR keeps `Ptr[T]` abstract. No JIT; REPL via `dlopen`. Detail: [codegen](./docs/design/codegen.md).
+- **Backend**: QBE (small, legible, multi-arch). No LLVM. Hand-written backend deferred (reconsider after self-hosting). WASM is a sibling lowering off the neutral IR via binaryen. IR keeps `Ptr[T]` abstract. No JIT; `driver::Library` can load a compiled `.so` in-process via `dlopen`. Detail: [codegen](./docs/design/codegen.md).
 - **Errors**: values, no THROW/CATCH, no unwinding.
 - **Concurrency**: library, not core. Atomics + spawn are intrinsics; data-race freedom from linear types + non-escaping refs. Detail: [concurrency](./docs/design/concurrency.md).
 - **Real-time**: soft-RT out of the box; hard-RT by discipline (fixed layer + static topology). ISR/mainline sharing is a checked error. Ravenscar is the reference. Detail: [concurrency](./docs/design/concurrency.md).
@@ -433,8 +433,7 @@ that were argued out rather than assumed.
   Decide against a real driver, not in the abstract. Detail:
   [embedded](./docs/design/embedded.md).
 - **Whether an ISR's global set can be checked under separate compilation.**
-  Likely a link-time check, not per-module. What the REPL's `dlopen` path does with
-  it is unresolved. Detail: [embedded](./docs/design/embedded.md).
+  Likely a link-time check, not per-module. Detail: [embedded](./docs/design/embedded.md).
 - **Exact surface syntax for quotations/closures and their captures.** Illustrative
   above, not fully settled. Detail: [control flow](./docs/design/control-flow.md).
 - **Optional HM inference later.** Kept possible by the `(value, type)` slot
@@ -458,12 +457,11 @@ that were argued out rather than assumed.
   consumer rather than the justification. N is a compile-time literal on top of the
   row. Open: count spelling, `..N`/`'N` relationship, diagnostic on disagreement.
 - **Owning a native backend.** Deferred. Reconsider after self-hosting, and only if
-  the pull is genuine or sub-millisecond REPL is wanted. Detail:
-  [codegen](./docs/design/codegen.md).
-- **REPL late binding for redefinition.** Words are frozen at their compile-time
+  the pull is genuine. Detail: [codegen](./docs/design/codegen.md).
+- **Late binding for redefinition.** Words are frozen at their compile-time
   generation; redefining a callee doesn't update existing callers. Falls out of
-  the `dlopen` architecture. Revisit only if live-patching is wanted, as its own
-  design track.
+  `driver::Library`'s `dlopen` architecture. Revisit only if live-patching against
+  that primitive is wanted, as its own design track.
 
 ## Declined
 

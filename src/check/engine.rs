@@ -1336,7 +1336,7 @@ impl<'a> Ctx<'a> {
 
     /// P7 slice 3a phase 2 (R2): the live generic instantiator, or `None` on
     /// a path that can never carry a `PolyType::Generic` in the first place
-    /// (a session-defined poly word). A grounding arm
+    /// (a standalone single-word check probe). A grounding arm
     /// (`unify_poly_input`/`apply_subst`) that sees `None` here has reached a
     /// `PolyType::Generic` some path never grounds, and stays the Phase 1
     /// not-yet-groundable error rather than mint through a table that is not
@@ -1622,9 +1622,9 @@ mod tests {
     }
     #[test]
     fn check_shuffle_with_no_modules_is_ungated() {
-        // R8's contract: with `modules: None` (now only unit-test harnesses,
-        // since the REPL's `None` caller died in phase 7) an override is
-        // never gated -- disposing it is byte-for-byte what it was before 8b.
+        // R8's contract: with `modules: None` (only unit-test harnesses build
+        // a `Ctx` this way) an override is never gated -- disposing it is
+        // byte-for-byte what it was before 8b.
         let structs = vec![res_struct(0, true)];
         assert!(drop_res(&structs, None, 1).is_ok());
     }

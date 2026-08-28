@@ -27,7 +27,8 @@ pub struct StructLayout {
     /// fields fold (they are the caller's outputs, moved out by the unpack, so
     /// glue here would double-free one), and `lower_call` uses it as the
     /// discriminator for the unpack branch — bundle presence, not a raw output
-    /// count, since the REPL's registries intern no bundle at all.
+    /// count, since a registry built without the checker's own interning pass
+    /// carries no bundle at all.
     pub bundle: bool,
 }
 
@@ -275,8 +276,8 @@ impl Structs {
 
     /// R10: the synthesized bundle struct a word with these declared outputs
     /// returns, or `None` when none was interned for the tuple — a word with
-    /// fewer than two outputs, or any registry the checker never interned into
-    /// (the REPL's), which then keeps its pre-slice single-value lowering.
+    /// fewer than two outputs, or any registry the checker never interned into,
+    /// which then keeps its pre-slice single-value lowering.
     pub(super) fn bundle_for(&self, outputs: &[Type]) -> Option<StructId> {
         self.bundles
             .iter()
@@ -409,7 +410,7 @@ pub fn build_statics(decls: &[StaticDecl], enums: &Enums) -> (Statics, Vec<Stati
 }
 
 /// The shared empty static table, for every lowering path with no module
-/// statics to see (the REPL, destructor synthesis, unit tests), so a
+/// statics to see (destructor synthesis, unit tests), so a
 /// `Registries` can be built without each caller owning a `Statics`.
 #[cfg(test)]
 pub fn empty_statics() -> &'static Statics {
@@ -434,7 +435,8 @@ pub struct Registries<'a> {
 
 /// Build the struct and enum layout + generated-word registries from a
 /// program's declarations (the build path passes `&module.structs` /
-/// `&module.enums`, the REPL passes its accumulated registries). The layout
+/// `&module.enums`; destructor synthesis and tests pass their own
+/// accumulated registries). The layout
 /// pass is a single combined DFS so a struct field of enum type and a variant
 /// field of struct/enum type are sized via the peer registry (D9); the
 /// registries themselves stay logically separate (D10). Recursion is already

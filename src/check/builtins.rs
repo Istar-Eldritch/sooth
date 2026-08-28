@@ -210,7 +210,7 @@ pub(crate) fn is_builtin_operator_name(name: &str) -> bool {
 
 /// The builtin table, built once. `check_operator` consults it on every
 /// operator occurrence; `builtin_table()` itself rebuilds a fresh map for the
-/// callers that own theirs (the REPL, the tests).
+/// callers that own theirs (`check/declarations.rs`, the tests).
 pub(super) static BUILTIN_TABLE: std::sync::LazyLock<HashMap<String, Vec<BuiltinRow>>> =
     std::sync::LazyLock::new(builtin_table);
 

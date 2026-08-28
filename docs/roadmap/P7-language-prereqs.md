@@ -1114,57 +1114,27 @@ Two more follow-ups the slice deliberately did not fix:
   has `structs`/`enums` but no trait analogue) threaded through both sites -- comparable in
   size to the earlier struct/enum REPL work, so it is its own slice.
 
-**P7.S9 -- Remove the REPL.** `[ planned ]` The REPL (`src/repl.rs`, 5.3k lines, plus
-the hand-rolled line editor in `src/editor.rs`) is a second, parallel execution path:
-it `dlopen`s freshly compiled words into the session process line by line instead of
-going through `build`/`run`'s ordinary whole-program compile. That second path has
-produced a standing pile of REPL-only defects with no counterpart in `build`/`run`
--- a name-keyed `bool` conflation, a module-check bypass (anything reachable only
-through `assemble_module` goes unchecked at the REPL), a hub re-export the REPL
-can't follow, non-inline poly words it loses entirely, and a materialized quotation
-it can't link -- because each is a gap in reproducing the real compiler's semantics
-incrementally rather than a bug in the compiler itself. Deleting the REPL deletes the
-second path, not just its bugs: there is no remaining reason to keep a semantics-
-replicating shortcut once it is gone.
+**P7.S9 -- Remove the REPL.** `[ done ]` There is no interactive execution path: `sooth
+repl` is not a subcommand, and every word is compiled through `build`/`run`'s ordinary
+whole-program pipeline. `driver::Library` (relocated from the former `repl.rs`) keeps
+the `dlopen`/`dlsym` primitive over a `compile_so` output as a retained, currently
+callerless building block for a future library-output target and for future
+incremental compilation; `driver::compile_so` is unchanged.
 
-**Scope.** Delete `src/repl.rs`'s `Session` and read-eval-print loop, and
-`src/editor.rs` in full (its whole reason to exist is the interactive line editor);
-relocate `Library` out of `repl.rs` before the rest of the file goes (see below).
-Remove the `repl` subcommand (`src/main.rs`) and `driver::repl` (`src/driver.rs`).
-Strike every REPL-conditional branch and comment in the files that reference it
-outside `repl.rs` itself --
-`ast.rs`, `check.rs`, `ir.rs`, `lexer.rs`, `lib.rs`, `packages.rs`, `parser.rs`,
-`resolve.rs`, `test_support.rs`, `backend/qbe.rs`, and the `check/`/`ir/` submodules
-that carry REPL-specific workarounds (`check/audits.rs`, `check/builtins.rs`,
-`check/captures.rs`, `check/combinators.rs`, `check/declarations.rs`,
-`check/drop_graph.rs`, `check/engine.rs`, `check/operators.rs`, `check/poly.rs`,
-`check/terms.rs`, `check/word_families.rs`, `ir/destructors.rs`, `ir/driver.rs`,
-`ir/layout.rs`, `ir/test_helpers.rs`, `ir/types.rs`). Each of those workarounds is a
-candidate for outright deletion, not just an `if repl` branch removal, once nothing
-exercises the incremental-dlopen path it exists for -- confirm per file rather than
-assuming, since a few may guard a real non-REPL case too.
+`Ctx` (`src/check/engine.rs`) is a struct, not an enum: the second, line-scoped
+checking path it used to carry is gone, and every method returns its `Word`-path
+value unconditionally (three still return `Option`, load-bearing: `modules`,
+`generics`, `static_type`). `resolve::resolve_modules`'s `always_mangle` parameter is
+retained and unreachable-but-for-tests: every surviving production caller passes
+`true`, closing the QBE symbol-hijack class the parameter exists for.
 
-**Not everything `repl.rs`-adjacent goes.** `dlopen` has exactly one caller today --
-the REPL -- but two of its supporting pieces are generic, not REPL-specific, and are
-relocated rather than deleted: `driver::compile_so` (`src/driver.rs:947`, `.so`-with-
-no-`main` codegen through `qbe`/`cc`, no REPL state) and `repl.rs`'s `Library`
-(`dlopen`/`dlsym` wrapper, ~40 lines, no `Session` state either) both move into
-`driver.rs` as the load-bearing primitives for a future library-output build target
-and for future incremental compilation -- both explicitly on the roadmap, not this
-slice's problem to solve, but not this slice's problem to delete out from under
-either. What actually goes is `Session` (the persistent stack buffer, word env, and
-per-line incremental-compile state) and the read-eval-print loop built on it: that is
-where every REPL-only defect named above actually lives, not in the dlopen shell
-itself.
-
-**Docs.** `docs/book/the-interactive-book.md` (planned, unwritten) drops from
-`SUMMARY.md` entirely. `docs/book/preface.md`, `getting-started.md`, and `words.md`
-lose their REPL sections/examples and are rewritten to teach the same material
-against `sooth run` instead -- tracked as follow-up doc work once this slice lands,
-not part of its exit criteria.
+**Docs.** `docs/book/preface.md`, `getting-started.md`, `words.md`, and `the-stack.md`
+still carry REPL sections/examples, and `docs/book/the-interactive-book.md` (planned,
+unwritten) still appears in `SUMMARY.md`. Rewriting those against `sooth run` and
+dropping the interactive-book entry is tracked as follow-up doc work, not part of
+this slice's exit criteria.
 
 **Exit:** `sooth repl` does not exist as a subcommand; no source file references the
-REPL or its incremental-compile machinery; every workaround named above is deleted,
-not merely unreached, confirmed by grepping the corpus for its own review-graph
-notes; `cargo fmt --check && cargo clippy -- -D warnings && cargo test` is green with
-no REPL-only test module skipped or stubbed out
+REPL or its former incremental-compile machinery; `cargo fmt --check && cargo clippy
+-- -D warnings && cargo test` is green with no REPL-only test module skipped or
+stubbed out.

@@ -1026,7 +1026,7 @@ mod tests {
     fn word_str_slot_keeps_its_own_ir_type() {
         // A `str` slot enters a lowered frame as `IrType::Str`, not as a bare
         // 8-byte integer: it is the type a later `len`/`.`/`cstr` dispatches
-        // on. The retired carried-slot form asserted this of a session buffer
+        // on. The retired carried-slot form asserted this of a stack-buffer
         // load; the mapping itself is what survives, and `ir_type_of`'s own
         // width/float cases do not cover `Type::Str`.
         let ir = lower_src(": w ( str -- usize ) len ;");

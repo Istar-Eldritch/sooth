@@ -1,8 +1,8 @@
 //! Sooth AST. Skeleton for Phase 0; grows as the language does.
 
 /// A source location, 1-based (line, col), plus the id of the file it came
-/// from within its assembled `Module` (0 for a single-file program or REPL
-/// line, where the field is never read). Load-bearing beyond diagnostics:
+/// from within its assembled `Module` (0 for a single-file program, where the
+/// field is never read). Load-bearing beyond diagnostics:
 /// `Module::instantiations`/`Module::builtin_overloads` key a whole build's
 /// per-call-site records by `Span` alone, and two files' tokens can land on
 /// the identical (line, col) by coincidence, so `module` is what keeps two
@@ -130,7 +130,7 @@ pub struct Module {
     pub resolved_variant_fields: std::collections::HashMap<Span, (EnumId, usize, usize)>,
     /// Phase 4 slice 5a (R10): one entry per file in the import closure, in
     /// topological order, module 0 being the entry file. A single-file program
-    /// (and every REPL session) has exactly one entry. Every `StructDecl`/
+    /// has exactly one entry. Every `StructDecl`/
     /// `EnumDecl`/`WordDef`/`ExternDecl` carries an owning module id indexing
     /// this vector; the entry carries that module's qualifier->module import
     /// map and its parsed `export:` list.
@@ -184,7 +184,7 @@ pub struct ModuleInfo {
 /// table itself does not move and is not per module; only visibility is gated,
 /// so this says which of those names a body in this module may call bare.
 ///
-/// Both `parser::parse` (the REPL, every in-process test) and
+/// Both `parser::parse` (every in-process test) and
 /// `driver::assemble_module` set this field explicitly on every `ModuleInfo`
 /// they build, so nothing reads the derived `Default`. It fails closed to
 /// `None` anyway: a build path that forgot to set it should reject every
@@ -416,10 +416,11 @@ fn find_type_in_module(
     name: &str,
     module: u32,
 ) -> Option<Type> {
-    // R8d (slice 5b): match `name_static`, not `name`. A REPL-spliced imported
-    // type tags its `.name` with an import epoch so the accessor/constructor
-    // recognizers agree on one row per internal spelling, but its `.name_static`
-    // stays the pretty user-typed base spelling; a type-position reference must
+    // R8d (slice 5b): match `name_static`, not `name`. `resolve::mangle`
+    // rewrites a decl's `.name` with a module suffix so the accessor/
+    // constructor recognizers agree on one row per internal spelling, but its
+    // `.name_static` stays the pretty user-typed base spelling; a
+    // type-position reference must
     // resolve against that. Behavior-preserving for every native call: this
     // resolver only ever runs pre-`resolve_modules`, where `.name == .name_static`
     // for every decl, so the switched field compares identically there.
@@ -452,8 +453,8 @@ pub struct StructDecl {
     /// from the fields (which is exactly what it overrides), mirroring how
     /// the IR-side `StructLayout::is_linear` is a computed-once bit rather
     /// than a predicate. Recording it on the declaration is what makes the
-    /// fact reach every `is_copy` call site, the layout fold, and the REPL's
-    /// persistent registries without threading a table through any of them.
+    /// fact reach every `is_copy` call site, the layout fold, and any
+    /// standalone registry without threading a table through any of them.
     pub has_drop_overload: bool,
     /// R10 (phase 4 slice 1): whether this is a synthesized *return bundle*
     /// rather than a user `type:` declaration — the aggregate a word with two
@@ -1234,7 +1235,7 @@ impl EnumId {
 }
 
 /// P7 slice 3i: the source spelling of the boolean type, named once so the
-/// registry lookup and the REPL's own bool-keyed arms cannot drift from
+/// registry lookup and every hand-written bool-keyed arm cannot drift from
 /// `lib/bool.sth`'s declaration.
 pub const BOOL_TYPE_NAME: &str = "Bool";
 
@@ -1855,11 +1856,11 @@ pub fn ground_member_poly(pty: &PolyType, target: &PolyType) -> PolyType {
 
 /// The shared, lazily-built `Copy` entry (`seed_predicate_traits`), for a
 /// caller that only ever needs the reserved predicate table and no user
-/// `trait:` declarations -- the REPL's per-line word-definition path, which
-/// supports `'T: Copy` but not yet a user trait declaration at REPL scope
-/// (the same bypass pattern `structs`/`enums` already follow there). P7.S3s:
-/// `Ord` used to be pre-seeded here too; it is now an ordinary library trait
-/// declared in `core::cmp`, unreachable from a REPL session (R8).
+/// `trait:` declarations -- the type pre-pass parsing a signature that can
+/// still name a bound (`'T: Copy`) before any user trait is registered, and
+/// `check/poly.rs`'s scratch contexts, which carry no user bound at all.
+/// P7.S3s: `Ord` used to be pre-seeded here too; it is now an ordinary
+/// library trait declared in `core::cmp` (R8).
 pub fn predicate_traits() -> &'static [TraitDecl] {
     static TRAITS: std::sync::OnceLock<Vec<TraitDecl>> = std::sync::OnceLock::new();
     TRAITS.get_or_init(seed_predicate_traits)
@@ -1938,8 +1939,8 @@ pub struct ImplDecl {
     /// which resolves it pre-mangle, where a binding's raw word name and a
     /// `WordDef::name` still agree; a bound-directed call site then mints the
     /// symbol from `overload_symbols` so it is byte-identical to the one
-    /// lowering emits. Empty on any path that skips that check (a REPL
-    /// session, which declares no `impl:`), so nothing resolves there.
+    /// lowering emits. Empty on any path that skips that check (a standalone
+    /// probe, which declares no `impl:`), so nothing resolves there.
     pub resolved: Vec<(String, usize)>,
 }
 
@@ -3010,7 +3011,7 @@ mod tests {
     /// U8 (slice 5b, R8d): `find_type_in_module` matches on `name_static` with
     /// module gating. A single-module lookup is unaffected, and two decls that
     /// share a `name_static` but sit in different modules disambiguate by their
-    /// module id (the REPL splice's epoch-tagged `.name` plays no part in
+    /// module id (`resolve::mangle`'s module-suffixed `.name` plays no part in
     /// type-position resolution).
     #[test]
     fn find_type_in_module_matches_name_static_module_gated() {
@@ -3024,9 +3025,9 @@ mod tests {
             module,
         };
         // Two structs share `name_static` "Point" but sit in modules 0 and 1,
-        // and their `.name` fields are tagged apart the way the REPL splice
-        // tags an epoch onto an imported type.
-        let structs = vec![mk("Point", "Point", 0), mk("q::Point__import3", "Point", 1)];
+        // and their `.name` fields are tagged apart the way `resolve::mangle`
+        // suffixes an imported type's name with its module id.
+        let structs = vec![mk("Point", "Point", 0), mk("Point__m1", "Point", 1)];
         let enums: Vec<EnumDecl> = Vec::new();
 
         // Module 0's lookup finds index 0 (a single-module lookup is exactly
@@ -3036,7 +3037,7 @@ mod tests {
             other => panic!("expected module 0's Point at index 0, got {other:?}"),
         }
         // Module 1's lookup finds index 1, disambiguated purely by module id
-        // even though the tagged `.name` ("q::Point__import3") never matches
+        // even though the tagged `.name` ("Point__m1") never matches
         // the queried "Point".
         match find_type_in_module(&structs, &enums, "Point", 1) {
             Some(Type::Struct(id, _)) => assert_eq!(id.index(), 1),

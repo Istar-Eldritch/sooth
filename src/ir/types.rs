@@ -44,7 +44,7 @@ pub struct IrModule {
     pub funcs: Vec<IrFunc>,
     /// Per-struct memory layout, indexed by `StructId`. The backend emits
     /// a `type :S = { … }` per entry and reads field offsets/widths from it;
-    /// empty for a struct-free module (or a single-func REPL emit).
+    /// empty for a struct-free module (or a single-func standalone emit).
     pub structs: Vec<StructLayout>,
     /// Per-enum tagged layout, indexed by `EnumId`. The backend emits an
     /// opaque byte-blob `type :E = align A { b N }` per entry (D3, R15) and
@@ -518,9 +518,8 @@ pub enum Terminator {
 }
 
 /// Declared signature of a user word or `extern:` declaration. The build path
-/// derives this from declared slot types; the REPL derives it from the
-/// checker's typed env. A `None` `ret_ty` (e.g. a word with no output) is
-/// treated as `IrType::Int` by callers.
+/// derives this from declared slot types. A `None` `ret_ty` (e.g. a word with
+/// no output) is treated as `IrType::Int` by callers.
 #[derive(Debug, Clone)]
 pub struct Arity {
     pub in_arity: usize,
@@ -530,8 +529,7 @@ pub struct Arity {
     /// site materializes the phantom argument at each of these slots before it
     /// enters `Instr::Call`; the name-keyed env is the only thing a call site
     /// holds about its callee, so the shape has to travel here rather than be
-    /// re-read from the callee's `WordDef` (which lowering never has, and the
-    /// REPL has no module to read one from).
+    /// re-read from the callee's `WordDef` (which lowering never has).
     pub quot_inputs: Vec<(usize, IrType)>,
 }
 
@@ -548,9 +546,8 @@ pub fn quot_input_slots(inputs: impl IntoIterator<Item = Type>) -> Vec<(usize, I
         .collect()
 }
 
-/// Maps a called user-word name to the symbol it is emitted/linked as. The build
-/// path uses identity; the REPL supplies generation-mangled symbols so a unit
-/// links against the words it was compiled against.
+/// Maps a called user-word name to the symbol it is emitted/linked as. The
+/// build path uses identity.
 pub type Resolver<'a> = &'a dyn Fn(&str) -> String;
 
 #[cfg(test)]

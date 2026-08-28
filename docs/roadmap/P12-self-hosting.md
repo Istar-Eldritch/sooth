@@ -11,15 +11,15 @@ one at a time, front-end first, while the not-yet-ported stages keep running as
 host-language (Rust) code called across the FFI boundary — the Zig self-hosted-compiler
 model, not Nim's permanent-hybrid one. Stages are retired from the host side as their
 Sooth replacement proves out; the host-language bootstrap only disappears once every
-stage has been ported. No metacircular JIT: the self-hosted REPL/build path still runs
+stage has been ported. No metacircular JIT: the self-hosted build path still runs
 on the backend.
 
 **Prerequisite:** [P8.S4](./P8-packages-modules.md) (richer `extern:` payloads, unmangled
 exports). The FFI boundary this phase depends on is one-directional today (host calling
-Sooth, via `dlopen` in the REPL); a progressive port additionally needs Sooth calling
-host code with non-trivial payloads (token streams, AST nodes, tagged unions), which is
-module/linkage machinery pulled forward into Phase 8 rather than designed here, since it
-blocks self-hosting sequencing, not stdlib content.
+Sooth, via `driver::Library`'s `dlopen` over a `compile_so` output); a progressive port
+additionally needs Sooth calling host code with non-trivial payloads (token streams, AST
+nodes, tagged unions), which is module/linkage machinery pulled forward into Phase 8
+rather than designed here, since it blocks self-hosting sequencing, not stdlib content.
 
 **Exit:** the compiler compiles itself; fixpoint reached (bootstrap-compiled ==
 self-compiled).

@@ -1389,3 +1389,138 @@ three retired tests above. Zero `tests/qbe_baseline` diffs.
 `src/parser.rs:9892` (an `== false` in a parser unit test) and two
 `needless_borrow`s in `tests/phase4_combinators.rs`. All three predate this phase and are
 outside the `cargo clippy -- -D warnings` gate; not touched, per phase scope.
+
+## Phase 10 (R8) — docstring, design-doc and invariant sweep
+
+### Derived sweep list, not hardcoded
+
+`grep -rniE 'repl|session|dlopen|override_epoch|drop_generation' src/ | grep -viE
+'replac|replic'` at the start of this phase (post phase 9) returned **115 hits across 23
+files** — far fewer than the spec's spec-time snapshot of 275/28, because phases 4-9 already
+retired most of the REPL surface incrementally as they went (phase 9's carry-forward note
+above already flagged `ir/types.rs:552`). Files actually touched this phase: `ast.rs`,
+`backend/qbe.rs`, `check.rs`, `check/{audits,builtins,combinators,declarations,drop_graph,
+engine,operators,poly,terms,word_families}.rs`, `driver.rs`, `ir.rs`, `ir/{driver,layout,
+types}.rs`, `ir/func_builder/{calls,mod}.rs`, `lexer.rs`, `parser.rs`, `resolve.rs`. No hits
+remained in `lib.rs`, `main.rs`, `test_support.rs`, `ir/destructors.rs`, or
+`ir/func_builder/quotation.rs` — already clean from earlier phases.
+
+Every hit was read in context, not pattern-substituted blind. Three shapes of edit:
+
+- **Drop a stale alternative from a list** (`"Empty on the REPL/destructor/test paths"` →
+  `"Empty on the destructor/test paths"`) where the REPL was one of several callers that
+  left a field empty and the others still do.
+- **Rename to the actual current caller** where the REPL was the *only* thing that made a
+  doc's claim true and something else now plays the same structural role — e.g.
+  `check.rs`'s `PolyCtx` fields now say "standalone/scratch paths" (the single-word check
+  probe at `check/engine.rs:1203`, migrated there in phase 2, not the REPL); `ir/func_builder/
+  calls.rs:821`'s "the REPL's env derives a multi-output `ret_ty` from the first output
+  alone" now names `extern:` declarations, verified as the actual surviving producer of that
+  shape (`ir/driver.rs:154`).
+- **Delete the clause outright** where the REPL was the sole reason a rule existed and
+  nothing replaces it — `check/audits.rs`'s per-word quotation audit no longer contrasts
+  against "rejected separately at the REPL (R23)"; that second rejection path died with the
+  REPL and nothing stands in for it.
+
+One correction made mid-sweep: `ast.rs:3013`/`:3027`/`:3040` and `parser.rs:4040` invoked "the
+REPL splice's epoch-tagged `.name`" as the mechanism that makes a decl's `.name` diverge from
+its `.name_static`. That import-epoch tagging never existed as production code (`grep -rn
+'epoch' src/resolve.rs` is empty); the actual mechanism is `resolve::mangle`'s `__m{module}`
+suffix. The fixture literal `"q::Point__import3"` was renamed to `"Point__m1"` to match what
+`mangle` actually produces, not left as a REPL-flavoured string with the REPL word stripped
+out around it.
+
+`backend/qbe.rs:303`'s `sooth_line_{seq}` carve-out (named in the spec's verified-anchors
+table) is dead in full, not just its REPL clause: `grep -n 'sooth_line' src/` returns only
+that one comment line pre-edit. Dropped from the list of symbols `qbe_name`'s escape
+character has to leave alone, rather than reworded.
+
+### `src/backend/qbe.rs:303`'s `__import{epoch}` half also didn't exist
+
+The same comment's `__m{module}`/`__import{epoch}` mangle-suffix list named a second suffix
+shape that, like the REPL's epoch tagging above, is not real: `grep -n '__import' src/` (pre-
+edit) matched only doc-comment prose, never a format string. Dropped that half too, leaving
+only the real `__m{module}` suffix `resolve::mangle` emits.
+
+### E2, re-derived after the sweep
+
+```sh
+grep -rniE 'repl|session|dlopen|override_epoch|drop_generation' src/ | grep -viE 'replac|replic'
+```
+
+returns exactly six lines, all in `src/driver.rs`: the `dlopen`/`dlsym` extern declaration,
+its two call sites, one `SAFETY` comment, one doc comment on `Library::open`, and one unit
+test's `.expect("dlopen should succeed")`. Word-boundary form (`grep -rniwE`) returns the
+same six. This matches E2's expected witness exactly (the relocated `Library` primitive is
+the sole permitted survivor).
+
+### Design-doc sweep (current-state only, no removal narrative)
+
+- **`CLAUDE.md`**: the load-bearing-invariants bullet now reads "`driver::Library` loads a
+  compiled `.so` in-process via `dlopen`" — states the surviving primitive, not the REPL.
+- **`DESIGN.md`**: three mentions fixed (codegen summary, the "Liveness and craft discipline"
+  bullet, the `Decided` backend bullet) plus two `Open/deferred` items (the ISR/dlopen
+  question dropped its now-answered REPL clause; "owning a native backend" dropped
+  "sub-millisecond REPL" as a motivating reason; "REPL late binding for redefinition" renamed
+  to "Late binding for redefinition", now framed against `driver::Library`'s retained `dlopen`
+  primitive rather than a session that no longer exists).
+- **`docs/roadmap/ROADMAP.md`**: the guiding-principles "A REPL and immediate feedback arrive
+  in Phase 1" bullet now reads "Fast local iteration (`sooth run`)"; the paragraph describing
+  the REPL's hand-rolled line editor (prompt, history, tab completion) under "Cross-cutting"
+  was deleted outright — it described `src/editor.rs`, which no longer exists, in present
+  tense. The **P1** row's existing "interactive criteria retired with the REPL" note (written
+  by phase 5) was left as-is: it is a correct statement about what happened, not a stale claim
+  about current REPL behaviour.
+- **`docs/roadmap/P7-language-prereqs.md`'s S9 entry**: rewritten from `[ planned ]`,
+  ~50 lines of "what to delete and why", to `[ done ]`, ~10 lines stating the post-removal
+  state (`Ctx` is a struct; `driver::Library` retained; `always_mangle` unreachable-but-kept)
+  plus the still-open book-doc follow-up. The S3s entry's own stray REPL mention (`"The REPL
+  carries no whole-program trait/impl registry..."`, describing a now-nonexistent open gap)
+  was **left untouched** — out of this phase's named scope (R8 names the S9 entry
+  specifically), and it is a different, already-`[ done ]` slice's historical note, not
+  current design prose this phase is chartered to revise.
+- **`docs/design/`**: `control-flow.md` (7 word-boundary mentions, now 0) — the two REPL-
+  specific rejection sentences in the 6a/6b narrative were dropped (the whole rejection they
+  described no longer exists to contrast against), and the entire "Phase 4 Slice 6c" paragraph
+  (REPL `Session`-level combinator store: 9 sentences describing `Session::combinators`,
+  `infer_line`, `lower_line` entry points) was condensed to the two sentences of it that are
+  still true design facts independent of the REPL (combinators have no compile event to
+  freeze against; a poly word's frozen-resolver precedent doesn't transfer). `modules.md`
+  (6 → 1): the whole "REPL imports (Slice 5b)" paragraph, entirely about a now-deleted
+  mechanism, was replaced with a two-sentence retirement pointer to P7.S9, rather than left
+  narrating a live session that no longer runs. `codegen.md` (4 → 0): the "REPL runs on the
+  backend" bullet and "REPL's stack buffer is a driver artifact" paragraph were rewritten to
+  describe `driver::Library`'s retained primitive as the still-true "no in-process JIT"
+  mechanism, not a session. `memory-model.md` confirmed **0** word-boundary REPL mentions
+  both before and after, matching the spec's own correction of a review round's false claim.
+- **`docs/roadmap/P8-packages-modules.md`**: `:111` and `:176`'s "also read by the REPL for a
+  session" clauses dropped (the fallback chain reads the same regardless); `:291-292`'s
+  declined "REPL exemption in the compiler" note rewritten to say the question is moot
+  because the REPL no longer exists, rather than describing REPL behavior that no longer
+  happens.
+- **`docs/roadmap/P12-self-hosting.md`**: `:14` — plain mention strip, `REPL/` dropped,
+  "No metacircular JIT: the self-hosted build path still runs on the backend" survives
+  verbatim otherwise. `:19` — rewritten to name `driver::Library`'s `dlopen` over a
+  `compile_so` output as the host→Sooth FFI direction, per R1's decision; the sentence's
+  other half (Sooth calling host code, pulled into Phase 8) is untouched, and the rewrite
+  states this answers the direction rather than leaving it recorded as open.
+
+### Follow-up recorded, not started
+
+`docs/book/preface.md` (5 REPL mentions), `getting-started.md` (6), `words.md` (2), and
+`the-stack.md` (1 — correctly included this time, the item the spec flagged as omitted from
+the roadmap entry's own list) all still teach the REPL. `docs/book/SUMMARY.md:55`'s
+`the-interactive-book.md` entry (unwritten, planned) still stands. P7.S9's phase-notes doc
+section was corrected mid-phase: an early draft of this phase's edit said the interactive-
+book `SUMMARY.md` entry "drops" as if done; it does not, and the entry now says the drop is
+tracked follow-up work alongside the three prose files, not a completed action. None of the
+four book files were touched.
+
+### Gate
+
+`cargo fmt --check` clean; `cargo clippy -- -D warnings` clean; `cargo test --no-fail-fast`:
+all suites green, zero failures (unit-test count and `tests/qbe_baseline` unaffected — no
+production code changed this phase, comment/doc text only). `cargo clippy --all-targets`
+still reports the same three pre-existing warnings from phase 9 (`src/parser.rs`'s
+`bool_comparison`, two `needless_borrow`s in `tests/phase4_combinators.rs`), confirmed
+unchanged by diffing against a `git stash` baseline — outside this phase's scope, not fixed.

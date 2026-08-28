@@ -77,28 +77,21 @@ current "integer literals default to `i64`" stance is 64-bit-centric, since on r
 natural machine word is 32-bit, not `i64`.
 
 **Dropping LLVM means no in-process JIT, and it turns out to cost nothing.** LLVM's
-ORC would have let the REPL and a compile-time evaluator share one native engine. Two
-decisions remove the need for it outright:
+ORC would have let an interactive host-loading path and a compile-time evaluator
+share one native engine. Two decisions remove the need for it outright:
 
 - **No compile-time execution.** There is no immediate-word / macro facility (see
   [Declined](../../DESIGN.md#declined)), so nothing runs Sooth at compile time and there is no comptime
   interpreter to build.
-- **The REPL runs on the backend, not an interpreter.** Each new word is compiled
-  through the normal pipeline to a shared object and `dlopen`'d into the session, so
-  the process holds live, natively-compiled code it can call at once; redefinition
-  loads a new object and swaps the name→symbol entry. Whole-program `run`/watch takes
-  the simpler compile-to-binary + subprocess path. One execution semantics either way,
-  so the live loop exercises the real backend with nothing to keep in sync. This is
-  Factor's in-image model minus the sub-millisecond per-word compile: an assembler +
-  linker + load round-trip per definition, higher latency than a JIT, acceptable for
-  craft. Sub-millisecond would require owning a backend (see [Open / deferred](../../DESIGN.md#open--deferred)); not now.
+- **Any host-loading path runs on the backend, not an interpreter.** `driver::Library`
+  keeps a `dlopen`/`dlsym` wrapper over a `compile_so` output as the load-bearing
+  primitive for this: a compiled word is a shared object loaded in-process, so the
+  process holds live, natively-compiled code it can call at once. Whole-program
+  `run`/watch takes the simpler compile-to-binary + subprocess path. One execution
+  semantics either way, with nothing to keep in sync against a second, interpreted
+  one. Sub-millisecond per-definition loading would require owning a backend (see
+  [Open / deferred](../../DESIGN.md#open--deferred)); not now.
 
-**The REPL's stack buffer is a driver artifact, not a runtime-stack feature.** Word
-bodies still compute entirely in SSA/registers; the compile-time-virtual-stack
-invariant is untouched. The buffer exists only to bridge separately-compiled `.so`
-units: each bare expression line is a wrapper that loads the whole carried stack from
-a `Vec<i64>`, runs the line's body in registers exactly like a word, and stores the
-result back. This is also a deliberate preview of the **uniform runtime stack**
-reserved for escaping quotations (Phase 4): the same "marshal to/from a byte buffer
-at a compiled boundary" shape, reused there for closures that must cross into `alloc`
-rather than for a REPL line. Neither case puts a runtime stack inside a word body.
+Word bodies compute entirely in SSA/registers; the compile-time-virtual-stack
+invariant holds regardless of which loading path a compiled word reaches the
+process through.

@@ -192,9 +192,9 @@ impl<'a> FuncBuilder<'a> {
     /// splice's uid (`splice_uid_stack.last()`, or 0 at the top level) for the
     /// `inline_uid` reset and the alpha-rename suffix; the push/pop of
     /// `splice_uid_stack` and `member_splice_depth` still happen, so R1b's
-    /// gate still stands aside for this splice. That is the REPL's state, and
-    /// it hands out empty splice tables, so no member splice there has an
-    /// entry to miss in the first place.
+    /// gate still stands aside for this splice. That is the state of any
+    /// lowering path that hands out empty splice tables, so no member splice
+    /// there has an entry to miss in the first place.
     ///
     /// Entering the member's namespace does not make the uid unique: the
     /// member's seed is also the uid the first combinator splice *inside* this
@@ -280,7 +280,7 @@ impl<'a> FuncBuilder<'a> {
         //
         // P7.S8 (R1b): valid except during an active *member re-splice*. This
         // table is span-keyed and holds one grounding per `FuncBuilder`
-        // session; a member body spliced by `lower_resolved_word_call` can
+        // instance; a member body spliced by `lower_resolved_word_call` can
         // reach the same source span under a second grounding (the member's
         // fields' types), where the recorded answer is the wrong one and
         // re-dispatching to it recurses without bound. Inside that bracket the
@@ -818,9 +818,9 @@ impl<'a> FuncBuilder<'a> {
         // R11: a multi-output callee returns one bundle, unpacked back
         // onto the stack below, so the lowering stack matches the
         // stack the checker verified. The discriminator is the
-        // bundle's own flag, not `out_arity >= 2`: the REPL's env
-        // derives a multi-output `ret_ty` from the first output alone
-        // and interns no bundle, and must not enter this branch.
+        // bundle's own flag, not `out_arity >= 2`: an `extern:` declaration's
+        // env entry derives a multi-output `ret_ty` from the first output
+        // alone and interns no bundle, and must not enter this branch.
         let bundle = match arity.ret_ty {
             Some(IrType::Struct(id)) if self.structs.layouts[id.index()].bundle => Some(id),
             _ => None,

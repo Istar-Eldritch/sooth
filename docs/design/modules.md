@@ -4,7 +4,7 @@ Design detail for modules and encapsulation, split from [DESIGN.md](../../DESIGN
 
 ## Modules and encapsulation
 
-A file is a compilation unit (Phase 4 Slice 5a, native only; REPL imports are 5b), and
+A file is a compilation unit (Phase 4 Slice 5a), and
 a directory tree under a `sooth.pkg` manifest is a **package**. `export: name... ;`
 (lines accumulate) is the only way a name leaves its file; a module with none exports
 nothing, so every pre-5a example is unaffected — it exports nothing and stays a
@@ -60,7 +60,7 @@ declare `Point`; the duplicate-type-name check is per-module, not global. Same-n
 words in two modules mint distinct emitted symbols via a module-disambiguating
 component, added to `instantiation_symbol` the same way its `generation` suffix
 already is, so `::` never has to survive to the symbol sanitizer and a single-module
-closure (every pre-5a program, every REPL session) is byte-for-byte unchanged.
+closure (every pre-5a program) is byte-for-byte unchanged.
 
 **A `type:` declaration is a name-scope, and visibility is the ordinary export
 mechanism applied to it, not a special rule for types.** Its generated words — a bare
@@ -122,25 +122,9 @@ use-site disambiguation: two selective imports exposing the same unqualified nam
 an error at the second, naming both modules, and a selectively-exposed name colliding
 with a local definition is the same error.
 
-**REPL imports (Slice 5b) answer what an import means in a live session by treating it
-as an ordinary redefinition event applied to a batch of names, not a new rule.** The
-REPL's own top-level `import:` path resolves relative to the *process current working
-directory* (every transitive import inside the discovered closure keeps 5a's
-importer-relative rule unchanged, so exactly one frame of reference is new). Each
-`import:` line mints one fresh, session-wide import epoch and recompiles every word in
-the closure under it, exactly the way redefining an ordinary word mints a fresh
-generation every time: a caller already compiled against the old epoch stays frozen
-under `RTLD_GLOBAL`, while a fresh reference resolves against the new one. Splicing the
-closure into the session's flat, positionally-indexed registries (`StructId = index` and
-siblings) remaps every type id it carries from closure-local to session indices — the
-remap a fresh native compile never needs, since it never has an already-populated
-registry to append onto. Transitive re-export stays closed at the REPL exactly as
-natively: a third file imported by the imported file contributes no session-visible
-name. Registry growth on re-import is accepted, not deduplicated or capped, matching a
-redefined word's fresh generation every time. An imported file declaring `main` is a
-located rejection naming the file and the word, at import time — the native path's own
-exposure to the same collision (recon #4, ROADMAP) stays unfixed. `export:` as a REPL
-line is its own located rejection: a live session has no export boundary to cross.
+**Slice 5b's interactive import path is retired.** It once answered what an import
+means in a live session; the whole interactive path was removed along with the REPL
+(P7.S9), and every surviving import is resolved by the native path described above.
 
 Out of scope for this slice, all deferred to Phase 8's eventual package/versioning
 layer or later: a serializable API description and semver enforcement (which will

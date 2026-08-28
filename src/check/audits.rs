@@ -54,10 +54,6 @@ pub fn find_drop_overloads(
 /// modeled on `check_main_effect`'s shape (find the offending word by name,
 /// report its span).
 ///
-/// R11: the REPL calls this directly on its one entered `: drop` line, so a
-/// line-at-a-time override gets exactly the declaration-shape rule a compiled
-/// program's does; only the duplicate-override rejection differs, since a
-/// second REPL `: drop` for one struct is a redefinition, not a collision.
 pub fn drop_overload_struct_id(word: &WordDef) -> Result<StructId, String> {
     if !word.effect.outputs.is_empty() {
         return Err(drop_overload_output_error(word));
@@ -147,14 +143,14 @@ pub(super) fn audit_quotation_type_positions(module: &Module) -> Result<(), Stri
     Ok(())
 }
 
-/// R7a (REPL, item 2): the registry half of the audit, over exactly the shared
+/// R7a (item 2): the registry half of the audit, over exactly the shared
 /// type registries. A quotation type never legally enters any of these (its
 /// one legal home is a direct word parameter, stored in the word's `Sig`, and
-/// a declared effect is interned separately), so re-scanning them per REPL
-/// line is a safe, idempotent invariant. Split out so the REPL's `type:` and
-/// `:` chokepoints run the same rejections as the native `check`, which the
-/// REPL's `check_types`-only path skipped (a quotation in an audited position
-/// then reached `ir_type_of`'s `unreachable!`, bricking the session).
+/// a declared effect is interned separately), so re-scanning them is a safe,
+/// idempotent invariant. Split out from the per-word half so a bare
+/// `type:`/`:` chokepoint can run the same rejections a `check_types`-only
+/// path would otherwise skip (a quotation in an audited position would then
+/// reach `ir_type_of`'s `unreachable!`).
 pub(crate) fn audit_quotation_type_registries(
     structs: &[StructDecl],
     enums: &[EnumDecl],
@@ -227,11 +223,10 @@ pub(crate) fn audit_quotation_type_registries(
     Ok(())
 }
 
-/// R7a (REPL, item 2): the per-word half of the audit -- a quotation in a
+/// R7a (item 2): the per-word half of the audit -- a quotation in a
 /// word's *output* row, `main` taking one, or a quotation nested inside a
-/// declared effect. A direct quotation *parameter*
-/// (the one legal position) is accepted here and rejected separately at the
-/// REPL (R23), which discards word bodies the inliner needs.
+/// declared effect. A direct quotation *parameter* (the one legal position)
+/// is accepted here.
 ///
 /// Also runs the poly twin of the no-stored-reference signature rule
 /// (`audit_poly_reference_free_signature`): `structs`/`enums`/`arrays` are

@@ -11,9 +11,9 @@
 //! symbol minter) and a same-named word in another module already carries a
 //! distinct name by the time a symbol is spelled (R22).
 //!
-//! A single-module closure (every single-file program, every REPL session) is
-//! left byte-for-byte untouched (R22): the pass is a no-op below two modules,
-//! so today's symbols and output are unchanged.
+//! A single-module closure (every single-file program) is left byte-for-byte
+//! untouched (R22): the pass is a no-op below two modules, so today's symbols
+//! and output are unchanged.
 
 use crate::ast::{is_name_dispatched_builtin, IntrinsicVisibility, Module, Span, Term, TermKind};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -733,11 +733,13 @@ fn walk_to_origin(
 
 /// Mangle every decl name for a multi-module closure and rewrite every body to
 /// match. Below two modules the pass is a no-op *unless* `always_mangle` is set
-/// (R22): the REPL import path leaves a single-file closure raw and does its own
-/// epoch renaming, while the native build path forces mangling even for one
-/// module so a user word whose bare name equals a libc symbol (`close`) or a
-/// runtime shim's callee (`free`, called from `sooth_free`) becomes `close__m0`
-/// / `free__m0` and can no longer hijack that symbol at link time.
+/// (R22): the native build path forces mangling even for one module so a user
+/// word whose bare name equals a libc symbol (`close`) or a runtime shim's
+/// callee (`free`, called from `sooth_free`) becomes `close__m0` / `free__m0`
+/// and can no longer hijack that symbol at link time. `always_mangle: false`
+/// is exercised only by this module's own unit tests now, but is kept: it is
+/// the single-module forcing that closes the symbol-hijack class, and
+/// collapsing the parameter would make that forcing implicit.
 pub fn resolve_modules(module: &mut Module, always_mangle: bool) -> Result<(), String> {
     if module.modules.len() < 2 && !always_mangle {
         return Ok(());

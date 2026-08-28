@@ -155,8 +155,8 @@ pub(super) struct EnvCapture {
     pub(super) ref_mutable: bool,
 }
 
-/// 7b/R17: the env-parameter plan for a lowered body. A user word (or REPL
-/// line) has none; a materialized quotation body always takes one trailing
+/// 7b/R17: the env-parameter plan for a lowered body. An ordinary user word
+/// has none; a materialized quotation body always takes one trailing
 /// `Ptr` env parameter, uniform so `lower_indirect_call` can pass the env slot
 /// without knowing the callee, and binds a captured local when it has one.
 pub(super) enum EnvPlan {
@@ -183,18 +183,18 @@ pub(super) struct FuncBuilder<'a> {
     /// Phase 7 slice 2 (R1): the module's `static:` table, name -> referent
     /// `IrType`. Consulted by `lower_reference_word` only after a local lookup
     /// misses, so a local shadowing a static still wins. Empty on the
-    /// REPL/destructor/test paths.
+    /// destructor/test paths.
     pub(super) statics: &'a Statics,
     /// R14: the per-call-site instantiation table. A `Call` term whose span
     /// keys an entry here is a call to a polymorphic word and resolves to that
     /// entry's mangled symbol and per-θ output shape, not the name-keyed
-    /// `env`/`resolve`. Empty on the REPL/destructor/test paths.
+    /// `env`/`resolve`. Empty on the destructor/test paths.
     pub(super) instantiations: &'a HashMap<Span, CallInst>,
     /// Slice 8a phase 2 (R7): the call sites the checker resolved to a user
     /// overload of a builtin-named word, span -> resolved callee name.
     /// Consulted before the name-directed builtin dispatch in `lower_call`, so
     /// a recorded `Vec2 add` site emits an `Instr::Call` to the user word
-    /// instead of `Bin(Add)`. Empty on every corpus/REPL/test path (the
+    /// instead of `Bin(Add)`. Empty on every corpus/test path (the
     /// checker records nothing there), so their lowering is byte-for-byte.
     pub(super) builtin_overloads: &'a HashMap<Span, String>,
     /// P7.S3e (R8/R9): this instantiation's own trait-member-call resolutions
@@ -235,7 +235,7 @@ pub(super) struct FuncBuilder<'a> {
     /// to their bodies. A `Call` of such a name is spliced in place rather
     /// than lowered to an `Instr::Call`, mirroring the checker's inliner
     /// (R18): the callee mints no `IrFunc` (it is absent from `funcs`/`env`),
-    /// so its only reachable form is the splice. Empty on the REPL/destructor/
+    /// so its only reachable form is the splice. Empty on the destructor/
     /// test paths.
     pub(super) combinators: &'a crate::check::CombinatorIndex,
     /// Name of the word currently being lowered, used by the tail-call ->
@@ -255,8 +255,8 @@ pub(super) struct FuncBuilder<'a> {
     /// join in tail position maps its merged slot `i` to `cur_outputs[i]`; a
     /// differing phantom-quotation pair whose target is `IrType::Quotation` is
     /// materialized into a `(code, env)` value in each arm and `Phi`-joined.
-    /// Empty on the REPL-line path (a line has no declared row, so the checker
-    /// never lets a materializing join reach here).
+    /// Empty on the destructor-synthesis/test paths, whose bodies declare no
+    /// output row for a materializing join to target.
     pub(super) cur_outputs: Vec<IrType>,
     /// R10: the self-tail combinator whose body is currently being spliced
     /// (its mangled name and the length of the loop-carried state row). A
@@ -385,16 +385,16 @@ pub(super) struct FuncBuilder<'a> {
     /// when splicing a resolved trait member body, whose splice uids belong to
     /// the *member's* namespace rather than the enclosing caller's. Keyed by
     /// name, matching `combinators`' own keying, so one key serves both
-    /// lookups. Empty on the REPL paths, which also hand out
+    /// lookups. Empty on the destructor/test paths, which also hand out
     /// `empty_splice_trait_calls` and so have no member-splice entry to miss.
     member_uid_seeds: &'a HashMap<String, u32>,
     /// P7.S8 (R1b): nesting depth of an active *member re-splice* (the bracket
     /// in `lower_resolved_word_call`'s combinator branch) specifically -- not
     /// `splice_uid_stack.is_empty()`, which also counts an ordinary combinator
     /// splice unrelated to any re-grounding. `trait_calls` (span-keyed, one
-    /// grounding per `FuncBuilder` session) stays valid at any depth of
+    /// grounding per `FuncBuilder` instance) stays valid at any depth of
     /// ordinary splice nesting; it only goes stale once a member re-splice
-    /// reintroduces a second grounding within the same session.
+    /// reintroduces a second grounding within the same instance.
     member_splice_depth: u32,
     /// Slice 7a (R9): the quotation literals this func materialized, in mint
     /// order. Drained by the lowering driver, which lowers each into its own

@@ -37,8 +37,8 @@ choice in principle, but nothing motivates switching.
   program. This is the antidote to the failure mode named in DESIGN.md: a beautiful
   half-built compiler no one writes code in. If a phase produces no runnable
   program, the phase isn't done.
-- **Liveness early.** A REPL and immediate feedback arrive in Phase 1, not at the
-  end, for the same reason.
+- **Liveness early.** Fast local iteration (`sooth run`) arrives in Phase 1, not at
+  the end, for the same reason.
 - **No calendar estimates** (they'd be fiction). Effort weights (S/M/L/XL) are
   relative, to show where the mass is.
 
@@ -71,12 +71,6 @@ author's own write-run-fix loop and for legibility, not for any LLM-authorabilit
 goal (dropped). A formatter and an auto-generated reference doc (word list + stack
 effects) once the surface stabilises around Phase 4. An LSP is optional and low
 priority for a craft language; add it only if you're using it enough to want it.
-
-The REPL (`src/repl.rs`, `src/editor.rs`) grew a hand-rolled raw-mode line editor
-(prompt, cursor movement, history, Ctrl-C/Ctrl-D handling), multi-line continuation
-for an open `:`/`type:` definition or bracket, typed/rich stack rendering on the tty
-path, and `:help`/`:words`/`:type`/`:stack`/`:clear` meta-commands with tab
-completion. The piped (non-tty) path is unchanged byte-for-byte.
 
 ## Shape of the risk
 

@@ -346,9 +346,9 @@ fn param_binds(terms: &[Term], inputs: usize) -> HashMap<&str, usize> {
 /// alone, is simply the wrong place for it.
 ///
 /// Slice 10c (R-P1-5): the one predicate every consumer shares -- the two
-/// syntactic passes, the per-word build gate, the REPL and destructor lowering
-/// paths, and the checker's `splice_tail` -- so check and lowering agree on
-/// whether a splice is a loop by construction rather than by luck.
+/// syntactic passes, the per-word build gate, destructor lowering, and the
+/// checker's `splice_tail` -- so check and lowering agree on whether a
+/// splice is a loop by construction rather than by luck.
 pub(crate) fn has_self_tail_call(word: &WordDef, combs: &CombinatorIndex) -> bool {
     !is_builtin_word_name(&word.name)
         && tail_position_calls(word, combs)

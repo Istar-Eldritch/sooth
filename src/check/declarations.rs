@@ -1108,9 +1108,7 @@ fn check_duplicate_struct_names(structs: &[StructDecl]) -> Result<(), String> {
 /// type, or with another generic header, and neither would be caught here,
 /// only surfacing later as an ambiguous name for Phase 2's instantiation
 /// lookup to pick between arbitrarily. Delegates the struct-only pass to
-/// `check_duplicate_struct_names` (also called directly by struct-only
-/// callers, e.g. the REPL, which doesn't yet declare enums or generics)
-/// rather than re-scanning `structs` twice.
+/// `check_duplicate_struct_names` rather than re-scanning `structs` twice.
 pub(super) fn check_duplicate_type_names(
     structs: &[StructDecl],
     enums: &[EnumDecl],
@@ -1361,10 +1359,7 @@ pub(super) fn check_generic_concrete_overlap(
 /// spelling only, irrelevant to what the signature actually accepts) is
 /// deliberately excluded from the comparison. Scoped to the native build
 /// path only, matching `check_generic_concrete_overlap`'s own existing
-/// scope: neither runs at the REPL, where per-definition poly checking
-/// stays out of this slice's exit criteria (crashing was never licensed;
-/// a missing duplicate-signature diagnostic there is a pre-existing gap
-/// this slice doesn't widen).
+/// scope.
 pub(super) fn check_duplicate_poly_signatures(words: &[WordDef]) -> Result<(), String> {
     let mut seen: Vec<(u32, &str, &PolySig, Span)> = Vec::new();
     for word in words {
@@ -1935,10 +1930,7 @@ pub fn check_no_word_shadows_eliminator(
     Ok(())
 }
 
-/// The rejection above, as a message. Shared with the REPL, whose two
-/// declaration paths reach the same collision one line at a time (a `:` line
-/// naming an existing enum's eliminator, and a `type:` line whose eliminator
-/// name a session word already holds) and so cannot use the whole-module scan.
+/// The rejection above, as a message.
 pub(crate) fn word_shadows_eliminator_error(
     eliminator_name: &str,
     span: Span,

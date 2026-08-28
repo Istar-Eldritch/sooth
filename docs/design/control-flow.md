@@ -52,7 +52,7 @@ fusion — `call` splices a literal's body at the consumption site, type-checkin
 to writing the body inline, because there is no standalone effect to infer for a bare body
 (D3). `call` therefore accepts only a statically-known literal; every position that would
 need a real runtime value instead (a branch join, an array element, a user or polymorphic
-word argument, an operator operand, a REPL residual stack) is a located rejection, not a
+word argument, an operator operand) is a located rejection, not a
 panic (D4). This defers the `Type`/`PolyType`/`IrType`/unification/mangling change a real
 runtime quotation type implies to the slice that gives escaping quotations a consumer for
 it (Phase 4 Slice 6). `times ( ..s i64 ~[ ..s i64 -- ..s ] -- ..s )` passes the iteration index
@@ -60,9 +60,9 @@ and requires the body return the row it received, so effect realization only eve
 inner row against itself (D6). It is library source, not a compiler-known word (slice 10b):
 a thin wrapper over a self-tail-recursive `times-helper`, whose tail call is what
 reaches the internal loop primitive (`begin_loop`/`finalize_loop`), and loops nest at any
-depth. Both names are exported: the REPL's `dlopen` import path retains only
-exported words, so a helper reached only transitively through a splice would
-be unresolvable. The quotation-literal fusion this slice owns (splicing a literal's body at its
+depth. Both names are exported: an import path retains only exported words, so a
+helper reached only transitively through a splice would be unresolvable. The
+quotation-literal fusion this slice owns (splicing a literal's body at its
 `call`) never crosses a `:` word boundary (D5); the interprocedural user-word inliner that
 lowers the combinator library itself is Slice 5's.
 
@@ -90,9 +90,7 @@ is total, library composition depth is code size at every call site, so building
 `each` would make every `map` call site depth 2 plus an extra array copy and a counter cell,
 where a leaf keeps the library flat at depth 1. "When to inline" becomes a real question
 only at slice 7, when a runtime representation first makes a genuine choice possible; until
-then "always" is the only implementable answer. The REPL
-stays a located rejection, both at a session line defining a quotation-taking word and at an
-imported closure exporting one (D7); 6c lifts it.
+then "always" is the only implementable answer.
 
 **Phase 4 Slice 6b relaxed the self-tail edge of 6a's D5 and lowered it to a loop
 back-edge.** `filter` needed no compiler change at all: a combinator body is checked by
@@ -121,40 +119,14 @@ splice. `while` inherits the R18 nested-loop limit in both directions — openin
 combinator loop while a loop is already open, and a `times` reached while splicing one — by
 raising and restoring the same counter `times` does (renamed `loop_depth`, since it now
 counts two kinds of loop); the limit is not lifted here (6d lifts it for all five combinators
-at once). The REPL chokepoint needed no change: it already rejects any quotation-declaring
-word at the definition site, self-tail or not.
+at once).
 
-**Phase 4 Slice 6c lifted the REPL's two combinator rejections by retention, not by
-inventing a frozen resolver.** A combinator has no compile event of its own to freeze
+**Combinators are never frozen.** A combinator has no compile event of its own to freeze
 against: it mints no `IrFunc` and no symbol (D2 above), and it is inlined by term-splice,
 fresh, at every call site, re-checked and re-lowered against that site's own live env each
-time. Slice 2's precedent — a polymorphic word's frozen defining-line resolver, read once
+time. Slice 2's polymorphic-word precedent — a frozen defining-line resolver, read once
 per instantiation at lowering — does not transfer, because a poly body is checked once and
 never re-checked, while a combinator body is re-checked and re-lowered at every splice site.
-So the fix is a session-level store, not a generation-tracking mechanism: `Session` gains
-`combinators: HashMap<String, WordDef>`, holding mono and poly combinators in one store
-(mirroring the checker's `is_combinator`/`collect_combinators`, which already treat both
-uniformly), replaced wholesale on redefinition and carrying no generation, epoch, or symbol.
-It is projected on demand into the two shapes the inline paths already read — a
-`HashMap<String, Combinator>` for the checker, a `HashMap<String, Vec<Term>>` for
-lowering — threaded into every REPL entry point that previously hardcoded an empty map:
-`check_def`, `check_def_collecting_drop_sites`, and `infer_line` on the checker side;
-`lower_word`, `lower_instantiation`, and `lower_line` on the lowering side. Defining a
-combinator at the REPL skips lowering entirely — check, then store, no `.so`, no symbol, no
-`dlopen` — against a view that already includes the definee itself, so a self-reference
-dispatches through the inline path rather than unknown-word, with `check_combinator_cycles`
-run over that view so a cycle formed across separate session lines is still the located
-error; a polymorphic combinator bypasses the ordinary poly-definition path's ≥2-outputs
-deferral, since a combinator is spliced inline and never lowered to a bundle-returning
-`IrFunc`, so that limitation cannot arise for it. The three now-mutually-exclusive
-name-shape stores (an ordinary word's `env`, a polymorphic word's `poly_words`, and the new
-combinators store) evict each other symmetrically on redefinition, since combinator dispatch
-is checked before both other stores and a stale entry in the wrong one would otherwise win
-silently. Importing a closure that exports a combinator retains it the same way: a module-0
-exported combinator is copied into the session store under its import-internal name, with
-its body's calls — including a self-tail call — rewritten to internal spellings, so an
-imported `while`'s self-call still resolves to itself and the self-tail recognizer still
-fires rather than recursing forever through an unrecognized name.
 
 **Conditionals and dispatch.** Boolean branching is the ordinary word `if`, taking a
 `bool` and two quotations (`~[ then ] ~[ else ] if`). Structural dispatch on ADTs is
