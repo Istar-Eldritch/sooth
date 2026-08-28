@@ -1,0 +1,19 @@
+\ Dogfood: `core::cmp`'s `Ord` surface, exercised through `hosted::testing`.
+\ `expect-eq` does real work here (R5.1): every scalar width `impl: Ord`
+\ covers is reachable through `eq`, and the remaining five comparisons return
+\ a bare `Bool`, so they go through `expect` instead (`Bool` has no `Ord`
+\ impl of its own).
+
+import: intrinsics * ;
+import: core::prelude * ;
+import: hosted::testing t | expect expect-eq | ;
+
+: main ( -- )
+  2 2 "eq holds for equal i64 values" expect-eq
+  1 1 add 2 "eq checks real arithmetic, not just repeated literals" expect-eq
+  2 3 lt "lt holds when the left operand is smaller" expect
+  3 2 gt "gt holds when the left operand is larger" expect
+  2 2 lte "lte holds for equal operands" expect
+  2 2 gte "gte holds for equal operands" expect
+  2 3 ne "ne holds for unequal operands" expect
+  2.0 2.0 "eq holds for equal f64 values" expect-eq ;

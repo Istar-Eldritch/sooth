@@ -1,7 +1,9 @@
 # Phase 7 Slice 7c: `Show`/`Write`, a sink-generic printing pair (brief)
 
-`Show` is the obvious next want once S7b's assertions can only report a label, not
-the actual/expected values. The naive shape — `trait: Show ; show ( &'T -- ) ;`
+S7b `[ done ]` shipped `hosted::testing`'s `expect`/`expect-eq`, label-only, printing
+through the still-intrinsic `.` (`lib/hosted/testing.sth`); its dogfood suite is
+`examples/tests/`. `Show` is the obvious next want once that consumer's assertions can
+only report a label, not the actual/expected values. The naive shape — `trait: Show ; show ( &'T -- ) ;`
 with an `impl: Show for i64` living wherever prints to stdout — is unsound in
 Sooth's own trait system before it's unsound anywhere else: the orphan rule
 (`check_impl_decls_orphan_scalar_target_names_only_the_trait_module`) forces *any*

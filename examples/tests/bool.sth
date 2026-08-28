@@ -1,0 +1,14 @@
+\ Dogfood: `core::bool`'s `if`/`unless`, exercised through `hosted::testing`.
+\ Neither `Bool` nor `Ordering` has an `Ord` impl, so this suite leans on
+\ `expect` alone (R5.1): each assertion's arm is chosen so the dispatch under
+\ test only reads back `True` when it picked the right branch.
+
+import: intrinsics * ;
+import: core::prelude * ;
+import: hosted::testing t | expect | ;
+
+: main ( -- )
+  True ~[ True ] ~[ False ] if "if runs the first arm when the condition is true" expect
+  False ~[ False ] ~[ True ] if "if runs the second arm when the condition is false" expect
+  True ~[ False ] ~[ True ] unless "unless runs the second arm when the condition is true" expect
+  False ~[ True ] ~[ False ] unless "unless runs the first arm when the condition is false" expect ;

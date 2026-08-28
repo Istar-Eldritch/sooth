@@ -1,0 +1,18 @@
+\ Dogfood: `core::option`'s `Option`, exercised through `hosted::testing`.
+\ `Option` has no `Ord` impl, so each case is reduced to a scalar by hand
+\ (R5.1): eliminate the `Option[i64]` down to an `i64` first, then
+\ `expect-eq` the result.
+
+import: intrinsics * ;
+import: core::prelude * ;
+import: core::option o | Some None | ;
+import: hosted::testing t | expect-eq | ;
+
+: unwrap-or ( i64 o::Option[i64] -- i64 )
+  ~[ ( Some ) Some> swap drop ]
+  ~[ ( None ) drop ]
+  Option? ;
+
+: main ( -- )
+  9 5 Some unwrap-or 5 "Some unwraps to its payload" expect-eq
+  9 None unwrap-or 9 "None falls back to the default" expect-eq ;

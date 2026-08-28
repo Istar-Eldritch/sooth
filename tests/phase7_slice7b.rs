@@ -425,3 +425,59 @@ fn cli_test_with_failing_suite_exits_nonzero() {
         "the failed verdict reaches stdout: {stdout}"
     );
 }
+
+//
+// Phase 4 -- the `examples/tests` dogfood suite (R5).
+//
+
+/// R5's dogfood suite is real Sooth source living under `examples/tests/`
+/// (`bool`/`cmp`/`option`/`result`/`combinators`), so its own broken twin --
+/// harness-written here, never committed, since R3.1/R3.2 sweep every `.sth`
+/// present with no skip mechanism -- must route through the real vocabulary
+/// (`core::prelude`, `hosted::testing`'s `expect-eq`) rather than a
+/// hand-written protocol line, proving `sooth test` catches a genuine
+/// dogfood-shaped regression and not just a synthetic one (Phase 2's
+/// `failing_entry`).
+#[test]
+fn dogfood_suite_broken_twin_is_reported_failed() {
+    let t = Tree::new("dogfood-broken");
+    t.write("sooth.pkg", &pkg_manifest());
+    t.write(
+        "tests/cmp.sth",
+        "import: intrinsics * ;\n\
+         import: core::prelude * ;\n\
+         import: hosted::testing t | expect-eq | ;\n\
+         : main ( -- )\n\
+         2 3 \"eq wrongly claims 2 equals 3\" expect-eq ;\n",
+    );
+    let (code, report, _) = run_test(&t.0, &[t.0.join("tests")]);
+    assert_ne!(code, 0);
+    assert!(
+        report.contains("FAIL ") && report.contains("cmp.sth"),
+        "the dogfood-shaped regression is caught: {report}"
+    );
+}
+
+/// Exit criterion 3: the real, committed dogfood suite (`bool`, `cmp`,
+/// `option`, `result`, `combinators`) is green under `sooth test
+/// examples/tests`, run exactly as documented from the repo root.
+#[test]
+fn dogfood_suite_examples_tests_is_green() {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_sooth"))
+        .arg("test")
+        .arg("examples/tests")
+        .current_dir(checkout())
+        .output()
+        .expect("sooth test should spawn");
+    assert!(
+        output.status.success(),
+        "stdout: {}, stderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("stdout is utf8");
+    assert!(
+        stdout.contains("5 entries, 0 failed"),
+        "the dogfood suite is green: {stdout}"
+    );
+}

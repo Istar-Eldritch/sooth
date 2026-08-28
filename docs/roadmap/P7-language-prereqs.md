@@ -1066,8 +1066,9 @@ Sequenced so nothing but the last subslice touches the compiler:
 - **S7a** `[ done ]` -- `lib/core`/`lib/hosted` package split, `lib/hosted/libc.sth` with
   `exit`. Detail: [slice7a-libc-brief](./P7/slice7a-libc-brief.md),
   [slice7a-spec](./P7/slice7a-spec.md).
-- **S7b** -- `hosted::testing`'s `expect`/`expect-eq` and the `sooth test` driver, label-only
-  output, printing via the still-intrinsic `.`. Detail:
+- **S7b** `[ done ]` -- `hosted::testing`'s `expect`/`expect-eq` and the `sooth test`
+  driver, label-only output, printing via the still-intrinsic `.`; `examples/tests/`
+  dogfooded against `bool`/`cmp`/`option`/`result`/`combinators`. Detail:
   [slice7b-testing-brief](./P7/slice7b-testing-brief.md).
 - **S7c** -- `core::show`'s `Write`/`Show` trait pair (sink-generic: one `Show` impl per type,
   living in `core`; per-target `Write` impls carry the platform dependency), with
