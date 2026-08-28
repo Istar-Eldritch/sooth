@@ -63,10 +63,10 @@ fn testing_fixture(t: &Tree) -> PathBuf {
          import: core::prelude * ;\n\
          import: hosted::testing t | expect expect-eq | ;\n\
          : main ( -- )\n\
-         \u{20}\u{20}True \"true is true\" expect\n\
-         \u{20}\u{20}False \"false is true\" expect\n\
-         \u{20}\u{20}1 1 \"one equals one\" expect-eq\n\
-         \u{20}\u{20}1 2 \"one equals two\" expect-eq ;\n",
+         True \"true is true\" expect\n\
+         False \"false is true\" expect\n\
+         1 1 \"one equals one\" expect-eq\n\
+         1 2 \"one equals two\" expect-eq ;\n",
     )
 }
 

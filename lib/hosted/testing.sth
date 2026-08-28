@@ -17,7 +17,7 @@ export: expect expect-eq ;
   if ;
 
 \ Not `inline`: this word's own body binds `Bound::User` (the `'T: Ord`
-\ instantiation), independent of `eq`'s own `inline`-ness at HEAD.
+\ instantiation), independent of whatever its callee `eq` is.
 : expect-eq ['T: Ord] ( 'T 'T str -- )
   | label |
   eq label expect ;
