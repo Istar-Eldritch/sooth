@@ -105,10 +105,13 @@ fn hosted_libc_exit_zero_code_observed() {
     assert_eq!(code, Some(0));
 }
 
-/// R5.3/R5.8(2): a `layer: core` package `depends:` on the real
-/// `lib/hosted` is rejected with the layer-violation message naming both
-/// layers -- the real checkout path, which a fixture tree cannot stand in
-/// for.
+/// R5.3/R5.8(2), deliberately one test rather than two: this *is* a
+/// harness-written `layer: core` fixture tree (R5.3), aimed at the real
+/// `lib/hosted` (R5.8(2)), which is the half a fixture dependency cannot
+/// stand in for. A pure-sandbox witness already exists and pins the whole
+/// message including the trailing rule line
+/// (`packages::tests::check_package_graph_layer_violation_is_error`), so
+/// splitting this one would only duplicate it.
 #[test]
 fn layer_core_depends_on_real_hosted_is_error() {
     let t = Tree::new("layer-violation-real-hosted");
@@ -172,7 +175,10 @@ fn hosted_import_without_depends_entry_is_error() {
         "unexpected message: {err}"
     );
     assert!(
-        err.contains("add `depends: hosted path \"<path>\" ;`"),
+        err.contains(&format!(
+            "add `depends: hosted path \"<path>\" ;` to {}",
+            t.0.join("sooth.pkg").display()
+        )),
         "unexpected message: {err}"
     );
 }
