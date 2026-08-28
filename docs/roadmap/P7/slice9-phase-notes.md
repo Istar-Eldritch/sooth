@@ -1570,3 +1570,195 @@ ragged paragraphs predate this slice. `cargo clippy --all-targets`
 still reports the same three pre-existing warnings from phase 9 (`src/parser.rs`'s
 `bool_comparison`, two `needless_borrow`s in `tests/phase4_combinators.rs`), confirmed
 unchanged by diffing against a `git stash` baseline — outside this phase's scope, not fixed.
+
+## Phase 11 — exit sweep
+
+No `src/`, `tests/` or `docs/` edits: this phase runs E1–E10, records the results
+verbatim, and re-derives the four split signals CLAUDE.md asks for at slice exit. Nothing
+found a gap large enough to reopen an earlier phase.
+
+### E1 — `sooth repl` is not a subcommand
+
+```
+$ ./target/debug/sooth repl
+unknown command: repl
+$ echo $?
+2
+$ ./target/debug/sooth
+sooth — the Sooth compiler (bootstrap)
+
+usage:
+  sooth build <file.sth> [--manifest <path>]   compile to a native binary
+  sooth run   <file.sth> [--manifest <path>]   compile and run
+  ...
+```
+
+No `repl` line in `usage()`. **Pass.**
+
+### E2 — no source file references the REPL or its incremental-compile machinery
+
+Corrected form, not the word-boundary form an earlier draft mandated (see the spec's own
+note on why `-w` goes blind to `check_poly_combinator_repl`-shaped compound identifiers):
+
+```
+$ grep -rniE 'repl|session|dlopen|override_epoch|drop_generation' src/ | grep -viE 'replac|replic'
+src/driver.rs:976:    fn dlopen(filename: *const c_char, flag: c_int) -> *mut c_void;
+src/driver.rs:996:            dlopen(cpath.as_ptr(), RTLD_NOW | RTLD_GLOBAL)
+src/driver.rs:999:            return Err(format!("dlopen {path:?} failed: {}", last_dlerror()));
+src/driver.rs:1007:        // SAFETY: handle came from a successful dlopen; cname is nul-terminated.
+src/driver.rs:1033:/// `dlopen` has already read the `.so`) by the time its function returns, so
+src/driver.rs:2504:        let lib = Library::open(&so).expect("dlopen should succeed");
+```
+
+All six lines are `driver.rs`'s relocated `Library`/`dlopen` primitive (R1) — no
+`dlsym`/`dlerror` literal survives because the extern block spells the symbol as a
+function-pointer field, not a call site the grep's word list matches, and that field is
+named in the extern block shown by line `976`'s neighbours. `drop_generation` and
+`override_epoch` contribute zero hits: phase 9's stop condition did not fire (confirmed
+there by an empty `tests/qbe_baseline` diff after regeneration), so R7 landed in full and
+there is nothing to report blocked. **Pass**, exactly matching the spec's prediction of
+"only `src/driver.rs`'s relocated `dlopen`/`dlsym` extern declarations."
+
+### E3 — `Library` and `compile_so` both live in `driver.rs` and are covered
+
+```
+$ grep -n "struct Library\|fn compile_so\|fn compile_so_produces_loadable_object\|fn library_" src/driver.rs
+945:pub fn compile_so(ssa: &str, out: &Path) -> Result<(), String> {
+983:pub struct Library {
+2477:    fn compile_so_produces_loadable_object() {
+2492:    fn library_opens_and_resolves_a_compiled_symbol() {
+```
+
+`Library` and `compile_so` are both in `driver.rs`; `compile_so_produces_loadable_object`
+still exists and is green (see the E10 gate); `library_opens_and_resolves_a_compiled_symbol`
+is R1's round-trip test. **Pass.**
+
+### E4 — `Ctx::Line` does not exist; `Ctx` is a struct
+
+```
+$ grep -rn 'Ctx::Line' src/
+(empty)
+$ grep -n "fn modules\|fn generics\|fn static_type" src/check/engine.rs
+1270:    pub(super) fn static_type(&self, name: &str) -> Option<Type> {
+1283:    pub(super) fn modules(&self) -> Option<&[ModuleInfo]> {
+1344:    pub(super) fn generics(&self) -> Option<&'a RefCell<GenericTypes>> {
+```
+
+`Ctx::Line` is gone and the three load-bearing `Option` returns (a retained poly word's
+`None` off the whole-program path, `check::check`'s `None` for `generics`, a name that
+genuinely may not be static) are unchanged. **Pass.**
+
+### E5 — every named workaround is deleted, not unreached
+
+Per-item grep over `src/` and `tests/` for every deletion target named across phases 1–9
+(`repl.rs`, `editor.rs`, `InferredLine`, `infer_line`, `check_poly_combinator_repl`,
+`parse_line`, `ast::Line`, `is_repl`, `reject_generic_typedef_in_repl`,
+`repl_unknown_capability_error`, `lower_line`, `line_terms`, `Instantiation::generation`,
+`drop_generation`, `override_epoch`): every one is empty except `repl\.rs` (4 hits) and
+`override_epoch` (1 hit), both in `tests/`, both retirement-record comments left behind by
+earlier phases explaining *why* a test was migrated or deleted (`tests/phase4_combinators.rs:245,468`,
+`tests/phase7_slice3t.rs:259`, `tests/phase7_slice3v.rs:317,313`) — not live references to
+the deleted mechanism.
+
+`docs/roadmap/` still names these items in `docs/roadmap/P7/slice9-brief.md` and
+`slice9-phase-notes.md` (this document) and in the historical `P7/slice*-{brief,spec}.md`
+files — all out of scope per R8 ("historical implementation specs... record what was
+built at the time, not current design"). The current-design roadmap files
+(`P1-repl-and-liveness.md`, `P4-polymorphism-quotations.md`, `P7-language-prereqs.md`,
+`P8-packages-modules.md`, `P12-self-hosting.md`, `ROADMAP.md`) carry none of these
+identifiers. **Pass.**
+
+### E6 — no REPL-only test module is skipped or stubbed
+
+```
+$ grep -rnE '^[[:space:]]*#\[ignore' tests/
+tests/phase7_slice3b_follow.rs:84:#[ignore = "P7.S3s review finding: `times-helper`'s own `from to lt` cross-\
+tests/phase7_slice3b_follow.rs:736:#[ignore = "P7.S3s review finding: same `times-helper` cross-call gap as \
+tests/phase7_slice3b_follow.rs:768:#[ignore = "P7.S3s review finding: same `times-helper` cross-call gap as \
+```
+
+Exactly the three non-REPL notes the spec names, and nothing else. The loose
+`grep -rn '#\[ignore'` form returns 6 at HEAD (matching note bodies that quote the
+attribute while explaining the ignore, same failure mode the spec measured as 22-vs-13
+before this slice started); it is not the witness. **Pass.**
+
+### E7 — every migrated test is proved live
+
+Carried, not re-run here: phases 2–6's per-test mutation proofs are recorded in their own
+sections of this document (phase 2's `Ctx::Word` migrations, phase 3's `ir::lower`
+migrations, phases 4–6's `run`-based rewrites), and every deleted test is classified there
+as retired-mechanism or duplicate-of-a-named-covering-test. Nothing in phases 7–10 altered
+any migrated test's assertions (phase 7's collapse is diagnostic-text-preserving by
+construction; phases 8–10 touch no test logic). **Pass**, by inheritance.
+
+### E8 — retired exit criteria are recorded where they are stated
+
+```
+$ sed -n '294,300p' docs/roadmap/P4-polymorphism-quotations.md
+**5b — imports at the REPL.** Retired with the REPL (P7.S9): ...
+$ sed -n '10,33p' docs/roadmap/P1-repl-and-liveness.md
+**Exit (retired):** the interactive criteria ... have no form without the REPL. ...
+**Dogfood (retired):** the interactive calculator session has no whole-program
+form. ...
+$ sed -n '53p' docs/roadmap/ROADMAP.md
+| **P1** | [REPL and liveness](./P1-repl-and-liveness.md) | `[M]`  ✅ done; interactive criteria retired with the REPL |
+```
+
+P4's `:295` criterion, P1's **both** Exit (`:12-13`-region) and Dogfood (`:14-15`-region)
+lines, and the `ROADMAP.md` P1 row are all present and updated — not the Exit line alone.
+**Pass.**
+
+### E9 — P12's `:19` FFI claim names the surviving mechanism
+
+```
+$ grep -n "REPL\|dlopen\|metacircular\|FFI boundary" docs/roadmap/P12-self-hosting.md
+11:host-language (Rust) code called across the FFI boundary — the Zig self-hosted-compiler
+14:stage has been ported. No metacircular JIT: the self-hosted build path still runs
+18:exports). The FFI boundary this phase depends on is one-directional today (host calling
+19:Sooth, via `driver::Library`'s `dlopen` over a `compile_so` output); a progressive port
+```
+
+`:19` names `driver::Library`'s `dlopen` over a `compile_so` output — R1's retained
+primitive — as the host→Sooth boundary; it says neither "in the REPL" nor that the
+direction is an open question, and the rest of the sentence (the reverse direction,
+pulled forward into Phase 8) stands untouched. `:14` is a plain mention strip: "REPL/"
+dropped, "No metacircular JIT ... still runs on the backend" survives verbatim. **Pass.**
+
+### Split-signal re-run (CLAUDE.md's five, against the four files that shrank this slice)
+
+| File | Lines before slice → after | Import divergence | X-and-Y-and-Z | High/low mixed | Dead-pair functions | Circular-dependency split |
+| --- | --- | --- | --- | --- | --- | --- |
+| `src/check.rs` | 5472 → 4967 (−505) | No — one `use crate::ast::{...}` cluster plus `self::{audits,builtins,captures,combinators,declarations,drop_graph,engine,operators,poly,terms,word_entry,word_families}::*`, already the CLAUDE.md-mandated per-stage split | No — `check.rs` itself is the stage's `mod.rs`-shaped hub; the responsibility split already lives in its submodules | No — the file's own top-level fns didn't move this slice | No new evidence — this slice only deleted `infer_line`/`InferredLine`/`Ctx::Line` arms, it didn't add an unrelated cluster | No |
+| `src/check/engine.rs` | 2184 → 2118 (−66) | No — single `use super::*` plus `std::{borrow::Cow, cell::RefCell}` and `crate::ast::GenericTypes` | No — one responsibility (borrow/scope/liveness engine + `Ctx`/`word_ctx`), stated in its own module doc comment | No | No | No |
+| `src/check/poly.rs` | 14393 → 14241 (−152) | No — `use super::*` only | **Signal present, not new**: at 14241 lines this is by far the largest file in the tree, doing generic-instantiation resolution, bound checking, monomorphization and lowering-adjacent splice work in one file. Per `project_poly_rs_split_deferred`, this signal has fired before this slice and its split was already ruled deferred (3/5 signals present, both candidate splits wrong at the time) — this phase does not reopen that decision, and a −152-line shrink from deletions doesn't change the shape argument that deferred it | No new evidence this slice | No | No |
+| `src/parser.rs` | 10516 → 10053 (−463) | No — `use crate::ast::{...}`, `crate::lexer::Token`, `std::collections::HashMap` | No — one responsibility (lexer → AST), the `is_repl`/`parse_line` family's removal shrank it without leaving a residual cluster | No | No — the REPL-only unit tests this slice's phase 8 removed were the file's own dead-pair candidate, and they're gone now | No |
+
+Three of four files show no signal beyond what predates this slice; `check/poly.rs`
+repeats a fact already on record (`project_poly_rs_split_deferred`) rather than surfacing
+a new one. No split action is recommended from this phase.
+
+### Final gate (E10)
+
+```
+$ cargo fmt --check && cargo clippy -- -D warnings && cargo test --no-fail-fast
+```
+
+`cargo fmt --check`: clean. `cargo clippy -- -D warnings`: clean. `cargo test
+--no-fail-fast`: **2673 passed, 0 failed, 3 ignored** (the three non-REPL
+`phase7_slice3b_follow.rs` notes), zero `tests/qbe_baseline` diffs. Unchanged from phase
+9's 2673: phase 10 was comment/doc-only and reported its own gate as "unaffected" rather
+than a new figure, and no test was added, deleted or edited between phase 9's commit and
+this one — 2673 is the number both phases certify.
+
+`cargo clippy --all-targets` still reports the same three pre-existing warnings
+(`src/parser.rs`'s `bool_comparison`, two `needless_borrow`s in
+`tests/phase4_combinators.rs`) that phases 9 and 10 already recorded as pre-existing and
+outside the `cargo clippy -- -D warnings` gate; unchanged, not fixed, not this phase's
+scope.
+
+### Slice-level summary
+
+All ten E1–E10 exit criteria pass. R7's stop condition did not fire, so no criterion is
+recorded blocked. The book rewrite (`docs/book/{preface,getting-started,words,the-stack}.md`,
+`SUMMARY.md:55`'s `the-interactive-book.md` entry) remains explicit, out-of-scope
+follow-up per phase 10's record — not started, not re-litigated here. P7.S9 is done.
