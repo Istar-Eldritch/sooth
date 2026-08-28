@@ -5,7 +5,7 @@
 import: intrinsics * ;
 import: core::prelude * ;
 import: core::combinators c ;
-import: hosted::testing t | expect-eq | ;
+import: hosted::testing | expect-eq | ;
 
 : scores ( -- array[i64 5] )
   0 5 fill | s |

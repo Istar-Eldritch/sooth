@@ -5,7 +5,7 @@
 
 import: intrinsics * ;
 import: core::prelude * ;
-import: hosted::testing t | expect | ;
+import: hosted::testing | expect | ;
 
 : main ( -- )
   True ~[ True ] ~[ False ] if "if runs the first arm when the condition is true" expect

@@ -6,7 +6,7 @@
 import: intrinsics * ;
 import: core::prelude * ;
 import: core::result r | Ok Err | ;
-import: hosted::testing t | expect-eq | ;
+import: hosted::testing | expect-eq | ;
 
 : safe-mod ( i64 i64 -- r::Result[i64 i64] )
   dup 0 eq ~[ drop drop -1 Err ] ~[ mod Ok ] if ;

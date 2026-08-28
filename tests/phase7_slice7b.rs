@@ -431,25 +431,25 @@ fn cli_test_with_failing_suite_exits_nonzero() {
 //
 
 /// R5's dogfood suite is real Sooth source living under `examples/tests/`
-/// (`bool`/`cmp`/`option`/`result`/`combinators`), so its own broken twin --
-/// harness-written here, never committed, since R3.1/R3.2 sweep every `.sth`
-/// present with no skip mechanism -- must route through the real vocabulary
-/// (`core::prelude`, `hosted::testing`'s `expect-eq`) rather than a
-/// hand-written protocol line, proving `sooth test` catches a genuine
-/// dogfood-shaped regression and not just a synthetic one (Phase 2's
-/// `failing_entry`).
+/// (`bool`/`cmp`/`option`/`result`/`combinators`). Its broken twin is the
+/// *committed* `cmp.sth`, copied verbatim into a scratch tree with one
+/// literal flipped, so the regression is dogfood-shaped rather than a
+/// synthetic protocol line (Phase 2's `failing_entry`): if this exact
+/// committed file regressed, `sooth test` must catch it.
 #[test]
 fn dogfood_suite_broken_twin_is_reported_failed() {
+    let committed = std::fs::read_to_string(Path::new(checkout()).join("examples/tests/cmp.sth"))
+        .expect("the committed cmp.sth should read");
+    let broken = committed.replacen(
+        "2 2 \"eq holds for equal i64 values\" expect-eq",
+        "2 3 \"eq holds for equal i64 values\" expect-eq",
+        1,
+    );
+    assert_ne!(broken, committed, "the target line should exist to mutate");
+
     let t = Tree::new("dogfood-broken");
     t.write("sooth.pkg", &pkg_manifest());
-    t.write(
-        "tests/cmp.sth",
-        "import: intrinsics * ;\n\
-         import: core::prelude * ;\n\
-         import: hosted::testing t | expect-eq | ;\n\
-         : main ( -- )\n\
-         2 3 \"eq wrongly claims 2 equals 3\" expect-eq ;\n",
-    );
+    t.write("tests/cmp.sth", &broken);
     let (code, report, _) = run_test(&t.0, &[t.0.join("tests")]);
     assert_ne!(code, 0);
     assert!(
@@ -477,7 +477,7 @@ fn dogfood_suite_examples_tests_is_green() {
     );
     let stdout = String::from_utf8(output.stdout).expect("stdout is utf8");
     assert!(
-        stdout.contains("5 entries, 0 failed"),
-        "the dogfood suite is green: {stdout}"
+        stdout.contains("5 entries, 0 failed (19 ok, 0 not ok assertions)"),
+        "the dogfood suite is green with every assertion counted: {stdout}"
     );
 }

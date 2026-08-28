@@ -6,7 +6,7 @@
 import: intrinsics * ;
 import: core::prelude * ;
 import: core::option o | Some None | ;
-import: hosted::testing t | expect-eq | ;
+import: hosted::testing | expect-eq | ;
 
 : unwrap-or ( i64 o::Option[i64] -- i64 )
   ~[ ( Some ) Some> swap drop ]
