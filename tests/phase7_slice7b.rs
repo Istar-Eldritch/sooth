@@ -192,6 +192,10 @@ fn driver_test_pass_reports_green() {
         )
     );
     assert_eq!(diagnostics, "", "a green run diagnoses nothing");
+    assert!(
+        !entry.with_extension("").exists(),
+        "R4: the entry's binary is built into a temp dir, never beside the source"
+    );
 }
 
 /// R1: the runner reads the *protocol*, not just the exit code. The child
