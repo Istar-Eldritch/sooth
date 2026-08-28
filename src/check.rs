@@ -87,8 +87,10 @@ pub(crate) use self::poly::{check_poly_body, poly_type_str, CrossCtx, TraitCtx};
 use self::terms::borrow_join_disagreement_error;
 use self::terms::check_terms;
 use self::terms::check_terms_relaxed;
+use self::terms::eliminator_arm_names_no_eliminator_error;
 use self::terms::eliminator_arm_outside_call_error;
 use self::terms::tagged_literal_reaches_an_eliminator_call;
+use self::terms::EliminatorArmDest;
 pub(crate) use self::word_entry::{
     check_inline_declaration, check_inline_quotation_requires_inline,
 };

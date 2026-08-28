@@ -1057,20 +1057,32 @@ fn check_term(
                         // eliminator call (a typo'd call name, or a tagged
                         // literal used as an ordinary value) was silently
                         // never checked at all, magic that this rejects.
-                        Some(tag)
-                            if !tagged_literal_reaches_an_eliminator_call(
-                                siblings,
-                                at,
-                                poly.eliminators,
-                            ) =>
-                        {
-                            return Err(eliminator_arm_outside_call_error(
-                                ctx,
-                                resolved.span,
-                                &tag.name,
-                            ));
-                        }
-                        Some(_) => {}
+                        Some(tag) => match tagged_literal_reaches_an_eliminator_call(
+                            siblings,
+                            at,
+                            poly.eliminators,
+                        ) {
+                            EliminatorArmDest::Reached => {}
+                            EliminatorArmDest::NotAdjacent => {
+                                return Err(eliminator_arm_outside_call_error(
+                                    ctx,
+                                    resolved.span,
+                                    &tag.name,
+                                ));
+                            }
+                            // P7.S12 (R7.2): the call this literal is adjacent
+                            // to names no eliminator at all -- a typo'd call
+                            // name, most likely -- which is not an adjacency
+                            // mistake and must not be told it is one.
+                            EliminatorArmDest::NamesNoEliminator(call) => {
+                                return Err(eliminator_arm_names_no_eliminator_error(
+                                    ctx,
+                                    resolved.span,
+                                    &tag.name,
+                                    &call,
+                                ));
+                            }
+                        },
                     }
                     Some(resolved)
                 }
@@ -1148,12 +1160,27 @@ fn poly_call_takes_type_args(
         })
 }
 
-/// Phase 6 slice 3 review fix (finding 3): whether the tagged literal at
-/// `siblings[at]` is actually collected as an eliminator arm. Forward-scans
-/// past every immediately-following tagged quotation literal and accepts only
-/// if that run ends in a call to a name the eliminator registry actually
-/// holds. Anything else (a typo'd call name, an intervening term, or running
-/// off the end of the body) means this literal is never consumed as an arm.
+/// P7.S12 (R7.1): the three outcomes of scanning forward from a tagged
+/// literal for the eliminator call it is meant to feed. `Reached` is the
+/// success case; the other two used to collapse into one `bool` `false`, and
+/// the whole point of splitting them is that they are different mistakes.
+/// `NotAdjacent` is a genuine written-adjacency problem -- the run of tagged
+/// literals is not immediately followed by any call at all (an intervening
+/// term, or running off the end of the body) -- and keeps the existing
+/// adjacency message. `NamesNoEliminator` is a call that *is* right there,
+/// adjacent as written, but names nothing the eliminator registry holds (a
+/// typo'd `Optionn?`, most likely): telling that a story about adjacency
+/// would be wrong, since the arms are exactly where they should be.
+pub(super) enum EliminatorArmDest {
+    Reached,
+    NotAdjacent,
+    NamesNoEliminator(String),
+}
+
+/// Phase 6 slice 3 review fix (finding 3): which of `EliminatorArmDest` the
+/// tagged literal at `siblings[at]` reaches. Forward-scans past every
+/// immediately-following tagged quotation literal and reads the call that
+/// ends the run, if any.
 ///
 /// This is *written adjacency*, deliberately stricter than
 /// `check_eliminator_call`'s own stack-based collection: a stack-neutral term
@@ -1164,24 +1191,37 @@ fn poly_call_takes_type_args(
 /// anything until *some* eliminator call) re-opens the hole this exists to
 /// close: it would accept a tagged literal that is dropped, never checked,
 /// merely because an unrelated eliminator call follows it later in the body.
-/// The error names the adjacency requirement so the rejection is a stated
-/// rule rather than an unexplained one.
 pub(super) fn tagged_literal_reaches_an_eliminator_call(
     siblings: &[Term],
     at: usize,
     eliminators: &HashMap<String, EliminatorTarget>,
-) -> bool {
+) -> EliminatorArmDest {
     let mut j = at + 1;
     while let Some(term) = siblings.get(j) {
         match &term.kind {
             TermKind::Quotation(_, _, Some(annot)) if annot.variant_tag.is_some() => {
                 j += 1;
             }
-            TermKind::Call(name, _) => return eliminators.contains_key(name),
-            _ => return false,
+            TermKind::Call(name, _) => {
+                return if eliminators.contains_key(name) {
+                    EliminatorArmDest::Reached
+                } else if name.ends_with('?') {
+                    // P7.S12 (R7.2): `?` is the generated-eliminator naming
+                    // convention (`eliminator_registry`'s own key shape,
+                    // `{surface}?`) -- an ordinary call never ends in it (R8.7's
+                    // own fixtures, `drop`/`swap`, are the negative witnesses),
+                    // so a `?`-suffixed call absent from the registry reads as
+                    // a typo'd eliminator name, not a written-adjacency
+                    // mistake.
+                    EliminatorArmDest::NamesNoEliminator(name.clone())
+                } else {
+                    EliminatorArmDest::NotAdjacent
+                };
+            }
+            _ => return EliminatorArmDest::NotAdjacent,
         }
     }
-    false
+    EliminatorArmDest::NotAdjacent
 }
 
 /// Phase 6 slice 3 review fix (finding 3): a variant-tagged quotation literal
@@ -1191,6 +1231,26 @@ pub(super) fn tagged_literal_reaches_an_eliminator_call(
 pub(super) fn eliminator_arm_outside_call_error(ctx: &Ctx, span: Span, tag: &str) -> String {
     format!(
         "error: this quotation is annotated `( {tag} )`, an eliminator-arm tag, but it is not consumed by a call to a generated eliminator{} (line {})\n  arms are written together, immediately before the call: `~[ ( A ) .. ] ~[ ( B ) .. ] Enum?`",
+        in_word(ctx),
+        span.line,
+    )
+}
+
+/// P7.S12 (R7.2): a variant-tagged quotation literal written immediately
+/// before a call, exactly where an eliminator arm belongs -- but that call
+/// names no eliminator at all, neither a monomorph nor a generic header, so
+/// there is nothing for these arms to be arms *of*. Its own message: the
+/// adjacency text (`eliminator_arm_outside_call_error`) would tell the
+/// caller to fix something that is already right.
+pub(super) fn eliminator_arm_names_no_eliminator_error(
+    ctx: &Ctx,
+    span: Span,
+    tag: &str,
+    call: &str,
+) -> String {
+    let call = crate::resolve::demangle_call(call);
+    format!(
+        "error: this quotation is annotated `( {tag} )`, an eliminator-arm tag, but the call `{call}` it is adjacent to names no eliminator in scope{} (line {})",
         in_word(ctx),
         span.line,
     )

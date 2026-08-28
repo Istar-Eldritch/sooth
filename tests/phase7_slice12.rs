@@ -665,3 +665,138 @@ fn a_narrowed_variant_binds_and_drops_at_two_instantiations() {
     assert_eq!(code, 0);
     assert_eq!(stdout, "1\n1\n");
 }
+
+// ---------------------------------------------------------------------------
+// Phase 4 (R6 + R7): the destructure intercept, and the diagnostic split.
+// ---------------------------------------------------------------------------
+
+/// R8.3: `unwrap-or`-shaped -- a poly word whose `Some` arm destructures the
+/// generic payload with `Some>` and returns it, at two instantiations whose
+/// payload layouts differ. This is R6's only end-to-end witness: nothing else
+/// in the suite reads a field out of a still-ungrounded `GenericVariant`.
+#[test]
+fn unwrap_or_destructures_the_payload_at_two_instantiations() {
+    let src = format!(
+        "{OPTION}\
+         : unwrap-or ( 'T Option['T] -- 'T )\n\
+           ~[ ( Some ) Some> swap drop ]\n\
+           ~[ ( None ) None> ]\n\
+           Option? ;\n\
+         : mki ( i64 -- Option[i64] ) Some ;\n\
+         : mkp ( Pt -- Option[Pt] ) Some ;\n\
+         : nonei ( -- Option[i64] ) None ;\n\
+         : default-pt ( -- Pt ) 0 0 Pt ;\n\
+         : main ( -- )\n\
+           0 7 mki unwrap-or .\n\
+           9 nonei unwrap-or .\n\
+           default-pt 1 2 Pt mkp unwrap-or Pt> drop . ;\n"
+    );
+    let prog = Scratch::write("r83-unwrap-or", &src);
+    let (stdout, code) = build_and_run(prog.path());
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "7\n9\n1\n");
+}
+
+/// R8.4: a poly word that both *constructs* and *eliminates* `Option['T]`,
+/// at two instantiations -- unlike phase 1's B3, this is in scope now: R1.2
+/// is what makes the construction call inside this same body lowerable, and
+/// R6 is what makes the destructure inside the arm it flows into lowerable.
+#[test]
+fn a_poly_word_constructs_and_eliminates_the_same_generic_enum_at_two_instantiations() {
+    let src = format!(
+        "{OPTION}\
+         : wrap-and-check ( 'T -- i64 )\n\
+           Some\n\
+           ~[ ( Some ) Some> drop 1 ]\n\
+           ~[ ( None ) None> 0 ]\n\
+           Option? ;\n\
+         : main ( -- )\n\
+           1 2 Pt wrap-and-check .\n\
+           7 wrap-and-check . ;\n"
+    );
+    let prog = Scratch::write("r84-construct-eliminate", &src);
+    let (stdout, code) = build_and_run(prog.path());
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "1\n1\n");
+}
+
+/// R8.5: `~[ ( None ) None> .. ]` over a generic scrutinee, at two
+/// instantiations (R6.3) -- previously unwitnessed. `None` carries no fields,
+/// so `None>` destructures to nothing; the real assertion is that the call is
+/// accepted and lowers at both payload layouts, `is-none` returning `1` for
+/// a `None` scrutinee and `0` for its own `Some` arm.
+///
+/// Two separate builds, not one program: a *concrete* zero-arity constructor
+/// shared bare across two monomorphs of one header (an explicit
+/// `Option[Pt]`-returning `None` caller in a build that also mints
+/// `Option[i64]` resolves to whichever monomorph minted first, regardless of
+/// declaration order) is a pre-existing collision, reproducing identically
+/// before this phase's own changes and entirely outside R6's scope -- it is
+/// the *construction* side of a zero-field variant across concrete
+/// monomorphs, not a poly body's destructure of one. Each build below mints
+/// exactly one `Option` instantiation, so that collision never triggers.
+#[test]
+fn a_zero_field_variant_destructures_to_nothing_at_the_i64_instantiation() {
+    let src = format!(
+        "{OPTION}\
+         : is-none ( Option['T] -- i64 )\n\
+           ~[ ( Some ) drop 0 ]\n\
+           ~[ ( None ) None> 1 ]\n\
+           Option? ;\n\
+         : mki ( i64 -- Option[i64] ) Some ;\n\
+         : nonei ( -- Option[i64] ) None ;\n\
+         : main ( -- )\n\
+           7 mki is-none .\n\
+           nonei is-none . ;\n"
+    );
+    let prog = Scratch::write("r85-zero-field-i64", &src);
+    let (stdout, code) = build_and_run(prog.path());
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "0\n1\n");
+}
+
+/// R8.5, the second instantiation: a struct payload, in its own build for the
+/// reason documented above.
+#[test]
+fn a_zero_field_variant_destructures_to_nothing_at_the_struct_instantiation() {
+    let src = format!(
+        "{OPTION}\
+         : is-none ( Option['T] -- i64 )\n\
+           ~[ ( Some ) drop 0 ]\n\
+           ~[ ( None ) None> 1 ]\n\
+           Option? ;\n\
+         : mkp ( Pt -- Option[Pt] ) Some ;\n\
+         : nonep ( -- Option[Pt] ) None ;\n\
+         : main ( -- )\n\
+           1 2 Pt mkp is-none .\n\
+           nonep is-none . ;\n"
+    );
+    let prog = Scratch::write("r85-zero-field-pt", &src);
+    let (stdout, code) = build_and_run(prog.path());
+    assert_eq!(code, 0);
+    assert_eq!(stdout, "0\n1\n");
+}
+
+/// R8.6/R7.2: the remaining R8.6 case -- a genuinely absent eliminator (a
+/// typo'd `Optionn?`). The arms are written correctly, immediately before the
+/// call, so this must not read as an adjacency mistake: R7.3's own
+/// requirement, that a witness for this message be a real typo, not an
+/// unrelated call like `drop`/`swap` (which stay the adjacency message, R8.7).
+#[test]
+fn a_typod_eliminator_call_names_no_eliminator_rather_than_an_adjacency_mistake() {
+    let src = format!(
+        "{OPTION}\
+         : probe ( Option['T] -- i64 )\n\
+           ~[ ( Some ) drop 1 ]\n\
+           ~[ ( None ) drop 0 ]\n\
+           Optionn? ;\n\
+         : mki ( i64 -- Option[i64] ) Some ;\n\
+         : main ( -- ) 7 mki probe . ;\n"
+    );
+    let prog = Scratch::write("r72-typo", &src);
+    let err = build_error(prog.path());
+    assert!(
+        err.contains("the call `Optionn?` it is adjacent to names no eliminator in scope"),
+        "expected R7.2's own located rejection, got: {err}"
+    );
+}

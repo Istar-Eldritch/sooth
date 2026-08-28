@@ -661,10 +661,19 @@ pub(super) fn poly_walk(
     for (at, term) in terms.iter().enumerate() {
         if let TermKind::Quotation(_, _, Some(annot)) = &term.kind {
             if let Some(tag) = &annot.variant_tag {
-                if !tagged_literal_reaches_an_eliminator_call(terms, at, &eliminators) {
-                    return Err(eliminator_arm_outside_call_error(
-                        ctx, annot.span, &tag.name,
-                    ));
+                match tagged_literal_reaches_an_eliminator_call(terms, at, &eliminators) {
+                    EliminatorArmDest::Reached => {}
+                    EliminatorArmDest::NotAdjacent => {
+                        return Err(eliminator_arm_outside_call_error(
+                            ctx, annot.span, &tag.name,
+                        ));
+                    }
+                    // P7.S12 (R7.2): its own message, not the adjacency one.
+                    EliminatorArmDest::NamesNoEliminator(call) => {
+                        return Err(eliminator_arm_names_no_eliminator_error(
+                            ctx, annot.span, &tag.name, &call,
+                        ));
+                    }
                 }
             }
         }
@@ -1888,6 +1897,15 @@ pub(super) fn poly_call_term(
                 sig,
             ));
         }
+    }
+    // P7.S12 (R6): the destructure dual of the construction arm just below --
+    // tried first because it reads its header off the *operand* (a narrowed
+    // `PolyType::GenericVariant`, only ever produced inside an eliminator
+    // arm, R3.5) rather than searching the module by name, so there is
+    // nothing for `poly_construct_generic`'s own by-name search to find here
+    // and the two can never both match one call.
+    if let Some(next) = poly_destructure_generic(name, span, &mut stack, ctx, tctx) {
+        return Ok(next);
     }
     // P7 slice 3a (R3): a call naming a variant of a generic enum header (or
     // a generic struct's own constructor) is legal in a polymorphic body,
@@ -4315,6 +4333,78 @@ fn poly_env_exact_match(
                     .all(|(s, inp)| matches!(&s.pt, PolyType::Concrete(t) if t == inp))
         })
     })
+}
+
+/// P7.S12 (R6.1/R6.2): the exact dual of `poly_bind_construction_arg` --
+/// construction binds header variables *from* operands, this applies them
+/// *to* fields. `None` unless the call's own top operand is a narrowed
+/// `PolyType::GenericVariant` and `name` is that variant's own `{name}>`
+/// destructure spelling: unlike `poly_construction_header`, there is nothing
+/// to search here -- the operand already names its header, module and
+/// variant index (R5.4's scrutinee `args`, carried unchanged) -- so a bare
+/// name match against *this* variant is the whole gate.
+///
+/// R6.3: a zero-field variant's field list is empty, so the loop below runs
+/// zero times and the call destructures to nothing, exactly the concrete
+/// rule. R6.4 (out of scope): a generic body has no field-projection route at
+/// all, so nothing here needs to reject one specially.
+fn poly_destructure_generic(
+    name: &str,
+    span: Span,
+    stack: &mut Vec<PolySlot>,
+    ctx: &Ctx,
+    tctx: &mut TraitCtx,
+) -> Option<Vec<PolySlot>> {
+    let top = stack.last()?;
+    let PolyType::GenericVariant {
+        idx,
+        module,
+        vi,
+        args,
+        ..
+    } = &top.pt
+    else {
+        return None;
+    };
+    let (idx, module, vi, args) = (*idx, *module, *vi, args.clone());
+    let cell = ctx
+        .generics()
+        .expect("a `GenericVariant` operand is only built from a live instantiator");
+    let generics = cell.borrow();
+    let decl = &generics.enums[idx as usize];
+    let variant = &decl.variants[vi];
+    if name != format!("{}>", variant.name) {
+        return None;
+    }
+    let field_ptys: Vec<PolyType> = variant.fields.iter().map(|(_, p)| p.clone()).collect();
+    let header_name: &'static str = Box::leak(decl.name.clone().into_boxed_str());
+    drop(generics);
+
+    stack.pop();
+    // R6.1: fields push in declared order, first field deepest -- an
+    // ordinary forward loop already leaves the first field pushed deepest,
+    // mirroring the concrete `EnumWord::Destructure` lowering.
+    for field_pty in &field_ptys {
+        let substituted = crate::ast::substitute_generic_variant_field(field_pty, &args);
+        stack.push(PolySlot::new(substituted));
+    }
+    // P7.S12 (R1.2/R6.1): record this call site's header, exactly as
+    // `poly_construct_generic` does for a construction call, so lowering can
+    // ground the right monomorph's `EnumId` for the bare-key
+    // `EnumWord::Destructure` lookup (`apply_subst`'s `Generic` arm grounds
+    // this to `Type::Enum`, which is what `check_poly_call`'s `enum_words`
+    // fixpoint filters on).
+    tctx.enum_sites.push((
+        span,
+        PolyType::Generic {
+            is_enum: true,
+            idx,
+            module,
+            args,
+            name: header_name,
+        },
+    ));
+    Some(std::mem::take(stack))
 }
 
 /// P7 slice 3a (R3): a call to `name` naming a generic struct's constructor
