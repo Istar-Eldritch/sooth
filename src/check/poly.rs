@@ -970,7 +970,13 @@ pub(super) fn poly_term(
             // links whatever the symbolic path resolved instead. P7.S6b (R2a):
             // an explicit length list is rejected the same way.
             if !type_args.is_empty() || !len_args.is_empty() {
-                return Err(type_arguments_in_poly_body_error(ctx, span, name));
+                return Err(type_arguments_in_poly_body_error(
+                    ctx,
+                    span,
+                    name,
+                    !type_args.is_empty(),
+                    !len_args.is_empty(),
+                ));
             }
             return poly_call_term(
                 name,
@@ -5837,9 +5843,11 @@ pub(super) fn check_poly_call(
     // divergence R6 makes reachable by allowing a redundant instantiation.
     // `len` reorders the same way -- pass 1 skips the quotation input of
     // `( [ array['T 'N] -- ] array['U 'M] array['T 'N] -- )`, so `'M` (id 1) binds before
-    // `'N` (id 0) -- but not *divergently*: R4 gives it no seed path, so its
-    // order is a function of the callee's signature and every minting path
-    // agrees. Sorted anyway because `Subst`'s derived `Eq`, which
+    // `'N` (id 0). P7.S6b gives it a seed path too (`len_args`/`seeded_len`
+    // above), so divergence is now reachable in principle -- an inferred call
+    // and an explicitly-instantiated call at the same theta could push `'N`
+    // and `'M` in different orders. The sort below is what actually keeps
+    // both paths agreeing, since `Subst`'s derived `Eq`, which
     // specializations dedup on, compares vectors positionally.
     subst.ty.sort_by_key(|(v, _)| *v);
     subst.len.sort_by_key(|(v, _)| *v);
@@ -9438,7 +9446,7 @@ pub(super) fn explicit_len_instantiation_conflict_error(
     let callee = crate::resolve::demangle_call(callee);
     let line = span.line;
     format!(
-            "error: `{callee}` in {name} (line {line}) was instantiated at `{var}` = `{instantiated}` but its operand is `{operand}`",
+            "error: `{callee}` in {name} (line {line}) was instantiated at length `{var}` = `{instantiated}` but its operand is `{operand}`",
             name = ctx.rendered_word()
         )
 }
@@ -11012,7 +11020,7 @@ mod tests {
         .unwrap_err();
         assert_eq!(
             err,
-            "error: `sum` in `probe` (line 0) was instantiated at `'N` = `4` but its operand is `8`"
+            "error: `sum` in `probe` (line 0) was instantiated at length `'N` = `4` but its operand is `8`"
         );
     }
 
@@ -12166,7 +12174,7 @@ mod tests {
         .expect_err("an explicit instantiation inside a poly body is rejected");
         assert_eq!(
             err,
-            "error: `sum` in `wrapper` (line 2) cannot be explicitly instantiated inside a polymorphic word's own body\n  note: instantiate the enclosing word at its own call site instead; forwarding a type argument through a polymorphic body is not supported"
+            "error: `sum` in `wrapper` (line 2) cannot be explicitly instantiated inside a polymorphic word's own body\n  note: instantiate the enclosing word at its own call site instead; forwarding a type or length argument through a polymorphic body is not supported"
         );
     }
     /// P7.S6b (R2a): the non-poly dispatch route's `no_type_arguments_error`
@@ -12178,8 +12186,35 @@ mod tests {
             .expect_err("a concrete word takes no explicit length argument");
         assert_eq!(
             err,
-            "error: `addup` (line 2) takes no type arguments; only a call to a polymorphic word may be explicitly instantiated"
+            "error: `addup` (line 2) takes no length arguments; only a call to a polymorphic word may be explicitly instantiated"
         );
+    }
+    /// P7.S6b: type and length arguments seed independently -- a callee
+    /// declaring both `'T` and `'N: Len` may be called with only the length
+    /// sublist (`sum[4]`), leaving `'T` to ordinary inference off the
+    /// operand. Each list's arity is checked only when that list is
+    /// non-empty, so a length-only call is not an arity error.
+    #[test]
+    fn a_length_only_explicit_argument_leaves_the_type_variable_to_inference() {
+        check_src(
+            ": sum['T 'N: Len] ( array['T 'N] -- usize ) len swap drop ;\n\
+             : main ( -- ) 0 4 fill sum[4] drop ;",
+        )
+        .expect("the length argument seeds 'N; 'T is inferred as i64 from the operand");
+    }
+    /// P7.S6b: the call-site instantiation list is always type-sublist-then-
+    /// length-sublist (a lexical convention, not a declaration-order mirror).
+    /// Declaring the length variable *before* the type variable in the
+    /// header (`'N: Len 'T`, the reverse of every other test's `'T 'N: Len`)
+    /// must still check identically -- `ty_var_names`/`len_var_names` are
+    /// collected per-kind, independent of interleaving in the declaration.
+    #[test]
+    fn a_length_variable_declared_before_the_type_variable_still_checks() {
+        check_src(
+            ": sum['N: Len 'T] ( array['T 'N] -- usize ) len swap drop ;\n\
+             : main ( -- ) 0 4 fill sum[i64 4] drop ;",
+        )
+        .expect("declaration order of 'N vs 'T does not affect call-site checking");
     }
     /// P7.S3t (R5): the redirect itself, at `unify_poly_input`. One prior
     /// binding, one disagreeing operand, two messages -- the seeded one names

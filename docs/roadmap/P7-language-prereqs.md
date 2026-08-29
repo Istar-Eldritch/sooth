@@ -1028,7 +1028,7 @@ against a concrete caller. `cargo fmt --check && cargo clippy -- -D warnings && 
 is green. The `Kind` enum has `Star` and `Len` variants; the `: Len` annotation syntax is
 live at `type:`, `trait:`, and `:` binding sites.
 
-**P7.S6b -- Explicit length arguments at word call sites.** `[ planned ]` The
+**P7.S6b -- Explicit length arguments at word call sites.** `[ done ]` The
 instantiation-side companion to S6a. A word signature can already declare a length variable
 (`sum['T 'N: Len] ( array['T 'N] -- 'T )`, parseable since S6a) and a caller can already bind
 it by inference, but there is no syntax to bind it explicitly: `sum[i64 4]` does not parse.
@@ -1060,11 +1060,12 @@ diagnostic" hazard those guards exist to prevent.
 `unify_poly_input`'s two `Len::Var` conflict arms (`src/check/poly.rs:8022`, `:8230`) through a
 seeded-length set, mirroring the `PolyType::Var` arm's existing `seeded.contains(v)` routing
 (`:7987`): today both `Len::Var` arms always raise the generic `poly_len_conflict_error`,
-never the caller-context `explicit_instantiation_conflict_error`.
+never the caller-context `explicit_len_instantiation_conflict_error`.
 
 **Exit:** a caller can write `sum[i64 4]` to explicitly bind both `'T = i64` and `'N = 4`
 against a word declared `sum['T 'N: Len] ( array['T 'N] -- usize )`, and a conflicting operand,
-type or length, produces the routed `explicit_instantiation_conflict_error`, not the generic
+type or length, produces the routed `explicit_instantiation_conflict_error`/
+`explicit_len_instantiation_conflict_error`, not the generic
 `poly_var_conflict_error`/`poly_len_conflict_error`. The exit-criterion example reads the
 length back (`len`) rather than indexing: review found `inline` and explicit instantiation are
 mutually exclusive today (an `inline` word is a combinator, and

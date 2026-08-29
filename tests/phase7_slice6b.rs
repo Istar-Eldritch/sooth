@@ -107,7 +107,7 @@ fn explicit_length_argument_conflicting_with_operand_is_rejected() {
     let err = build_error(&entry);
     assert!(
         err.contains(
-            "`sum` in `main` (line 4) was instantiated at `'N` = `4` but its operand is `8`"
+            "`sum` in `main` (line 4) was instantiated at length `'N` = `4` but its operand is `8`"
         ),
         "{err}"
     );

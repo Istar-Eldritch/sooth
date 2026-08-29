@@ -212,7 +212,12 @@ fn check_term(
                     poly.trait_resolve.traits,
                 )
             {
-                return Err(no_type_arguments_error(span, name));
+                return Err(no_type_arguments_error(
+                    span,
+                    name,
+                    !type_args.is_empty(),
+                    !len_args.is_empty(),
+                ));
             }
             if let Some(binding) = scope.local(name) {
                 let (ty, aliases, held, quot, surviving) = (

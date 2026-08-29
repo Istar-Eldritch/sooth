@@ -72,14 +72,15 @@ Key decisions and their rationale:
   `subst.len`/`seeded_len` seeding, and renamed/re-scoped the stale
   `instantiation_arity_error` test and note.
 - **Phase 3 -- conflict routing** (`8f03328`): added `seeded_len: &[u32]` to
-  `unify_poly_input`, routed both `Len::Var` arms through it, and added
-  `explicit_len_instantiation_conflict_error` (`src/check/poly.rs`,
-  `src/check/combinators.rs`).
+  `unify_poly_input` (`src/check/poly.rs`, which also gains
+  `explicit_len_instantiation_conflict_error`), routed both `Len::Var` arms
+  through it, and threaded the new parameter through `src/check/combinators.rs`'s
+  two call sites (each passing `&[]`, unchanged behaviour).
 - **Phase 4 -- integration golden** (`6c4dcbb`): `tests/phase7_slice6b.rs`
   covering accept (`sum[i64 4]` over a length-4 array), length-conflict
   (explicit-instantiation message, not the generic one), and length-arity
   rejection, over the non-`inline` fixture
-  `: sum['T 'N: Len] ( array['T 'N] -- usize ) len ;`.
+  `: sum['T 'N: Len] ( array['T 'N] -- usize ) len swap drop ;`.
 
 ## Exit criteria (met)
 
