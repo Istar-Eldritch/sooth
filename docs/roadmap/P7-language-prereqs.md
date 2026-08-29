@@ -1205,16 +1205,19 @@ overload doubles). A top-level generic *input* slot stays rejected before ground
 only the declared output, or a generic nested inside a quotation effect/array/reference/
 cell, is admitted. Every registry this pass writes to is dropped when the check returns --
 nothing it mints ever reaches `module.structs`/`module.enums`/`module.arrays`/
-`module.owned_cells`/`module.refs`/`module.slices`. Ten goldens and the mutation recipe are
-in `tests/phase7_slice11.rs`; mutation 10 (dropping the generated-sigs prefix skip) is a
-recorded, accepted survivor -- the overload resolver silently picks the first identical
+`module.owned_cells`/`module.refs`/`module.slices`. Ten goldens are in
+`tests/phase7_slice11.rs`; the mutation recipe itself lives in the spec document's Mutation
+recipe table, not in the test file. Mutation 10 (dropping the generated-sigs prefix skip) is
+a recorded, accepted survivor -- the overload resolver silently picks the first identical
 candidate, so a doubled `local_env` entry is unobservable rather than a live gap. Detail:
 [slice11-brief](./P7/slice11-brief.md), [slice11-spec](./P7/slice11-spec.md).
 
 CLAUDE.md's five split signals, re-run over `src/check/poly.rs` after this slice's ~555-line
 addition (`WordScopedRegistries`, `ground_into_word_scoped_registries`, the R3 input-slot
-guard, the R4 env-extension block, and their tests). The file is 15799 lines and stays at
-the same **3 of 5** P7.S12 recorded: no new import (`RefCell` and `GenericTypes` were
+guard, the R4 env-extension block, and their tests). The file is 15799 total lines (`wc -l`;
+not the same measure as P7.S12's 9311 *source* lines below, which excludes blanks/comments,
+so the two counts are not directly comparable) and stays at the same **3 of 5** P7.S12
+recorded: no new import (`RefCell` and `GenericTypes` were
 already imported for the instantiator threading this slice extends, so import divergence
 does not fire); the addition sits inside the file's existing signature-grounding/
 instantiation responsibility, not a fourth axis, so "does X and Y and Z" does not gain a new
