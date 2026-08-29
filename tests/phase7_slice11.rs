@@ -276,3 +276,24 @@ fn a_standalone_mint_after_an_earlier_check_time_mint_lands_at_the_right_id() {
         "expected the call site (main) to fail once the stale-base mint lands right: {err}"
     );
 }
+
+/// Golden 10: R4's *struct* half, otherwise unwitnessed by goldens 1-9 (every
+/// prior fixture mints an enum). `wrap` is `inline`, so this also exercises
+/// the splice-time recheck of its body in `main` -- with the struct tail
+/// correctly appended, `main`'s own env still lacks this check-time-only
+/// mint's `Cell` (the same frozen-call-site gap golden 6 pins for enums), so
+/// the failure lands at the call site. Stubbing R4's struct skip to drop the
+/// whole tail moves the failure back to the def site (`wrap`), which is the
+/// discriminator this golden exists to pin.
+#[test]
+fn a_check_time_struct_monomorphs_constructor_is_absent_from_the_call_site_env() {
+    let src = "type: Cell['T] val 'T ;\n\
+         : wrap inline ( 'T ~[ 'T -- 'T ] -- Cell['T] ) call Cell ;\n\
+         : main ( -- ) 7 ~[ 1 add ] wrap drop ;\n";
+    let prog = Scratch::write("golden10", src);
+    let err = build_error(prog.path());
+    assert!(
+        err.contains("unknown word `Cell` in `main`"),
+        "expected the call site (main), not the def site (wrap), to fail: {err}"
+    );
+}
