@@ -1180,7 +1180,7 @@ CLAUDE.md's five split signals re-run against the two files the slice grew,
 below the two-signal threshold and predates this slice. Neither splits.
 
 **P7.S11 -- Grounding a generic type applied to its own type variable inside an inline
-combinator's standalone check.** `[ planned ]` P7.S3a taught the checker to ground
+combinator's standalone check.** `[ done ]` P7.S3a taught the checker to ground
 `PolyType::Generic` (`Option['T]`, `Result['T 'E]`, ...) at a call site inside an ordinary
 poly word's own body, by minting through the live `GenericTypes` instantiator threaded on
 `Ctx::Word`. `check_poly_combinator_standalone` (`src/check/poly.rs:381`) -- the path that
@@ -1192,7 +1192,48 @@ regardless of whether a real registry exists elsewhere in the program. Reproduce
 `inline` word over `Option['T]` (`: map inline ( Option['T] ~[ 'T -- 'U ] -- Option['U] )
 ...`) fails at its own body's construction of the `Some`/`None` result, not at any call
 site. This blocks writing `Option`/`Result`-shaped combinators (`map`, `and_then`, ...) as
-library words at all. Detail: [slice11-brief](./P7/slice11-brief.md).
+library words at all.
+
+Fixed by grounding the standalone check against a *word-scoped* clone of every registry a
+mint can touch, never the live one: a scratch `GenericTypes` rebased onto the live
+registries' current lengths (so a fresh mint cannot collide with an earlier word's
+check-time flush), word-scoped copies of `structs`/`enums`/`arrays`/`cells`/`refs`/`slices`
+(`WordScopedRegistries`, `ground_into_word_scoped_registries`), and a word-scoped clone of
+`env` extended with exactly the newly-minted monomorph's generated constructor/destructure
+sigs (the tail past the base decls' own sigs, never the whole list, or every existing
+overload doubles). A top-level generic *input* slot stays rejected before grounding starts;
+only the declared output, or a generic nested inside a quotation effect/array/reference/
+cell, is admitted. Every registry this pass writes to is dropped when the check returns --
+nothing it mints ever reaches `module.structs`/`module.enums`/`module.arrays`/
+`module.owned_cells`/`module.refs`/`module.slices`. Ten goldens and the mutation recipe are
+in `tests/phase7_slice11.rs`; mutation 10 (dropping the generated-sigs prefix skip) is a
+recorded, accepted survivor -- the overload resolver silently picks the first identical
+candidate, so a doubled `local_env` entry is unobservable rather than a live gap. Detail:
+[slice11-brief](./P7/slice11-brief.md), [slice11-spec](./P7/slice11-spec.md).
+
+CLAUDE.md's five split signals, re-run over `src/check/poly.rs` after this slice's ~555-line
+addition (`WordScopedRegistries`, `ground_into_word_scoped_registries`, the R3 input-slot
+guard, the R4 env-extension block, and their tests). The file is 15799 lines and stays at
+the same **3 of 5** P7.S12 recorded: no new import (`RefCell` and `GenericTypes` were
+already imported for the instantiator threading this slice extends, so import divergence
+does not fire); the addition sits inside the file's existing signature-grounding/
+instantiation responsibility, not a fourth axis, so "does X and Y and Z" does not gain a new
+answer; `ground_into_word_scoped_registries` and `check_poly_combinator_standalone` call
+each other in one direction only, no new cycle; and the new functions sit inside the
+existing `poly_walk`/`apply_subst` call chain, so no new island of functions that never call
+each other. The split stays deferred for the reason P7.S12 gave it: both candidate splits
+(`poly/diagnostics.rs`, `poly/eliminator.rs`) are still layer-shaped or coupling-increasing,
+and this slice's work sits inside the responsibility the file already carries.
+
+**P7.S11-follow -- The frozen call-site env.** `[ planned ]` A monomorph minted at check
+time (via `apply_subst`'s `Generic` arm, in an ordinary word or in P7.S11's standalone
+combinator check) never enters `env`, which is built once at `src/check.rs:568-576`, before
+the per-word loop. Consequence, measured by P7.S11's golden 6: an `inline` combinator
+constructing a generic output is only callable from a later word if a **parse-time**
+monomorph of the same header exists somewhere in the program; a file whose only `Option`
+instantiation is `map`'s own construction still does not build. Fixing it needs an `env`
+that can be extended mid-word-walk, since the mint and the lookup happen inside one
+`check_word` call -- a distinct slice from P7.S11's word-scoped-registries fix.
 
 **P7.S12 -- A generic enum's eliminator, and its generated words, resolve per monomorph
 inside a poly body.** `[ done ]` Detail: [slice12-spec](./P7/slice12-spec.md).

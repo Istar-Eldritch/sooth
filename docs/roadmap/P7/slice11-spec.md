@@ -1,6 +1,6 @@
 # P7.S11 -- Generic construction inside an inline combinator's standalone check
 
-**Status:** Planned
+**Status:** Done
 **Discovery:** `docs/roadmap/P7/slice11-brief.md`
 
 > Revision note (round 3, 2026-08-29). Round 2's rebase + mint + flush into
@@ -19,6 +19,21 @@
 >   seams: a new extracted free function, and the public `lookup_enum`.
 > - **The mutation recipe named witnesses that cannot fail.** Fixed, with one
 >   mutation gaining a new purpose-built golden and every row re-derived.
+>
+> **Phase 3 addendum (2026-08-29).** All ten mutation-recipe rows were run against
+> the working tree, each reverted with `git checkout` before the next: rows
+> 1-8 and 10 were re-measured fresh and matched their recorded outcome
+> exactly, with one correction -- row 5's "every minting golden" omitted
+> golden 5, which dies identically to golden 6 (fixed in the row below). Row
+> 9 was cross-checked rather than re-run (it needs a structural signature
+> change to `check_poly_combinator_standalone` to hand live, mutable
+> registries down to a read-only-slice call site); its recorded panic line
+> (`src/ir/layout.rs:719`) and named unit tests were confirmed present and
+> passing at baseline against the current source. Row 10 (the accepted
+> survivor) reconfirmed: all ten goldens stay green with the prefix skip
+> dropped, matching the resolver-silently-picks-the-first-candidate
+> explanation already on file. `cargo fmt --check && cargo clippy -- -D
+> warnings && cargo test` green throughout.
 >
 > Every line citation below was re-read against the working tree at `9b220b8`
 > while writing this revision; the round-2 citations for
@@ -990,7 +1005,7 @@ minting fixtures are goldens 4, 6, 8 and 9.
 | 2 | Drop R3's input-slot guard | `standalone_combinator_generic_input_slot_is_still_rejected`, golden 3, **and** `tests/phase7_slice12.rs:632 a_combinator_over_a_generic_enum_slot_is_rejected_before_r15_can_fire` (measured: exactly these; the rest of the suite stayed green) | goldens 1, 2 |
 | 3 | Make R3's guard recurse into nested positions | `standalone_generic_nested_in_a_quotation_input_is_not_rejected`, goldens 2, 4, 8 | golden 3 |
 | 4 | Drop R2's `rebase` call in `ground_into_word_scoped_registries` | `standalone_grounded_output_id_matches_its_extended_slice_position` (its step 2 forces a stale base, so the id is one short), golden 9 (error moves from `main` to a `wrap` type mismatch) | goldens 1, 2 (nothing is minted there) |
-| 5 | Drop R2's `flush_enums_into(&mut local.enums)` | `standalone_grounded_output_id_matches_its_extended_slice_position` (`local.enums.len()` unchanged), and **every minting golden**: 4, 6, 8, 9 | goldens 1, 2 |
+| 5 | Drop R2's `flush_enums_into(&mut local.enums)` | `standalone_grounded_output_id_matches_its_extended_slice_position` (`local.enums.len()` unchanged), and **every minting golden**: 4, 5, 6, 8, 9 (round-3's table omitted golden 5 -- phase 3 measurement: it dies too, `Ok` unresolved in `wrap` at the def site, since golden 5 mints exactly as golden 6 does) | goldens 1, 2 |
 | 6 | Point R2 at the live cell instead of the clone | `standalone_stand_in_monomorph_does_not_enter_the_live_registry` | goldens 1, 2 |
 | 7 | Stub R4 (thread + flush, but no `local_env`) | golden 6 (its error moves back to `wrap`), golden 9 (same shift, from `main` to a `wrap` type mismatch), golden 10 (struct half, same shift), golden 5's first assertion (measured: moves from the unbound-output-variable message to `` unknown word `Ok` in `wrap` ``, since R4 is a silent prerequisite for reaching golden 5's own check) | **golden 7 stays green -- round-3's named witness was wrong (phase 2 finding).** Measured: under a stubbed R4, `wrap`'s body still fails with `` unknown word `One` in `wrap` ``, identical to the live outcome, because `One` precedes `Ok` textually in `dup One drop Ok` and the body walk reports the first unresolved name regardless of whether `Ok` would also have failed. Golden 7 pins R4's *reach boundary* (an unrelated header stays unknown even when R4 works), not an R4-presence witness; it is a boundary pin, not a killer, for this row. golden 8 stays green too -- `hold`'s own body never names `Ok` (only `call` on the quotation parameter, plus `dup`/`arr4`), so a missing `local_env` registration is invisible to it; it is an R6/array witness, not an R4 one. **golden 2 and `standalone_combinator_grounds_a_generic_output_without_a_constructor` stay green** -- the pair proving slot grounding and body-constructor resolution are distinct halves (measured: under a stubbed R4, `relay` still runs and prints `7`). Golden 1 also stays green, but for the uninteresting reason that it mints nothing |
 | 8 | Feed R4's sig generation a one-element slice instead of the extended one, **at the call site** | **golden 9 -- round-3's named witness was wrong (phase 2 finding).** Measured: golden 6 (no other check-time mint before `wrap`) stays green under this mutation, because `local.enums` already has exactly one element beyond the base, so a one-element slice *is* the extended slice -- an identity edit for that fixture. Golden 9 (`Box[i64]` flushed by `seed` before `wrap` runs, so the base is length 1) is the real killer: fed a one-element slice instead of the true tail, `Ok` is registered against `local.enums[0]` (`Box`), a type mismatch inside `wrap`'s own body, instead of `` unknown word `Ok` in `main` `` | goldens 1, 2, 6, 8 (none of these has a check-time mint *before* the combinator's own, so a one-element slice coincides with the true tail and the mutation is unobservable) |
