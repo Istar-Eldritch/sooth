@@ -1267,8 +1267,7 @@ fn check_outputs(
     final_stack: &[Slot],
     declared: &[Type],
     line: u32,
-    structs: &[StructDecl],
-    enums: &[EnumDecl],
+    ctx: &Ctx,
     arrays: &[ArrayDecl],
 ) -> Result<(), String> {
     // R10: a quotation left on the exit stack gets its own diagnostic, ahead
@@ -1290,7 +1289,11 @@ fn check_outputs(
             .get(declared.len()..)
             .unwrap_or_default()
             .iter()
-            .find(|s| is_linear(s.ty, structs, enums, arrays))
+            .find(|s| {
+                ctx.with_extended_type_slices(|structs, enums| {
+                    is_linear(s.ty, structs, enums, arrays)
+                })
+            })
         {
             return Err(surplus_linear_value_error(word, slot.ty, line));
         }
@@ -1444,8 +1447,12 @@ fn type_mismatch_error(ctx: &Ctx, span: Span, op: &str, expected: Type, found: T
 /// be.
 fn cannot_copy_error(ctx: &Ctx, span: Span, op: &str, found: Type) -> String {
     let op = crate::resolve::demangle_call(op);
-    let defines_drop =
-        matches!(found, Type::Struct(id, _) if ctx.structs()[id.index()].has_drop_overload);
+    let defines_drop = match found {
+        Type::Struct(id, _) => {
+            ctx.with_struct_decl_or_generic(id, |d| d.is_some_and(|d| d.has_drop_overload))
+        }
+        _ => false,
+    };
     // A reference is neither `Copy` nor linear, so the ownership wording below
     // would tell the reader the opposite of the type rule.
     let why = if found.is_ref() {
@@ -2273,7 +2280,11 @@ fn check_eliminator_call(
     // the arity of the underflow diagnostic (a variant count every
     // instantiation of the family shares); the operative `EnumId` this call
     // actually eliminates is read off the scrutinee's own type once found.
-    let gate_decl = &ctx.enums()[gate_id.index()];
+    let (gate_variants_len, gate_name_static, gate_name) =
+        ctx.with_enum_decl_or_generic(gate_id, |d| {
+            let d = d.expect("gate_id names a real family header");
+            (d.variants.len(), d.name_static, d.name.clone())
+        });
     let held = stack.len();
     // R4 step 1: arm collection is variable-arity, not a fixed
     // `1 + variant_count` pop. A fixed pop cannot tell "an arm is missing"
@@ -2281,19 +2292,16 @@ fn check_eliminator_call(
     // always present as underflow and the exhaustiveness pass below could
     // never name it. Collection stops at the first operand that is not a
     // tagged quotation literal; that operand is the scrutinee slot.
+    // P7.S11-follow (Part 3): the tagged-quotation-literal stop condition is
+    // factored into `terms::eliminator_arm_at`, shared with
+    // `scrutinee_enum_id_of_family`'s non-destructive peek -- this remains
+    // the only caller that pops, over the count that shared test decides.
     let mut arms: Vec<(QuotId, VariantTag)> = Vec::new();
     while let Some(top) = stack.last().copied() {
-        let Some(QuotOperand::Literal(qid)) = resolve_quotation_operand(top) else {
+        let Some(arm) = self::terms::eliminator_arm_at(top, prov) else {
             break;
         };
-        let Some(tag) = prov.quotations[qid.0]
-            .annot
-            .as_ref()
-            .and_then(|a| a.variant_tag.as_ref())
-        else {
-            break;
-        };
-        arms.push((qid, tag.clone()));
+        arms.push(arm);
         stack.pop();
     }
     // The checker pushes operands in written source order, so popping off the
@@ -2307,7 +2315,7 @@ fn check_eliminator_call(
             ctx,
             span,
             name,
-            gate_decl.variants.len() + 1,
+            gate_variants_len + 1,
             held,
         ));
     };
@@ -2331,7 +2339,7 @@ fn check_eliminator_call(
     // instantiation the registry happened to retain (last write wins), so
     // the "expected" side is rendered under the family's surface name
     // (`Result`), not one arbitrary instantiation's (`Result[bool i64]`).
-    let expected_family = Type::Enum(gate_id, generic_surface_name(gate_decl.name_static));
+    let expected_family = Type::Enum(gate_id, generic_surface_name(gate_name_static));
     let Type::Enum(id, _) = referent else {
         return Err(type_mismatch_error(
             ctx,
@@ -2341,8 +2349,10 @@ fn check_eliminator_call(
             scrutinee.ty,
         ));
     };
-    if generic_surface_name(&ctx.enums()[id.index()].name) != generic_surface_name(&gate_decl.name)
-    {
+    let scrutinee_family_matches = ctx.with_enum_decl_or_generic(id, |d| {
+        d.is_some_and(|d| generic_surface_name(&d.name) == generic_surface_name(&gate_name))
+    });
+    if !scrutinee_family_matches {
         return Err(type_mismatch_error(
             ctx,
             span,
@@ -2351,14 +2361,17 @@ fn check_eliminator_call(
             scrutinee.ty,
         ));
     }
-    let enum_decl = &ctx.enums()[id.index()];
+    let (enum_variants, enum_decl_name) = ctx.with_enum_decl_or_generic(id, |d| {
+        let d = d.expect("the family check above already confirmed `id` names a real decl");
+        (d.variants.clone(), d.name.clone())
+    });
     // An `EnumDecl`'s `name` is the per-module mangled spelling (`Shape__m0`)
     // -- unlike `name_static`, which every `Type::Enum` render already uses.
     // Stripping the `[...]` arguments alone would still leave `Shape__m0` in a
     // diagnostic. An instantiation's mangle lands *after* the arguments
     // (`Result[i64 bool]__m0`), so for those the strip alone already yields a
     // bare `Result` and the demangle is what covers the concrete case.
-    let enum_name = crate::resolve::demangle_word(generic_surface_name(&enum_decl.name));
+    let enum_name = crate::resolve::demangle_word(generic_surface_name(&enum_decl_name));
 
     // R4 step 3: exhaustiveness and duplication, in written source order and
     // before any arm body is checked, so a coverage fault is reported where it
@@ -2366,8 +2379,7 @@ fn check_eliminator_call(
     let mut seen: HashSet<&str> = HashSet::new();
     let mut variant_indices = Vec::with_capacity(arms.len());
     for (qid, tag) in &arms {
-        let Some(vi) = enum_decl
-            .variants
+        let Some(vi) = enum_variants
             .iter()
             .position(|v| generic_surface_name(&v.name) == tag.name)
         else {
@@ -2379,7 +2391,7 @@ fn check_eliminator_call(
                 enum_name,
             ));
         };
-        if !seen.insert(generic_surface_name(&enum_decl.variants[vi].name)) {
+        if !seen.insert(generic_surface_name(&enum_variants[vi].name)) {
             return Err(eliminator_duplicate_arm_error(
                 ctx,
                 prov.quotations[qid.0].span,
@@ -2390,7 +2402,7 @@ fn check_eliminator_call(
         }
         variant_indices.push(vi);
     }
-    for variant in &enum_decl.variants {
+    for variant in &enum_variants {
         let variant_surface = generic_surface_name(&variant.name);
         if !seen.contains(variant_surface) {
             return Err(eliminator_non_exhaustive_error(
@@ -2423,7 +2435,12 @@ fn check_eliminator_call(
     let mut baseline: Option<Vec<Slot>> = None;
     let mut arm_moves: Vec<Moves> = Vec::with_capacity(arms.len());
     for ((qid, tag), vi) in arms.iter().zip(&variant_indices) {
-        let owned = variant_type(ctx.enums(), id, *vi);
+        // The scrutinee's own decl was already read above into
+        // `enum_variants` (fallback-safe for a check-time-only mint); build
+        // the `Type::Variant` off that clone directly rather than reindexing
+        // `ctx.enums()` -- `variant_type`'s own signature takes a slice and
+        // cannot be handed this single fallback decl.
+        let owned = Type::Variant(id, *vi, enum_variants[*vi].display_static);
         // Decision 6: the call's one resolved mode, applied uniformly. An arm
         // whose annotation spells the other mode disagrees with this built
         // effect and is rejected by the shared literal check below.
@@ -3127,7 +3144,9 @@ fn check_shuffle(
             // R4 (D3): `dup` is the explicit copy, so it is gated on `Copy`.
             // The pure reorderings below (`swap`/`rot`) move rather than copy
             // and stay legal on a linear value.
-            if !is_copy(top.ty, ctx.structs(), ctx.enums(), arrays) {
+            if !ctx
+                .with_extended_type_slices(|structs, enums| is_copy(top.ty, structs, enums, arrays))
+            {
                 return Err(cannot_copy_error(ctx, span, "dup", top.ty));
             }
             // `dup` of an aggregate deep-copies it (`Alloc`+`Blit`), so the
@@ -3165,9 +3184,15 @@ fn check_shuffle(
                 // is `None` (R8) and the arm is a no-op. The `prov.dropped`
                 // recording below is unchanged either way.
                 if let (Type::Struct(id, _), Some(m)) = (top.ty, ctx.modules()) {
-                    if ctx.structs()[id.index()].has_drop_overload {
-                        let decl = &ctx.structs()[id.index()];
-                        check_drop_import_visibility(ctx, span, m, decl)?;
+                    let has_drop = ctx.with_struct_decl_or_generic(id, |d| {
+                        d.is_some_and(|d| d.has_drop_overload)
+                    });
+                    if has_drop {
+                        ctx.with_struct_decl_or_generic(id, |d| {
+                            let decl =
+                                d.expect("the has_drop_overload check above confirmed a real decl");
+                            check_drop_import_visibility(ctx, span, m, decl)
+                        })?;
                     }
                 }
                 prov.dropped.push(top.ty);
@@ -3187,7 +3212,9 @@ fn check_shuffle(
             }
             let mut below = stack[n - 2];
             // `over` is gated exactly like `dup`.
-            if !is_copy(below.ty, ctx.structs(), ctx.enums(), arrays) {
+            if !ctx.with_extended_type_slices(|structs, enums| {
+                is_copy(below.ty, structs, enums, arrays)
+            }) {
                 return Err(cannot_copy_error(ctx, span, "over", below.ty));
             }
             // Unlike `dup`, `over` reuses the value rather than deep-copying it,

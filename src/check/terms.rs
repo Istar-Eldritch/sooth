@@ -175,7 +175,9 @@ fn check_term(
             }
             let bound = stack.split_off(stack.len() - names.len());
             for (name, slot) in names.iter().zip(bound) {
-                let linear = is_linear(slot.ty, ctx.structs(), ctx.enums(), arrays);
+                let linear = ctx.with_extended_type_slices(|structs, enums| {
+                    is_linear(slot.ty, structs, enums, arrays)
+                });
                 scope.bind(name, slot, linear, prov);
             }
             Ok(stack)
@@ -246,7 +248,9 @@ fn check_term(
                         // it is live would leave that reference aimed at storage
                         // its owner has given away. Only a linear local is
                         // consumed by being named; a Copy one is merely read.
-                        if is_linear(ty, ctx.structs(), ctx.enums(), arrays) {
+                        if ctx.with_extended_type_slices(|structs, enums| {
+                            is_linear(ty, structs, enums, arrays)
+                        }) {
                             if let Some(id) = live_borrow_of(&stack, scope, prov, live, at, name) {
                                 return Err(consume_of_borrowed_place_error(
                                     ctx,
@@ -614,8 +618,22 @@ fn check_term(
             // stand-in body reaches this too, and has no instantiator to
             // ground a scrutinee with even in principle.
             if let Some(target) = poly.eliminators.get(name).copied() {
-                let EliminatorTarget::Concrete(enum_id) = target else {
-                    return Err(concrete_body_generic_eliminator_error(ctx, span, name));
+                let enum_id = match target {
+                    EliminatorTarget::Concrete(enum_id) => enum_id,
+                    // P7.S11-follow (Part 3): the registry's `Generic` entry
+                    // is frozen at pre-loop `eliminator_registry` build time
+                    // and never re-consulted after a later check-time mint --
+                    // but the scrutinee already on the stack may itself name a
+                    // real, since-minted instantiation. Recover it from the
+                    // live stack rather than erroring immediately.
+                    EliminatorTarget::Generic { .. } => {
+                        match scrutinee_enum_id_of_family(&stack, prov, refs, ctx) {
+                            Some(id) => id,
+                            None => {
+                                return Err(concrete_body_generic_eliminator_error(ctx, span, name))
+                            }
+                        }
+                    }
                 };
                 let granted = releasable_into(
                     scope,
@@ -833,15 +851,33 @@ fn check_term(
             // `scoped_ops` (computed once above) is `Some` exactly for an
             // operator name under module scoping and carries the caller-visible
             // overloads; every other name still resolves through `env`.
+            let fallback_storage;
             let candidates = match &scoped_ops {
                 Some(v) => v.as_slice(),
-                None => env.get(name).ok_or_else(|| match gated {
-                    // P8 S2 (R6a): the name is a real intrinsic that nothing
-                    // else claimed, so the remedy is the import, not a
-                    // definition.
-                    true => ungated_intrinsic_error(ctx, span, name),
-                    false => unknown_word_error(ctx, span, name),
-                })?,
+                None => match env.get(name) {
+                    Some(v) => v.as_slice(),
+                    // P7.S11-follow (Part 4): an ordinary `env` miss may still
+                    // name the generated constructor/accessor of a check-time
+                    // monomorph, minted (by Part 1's splice-site grounding or
+                    // an ordinary mid-word poly call's own `apply_subst`)
+                    // into the live `generics_cell` after `env` was built and
+                    // so invisible to it -- re-derive it here, read-through,
+                    // mutating nothing.
+                    None => {
+                        let mints = mint_fallback_candidates(name, ctx);
+                        if mints.is_empty() {
+                            return Err(match gated {
+                                // P8 S2 (R6a): the name is a real intrinsic
+                                // that nothing else claimed, so the remedy is
+                                // the import, not a definition.
+                                true => ungated_intrinsic_error(ctx, span, name),
+                                false => unknown_word_error(ctx, span, name),
+                            });
+                        }
+                        fallback_storage = mints;
+                        fallback_storage.as_slice()
+                    }
+                },
             };
             let chosen = match candidates {
                 [only] => {
@@ -1261,6 +1297,122 @@ pub(super) fn eliminator_arm_names_no_eliminator_error(
     )
 }
 
+/// P7.S11-follow (Part 4): a shared `env`-miss fallback for the generated
+/// constructor/accessor of a check-time-only monomorph. Both originating
+/// mints -- a combinator's own splice-site output grounding (Part 1) and an
+/// ordinary mid-word poly call's `apply_subst` mint -- land in the same live
+/// `generics_cell` regardless of call shape, so this one fallback at the
+/// point of use covers both. Read-through, mutates nothing.
+///
+/// The id-derivation runs over the *extended* slice (`ctx.enums()`/
+/// `ctx.structs()` ++ the live cell's unflushed pending tail), never the
+/// pending tail alone -- `struct_generated_sigs`/`enum_generated_sigs`/
+/// `variant_generated_sigs` mint each candidate's own id from `enumerate()`
+/// over whatever slice they are handed, so run alone over the tail every
+/// candidate would mint at `from_index(0..)`, a wrong, colliding id
+/// (`enum_generated_sigs_over_an_extended_slice_carries_the_monomorphs_own_id`).
+/// Skipping the flushed prefix's own sig count is exact because the flushed
+/// prefix and the pending tail meet with no gap or overlap on every live path
+/// (`enum_base == ctx.enums().len()`, resp. `struct_base ==
+/// ctx.structs().len()`) -- see the spec's invariant note.
+///
+/// Returns *all* pending mints whose surface name matches `name` --
+/// variant-ctor env keys are module-blind, so two pending mints can in
+/// principle generate the same surface name. Dispatch over the result
+/// follows the existing env-overload discipline (first-wins on a genuine
+/// collision, no ambiguity check); this fallback must not invent a stricter
+/// rule than a present `env` entry would have had.
+fn mint_fallback_candidates(name: &str, ctx: &Ctx) -> Vec<Overload> {
+    ctx.with_extended_type_slices(|structs, enums| {
+        let mut out = Vec::new();
+        let struct_skip = struct_generated_sigs(ctx.structs()).len();
+        for (n, symbol, sig) in struct_generated_sigs(structs).into_iter().skip(struct_skip) {
+            if n == name {
+                out.push(Overload { sig, symbol });
+            }
+        }
+        let enum_skip = enum_generated_sigs(ctx.enums()).len();
+        for (n, symbol, sig) in enum_generated_sigs(enums).into_iter().skip(enum_skip) {
+            if n == name {
+                out.push(Overload { sig, symbol });
+            }
+        }
+        let variant_skip = variant_generated_sigs(ctx.enums()).len();
+        for (n, symbol, sig) in variant_generated_sigs(enums).into_iter().skip(variant_skip) {
+            if n == name {
+                out.push(Overload { sig, symbol });
+            }
+        }
+        out
+    })
+}
+
+/// P7.S11-follow (Part 3): whether `top` is a tagged quotation literal that
+/// counts as an eliminator arm, and if so its `(QuotId, VariantTag)` -- the
+/// shared stop condition for both `check_eliminator_call`'s destructive
+/// arm-collection scan (`src/check.rs`) and `scrutinee_enum_id_of_family`'s
+/// non-destructive peek below. Neither pops or otherwise mutates the stack
+/// here; only the `check.rs` caller pops, over the count this decides.
+pub(super) fn eliminator_arm_at(top: Slot, prov: &Provenance) -> Option<(QuotId, VariantTag)> {
+    let Some(QuotOperand::Literal(qid)) = resolve_quotation_operand(top) else {
+        return None;
+    };
+    let tag = prov.quotations[qid.0]
+        .annot
+        .as_ref()?
+        .variant_tag
+        .as_ref()?
+        .clone();
+    Some((qid, tag))
+}
+
+/// P7.S11-follow (Part 3): a non-destructive peek from the top of `stack`,
+/// walking past tagged-quotation-literal arms (via `eliminator_arm_at`) to
+/// the scrutinee slot -- the same stop condition `check_eliminator_call`'s
+/// destructive scan uses, but here run *before* `check_eliminator_call` is
+/// even invoked, so the stack must stay intact. Returns the scrutinee's slot,
+/// or `None` if the stack holds only arms (or is empty).
+fn peek_eliminator_scrutinee(stack: &[Slot], prov: &Provenance) -> Option<Slot> {
+    let mut idx = stack.len();
+    while idx > 0 {
+        let top = stack[idx - 1];
+        if eliminator_arm_at(top, prov).is_none() {
+            return Some(top);
+        }
+        idx -= 1;
+    }
+    None
+}
+
+/// P7.S11-follow (Part 3): when the eliminator registry's classification for
+/// a call is the frozen `Generic` entry, recover the scrutinee's own concrete
+/// `Type::Enum(id, _)` from the live stack instead of erroring immediately --
+/// a check-time mint elsewhere in the word, later than
+/// `eliminator_registry` was built, may already have grounded this
+/// instantiation. Confirms `id` resolves to a *real, minted* decl (Part 2's
+/// `with_enum_decl_or_generic`) rather than merely a concrete-looking,
+/// still-ungrounded `Type::Enum` -- a poly call's own unification can leave
+/// one on the stack independent of whether anything actually grounded it, and
+/// requiring an actual mint keeps a genuinely-ungrounded call getting the
+/// honest "cannot eliminate it while it is ungrounded" diagnostic.
+fn scrutinee_enum_id_of_family(
+    stack: &[Slot],
+    prov: &Provenance,
+    refs: &[RefDecl],
+    ctx: &Ctx,
+) -> Option<EnumId> {
+    let scrutinee = peek_eliminator_scrutinee(stack, prov)?;
+    let referent = match ref_parts(scrutinee.ty, refs) {
+        Some((referent, _)) => referent,
+        None => scrutinee.ty,
+    };
+    let Type::Enum(id, _) = referent else {
+        return None;
+    };
+    ctx.with_enum_decl_or_generic(id, |d| d.is_some())
+        .then_some(id)
+}
+
 /// P7.S12 (R2.4/R7.4): a call to a generic enum's eliminator from a body the
 /// *concrete* checker walks -- an ordinary monomorphic word, or
 /// `check_poly_combinator_standalone`'s i64 stand-in. The registry keys the
@@ -1319,10 +1471,9 @@ fn check_linear_across_back_edge(
     arrays: &[ArrayDecl],
     frame_floor: Option<usize>,
 ) -> Result<(), String> {
-    if let Some(slot) = below_args
-        .iter()
-        .find(|s| is_linear(s.ty, ctx.structs(), ctx.enums(), arrays))
-    {
+    if let Some(slot) = below_args.iter().find(|s| {
+        ctx.with_extended_type_slices(|structs, enums| is_linear(s.ty, structs, enums, arrays))
+    }) {
         return Err(linear_across_back_edge_error(ctx, span, callee, slot.ty));
     }
     // `position` resolves to the *first* matching binding; this is only correct
@@ -1991,6 +2142,7 @@ fn naming_aliases_borrowed_place_error(ctx: &Ctx, span: Span, name: &str, live: 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ast::GenericTypes;
 
     fn check_src(src: &str) -> Result<(), String> {
         let tokens = crate::lexer::lex(src).unwrap();
@@ -2129,5 +2281,207 @@ mod tests {
             Some(set),
             "the aggregate's surviving capture set must ride across the back-edge"
         );
+    }
+
+    /// A scratch `MutRegistries` over empty `arrays`/`cells`/`refs`, mirroring
+    /// `ast.rs`'s test-only `ScratchRegs` (private there) -- kept live across
+    /// a test's calls so an interned shape from one instantiation is visible
+    /// to the next.
+    #[derive(Default)]
+    struct ScratchRegs {
+        arrays: Vec<ArrayDecl>,
+        cells: Vec<OwnedCellDecl>,
+        refs: Vec<RefDecl>,
+    }
+
+    impl ScratchRegs {
+        fn regs(&mut self) -> crate::ast::MutRegistries<'_> {
+            crate::ast::MutRegistries {
+                structs: &[],
+                enums: &[],
+                arrays: &mut self.arrays,
+                cells: &mut self.cells,
+                refs: &mut self.refs,
+            }
+        }
+    }
+
+    fn generic_enum_decl(name: &str, variant: &str) -> crate::ast::GenericEnumDecl {
+        crate::ast::GenericEnumDecl {
+            name: name.to_string(),
+            ty_var_names: vec!["'T".to_string()],
+            len_var_names: vec![],
+            variants: vec![crate::ast::GenericVariantDecl {
+                name: variant.to_string(),
+                fields: vec![("val".to_string(), PolyType::Var(0))],
+                span: Span::default(),
+            }],
+            span: Span::default(),
+            module: 0,
+        }
+    }
+
+    /// P7.S11-follow (Part 4, happy path): a pending, unflushed enum mint's
+    /// generated constructor is found by name, id-correct (its own `EnumId`,
+    /// not `from_index(0)`).
+    #[test]
+    fn mint_fallback_candidates_finds_an_unflushed_constructor() {
+        let structs: Vec<StructDecl> = Vec::new();
+        let enums: Vec<EnumDecl> = Vec::new();
+        let mut generics = GenericTypes::with_bases(structs.len(), enums.len());
+        generics.enums.push(generic_enum_decl("Result", "Ok"));
+        let mut scratch = ScratchRegs::default();
+        let minted = generics.instantiate_enum(0, &[Type::I64], &[], 0, scratch.regs());
+        let Type::Enum(id, _) = minted else {
+            panic!("expected a Type::Enum")
+        };
+        let cell = RefCell::new(generics);
+        let word = crate::test_support::bare_word("main", 0);
+        let ctx = word_ctx(
+            &word,
+            &structs,
+            &enums,
+            &[],
+            None,
+            &CombinatorIndex::new(),
+            Some(&cell),
+        );
+        let candidates = mint_fallback_candidates("Ok", &ctx);
+        assert_eq!(
+            candidates.len(),
+            1,
+            "expected exactly the one pending mint's constructor"
+        );
+        assert_eq!(
+            candidates[0].sig.outputs,
+            vec![Type::Enum(id, "Result[i64]")]
+        );
+    }
+
+    /// P7.S11-follow (Part 4, edge case): nothing pending -- an empty live
+    /// cell, or no `generics` at all -- returns no candidates.
+    #[test]
+    fn mint_fallback_candidates_empty_when_nothing_pending() {
+        let structs: Vec<StructDecl> = Vec::new();
+        let enums: Vec<EnumDecl> = Vec::new();
+        let generics = GenericTypes::with_bases(structs.len(), enums.len());
+        let cell = RefCell::new(generics);
+        let word = crate::test_support::bare_word("main", 0);
+        let ctx = word_ctx(
+            &word,
+            &structs,
+            &enums,
+            &[],
+            None,
+            &CombinatorIndex::new(),
+            Some(&cell),
+        );
+        assert!(mint_fallback_candidates("Ok", &ctx).is_empty());
+
+        let ctx_no_generics = word_ctx(
+            &word,
+            &structs,
+            &enums,
+            &[],
+            None,
+            &CombinatorIndex::new(),
+            None,
+        );
+        assert!(mint_fallback_candidates("Ok", &ctx_no_generics).is_empty());
+    }
+
+    /// P7.S11-follow (Part 4, name-collision probe): variant-ctor env keys
+    /// are module-blind, so two pending mints in one live cell can in
+    /// principle generate the same surface name -- built unconditionally
+    /// (a hand-crafted `GenericTypes` is always constructible), asserting
+    /// *both* overloads are returned. Dispatch over the pair is first-wins
+    /// per the downstream-dispatch ruling; this test pins the return, not
+    /// the selection.
+    #[test]
+    fn mint_fallback_candidates_at_a_colliding_name_returns_both() {
+        let structs: Vec<StructDecl> = Vec::new();
+        let enums: Vec<EnumDecl> = Vec::new();
+        let mut generics = GenericTypes::with_bases(structs.len(), enums.len());
+        generics.enums.push(generic_enum_decl("Left", "Same"));
+        generics.enums.push(generic_enum_decl("Right", "Same"));
+        let mut scratch = ScratchRegs::default();
+        generics.instantiate_enum(0, &[Type::I64], &[], 0, scratch.regs());
+        generics.instantiate_enum(1, &[Type::I64], &[], 0, scratch.regs());
+        let cell = RefCell::new(generics);
+        let word = crate::test_support::bare_word("main", 0);
+        let ctx = word_ctx(
+            &word,
+            &structs,
+            &enums,
+            &[],
+            None,
+            &CombinatorIndex::new(),
+            Some(&cell),
+        );
+        let candidates = mint_fallback_candidates("Same", &ctx);
+        assert_eq!(
+            candidates.len(),
+            2,
+            "expected both same-surface-name pending mints, not a last-write truncation"
+        );
+    }
+
+    /// P7.S11-follow (Part 3, happy path): a scrutinee whose `Type::Enum` id
+    /// names a real, unflushed pending mint resolves.
+    #[test]
+    fn scrutinee_enum_id_of_family_reads_a_minted_scrutinee() {
+        let structs: Vec<StructDecl> = Vec::new();
+        let enums: Vec<EnumDecl> = Vec::new();
+        let mut generics = GenericTypes::with_bases(structs.len(), enums.len());
+        generics.enums.push(generic_enum_decl("Result", "Ok"));
+        let mut scratch = ScratchRegs::default();
+        let minted = generics.instantiate_enum(0, &[Type::I64], &[], 0, scratch.regs());
+        let Type::Enum(id, name) = minted else {
+            panic!("expected a Type::Enum")
+        };
+        let cell = RefCell::new(generics);
+        let word = crate::test_support::bare_word("main", 0);
+        let ctx = word_ctx(
+            &word,
+            &structs,
+            &enums,
+            &[],
+            None,
+            &CombinatorIndex::new(),
+            Some(&cell),
+        );
+        let stack = vec![Slot::computed(Type::Enum(id, name))];
+        let prov = Provenance::default();
+        assert_eq!(
+            scrutinee_enum_id_of_family(&stack, &prov, &[], &ctx),
+            Some(id)
+        );
+    }
+
+    /// P7.S11-follow (Part 3, the permissiveness guard): a concrete-looking
+    /// `Type::Enum` whose id resolves to *nothing* -- neither the flushed
+    /// slice nor the live cell's pending tail -- must not be treated as
+    /// grounded. A poly call's own unification can leave such a type on the
+    /// stack independent of whether anything actually minted it.
+    #[test]
+    fn scrutinee_enum_id_of_family_none_when_type_looks_concrete_but_unminted() {
+        let structs: Vec<StructDecl> = Vec::new();
+        let enums: Vec<EnumDecl> = Vec::new();
+        let generics = GenericTypes::with_bases(structs.len(), enums.len());
+        let cell = RefCell::new(generics);
+        let word = crate::test_support::bare_word("main", 0);
+        let ctx = word_ctx(
+            &word,
+            &structs,
+            &enums,
+            &[],
+            None,
+            &CombinatorIndex::new(),
+            Some(&cell),
+        );
+        let unminted_id = EnumId::from_index(0);
+        let stack = vec![Slot::computed(Type::Enum(unminted_id, "Result[i64]"))];
+        let prov = Provenance::default();
+        assert_eq!(scrutinee_enum_id_of_family(&stack, &prov, &[], &ctx), None);
     }
 }

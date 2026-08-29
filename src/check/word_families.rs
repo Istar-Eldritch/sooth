@@ -544,7 +544,9 @@ pub(super) fn check_access_word(
                     stack[n - 1].ty,
                 ));
             };
-            if !is_copy(referent, ctx.structs(), ctx.enums(), arrays) {
+            if !ctx.with_extended_type_slices(|structs, enums| {
+                is_copy(referent, structs, enums, arrays)
+            }) {
                 return Err(access_of_linear_referent_error(ctx, span, "@", referent));
             }
             // Review fix: `@` reads an *element* of an aggregate the
@@ -600,7 +602,9 @@ pub(super) fn check_access_word(
                     stack[n - 2].ty,
                 ));
             }
-            if !is_copy(referent, ctx.structs(), ctx.enums(), arrays) {
+            if !ctx.with_extended_type_slices(|structs, enums| {
+                is_copy(referent, structs, enums, arrays)
+            }) {
                 return Err(access_of_linear_referent_error(ctx, span, name, referent));
             }
             if name == "+!" && !referent.is_int() {
@@ -798,7 +802,9 @@ pub(super) fn check_array_word(
             // buffer reference yields a `!Slice[T]` -- non-`Copy` (R4) and
             // exclusivity-tracked through the region it carries forward.
             let element = arrays[id.index()].element;
-            if !is_copy(element, ctx.structs(), ctx.enums(), arrays) {
+            if !ctx.with_extended_type_slices(|structs, enums| {
+                is_copy(element, structs, enums, arrays)
+            }) {
                 return Err(slice_linear_element_error(ctx, span, element));
             }
             let out = intern_slice_type(slices, element, recv_mut);
@@ -970,16 +976,18 @@ pub(super) fn check_array_word(
             // A construction site the declaration-site rule cannot reach: `fill` accepts
             // any `Copy` element, and `&T` is `Copy`, so the declaration-site
             // sweep never sees this shape. D2's shared gate owns this check.
-            check_array_element_gate(
-                ctx,
-                span,
-                "fill",
-                element.ty,
-                ctx.structs(),
-                ctx.enums(),
-                arrays,
-                element.variant_idx,
-            )?;
+            ctx.with_extended_type_slices(|structs, enums| {
+                check_array_element_gate(
+                    ctx,
+                    span,
+                    "fill",
+                    element.ty,
+                    structs,
+                    enums,
+                    arrays,
+                    element.variant_idx,
+                )
+            })?;
             let array_ty = intern_array_type(arrays, element.ty, count_val as u32);
             // Review fix: forward the element's surviving set (R19) onto the
             // array -- `fill` replicates one closure-carrying element N
@@ -1051,7 +1059,9 @@ pub(super) fn check_owned_cell_word(
             let payload = stack[n - 1].ty;
             // Another construction site the declaration-site rule cannot reach: `^` interns a
             // cell over any payload type with no filter of its own.
-            if contains_reference(payload, ctx.structs(), ctx.enums(), arrays) {
+            if ctx.with_extended_type_slices(|structs, enums| {
+                contains_reference(payload, structs, enums, arrays)
+            }) {
                 return Err(constructed_reference_error(
                     ctx,
                     span,
@@ -1112,7 +1122,9 @@ pub(super) fn check_owned_cell_word(
                 return Err(owned_cell_word_operand_error(ctx, span, "^|>", cell_ty));
             };
             let payload = cells[id.index()].payload;
-            if !is_copy(payload, ctx.structs(), ctx.enums(), arrays) {
+            if !ctx.with_extended_type_slices(|structs, enums| {
+                is_copy(payload, structs, enums, arrays)
+            }) {
                 return Err(peek_of_linear_owned_payload_error(
                     ctx, span, cell_ty, payload,
                 ));

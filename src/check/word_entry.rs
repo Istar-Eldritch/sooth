@@ -307,7 +307,7 @@ fn check_terms_word(
     }
     dropped.append(&mut prov.dropped);
 
-    check_outputs(word, &final_stack, &declared, line, structs, enums, arrays)?;
+    check_outputs(word, &final_stack, &declared, line, &ctx, arrays)?;
     leave_block(&ctx, &mut scope, 0, BlockEnd::Body(line))
 }
 

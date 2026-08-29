@@ -182,16 +182,15 @@ fn an_output_only_type_variable_is_still_uncallable() {
     );
 }
 
-/// Golden 6: pins the out-of-scope frozen-env gap so it cannot regress
-/// silently or be quietly claimed as fixed. Golden 1's source minus the
-/// `mki` line has no parse-time sibling monomorph, so R4 really does mint
-/// and register `Ok`'s constructor into the word-scoped env `wrap` is
-/// checked against -- the failure moves from the def site (`wrap`, before
-/// this slice) to the call site (`main`), which is the whole assertion: the
-/// word name discriminates "R4 is broken" from "R4 works, only the frozen
-/// env remains".
+/// Golden 6 (P7.S11-follow, Part 1/4): the check-time monomorph's
+/// constructor/accessor now resolves at the call site. Golden 1's source
+/// minus the `mki` line has no parse-time sibling monomorph, so `wrap`'s
+/// own signature grounding mints `Ok`'s constructor check-time; Part 1
+/// forces that mint ahead of the body splice and Part 4's `env`-miss
+/// fallback resolves it in `main`, so the whole program builds and runs.
+/// `main` is golden 1's minus `mki`, so it prints the same value.
 #[test]
-fn a_check_time_monomorphs_constructors_are_absent_from_the_call_site_env() {
+fn a_check_time_monomorphs_constructors_resolve_at_the_call_site() {
     let src = "type: Result['T 'E] | Ok 'T | Err 'E ;\n\
          : wrap inline ( 'T ~[ 'T -- 'T ] -- Result['T i64] ) call Ok ;\n\
          : main ( -- )\n\
@@ -200,11 +199,9 @@ fn a_check_time_monomorphs_constructors_are_absent_from_the_call_site_env() {
            ~[ ( Err ) Err> . ]\n\
            Result? ;\n";
     let prog = Scratch::write("golden6", src);
-    let err = build_error(prog.path());
-    assert!(
-        err.contains("unknown word `Ok` in `main`"),
-        "expected the call site (main), not the def site (wrap), to fail: {err}"
-    );
+    let (stdout, code) = build_and_run(prog.path());
+    assert_eq!(code, 0, "expected the program to build and run cleanly");
+    assert_eq!(stdout, "8\n");
 }
 
 /// Golden 7: R4's reach boundary. A combinator whose declared output grounds
@@ -252,15 +249,17 @@ fn a_combinator_returning_an_array_of_its_grounded_monomorph_builds_and_does_not
     );
 }
 
-/// Golden 9: the mutation-4 witness at integration level. An earlier
-/// monomorphic word (`boxit`, spliced through `seed`) grounds a *different*
-/// generic header at check time and flushes it, leaving `enum_base` stale by
-/// exactly that batch's size -- word order in source is load-bearing: `seed`
-/// precedes `wrap` in the single word loop, so its flush happens first. The
-/// standalone combinator check must still land its own scratch mint at the
-/// correct id (P0-A's rebase) and R4 must still register that mint's
-/// constructor, so the outcome is golden 6's call-site failure, not a
-/// wrong-id panic or a def-site error.
+/// Golden 9 (P7.S11-follow): the mutation-4 witness at integration level. An
+/// earlier monomorphic word (`boxit`, spliced through `seed`) grounds a
+/// *different* generic header at check time and flushes it, leaving
+/// `enum_base` stale by exactly that batch's size -- word order in source is
+/// load-bearing: `seed` precedes `wrap` in the single word loop, so its
+/// flush happens first. The standalone combinator check must still land its
+/// own scratch mint at the correct id (P0-A's rebase), and Part 4's
+/// id-derivation (which relies on that same base bookkeeping) must still
+/// resolve `Ok`'s constructor at the call site, so the whole program builds
+/// and runs rather than panicking on a wrong id. `main` (`seed 7 ~[ 1 add ]
+/// wrap drop`) has no eliminator and no `.`, so it prints nothing.
 #[test]
 fn a_standalone_mint_after_an_earlier_check_time_mint_lands_at_the_right_id() {
     let src = "type: Box['A] | Empty | Full 'A ;\n\
@@ -270,30 +269,76 @@ fn a_standalone_mint_after_an_earlier_check_time_mint_lands_at_the_right_id() {
          : wrap inline ( 'T ~[ 'T -- 'T ] -- Result['T i64] ) call Ok ;\n\
          : main ( -- ) seed 7 ~[ 1 add ] wrap drop ;\n";
     let prog = Scratch::write("golden9", src);
-    let err = build_error(prog.path());
-    assert!(
-        err.contains("unknown word `Ok` in `main`"),
-        "expected the call site (main) to fail once the stale-base mint lands right: {err}"
-    );
+    let (_, code) = build_and_run(prog.path());
+    assert_eq!(code, 0, "expected the program to build and run cleanly");
 }
 
-/// Golden 10: R4's *struct* half, otherwise unwitnessed by goldens 1-9 (every
-/// prior fixture mints an enum). `wrap` is `inline`, so this also exercises
-/// the splice-time recheck of its body in `main` -- with the struct tail
-/// correctly appended, `main`'s own env still lacks this check-time-only
-/// mint's `Cell` (the same frozen-call-site gap golden 6 pins for enums), so
-/// the failure lands at the call site. Stubbing R4's struct skip to drop the
-/// whole tail moves the failure back to the def site (`wrap`), which is the
-/// discriminator this golden exists to pin.
+/// Golden 10 (P7.S11-follow): R4's *struct* half, otherwise unwitnessed by
+/// goldens 1-9 (every prior fixture mints an enum). `wrap` is `inline`, so
+/// this also exercises the splice-time recheck of its body in `main` -- with
+/// the struct twin's decl-fallback and constructor fallback wired, `main`'s
+/// `Cell` call resolves through the same check-time mint (the same
+/// frozen-call-site gap golden 6 pins for enums), so the whole program
+/// builds and runs. `main` is `… wrap drop` with no `.`, so it prints
+/// nothing.
 #[test]
-fn a_check_time_struct_monomorphs_constructor_is_absent_from_the_call_site_env() {
+fn a_check_time_struct_monomorphs_constructor_resolves_at_the_call_site() {
     let src = "type: Cell['T] val 'T ;\n\
          : wrap inline ( 'T ~[ 'T -- 'T ] -- Cell['T] ) call Cell ;\n\
          : main ( -- ) 7 ~[ 1 add ] wrap drop ;\n";
     let prog = Scratch::write("golden10", src);
-    let err = build_error(prog.path());
-    assert!(
-        err.contains("unknown word `Cell` in `main`"),
-        "expected the call site (main), not the def site (wrap), to fail: {err}"
-    );
+    let (_, code) = build_and_run(prog.path());
+    assert_eq!(code, 0, "expected the program to build and run cleanly");
+}
+
+/// Golden 6b (P7.S11-follow): the minimal, unconfounded control for Part 4's
+/// constructor fallback and Part 2's enum drop/layout reads -- enum
+/// construction + `drop`, no eliminator at all. Golden 6 routes through the
+/// eliminator (`Result?`); golden 9 has no eliminator either but layers a
+/// stale-`enum_base` confound on top (the `Box`/`boxit`/`seed` prefix mints
+/// `Box[i64]` before `wrap`'s mint), so a failure there cannot discriminate
+/// the constructor-fallback mechanism from the base bookkeeping. This one
+/// header, one mint, no eliminator and no stale-base interaction.
+#[test]
+fn a_check_time_enum_monomorph_constructs_and_drops_without_an_eliminator() {
+    let src = "type: Result['T 'E] | Ok 'T | Err 'E ;\n\
+         : wrap inline ( 'T ~[ 'T -- 'T ] -- Result['T i64] ) call Ok ;\n\
+         : main ( -- ) 7 ~[ 1 add ] wrap drop ;\n";
+    let prog = Scratch::write("golden6b", src);
+    let (_, code) = build_and_run(prog.path());
+    assert_eq!(code, 0, "expected the program to build and run cleanly");
+}
+
+/// A `dup` witness for the extended-slice `is_copy` wiring (P7.S11-follow,
+/// Part 2). Parts 1/4 make it possible to `dup` a check-time-only monomorph,
+/// which reaches the unguarded `is_copy` read at `src/check.rs`'s `dup` site
+/// (an index past `ctx.structs()`/`ctx.enums()`, panicking without the
+/// extended-slice wiring). `Result[i64 i64]` is all-`Copy`, so `dup` here is
+/// legal.
+#[test]
+fn a_check_time_monomorph_survives_dup_without_a_panic() {
+    let src = "type: Result['T 'E] | Ok 'T | Err 'E ;\n\
+         : wrap inline ( 'T ~[ 'T -- 'T ] -- Result['T i64] ) call Ok ;\n\
+         : main ( -- ) 7 ~[ 1 add ] wrap dup drop drop ;\n";
+    let prog = Scratch::write("golden-dup", src);
+    let (_, code) = build_and_run(prog.path());
+    assert_eq!(code, 0, "expected the program to build and run cleanly");
+}
+
+/// A bind witness for the extended-slice `is_linear` wiring (P7.S11-follow,
+/// Part 2) -- a second, independent hole `dup` alone does not cover.
+/// `is_linear` is a thin wrapper over `is_copy` and inherits the identical
+/// unbounded read, but is reached by an entirely different path: binding a
+/// check-time monomorph to a local (`| r |`), with no `dup`/`over` in sight.
+/// `is_copy` and `is_linear` are called from disjoint sites (`check.rs` vs.
+/// `terms.rs`), so this golden and the `dup` golden above are independent
+/// witnesses -- fixing one does not imply the other is fixed.
+#[test]
+fn a_check_time_monomorph_survives_a_local_bind_without_a_panic() {
+    let src = "type: Result['T 'E] | Ok 'T | Err 'E ;\n\
+         : wrap inline ( 'T ~[ 'T -- 'T ] -- Result['T i64] ) call Ok ;\n\
+         : main ( -- ) 7 ~[ 1 add ] wrap | r | r drop ;\n";
+    let prog = Scratch::write("golden-bind", src);
+    let (_, code) = build_and_run(prog.path());
+    assert_eq!(code, 0, "expected the program to build and run cleanly");
 }

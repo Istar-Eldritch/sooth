@@ -587,35 +587,59 @@ fn a_generic_eliminator_in_a_standalone_checked_combinator_is_rejected() {
     );
 }
 
-/// `concrete_body_generic_eliminator_error` used to bake a literal `[i64]`
-/// into its second line as though it were a fact read off the program, when
-/// it is a hardcoded string the format! call never varies -- and its first
-/// line claimed "nothing in this program instantiates" the header even when a
-/// monomorph plainly exists here, minted by `wrap`'s own output and reachable
-/// from `main`'s call site (`eliminator_registry` is built before the poly
-/// pre-pass mints it, a separate, out-of-scope timing gap this message must
-/// not paper over by asserting something false). The scrutinee's own type
-/// parameter is `f64` here, not `i64`, so a resurrected `[i64]` in the
-/// message would be visibly and provably wrong rather than coincidentally
-/// right -- the `!contains("i64")` assertion below discriminates on this
-/// program precisely because `i64` never appears in it. The fix drops the
-/// fabricated instantiation and the false nothing-instantiates claim, and
-/// states the one thing that is always true: a concrete body cannot
-/// eliminate the header while it is ungrounded.
+/// (P7.S11-follow) `wrap` is an ordinary non-inline poly word, so it mints
+/// `Pair[f64]` mid-word through the ordinary poly-call path -- a real
+/// check-time mint, now correctly grounded by Part 3's actual-mint scrutinee
+/// recovery and Part 4's constructor fallback, so the whole program builds
+/// and runs. The `One` arm does `One>` and the trailing `.` prints the
+/// unwrapped `f64`; the tree's `f64` rendering convention (`tests/phase0.rs`)
+/// prints it with no trailing zeros. This fixture also carries its own
+/// independent, unrelated stack-linearity bug: its `Nil` arm `~[ ( Nil )
+/// 0.0 ]` never consumed the `Nil` variant it was given (the `One` arm
+/// consumes via `One>`), so it is fixed here (`~[ ( Nil ) drop 0.0 ]`) as an
+/// orthogonal fixture fix, not part of the mechanism this slice fixes.
 #[test]
-fn concrete_body_generic_eliminator_message_does_not_fabricate_an_instantiation() {
+fn a_check_time_poly_output_monomorph_resolves_at_the_eliminator() {
     let src = "type: Pair['A] | Nil | One 'A ;\n\
          : wrap ( 'T -- Pair['T] ) One ;\n\
-         : main ( -- ) 7.5 wrap ~[ ( One ) One> ] ~[ ( Nil ) 0.0 ] Pair? . ;\n";
+         : main ( -- ) 7.5 wrap ~[ ( One ) One> ] ~[ ( Nil ) drop 0.0 ] Pair? . ;\n";
     let prog = Scratch::write("r86-poly-output", src);
+    let (stdout, code) = build_and_run(prog.path());
+    assert_eq!(code, 0, "expected the program to build and run cleanly");
+    assert_eq!(stdout, "7.5\n");
+}
+
+/// (P7.S11-follow) Re-homes the fabricated-instantiation regression guard
+/// the flip above retired as a `build_error` assertion: the tree's only
+/// witness that `concrete_body_generic_eliminator_error` does not fabricate
+/// a specific instantiation when a monomorph *does* exist. `main` is checked
+/// before `probe` (the per-word loop aborts on the first error), so `main`
+/// checks clean -- minting `Pair[f64]` check-time, the exact mid-word mint
+/// shape this slice is about -- before `probe` is reached and fails: its
+/// scrutinee is `f64`, never a `Type::Enum`, so Part 3's actual-mint
+/// fallback never engages and `Pair?` still hits
+/// `concrete_body_generic_eliminator_error`. With a genuinely live
+/// monomorph in the program, `!contains("nothing in this program
+/// instantiates")` stays meaningful (a resurrected claim would be false
+/// here), and the source names no `i64` anywhere, so `!contains("i64")`
+/// stays meaningful too.
+#[test]
+fn a_grounded_program_still_rejects_a_scrutinee_mismatched_eliminator() {
+    let src = "type: Pair['A] | Nil | One 'A ;\n\
+         : wrap ( 'T -- Pair['T] ) One ;\n\
+         : main ( -- ) 7.5 wrap drop 7.5 probe . ;\n\
+         : probe ( f64 -- f64 )\n\
+           ~[ ( One ) drop 1.0 ]\n\
+           ~[ ( Nil ) drop 0.0 ]\n\
+           Pair? ;\n";
+    let prog = Scratch::write("r86-scrutinee-mismatch", src);
     let err = build_error(prog.path());
     assert!(
         err.contains("`Pair?` names the generic enum `Pair`")
             && err.contains("cannot eliminate it while it is ungrounded")
             && !err.contains("nothing in this program instantiates")
-            && !err.contains("i64")
-            && !err.contains("arms are written together"),
-        "expected the honest rejection with no fabricated instantiation, got: {err}"
+            && !err.contains("i64"),
+        "expected the honest rejection, no fabricated instantiation, got: {err}"
     );
 }
 
