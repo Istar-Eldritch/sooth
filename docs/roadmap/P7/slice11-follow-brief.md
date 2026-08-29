@@ -367,3 +367,65 @@ make explicitly, not an implementation detail.
 
 **Ready to spec: yes, with this scope question named as an explicit open decision** rather
 than silently resolved either way.
+
+## Gate (v) confirmed cheap: one shared mechanism, not a second wiring site (2026-08-29)
+
+A third discovery pass, in a fresh isolated worktree, found a materially better design than
+either prior prototype and settles the open scope question above.
+
+### The unified mechanism
+
+Instead of building a splice-scoped `env`/`structs`/`enums` clone inside `inline_combinator`
+(the first gate-(iv) prototype's approach), this pass moved the fallback to the single
+point of failure: an `env.get(name)` miss (`src/check/terms.rs`, the ordinary-call
+dispatch). On a miss, `mint_fallback_candidates(name, ctx)` reads the *live* `generics_cell`
+fresh, re-derives `struct_generated_sigs`/`enum_generated_sigs`/`variant_generated_sigs` over
+its pending (unflushed) mints, and returns any candidates matching `name` -- a read-through,
+computed per-miss, mutating nothing. Because *every* mid-word mint path (a splice's own
+output grounding, gate (i); an ordinary poly call's `apply_subst`, the gate-(v) case) writes
+into this same live cell regardless of call shape, one fallback at the `env`-miss site covers
+both origins automatically. Gate (i) shrinks to just forcing the mint to happen early enough
+(`apply_subst` over `sig.outputs` ahead of the splice in `inline_combinator`) -- no clone, no
+scoped `env` construction. Gates (ii)/(iii) keep their id-indexed and scrutinee-type-based
+fallbacks (`Ctx::with_struct_decl_or_generic`/`with_enum_decl_or_generic`,
+`scrutinee_enum_id_of_family`), reconstructed cleanly, no discrepancy from the earlier
+prototypes' description.
+
+**Answering the open question directly: gate (v) is not a second wiring site. It is the
+same mechanism as gate (iv), already generic over call shape, because the fallback lives at
+the point of use (an `env` miss) rather than at either originating mint site.** No separate
+plumbing is needed for "ordinary poly call inside the enclosing word" versus "splice-local
+mint escaping outward" -- both already flow through one live cell this one fallback reads.
+
+### Validation: full suite, not just the four target goldens
+
+All four target goldens (6, 6b, 9, 10) pass, exit 0, as before. Ran the *entire* existing
+suite (`cargo test --no-fail-fast`, all targets) against the prototype: **exactly the four
+failures already expected and none else** -- the three `phase7_slice11.rs` bug-pinning
+goldens (6, 9, 10's own tests) plus `phase7_slice12.rs`'s
+`concrete_body_generic_eliminator_message_does_not_fabricate_an_instantiation`, all flipping
+from reject to a different outcome, zero unrelated regressions anywhere in the suite.
+
+The `phase7_slice12.rs` fixture's flip is more interesting than a clean accept: past the now-
+fixed "ungrounded" gate, the checker finds a **second, real, unrelated bug already latent in
+that fixture's own source** -- `~[ ( Nil ) 0.0 ]` never consumes or drops the `0.0` it
+produces, so the honest error becomes `an arm of `Pair?` leaves `Pair[f64].Nil` on the stack`
+(a real linearity violation) rather than a clean exit 0. The old "ungrounded" rejection was
+firing so early it papered over this fixture's own independent stack-linearity mistake. This
+fixture's migration (unlike the three `phase7_slice11.rs` goldens, which just need their
+assertion flipped) also needs its `Nil` arm fixed to actually consume the value it produces
+(e.g. `drop` or `.`), the same way golden 6's arms do, before it can assert a clean exit 0.
+
+### Updated verdict, third pass
+
+Gate (v) is resolved: it is gate (iv) under a more general design, not an additional
+mechanism, and costs nothing extra beyond what (i)-(iv) already require. The open scope
+question from the second pass is answered -- **there is no reason to defer it**; the fix
+that already closes goldens 6/9/10 closes this fourth bug-pinning fixture (with one extra,
+independent, orthogonal fixture-source fix) for free, at no additional design cost. All four
+gates plus this generalization are validated end to end with a full-suite regression check
+and precisely four expected flips, no surprises. **Ready to spec: yes, gates (i)-(v) folded
+into one four-part fix** (splice-output grounding, id-indexed decl fallback, scrutinee-type
+eliminator grounding, and one shared `env`-miss mint fallback), plus a small, separately-
+scoped test migration list (3 `phase7_slice11.rs` assertion flips, 1 `phase7_slice12.rs`
+assertion flip + fixture fix for its own independent linearity bug).
