@@ -5860,14 +5860,10 @@ impl<'t> Parser<'t> {
                 self.pos += 1;
                 Len::Var(self.resolve_field_len_var(decl_name, len_vars, used_len, &w, span)?)
             } else {
-                Len::Concrete(
-                    self.parse_generic_field_array_count(decl_name, &elem, ty_vars, len_vars)?,
-                )
+                Len::Concrete(self.parse_generic_field_array_count(&elem, ty_vars, len_vars)?)
             }
         } else {
-            Len::Concrete(
-                self.parse_generic_field_array_count(decl_name, &elem, ty_vars, len_vars)?,
-            )
+            Len::Concrete(self.parse_generic_field_array_count(&elem, ty_vars, len_vars)?)
         };
         self.expect(Token::RBracket)?;
         Ok(match (elem, len) {
@@ -5887,7 +5883,6 @@ impl<'t> Parser<'t> {
     /// a concrete array field.
     fn parse_generic_field_array_count(
         &mut self,
-        _decl_name: &str,
         elem: &PolyType,
         ty_vars: &[(String, Span)],
         len_vars: &[(String, Span)],
@@ -11223,6 +11218,30 @@ mod tests {
         // `'N` bound but never used in any field's array count -- must fail
         // before `used_len` bookkeeping exists.
         let err = parse_src("type: Buffer['T 'N: Len] data 'T ;").unwrap_err();
+        assert!(err.contains("'N"), "{err}");
+        assert!(err.contains("phantom"), "{err}");
+    }
+
+    #[test]
+    fn parse_generic_enum_variant_field_binds_a_length_variable() {
+        // The enum twin of `parse_generic_type_header_with_length_parameter_parses`:
+        // `parse_generic_variant_fields` threads `len_vars`/`used_len` too.
+        let module =
+            parse_src("type: Ring['T 'N: Len] | Full data array['T 'N] | Empty 'T ;").unwrap();
+        let decl = &module.generic_enums[0];
+        assert_eq!(
+            decl.variants[0].fields[0].1,
+            PolyType::Array(Box::new(PolyType::Var(0)), Len::Var(0))
+        );
+    }
+
+    #[test]
+    fn parse_generic_enum_typedef_phantom_length_var_is_error() {
+        // The enum twin of `parse_generic_typedef_phantom_length_var_is_error`:
+        // `check_no_phantom_len_var` is called from
+        // `parse_generic_enum_typedef_variants` too, not only from the struct
+        // field loop.
+        let err = parse_src("type: Ring['T 'N: Len] | Full 'T | Empty 'T ;").unwrap_err();
         assert!(err.contains("'N"), "{err}");
         assert!(err.contains("phantom"), "{err}");
     }
