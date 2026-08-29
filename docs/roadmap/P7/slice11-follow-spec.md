@@ -147,28 +147,36 @@ family registry entry, whose *header* always exists, so this read rarely lands
 past `len`; wiring it anyway keeps the eliminator uniformly fallback-safe and
 costs only the field hoist.)
 
-**`is_copy` / `contains_reference` on the concrete path *are* wired (via an
-extended slice), because Parts 1/4 open a real panic hole otherwise.** `is_copy`
-(`src/check/builtins.rs:228`, `pub fn is_copy(ty, &[StructDecl], &[EnumDecl],
-&[ArrayDecl])`) indexes `structs[id.index()]`/`enums[id.index()]` with **no
-bounds check** (`src/check/builtins.rs:230-235`) and recurses over fields. Once
-Parts 1/4 make a check-time-only monomorph's constructor resolve, an ordinary
-program can `dup`/`over` that monomorph (a `Copy` monomorph such as
-`Result[i64 i64]` from `7 ~[ 1 add ] wrap dup …`) or `fill` an array of it, and
-the id-indexed read lands past `ctx.structs()/enums().len()` and **panics**. That
-is a new hole this slice would open, so it must be closed, not merely named.
+**`is_copy` / `contains_reference` / `is_linear` on the concrete path *are*
+wired (via an extended slice), because Parts 1/4 open a real panic hole
+otherwise — and every call site on this path must be covered, not a
+representative subset.** `is_copy` (`src/check/builtins.rs:228`, `pub fn
+is_copy(ty, &[StructDecl], &[EnumDecl], &[ArrayDecl])`) indexes
+`structs[id.index()]`/`enums[id.index()]` with **no bounds check**
+(`src/check/builtins.rs:230-235`) and recurses over fields. `is_linear`
+(`src/check/builtins.rs:271`, `!ty.is_ref() && !is_copy(ty, structs, enums,
+arrays)`) is a thin wrapper and inherits the identical unbounded read — any
+concrete-path call to `is_linear` is exactly as exposed as a call to `is_copy`
+itself. Once Parts 1/4 make a check-time-only monomorph's constructor resolve,
+an ordinary program can `dup`/`over` that monomorph, `fill` an array of it, or
+simply **bind it to a local** (`| r |`) — the bind path (`src/check/terms.rs:178`)
+reads `is_linear` on the bound slot's type to decide move/copy discipline, and a
+two-word program with no `dup` at all (`: main ( -- ) 7 ~[ 1 add ] wrap | r | r
+drop ;`) reaches it. Every one of these is a new hole this slice would open, so
+all of them must be closed, not a subset presented as if it were exhaustive.
 
 Wire it the same way Part 4 derives its ids: build an **extended** decl slice
 (the flushed `ctx.structs()`/`ctx.enums()` ++ the live cell's unflushed
-`inst_structs`/`inst_enums`) and hand *that* to `is_copy`/`contains_reference`.
-Do **not** change either function's signature. Provide a closure-taking Ctx
-accessor `with_extended_type_slices(|structs, enums| …)` (in `impl Ctx`,
+`inst_structs`/`inst_enums`) and hand *that* to `is_copy`/`contains_reference`/
+`is_linear`. Do **not** change any of their signatures. Provide a closure-taking
+Ctx accessor `with_extended_type_slices(|structs, enums| …)` (in `impl Ctx`,
 alongside the id-indexed accessors) that concatenates the flushed prefix and the
 live cell's pending tail into two local `Vec`s and calls `f(&structs, &enums)`;
 the concatenation is self-consistent (a monomorph's field may name another
 pending monomorph, and the extended slice contains it), so the recursion is
 safe and — by the dedup argument below — terminates exactly as before. The
-concrete-path `is_copy`/`contains_reference` sites to route through it:
+concrete-path sites to route through it — **enumerate all of them, this list is
+exhaustive, not representative**:
 
 - `dup` (`src/check.rs:3130`, `is_copy(top.ty, …)`) and `over`
   (`src/check.rs:3190`, `is_copy(below.ty, …)`);
@@ -176,7 +184,23 @@ concrete-path `is_copy`/`contains_reference` sites to route through it:
   `is_copy` (`src/check.rs:481`), whose caller
   (`src/check/word_families.rs:973`, `check_array_element_gate`) currently
   passes the frozen `ctx.structs()`/`ctx.enums()` — route the extended slices in
-  there.
+  there;
+- the local-bind linearity check (`src/check/terms.rs:178`, `is_linear(slot.ty,
+  ctx.structs(), ctx.enums(), …)`) and its sibling reads at
+  `src/check/terms.rs:249` and `:1324`;
+- the `drop`-site linearity check (`src/check.rs:1293`, `is_linear(s.ty,
+  structs, enums, arrays)`);
+- the remaining `is_copy`/`contains_reference` reads in
+  `src/check/word_families.rs` at `:547`, `:603`, `:801`, `:1054`, `:1115`
+  (per-field projection/assignment paths that gate on copy-ness the same way
+  the array-fill gate does).
+
+Verify this list against current source before implementing — do not trust it
+as frozen; a prior draft of this same section named only four sites and missed
+the rest, and a grep for every concrete-path `is_copy(`/`contains_reference(`/
+`is_linear(` call taking `ctx.structs()`/`ctx.enums()` (or the plain
+`structs`/`enums` parameters threaded from them) is the only reliable way to
+close this.
 
 The single-decl `has_drop_overload` reads on this same path — `cannot_copy_error`
 (`src/check.rs:1448`) and the `drop` reads (`src/check.rs:3168-3169`) — are
@@ -534,6 +558,27 @@ exercises the extended-slice `is_copy` read on a past-`len` id — without the
 wiring this program **panics** rather than building. It lands in Phase 2
 alongside the other new tests.
 
+**Add a bind witness for the extended-slice `is_linear` wiring — a second,
+independent hole `dup` alone does not cover.** `is_linear` (`src/check/builtins.rs:271`)
+is a thin wrapper over `is_copy` and inherits the identical unbounded read, but
+it is reached by an entirely different, more common path: binding a check-time
+monomorph to a local (`| r |`), with no `dup`/`over` in sight
+(`src/check/terms.rs:178`). This is a two-word program, no combinator syntax
+beyond `wrap` itself:
+
+```sooth
+type: Result['T 'E] | Ok 'T | Err 'E ;
+: wrap inline ( 'T ~[ 'T -- 'T ] -- Result['T i64] ) call Ok ;
+: main ( -- ) 7 ~[ 1 add ] wrap | r | r drop ;
+```
+
+Name it e.g. `a_check_time_monomorph_survives_a_local_bind_without_a_panic`,
+asserting `build_and_run` / exit 0. Without the `is_linear` wiring this panics
+the same way the `dup` fixture would without the `is_copy` wiring — the two
+goldens are independent witnesses because `is_copy` and `is_linear` are called
+from disjoint sites (`check.rs` vs. `terms.rs`), so fixing one does not imply
+the other is fixed. It lands in Phase 2 alongside the other new tests.
+
 **`src/check.rs:1448` (`cannot_copy_error`'s `has_drop_overload` read) is wired
 defensively, with no minimal integration witness.** Reaching `:1448` requires
 `is_copy` to first return `false`, i.e. a *linear* check-time-only monomorph
@@ -578,19 +623,26 @@ non-enum type. Add this as a **new rejection test** in `tests/phase7_slice12.rs`
 ```sooth
 type: Pair['A] | Nil | One 'A ;
 : wrap ( 'T -- Pair['T] ) One ;
+: main ( -- ) 7.5 wrap drop 7.5 probe . ;
 : probe ( f64 -- f64 )
   ~[ ( One ) drop 1.0 ]
   ~[ ( Nil ) drop 0.0 ]
   Pair? ;
-: main ( -- ) 7.5 wrap drop 7.5 probe . ;
 ```
 
-Name it e.g. `a_grounded_program_still_rejects_a_scrutinee_mismatched_eliminator`.
-`main`'s `7.5 wrap drop` mints `Pair[f64]` check-time (the exact mid-word mint
-shape this slice is about), so `!err.contains("nothing in this program
-instantiates")` stays meaningful (a resurrected "nothing instantiates" claim
-would be *false* here), and the source names no `i64` anywhere, so
-`!err.contains("i64")` stays meaningful. It stays rejected because `probe`'s
+**Word order is load-bearing here — `main` must be checked before `probe`.** The
+per-word loop aborts on the first error (`check_word(…)?` at `src/check.rs:998`),
+so if `probe` (which always fails) were checked first, as an earlier draft of
+this fixture had it, `main` would never run and no monomorph would ever be
+minted — the diagnostic would fire against a program with *zero* live
+monomorphs, which is exactly the weaker state the retired guard used to have
+and the re-home is supposed to avoid. With `main` first, `main` checks clean
+(minting `Pair[f64]` check-time, the exact mid-word mint shape this slice is
+about) before `probe` is reached and fails, so `!err.contains("nothing in this
+program instantiates")` stays meaningful against a program with a genuinely
+live monomorph (a resurrected "nothing instantiates" claim would be *false*
+here), and the source names no `i64` anywhere, so `!err.contains("i64")` stays
+meaningful too. It stays rejected because `probe`'s
 scrutinee is `f64`, never a `Type::Enum` — Part 3's actual-mint fallback never
 engages — so `Pair?` still hits `concrete_body_generic_eliminator_error`. The
 mint must stay **check-time-only**: `wrap` is an ordinary poly word called from
@@ -696,9 +748,10 @@ free.
   `:473`, `:481`, `:3130`, `:3190`); `src/check/word_families.rs` (the
   `check_array_element_gate` caller at `:973`, which must hand the extended
   slices to the fill/element gate). **`src/check/poly.rs` is not modified** —
-  its id-indexed body-walk reads are the standalone path already covered by
-  `ground_into_word_scoped_registries` (Part 2); do not touch the
-  `generics.enums[idx]` header table (`:3260`, `:3498-3500`, `:4558`,
+  its id-indexed body-walk reads are pre-existing exposure, not newly
+  reachable through this slice's mechanism (Part 2 — the pre-walk flush does
+  **not** cover a mid-walk mint, so this is not a coverage claim); do not touch
+  the `generics.enums[idx]` header table (`:3260`, `:3498-3500`, `:4558`,
   `:4638-4699`).
 - **Entry conditions.** Tree green at HEAD.
 - **Exit criteria.** New unit tests pass —
@@ -725,10 +778,13 @@ free.
   `sig.outputs` in `inline_combinator`, after `:351`, before the body splice);
   `src/check/terms.rs` (Part 3: `scrutinee_enum_id_of_family` with the
   actual-mint guard; Part 4: `mint_fallback_candidates` at the `env.get` miss,
-  `:838`); `tests/phase7_slice11.rs` (three flips, the new golden 6b, and the
-  new `dup` witness golden for the extended-slice `is_copy` wiring);
-  `tests/phase7_slice12.rs` (one flip plus the independent `Nil`-arm linearity
-  fixture fix, and the re-homed fabricated-instantiation rejection test).
+  `:838`); `src/check.rs` (the destructive arm-collection scan at `:2285-2302`,
+  refactored to call the shared peek-only helper and pop over the peeked
+  count — see Part 3); `tests/phase7_slice11.rs` (three flips, the new golden
+  6b, and the new `dup`/bind witness goldens for the extended-slice
+  `is_copy`/`is_linear` wiring); `tests/phase7_slice12.rs` (one flip plus the
+  independent `Nil`-arm linearity fixture fix, and the re-homed
+  fabricated-instantiation rejection test).
 - **Entry conditions.** Phase 1 merged and green.
 - **Exit criteria.** The three `phase7_slice11.rs` goldens (6, 9, 10) and the
   `phase7_slice12.rs` fixture all `build_and_run` to exit 0, with flipped
@@ -740,8 +796,9 @@ free.
   `a_combinator_over_a_generic_enum_slot_is_rejected_before_r15_can_fire` stay
   `build_error`; goldens 4, 5, 8 stay green unchanged (golden 8 is an existing
   accept test, not a rejection). The new `dup` witness golden
-  (`a_check_time_monomorph_survives_dup_without_a_panic`) `build_and_run`s to
-  exit 0, and the re-homed rejection test
+  (`a_check_time_monomorph_survives_dup_without_a_panic`) and the new bind
+  witness golden (`a_check_time_monomorph_survives_a_local_bind_without_a_panic`)
+  both `build_and_run` to exit 0, and the re-homed rejection test
   (`a_grounded_program_still_rejects_a_scrutinee_mismatched_eliminator`,
   `tests/phase7_slice12.rs`) is a NEW `build_error` with the four honest-message
   assertions. New unit tests pass —
@@ -756,9 +813,10 @@ free.
   **no** integration mutation-test (see the mutation-test ruling in the test
   plan); it is witnessed only by
   `scrutinee_enum_id_of_family_none_when_type_looks_concrete_but_unminted`.
-  Full green gate; exactly four flips plus three added tests (golden 6b, the
-  `dup` witness golden, and the re-homed slice12 rejection test) and the
-  slice12 fixture's orthogonal linearity fix; no other suite changes.
+  Full green gate; exactly four flips plus four added tests (golden 6b, the
+  `dup` witness golden, the bind witness golden, and the re-homed slice12
+  rejection test) and the slice12 fixture's orthogonal linearity fix; no other
+  suite changes.
 - **Effort / difficulty.** Medium effort; **hard** — the splice-site grounding,
   the scrutinee actual-mint guard (permissiveness is the trap), the shared
   `env`-miss fallback, and four coupled migrations must land atomically green.
@@ -775,7 +833,7 @@ free.
   },
   {
     "phase": 2,
-    "focus": "Check-time mint resolution: splice-site sig.outputs grounding in inline_combinator (src/check/combinators.rs, propagate apply_subst's Err); scrutinee_enum_id_of_family with a defensive actual-mint guard (scanned via a non-destructive peek shared with check.rs:2285, which alone keeps its pops) and mint_fallback_candidates (extended-slice + skip id derivation, first-wins dispatch on a name collision) at the env.get miss (src/check/terms.rs). Migrate the four bug-pinning fixtures atomically (three flips in tests/phase7_slice11.rs, one flip plus an independent Nil-arm linearity fix in tests/phase7_slice12.rs) and add three new tests: golden 6b, the dup witness golden (a_check_time_monomorph_survives_dup_without_a_panic), and the re-homed fabricated-instantiation rejection test (a_grounded_program_still_rejects_a_scrutinee_mismatched_eliminator, stays build_error). Golden 6 and the slice12 flipped fixture assert stdout (7.5\n for slice12). Unit tests for each new guard; Part 1's grounding is mutation-tested against golden 6, the Part-3 guard has no integration witness (unit-test only).",
+    "focus": "Check-time mint resolution: splice-site sig.outputs grounding in inline_combinator (src/check/combinators.rs, propagate apply_subst's Err); scrutinee_enum_id_of_family with a defensive actual-mint guard (scanned via a non-destructive peek shared with check.rs:2285, which alone keeps its pops) and mint_fallback_candidates (extended-slice + skip id derivation, first-wins dispatch on a name collision) at the env.get miss (src/check/terms.rs). Migrate the four bug-pinning fixtures atomically (three flips in tests/phase7_slice11.rs, one flip plus an independent Nil-arm linearity fix in tests/phase7_slice12.rs) and add four new tests: golden 6b, the dup witness golden (a_check_time_monomorph_survives_dup_without_a_panic), the bind witness golden (a_check_time_monomorph_survives_a_local_bind_without_a_panic, an independent is_linear witness disjoint from the is_copy one), and the re-homed fabricated-instantiation rejection test (a_grounded_program_still_rejects_a_scrutinee_mismatched_eliminator, main checked before probe so the mint is live at diagnostic time, stays build_error). Golden 6 and the slice12 flipped fixture assert stdout (7.5\n for slice12). Unit tests for each new guard; Part 1's grounding is mutation-tested against golden 6, the Part-3 guard has no integration witness (unit-test only).",
     "effort": "medium",
     "difficulty": "hard"
   }
@@ -797,14 +855,20 @@ free.
    defensive coding with no integration witness (unit-test only), and the false
    "deleting it re-breaks slice12" mutation claim is not asserted.
 3. `cargo fmt --check && cargo clippy -- -D warnings && cargo test` is green,
-   with exactly the four documented golden flips plus three added integration
-   tests (golden 6b, the `dup` witness golden, and the re-homed slice12
-   rejection test) and the slice12 fixture's orthogonal `Nil`-arm linearity fix,
-   and no other suite changes.
+   with exactly the four documented golden flips plus four added integration
+   tests (golden 6b, the `dup` witness golden, the bind witness golden, and the
+   re-homed slice12 rejection test) and the slice12 fixture's orthogonal
+   `Nil`-arm linearity fix, and no other suite changes.
 4. The fabricated-instantiation regression guard
    (`concrete_body_generic_eliminator_message_does_not_fabricate_an_instantiation`'s
    negative assertions) is **re-homed** onto a scrutinee-mismatch fixture
-   (`a_grounded_program_still_rejects_a_scrutinee_mismatched_eliminator`, a NEW
-   `build_error` test that both mints a monomorph and stays rejected, keeping
+   (`a_grounded_program_still_rejects_a_scrutinee_mismatched_eliminator`, `main`
+   checked before `probe` so the fixture mints a live monomorph before the
+   still-rejected eliminator is reached, a NEW `build_error` test keeping
    `!contains("nothing in this program instantiates")` and `!contains("i64")`
    meaningful), not retired.
+5. The extended-slice `is_copy`/`contains_reference`/`is_linear` wiring covers
+   every concrete-path call site listed in Part 2 (`check.rs`, `terms.rs`, and
+   `word_families.rs`), not only the `dup`/`over`/`fill` sites; both the `dup`
+   witness golden and the independent bind witness golden build and run to
+   exit 0.
