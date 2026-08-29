@@ -1024,31 +1024,26 @@ impl GenericTypes {
     /// a concrete `Result[i64 str]` was built from, to bind `'T`/`'E`
     /// against them.
     ///
-    /// P7.S6a (R5): `struct_keys`' entry tuple now carries a fourth,
-    /// length-argument element too, but this function's own **public return
-    /// signature stays `Option<(usize, u32, &[Type])>` in this phase** --
-    /// the length component is deliberately discarded here (`_lens`), not
-    /// yet exposed. R8's own phase widens the return type to `Option<(usize,
-    /// u32, &[Type], &[Len])>` and updates every consumer atomically; this
-    /// phase only has to keep this function itself compiling against the
-    /// widened tuple shape it destructures.
-    pub fn struct_instantiation_of(&self, id: StructId) -> Option<(usize, u32, &[Type])> {
+    /// P7.S6a (R8a): `struct_keys`' entry tuple carries a fourth,
+    /// length-argument element, now exposed as this function's own fourth
+    /// return component alongside the type arguments.
+    pub fn struct_instantiation_of(&self, id: StructId) -> Option<(usize, u32, &[Type], &[Len])> {
         let i = self
             .struct_resolved
             .iter()
             .position(|t| matches!(t, Type::Struct(sid, _) if *sid == id))?;
-        let (gi, m, args, _lens) = &self.struct_keys[i];
-        Some((*gi, *m, args))
+        let (gi, m, args, lens) = &self.struct_keys[i];
+        Some((*gi, *m, args, lens))
     }
 
     /// The enum twin of `struct_instantiation_of`.
-    pub fn enum_instantiation_of(&self, id: EnumId) -> Option<(usize, u32, &[Type])> {
+    pub fn enum_instantiation_of(&self, id: EnumId) -> Option<(usize, u32, &[Type], &[Len])> {
         let i = self
             .enum_resolved
             .iter()
             .position(|t| matches!(t, Type::Enum(eid, _) if *eid == id))?;
-        let (gi, m, args, _lens) = &self.enum_keys[i];
-        Some((*gi, *m, args))
+        let (gi, m, args, lens) = &self.enum_keys[i];
+        Some((*gi, *m, args, lens))
     }
 
     /// P7.S3n (R2): register a generic struct header with an empty field

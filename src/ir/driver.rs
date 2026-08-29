@@ -611,30 +611,36 @@ pub(super) fn subst_polytype(
         // (the same registry, kept alive rather than dropped), so a miss
         // here is a gap in that coverage, not a reason to mint from the
         // lowering side.
-        // P7.S6a (R8a lands length-aware lookup in a later phase):
-        // `len_args` is not yet substituted or matched here -- phase 3's
-        // scope is the mechanical compile-forced ripple only.
+        // P7.S6a (R8a): `len_args` substitutes through `subst.len` before
+        // the lookup, mirroring `apply_subst`'s own new logic, so the key
+        // agrees with whichever length-carrying monomorph check time minted.
         PolyType::Generic {
             is_enum,
             idx,
             module,
             args,
-            len_args: _,
+            len_args,
             name: _,
         } => {
             let concrete_args: Vec<Type> = args
                 .iter()
                 .map(|a| subst_polytype(a, subst, arrays, owned_cells, refs, generics))
                 .collect();
-            // P7.S6a (R8a lands length-aware lookup in a later phase): an
-            // empty placeholder matches every check-time mint's own
-            // placeholder length list in this phase (R7's real value has
-            // not landed yet), so the key still agrees with what
-            // `apply_subst` minted.
+            let concrete_lens: Vec<Len> = len_args
+                .iter()
+                .map(|l| match l {
+                    Len::Concrete(k) => Len::Concrete(*k),
+                    Len::Var(ln) => Len::Concrete(
+                        subst
+                            .len_of(*ln)
+                            .expect("checked: unification bound every length variable"),
+                    ),
+                })
+                .collect();
             let found = if *is_enum {
-                generics.lookup_enum(*idx as usize, *module, &concrete_args, &[])
+                generics.lookup_enum(*idx as usize, *module, &concrete_args, &concrete_lens)
             } else {
-                generics.lookup_struct(*idx as usize, *module, &concrete_args, &[])
+                generics.lookup_struct(*idx as usize, *module, &concrete_args, &concrete_lens)
             };
             found.expect(
                 "checked: apply_subst already minted this generic instantiation at check time",

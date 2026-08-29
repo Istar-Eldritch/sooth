@@ -2580,7 +2580,14 @@ fn poly_mentions_len_var(pt: &PolyType) -> bool {
         PolyType::Array(elem, len) => matches!(len, Len::Var(_)) || poly_mentions_len_var(elem),
         PolyType::Ref(referent, _) => poly_mentions_len_var(referent),
         PolyType::OwnedCell(payload) => poly_mentions_len_var(payload),
-        PolyType::Generic { args, .. } => args.iter().any(poly_mentions_len_var),
+        // P7.S6a (R8a): a header's own `len_args` are length positions too,
+        // scanned alongside its type `args` -- a length may live in
+        // `len_args` instead of a bare array, and this guard exists
+        // specifically to reject that in a poly-body cross-call.
+        PolyType::Generic { args, len_args, .. } => {
+            args.iter().any(poly_mentions_len_var)
+                || len_args.iter().any(|l| matches!(l, Len::Var(_)))
+        }
         PolyType::Quotation(ins, outs, ..) => ins.iter().chain(outs).any(poly_mentions_len_var),
         PolyType::Concrete(_) | PolyType::Var(_) | PolyType::QuotLit => false,
         // P7.S12 (R3.5): unconstructible outside an eliminator arm's own
@@ -7023,7 +7030,7 @@ fn match_impl_target_rec(
                 };
                 generics.struct_instantiation_of(id)
             };
-            let (found_idx, found_module, found_args) = found?;
+            let (found_idx, found_module, found_args, _) = found?;
             if found_idx != *idx as usize
                 || found_module != *module
                 || found_args.len() != args.len()
@@ -7143,7 +7150,7 @@ fn collect_positions(
                 };
                 generics.struct_instantiation_of(id)
             };
-            let (found_idx, found_module, found_args) = found?;
+            let (found_idx, found_module, found_args, _) = found?;
             if found_idx != *idx as usize
                 || found_module != *module
                 || found_args.len() != args.len()
@@ -7207,7 +7214,7 @@ fn collect_concrete_positions(
         }
         Type::Struct(id, _) => {
             if let Some(generics) = generics {
-                if let Some((_, _, args)) = generics.struct_instantiation_of(id) {
+                if let Some((_, _, args, _)) = generics.struct_instantiation_of(id) {
                     if !args.is_empty() {
                         for arg_ty in args {
                             collect_concrete_positions(
@@ -7228,7 +7235,7 @@ fn collect_concrete_positions(
         }
         Type::Enum(id, _) => {
             if let Some(generics) = generics {
-                if let Some((_, _, args)) = generics.enum_instantiation_of(id) {
+                if let Some((_, _, args, _)) = generics.enum_instantiation_of(id) {
                     if !args.is_empty() {
                         for arg_ty in args {
                             collect_concrete_positions(
@@ -7469,7 +7476,7 @@ fn collect_paired_positions(
         }
         Type::Struct(id, _) => {
             let generics = generics?;
-            let (_, _, ty_args) = generics.struct_instantiation_of(id)?;
+            let (_, _, ty_args, _) = generics.struct_instantiation_of(id)?;
             if ty_args.is_empty() {
                 return Some(());
             }
@@ -7492,7 +7499,7 @@ fn collect_paired_positions(
         }
         Type::Enum(id, _) => {
             let generics = generics?;
-            let (_, _, ty_args) = generics.enum_instantiation_of(id)?;
+            let (_, _, ty_args, _) = generics.enum_instantiation_of(id)?;
             if ty_args.is_empty() {
                 return Some(());
             }
@@ -7892,16 +7899,15 @@ pub(super) fn unify_poly_input(
         // instantiation of this exact header (wrong id, wrong header, or a
         // hand-written concrete type sharing no dedup key at all) is a
         // rendered mismatch, never a panic.
-        // P7.S6a (R8a lands signature-unification length binding in a
-        // later phase): `len_args` is not yet bound against `subst.len`
-        // here -- phase 3's scope is the mechanical compile-forced ripple
-        // only.
+        // P7.S6a (R8a): `len_args` binds against `subst.len` the same way
+        // the `Array` arm's own `Len::Var` does, one position per declared
+        // length argument.
         PolyType::Generic {
             is_enum,
             idx,
             module,
             args,
-            len_args: _,
+            len_args,
             name: _,
         } => {
             let Some(cell) = ctx.generics() else {
@@ -7933,21 +7939,52 @@ pub(super) fn unify_poly_input(
                 };
                 generics.struct_instantiation_of(id)
             };
-            let Some((found_idx, found_module, found_args)) = found else {
+            let Some((found_idx, found_module, found_args, found_lens)) = found else {
                 return Err(mismatch());
             };
             if found_idx != *idx as usize
                 || found_module != *module
                 || found_args.len() != args.len()
+                || found_lens.len() != len_args.len()
             {
                 return Err(mismatch());
             }
             let found_args = found_args.to_vec();
+            let found_lens = found_lens.to_vec();
             drop(generics);
             for (arg_pty, arg_ty) in args.iter().zip(found_args.iter()) {
                 unify_poly_input(
                     sig, arg_pty, *arg_ty, name, span, ctx, arrays, cells, refs, subst, seeded,
                 )?;
+            }
+            for (len, found_len) in len_args.iter().zip(found_lens.iter()) {
+                let Len::Concrete(found_len) = found_len else {
+                    unreachable!("a minted header instantiation's own length arguments are always concrete")
+                };
+                let found_len = *found_len;
+                match len {
+                    Len::Concrete(k) => {
+                        if *k != found_len {
+                            return Err(mismatch());
+                        }
+                    }
+                    Len::Var(ln) => {
+                        if let Some(prev) = subst.len_of(*ln) {
+                            if prev != found_len {
+                                return Err(poly_len_conflict_error(
+                                    ctx,
+                                    span,
+                                    name,
+                                    &sig.len_var_names[*ln as usize],
+                                    prev,
+                                    found_len,
+                                ));
+                            }
+                        } else {
+                            subst.len.push((*ln, found_len));
+                        }
+                    }
+                }
             }
         }
         // P7.S12 (R3.5): unconstructible outside an eliminator arm's own
@@ -8092,18 +8129,14 @@ pub(super) fn apply_subst(
         // `unify_poly_input`'s `Generic` arm reads. Substituting every
         // argument first (recursively) means a nested variable-bearing
         // argument grounds bottom-up, exactly as `Array`'s element does.
-        // PLACEHOLDER, replaced by R8a: `len_args` is populated in a
-        // checker-visible `PolySig` only once R7's signature-parsing fold
-        // lands (a later phase), so this arm never actually receives a
-        // non-empty `len_args` to drop in this phase -- an empty length list
-        // is passed through to `instantiate_*` until R8a resolves it through
-        // `subst.len`.
+        // P7.S6a (R8a): `len_args` resolves through `subst.len` the same way
+        // `Array`'s own `Len::Var` arm does, before minting.
         PolyType::Generic {
             is_enum,
             idx,
             module,
             args,
-            len_args: _,
+            len_args,
             name: _,
         } => {
             let Some(cell) = ctx.generics() else {
@@ -8119,6 +8152,16 @@ pub(super) fn apply_subst(
                 concrete_args.push(apply_subst(
                     sig, a, subst, name, span, ctx, arrays, cells, refs,
                 )?);
+            }
+            let mut concrete_lens = Vec::with_capacity(len_args.len());
+            for len in len_args {
+                let k = match len {
+                    Len::Concrete(k) => *k,
+                    Len::Var(ln) => subst.len_of(*ln).ok_or_else(|| {
+                        poly_unbound_output_error(ctx, span, name, &sig.len_var_names[*ln as usize])
+                    })?,
+                };
+                concrete_lens.push(Len::Concrete(k));
             }
             // P7.S3n (R3): `cells` is a live parameter now, so the
             // instantiation name renders a cell-payload argument against the
@@ -8135,9 +8178,9 @@ pub(super) fn apply_subst(
             };
             let mut g = cell.borrow_mut();
             Ok(if *is_enum {
-                g.instantiate_enum(*idx as usize, &concrete_args, &[], *module, regs)
+                g.instantiate_enum(*idx as usize, &concrete_args, &concrete_lens, *module, regs)
             } else {
-                g.instantiate_struct(*idx as usize, &concrete_args, &[], *module, regs)
+                g.instantiate_struct(*idx as usize, &concrete_args, &concrete_lens, *module, regs)
             })
         }
         // P7.S12 (R3.1/R4.1): ground the header the same way the `Generic`
@@ -8152,14 +8195,14 @@ pub(super) fn apply_subst(
         // `id.index() - 0`, which can land inside `inst_enums` and return
         // the *wrong* decl for an id that in fact names an already-flushed
         // entry, rather than falling through to `None`.
-        // PLACEHOLDER, replaced by R8a -- the same interim empty length
-        // list the `Generic` arm above passes, for the same reason.
+        // P7.S6a (R8a): resolves `len_args` through `subst.len` identically
+        // to the `Generic` arm above, replacing phase 3's placeholder.
         PolyType::GenericVariant {
             idx,
             module,
             vi,
             args,
-            len_args: _,
+            len_args,
             name: _,
         } => {
             let Some(cell) = ctx.generics() else {
@@ -8176,6 +8219,16 @@ pub(super) fn apply_subst(
                     sig, a, subst, name, span, ctx, arrays, cells, refs,
                 )?);
             }
+            let mut concrete_lens = Vec::with_capacity(len_args.len());
+            for len in len_args {
+                let k = match len {
+                    Len::Concrete(k) => *k,
+                    Len::Var(ln) => subst.len_of(*ln).ok_or_else(|| {
+                        poly_unbound_output_error(ctx, span, name, &sig.len_var_names[*ln as usize])
+                    })?,
+                };
+                concrete_lens.push(Len::Concrete(k));
+            }
             let regs = crate::ast::MutRegistries {
                 structs: ctx.structs(),
                 enums: ctx.enums(),
@@ -8185,7 +8238,7 @@ pub(super) fn apply_subst(
             };
             let mut g = cell.borrow_mut();
             let Type::Enum(id, _) =
-                g.instantiate_enum(*idx as usize, &concrete_args, &[], *module, regs)
+                g.instantiate_enum(*idx as usize, &concrete_args, &concrete_lens, *module, regs)
             else {
                 unreachable!("instantiate_enum always returns Type::Enum")
             };
@@ -9246,7 +9299,9 @@ pub(crate) fn poly_type_str(pt: &PolyType, sig: &PolySig) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::{ArrayDecl, ArrayId, GenericEnumDecl, GenericVariantDecl, OwnedCellDecl};
+    use crate::ast::{
+        ArrayDecl, ArrayId, GenericEnumDecl, GenericStructDecl, GenericVariantDecl, OwnedCellDecl,
+    };
     use crate::lexer::lex;
 
     /// P7.S3k: the callee-side walk context for a fixture that drives
@@ -10390,6 +10445,175 @@ mod tests {
             .words
             .iter()
             .any(|w| w.name == "reorder" && w.poly.is_some()));
+    }
+
+    /// A `Buffer['T 'N: Len]`-shaped generic header, for the R8a length-
+    /// binding tests below -- the same header `ast.rs`'s own
+    /// `instantiate_struct_distinct_lengths_mint_distinct_monomorphs` uses.
+    fn buffer_header() -> GenericStructDecl {
+        GenericStructDecl {
+            name: "Buffer".to_string(),
+            ty_var_names: vec!["'T".to_string()],
+            len_var_names: vec!["'N".to_string()],
+            fields: vec![(
+                "data".to_string(),
+                PolyType::Array(Box::new(PolyType::Var(0)), Len::Var(0)),
+            )],
+            span: Span::default(),
+            module: 0,
+        }
+    }
+
+    /// P7.S6a (R8a): `unify_poly_input`'s `Generic` arm binds a declared
+    /// length variable from a concrete instantiation's own recovered
+    /// length, the same way the neighboring `Array` arm binds a bare
+    /// array's `Len::Var` -- without this, `Buffer['T 'N]` in a signature
+    /// cannot bind `'N` from a concrete `Buffer[u8 256]` operand.
+    #[test]
+    fn unify_poly_input_generic_binds_len_arg_from_concrete_instantiation() {
+        let mut generics = GenericTypes::with_bases(0, 0);
+        generics.structs.push(buffer_header());
+        let mut arrays: Vec<ArrayDecl> = Vec::new();
+        let mut cells: Vec<OwnedCellDecl> = Vec::new();
+        let mut refs: Vec<RefDecl> = Vec::new();
+        let slot_ty = generics.instantiate_struct(
+            0,
+            &[Type::U32],
+            &[Len::Concrete(256)],
+            0,
+            crate::ast::MutRegistries {
+                structs: &[],
+                enums: &[],
+                arrays: &mut arrays,
+                cells: &mut cells,
+                refs: &mut refs,
+            },
+        );
+        let cell = RefCell::new(generics);
+        let sig = PolySig {
+            row_in: None,
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            row_out: None,
+            bounds: Vec::new(),
+            ty_var_names: vec!["'T".to_string()],
+            len_var_names: vec!["'N".to_string()],
+            row_var_names: Vec::new(),
+        };
+        let pty = PolyType::Generic {
+            is_enum: false,
+            idx: 0,
+            module: 0,
+            args: vec![PolyType::Var(0)],
+            len_args: vec![Len::Var(0)],
+            name: "Buffer",
+        };
+        let word = probe_word();
+        let ctx = word_ctx(
+            &word,
+            &[],
+            &[],
+            &[],
+            None,
+            &CombinatorIndex::new(),
+            Some(&cell),
+        );
+        let mut subst = Subst::default();
+        unify_poly_input(
+            &sig,
+            &pty,
+            slot_ty,
+            "f",
+            Span::default(),
+            &ctx,
+            &arrays,
+            &cells,
+            &refs,
+            &mut subst,
+            &[],
+        )
+        .expect("a concrete Buffer[u8 256] slot must bind 'N");
+        assert_eq!(subst.ty_of(0), Some(Type::U32));
+        assert_eq!(
+            subst.len_of(0),
+            Some(256),
+            "'N must bind to the instantiation's own recovered length"
+        );
+    }
+
+    /// The conflict twin: two positions both binding `'N` against different
+    /// concrete lengths must be a located mismatch, never a silent last-
+    /// write-wins overwrite -- exactly `poly_len_conflict_error`'s existing
+    /// role for the `Array` arm's own `Len::Var`.
+    #[test]
+    fn unify_poly_input_generic_len_conflict_is_error() {
+        let mut generics = GenericTypes::with_bases(0, 0);
+        generics.structs.push(buffer_header());
+        let mut arrays: Vec<ArrayDecl> = Vec::new();
+        let mut cells: Vec<OwnedCellDecl> = Vec::new();
+        let mut refs: Vec<RefDecl> = Vec::new();
+        let slot_ty = generics.instantiate_struct(
+            0,
+            &[Type::U32],
+            &[Len::Concrete(256)],
+            0,
+            crate::ast::MutRegistries {
+                structs: &[],
+                enums: &[],
+                arrays: &mut arrays,
+                cells: &mut cells,
+                refs: &mut refs,
+            },
+        );
+        let cell = RefCell::new(generics);
+        let sig = PolySig {
+            row_in: None,
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            row_out: None,
+            bounds: Vec::new(),
+            ty_var_names: vec!["'T".to_string()],
+            len_var_names: vec!["'N".to_string()],
+            row_var_names: Vec::new(),
+        };
+        let pty = PolyType::Generic {
+            is_enum: false,
+            idx: 0,
+            module: 0,
+            args: vec![PolyType::Var(0)],
+            len_args: vec![Len::Var(0)],
+            name: "Buffer",
+        };
+        let word = probe_word();
+        let ctx = word_ctx(
+            &word,
+            &[],
+            &[],
+            &[],
+            None,
+            &CombinatorIndex::new(),
+            Some(&cell),
+        );
+        let mut subst = Subst::default();
+        subst.len.push((0, 512));
+        let err = unify_poly_input(
+            &sig,
+            &pty,
+            slot_ty,
+            "f",
+            Span::default(),
+            &ctx,
+            &arrays,
+            &cells,
+            &refs,
+            &mut subst,
+            &[],
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("'N"),
+            "a length conflict must name the conflicting length variable: {err}"
+        );
     }
 
     /// P7 slice 3a (R3): a poly word constructs a generic value whose header
@@ -12300,6 +12524,29 @@ mod tests {
         );
     }
 
+    /// P7.S6a (R8a): a length lives in a header's own `len_args` too, not
+    /// only in a bare array's `Len::Var` -- `poly_mentions_len_var`'s
+    /// `Generic` arm must scan `len_args` as well as `args`, or this callee
+    /// slips the same cross-call rejection a bare-array length variable
+    /// already gets in the table below. Before the widening, `Buffer['T
+    /// 'N]` carried no length-mentioning leaf this guard could see, so the
+    /// call would have been silently admitted -- exactly the poly-body
+    /// cross-call this slice is out of scope for.
+    #[test]
+    fn check_cross_call_rejects_a_length_variable_carried_in_a_generic_header() {
+        let err = check_src(
+            "type: Buffer['T 'N: Len] data array['T 'N] ;\n\
+             : capacity['T 'N: Len] ( Buffer['T 'N] -- usize ) drop 0 >usize ;\n\
+             : g['T 'N: Len] ( Buffer['T 'N] -- usize ) capacity ;\n\
+             : main ( -- ) ;\n",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("a length variable in the callee's signature"),
+            "unexpected message: {err}"
+        );
+    }
+
     /// P7.S3k: the callee signature shapes a symbolic mapping cannot carry are
     /// each a located rejection naming that shape, not the whole-feature
     /// narrowing they replaced. Three of the four are pinned here (review
@@ -13568,6 +13815,76 @@ mod tests {
         assert!(refs[0].mutable);
     }
 
+    /// P7.S6a (R8a): `apply_subst`'s `Generic` arm resolves a declared
+    /// length variable through `subst.len` before minting, so a length-
+    /// carrying monomorph grounds to the concrete instantiation that
+    /// length actually names -- replacing phase 3's placeholder empty
+    /// length list.
+    #[test]
+    fn apply_subst_grounds_generic_len_args_through_subst() {
+        let mut generics = GenericTypes::with_bases(0, 0);
+        generics.structs.push(buffer_header());
+        let cell = RefCell::new(generics);
+        let sig = PolySig {
+            row_in: None,
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            row_out: None,
+            bounds: Vec::new(),
+            ty_var_names: vec!["'T".to_string()],
+            len_var_names: vec!["'N".to_string()],
+            row_var_names: Vec::new(),
+        };
+        let pty = PolyType::Generic {
+            is_enum: false,
+            idx: 0,
+            module: 0,
+            args: vec![PolyType::Var(0)],
+            len_args: vec![Len::Var(0)],
+            name: "Buffer",
+        };
+        let word = probe_word();
+        let ctx = word_ctx(
+            &word,
+            &[],
+            &[],
+            &[],
+            None,
+            &CombinatorIndex::new(),
+            Some(&cell),
+        );
+        let mut subst = Subst::default();
+        subst.ty.push((0, Type::U32));
+        subst.len.push((0, 256));
+        let mut arrays: Vec<ArrayDecl> = Vec::new();
+        let mut cells: Vec<OwnedCellDecl> = Vec::new();
+        let mut refs: Vec<RefDecl> = Vec::new();
+        let ty = apply_subst(
+            &sig,
+            &pty,
+            &subst,
+            "f",
+            Span::default(),
+            &ctx,
+            &mut arrays,
+            &mut cells,
+            &mut refs,
+        )
+        .expect("a bound length variable grounds the monomorph");
+        let Type::Struct(id, _) = ty else {
+            panic!("a grounded Generic header is a Type::Struct: {ty:?}")
+        };
+        let borrowed = cell.borrow();
+        let (_, _, _, lens) = borrowed
+            .struct_instantiation_of(id)
+            .expect("the mint is recoverable through struct_instantiation_of");
+        assert_eq!(
+            lens,
+            &[Len::Concrete(256)],
+            "the minted monomorph must carry the length subst.len bound, not an empty placeholder"
+        );
+    }
+
     /// P7.S12 phase 2 (R3.3/R4.1): `apply_subst`'s `GenericVariant` arm is
     /// the only arm this phase adds that computes rather than rejects, and
     /// nothing constructs a `GenericVariant` until phase 3 -- so the witness
@@ -13691,6 +14008,90 @@ mod tests {
         )
         .expect("the memoized instantiation grounds the same way after the flush");
         assert_eq!(flushed, unflushed);
+    }
+
+    /// P7.S6a (R8a, review round 2): `apply_subst`'s `GenericVariant` arm
+    /// resolves its own `len_args` through `subst.len` identically to the
+    /// `Generic` arm's fix -- `apply_subst_grounds_a_generic_variant_across_
+    /// the_flush` above hand-builds `Opt['T]`, a header with no length
+    /// variable at all, so it cannot witness this half of the arm. This
+    /// test narrows a length-carrying `Buffer['T 'N]` variant and asserts
+    /// the minted monomorph carries the bound length, not phase 3's empty
+    /// placeholder.
+    #[test]
+    fn apply_subst_grounds_a_generic_variant_len_args_through_subst() {
+        let mut generics = GenericTypes::with_bases(0, 0);
+        generics.enums.push(GenericEnumDecl {
+            name: "Buffer".to_string(),
+            ty_var_names: vec!["'T".to_string()],
+            len_var_names: vec!["'N".to_string()],
+            variants: vec![GenericVariantDecl {
+                name: "Full".to_string(),
+                fields: vec![("0".to_string(), PolyType::Var(0))],
+                span: Span::default(),
+            }],
+            span: Span::default(),
+            module: 0,
+        });
+        let cell = RefCell::new(generics);
+        let sig = PolySig {
+            row_in: None,
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            row_out: None,
+            bounds: Vec::new(),
+            ty_var_names: vec!["'T".to_string()],
+            len_var_names: vec!["'N".to_string()],
+            row_var_names: Vec::new(),
+        };
+        let pty = crate::ast::generic_variant_type(
+            &cell.borrow(),
+            0,
+            0,
+            0,
+            vec![PolyType::Var(0)],
+            vec![Len::Var(0)],
+        );
+        let word = probe_word();
+        let ctx = word_ctx(
+            &word,
+            &[],
+            &[],
+            &[],
+            None,
+            &CombinatorIndex::new(),
+            Some(&cell),
+        );
+        let mut subst = Subst::default();
+        subst.ty.push((0, Type::U32));
+        subst.len.push((0, 256));
+        let mut arrays: Vec<ArrayDecl> = Vec::new();
+        let mut cells: Vec<OwnedCellDecl> = Vec::new();
+        let mut refs: Vec<RefDecl> = Vec::new();
+        let ty = apply_subst(
+            &sig,
+            &pty,
+            &subst,
+            "f",
+            Span::default(),
+            &ctx,
+            &mut arrays,
+            &mut cells,
+            &mut refs,
+        )
+        .expect("a bound length variable grounds the narrowed variant's monomorph");
+        let Type::Variant(id, ..) = ty else {
+            panic!("a grounded GenericVariant is a Type::Variant: {ty:?}")
+        };
+        let borrowed = cell.borrow();
+        let (_, _, _, lens) = borrowed
+            .enum_instantiation_of(id)
+            .expect("the mint is recoverable through enum_instantiation_of");
+        assert_eq!(
+            lens,
+            &[Len::Concrete(256)],
+            "the minted monomorph must carry the length subst.len bound, not an empty placeholder"
+        );
     }
 
     /// P7.S6a (R3, added review round 4): the `Operative::Generic`
