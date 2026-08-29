@@ -2954,7 +2954,7 @@ pub enum TermKind {
     /// diagnostic), which is why the list widens this variant instead of
     /// arriving as a new one every existing arm would silently keep matching
     /// past.
-    Call(String, Vec<Type>),
+    Call(String, Vec<Type>, Vec<Len>),
     /// A `| names |` binding (R1): pops one value per name at the point it
     /// appears, leftmost name taking the deepest value. Its extent is the rest
     /// of the enclosing block (R2), so no closing term is needed.
@@ -3062,9 +3062,11 @@ fn rename_terms(terms: &[Term], uid: u32, suffix: &str, bound: &mut Vec<String>)
                     .collect();
                 TermKind::Bind(renamed)
             }
-            TermKind::Call(name, type_args) => {
-                TermKind::Call(rename_call(name, uid, suffix, bound), type_args.clone())
-            }
+            TermKind::Call(name, type_args, len_args) => TermKind::Call(
+                rename_call(name, uid, suffix, bound),
+                type_args.clone(),
+                len_args.clone(),
+            ),
             TermKind::Quotation(inner, is_inline, annot) => {
                 let mut inner_bound = bound.clone();
                 TermKind::Quotation(

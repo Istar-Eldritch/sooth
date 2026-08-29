@@ -661,7 +661,7 @@ fn called_names(words: &[WordDef]) -> std::collections::HashSet<&str> {
     fn walk<'a>(terms: &'a [Term], out: &mut std::collections::HashSet<&'a str>) {
         for t in terms {
             match &t.kind {
-                TermKind::Call(name, _) => {
+                TermKind::Call(name, _, _) => {
                     out.insert(name.as_str());
                 }
                 TermKind::Quotation(body, ..) => walk(body, out),

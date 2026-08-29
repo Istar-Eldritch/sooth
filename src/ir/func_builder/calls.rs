@@ -42,7 +42,7 @@ impl<'a> FuncBuilder<'a> {
                 self.push_instr(Instr::StrLit(v, s.clone()));
                 self.stack.push(v);
             }
-            TermKind::Call(name, _) => return self.lower_call(name, term.span, tail),
+            TermKind::Call(name, _, _) => return self.lower_call(name, term.span, tail),
             TermKind::Bind(names) => {
                 // R10: a binding is a compile-time rebinding of SSA values, so
                 // it emits nothing. Leftmost name takes the deepest value.

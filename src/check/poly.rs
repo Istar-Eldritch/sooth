@@ -962,7 +962,7 @@ pub(super) fn poly_term(
                 scope.locals.insert(name.clone(), pt);
             }
         }
-        TermKind::Call(name, type_args) => {
+        TermKind::Call(name, type_args, _len_args) => {
             // P7.S3t (R1/R3): a call inside a polymorphic word's own body is
             // checked symbolically -- there is no `Subst` here to seed, and
             // reaching one would be the multi-hop forwarding case R7 leaves
@@ -6593,7 +6593,7 @@ fn enqueue_new(
 /// Only `Quotation` nests terms; every other `TermKind` is a leaf.
 fn body_calls_a_poly_word(body: &[Term], words: &[WordDef]) -> bool {
     body.iter().any(|term| match &term.kind {
-        TermKind::Call(name, _) => words.iter().any(|w| w.poly.is_some() && &w.name == name),
+        TermKind::Call(name, _, _) => words.iter().any(|w| w.poly.is_some() && &w.name == name),
         TermKind::Quotation(inner, _, _) => body_calls_a_poly_word(inner, words),
         _ => false,
     })
@@ -11270,7 +11270,7 @@ mod tests {
             span: Span::default(),
         };
         let swap = Term {
-            kind: TermKind::Call("swap".to_string(), Vec::new()),
+            kind: TermKind::Call("swap".to_string(), Vec::new(), Vec::new()),
             span: Span::default(),
         };
         let mut stack = Vec::new();
@@ -11415,7 +11415,7 @@ mod tests {
         }];
         if consume {
             body.push(Term {
-                kind: TermKind::Call(local.to_string(), Vec::new()),
+                kind: TermKind::Call(local.to_string(), Vec::new(), Vec::new()),
                 span: Span::default(),
             });
         }
@@ -13730,7 +13730,7 @@ mod tests {
         let mut overloads = HashMap::new();
         let stack = poly_term(
             &Term {
-                kind: TermKind::Call("len".to_string(), Vec::new()),
+                kind: TermKind::Call("len".to_string(), Vec::new(), Vec::new()),
                 span: Span::default(),
             },
             vec![PolySlot::new(PolyType::Concrete(shared))],
@@ -14434,11 +14434,11 @@ mod tests {
         let full_quot = scope.intern_quotation(PolyQuotLit {
             body: vec![
                 Term {
-                    kind: TermKind::Call("Full>".to_string(), Vec::new()),
+                    kind: TermKind::Call("Full>".to_string(), Vec::new(), Vec::new()),
                     span: Span::default(),
                 },
                 Term {
-                    kind: TermKind::Call("drop".to_string(), Vec::new()),
+                    kind: TermKind::Call("drop".to_string(), Vec::new(), Vec::new()),
                     span: Span::default(),
                 },
             ],
@@ -14456,7 +14456,7 @@ mod tests {
         });
         let empty_quot = scope.intern_quotation(PolyQuotLit {
             body: vec![Term {
-                kind: TermKind::Call("Empty>".to_string(), Vec::new()),
+                kind: TermKind::Call("Empty>".to_string(), Vec::new(), Vec::new()),
                 span: Span::default(),
             }],
             span: Span::default(),

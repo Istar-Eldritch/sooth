@@ -182,7 +182,7 @@ fn check_term(
             }
             Ok(stack)
         }
-        TermKind::Call(name, type_args) => {
+        TermKind::Call(name, type_args, _len_args) => {
             // P7.S3t (R3): exactly one of this arm's dispatch routes consumes
             // an explicit type-argument list -- the polymorphic-call
             // interception far below. The guard is written as an *allow*, and
@@ -1243,7 +1243,7 @@ pub(super) fn tagged_literal_reaches_an_eliminator_call(
             TermKind::Quotation(_, _, Some(annot)) if annot.variant_tag.is_some() => {
                 j += 1;
             }
-            TermKind::Call(name, _) => {
+            TermKind::Call(name, _, _) => {
                 return if eliminators.contains_key(name) {
                     EliminatorArmDest::Reached
                 } else if name.ends_with('?') {
