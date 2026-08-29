@@ -2212,6 +2212,7 @@ mod tests {
             idx: 0,
             module: 0,
             args: vec![PolyType::Var(0), PolyType::Concrete(Type::I64)],
+            len_args: vec![],
             name: "Ent",
         };
         let pt = PolyType::OwnedCell(Box::new(payload));
@@ -2613,6 +2614,7 @@ mod tests {
         let generic_box = |module: u32| crate::ast::GenericStructDecl {
             name: "Box".to_string(),
             ty_var_names: vec!["'T".to_string()],
+            len_var_names: vec![],
             fields: Vec::new(),
             span: crate::ast::Span::default(),
             module,
