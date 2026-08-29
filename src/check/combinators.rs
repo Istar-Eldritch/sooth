@@ -648,6 +648,7 @@ fn check_poly_combinator_args(
             refs,
             &mut subst,
             &[],
+            &[],
         )?;
     }
     for (i, pin) in deferred_literals {
@@ -673,6 +674,7 @@ fn check_poly_combinator_args(
             cells,
             refs,
             &mut subst,
+            &[],
             &[],
         )?;
     }
