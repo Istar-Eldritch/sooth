@@ -175,7 +175,9 @@ fn check_term(
             }
             let bound = stack.split_off(stack.len() - names.len());
             for (name, slot) in names.iter().zip(bound) {
-                let linear = is_linear(slot.ty, ctx.structs(), ctx.enums(), arrays);
+                let linear = ctx.with_extended_type_slices(|structs, enums| {
+                    is_linear(slot.ty, structs, enums, arrays)
+                });
                 scope.bind(name, slot, linear, prov);
             }
             Ok(stack)
@@ -246,7 +248,9 @@ fn check_term(
                         // it is live would leave that reference aimed at storage
                         // its owner has given away. Only a linear local is
                         // consumed by being named; a Copy one is merely read.
-                        if is_linear(ty, ctx.structs(), ctx.enums(), arrays) {
+                        if ctx.with_extended_type_slices(|structs, enums| {
+                            is_linear(ty, structs, enums, arrays)
+                        }) {
                             if let Some(id) = live_borrow_of(&stack, scope, prov, live, at, name) {
                                 return Err(consume_of_borrowed_place_error(
                                     ctx,
@@ -1319,10 +1323,9 @@ fn check_linear_across_back_edge(
     arrays: &[ArrayDecl],
     frame_floor: Option<usize>,
 ) -> Result<(), String> {
-    if let Some(slot) = below_args
-        .iter()
-        .find(|s| is_linear(s.ty, ctx.structs(), ctx.enums(), arrays))
-    {
+    if let Some(slot) = below_args.iter().find(|s| {
+        ctx.with_extended_type_slices(|structs, enums| is_linear(s.ty, structs, enums, arrays))
+    }) {
         return Err(linear_across_back_edge_error(ctx, span, callee, slot.ty));
     }
     // `position` resolves to the *first* matching binding; this is only correct

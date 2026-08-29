@@ -927,6 +927,15 @@ impl GenericTypes {
             .and_then(|i| self.inst_enums.get(i))
     }
 
+    /// The struct twin of `enum_decl` -- a `StructId` this batch minted but
+    /// has not flushed into `Module::structs` yet. `None` for an id already
+    /// flushed (or a hand-written concrete struct).
+    pub fn struct_decl(&self, id: StructId) -> Option<&StructDecl> {
+        id.index()
+            .checked_sub(self.struct_base)
+            .and_then(|i| self.inst_structs.get(i))
+    }
+
     /// Read-only mint lookup: the already-resolved `Type` for one
     /// application of generic struct `idx`, if this exact `(idx, module,
     /// args)` key has ever been minted (parse-time or downstream). Used by
@@ -3741,6 +3750,55 @@ mod tests {
             generics.inst_structs[0].fields,
             vec![("val".to_string(), Type::I64)]
         );
+    }
+
+    /// P7.S11-follow: the struct twin of `enum_decl` -- a minted-but-unflushed
+    /// `StructId` reads back the pending decl.
+    #[test]
+    fn generic_types_struct_decl_reads_an_unflushed_mint() {
+        let decl = GenericStructDecl {
+            name: "Box".to_string(),
+            ty_var_names: vec!["'T".to_string()],
+            fields: vec![("val".to_string(), PolyType::Var(0))],
+            span: Span::default(),
+            module: 0,
+        };
+        let mut generics = GenericTypes::with_bases(3, 1);
+        generics.structs.push(decl);
+        let mut scratch = ScratchRegs::default();
+        let a = generics.instantiate_struct(0, &[Type::I64], 0, scratch.regs());
+        let Type::Struct(id, _) = a else {
+            panic!("expected a Type::Struct")
+        };
+        let found = generics
+            .struct_decl(id)
+            .expect("a minted-but-unflushed id must resolve");
+        assert_eq!(found.fields, vec![("val".to_string(), Type::I64)]);
+    }
+
+    /// A flushed id (or a hand-written concrete struct) is out of this
+    /// batch's pending range, so `struct_decl` returns `None` and the caller
+    /// falls back to indexing the live `structs` slice.
+    #[test]
+    fn generic_types_struct_decl_none_for_a_flushed_id() {
+        let decl = GenericStructDecl {
+            name: "Box".to_string(),
+            ty_var_names: vec!["'T".to_string()],
+            fields: vec![("val".to_string(), PolyType::Var(0))],
+            span: Span::default(),
+            module: 0,
+        };
+        let mut structs: Vec<StructDecl> = Vec::new();
+        let mut generics = GenericTypes::with_bases(structs.len(), 0);
+        generics.structs.push(decl);
+        let mut scratch = ScratchRegs::default();
+        let a = generics.instantiate_struct(0, &[Type::I64], 0, scratch.regs());
+        generics.flush_structs_into(&mut structs);
+        generics.rebase(structs.len(), 0);
+        let Type::Struct(id, _) = a else {
+            panic!("expected a Type::Struct")
+        };
+        assert!(generics.struct_decl(id).is_none());
     }
 
     /// A one-variable generic struct header with a single field of the given

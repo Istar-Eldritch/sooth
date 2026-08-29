@@ -1318,6 +1318,74 @@ impl Ctx<'_> {
     pub(super) fn is_self_tail_call(&self) -> bool {
         self.self_tail_call
     }
+
+    /// P7.S11-follow (Part 2): the decl for an `EnumId` this word's own
+    /// check-time generic mint may have minted but not yet flushed into
+    /// `self.enums()` -- mirrors `GenericTypes::enum_decl` (P7.S12). In
+    /// range, reads the flushed decl directly; past it, borrows the live
+    /// `generics` cell just long enough to hand `f` the pending decl (or
+    /// `None` when nothing pending resolves the id either).
+    pub(super) fn with_enum_decl_or_generic<R>(
+        &self,
+        id: EnumId,
+        f: impl FnOnce(Option<&EnumDecl>) -> R,
+    ) -> R {
+        if id.index() < self.enums().len() {
+            return f(Some(&self.enums()[id.index()]));
+        }
+        match self.generics() {
+            Some(cell) => {
+                let guard = cell.borrow();
+                f(guard.enum_decl(id))
+            }
+            None => f(None),
+        }
+    }
+
+    /// The struct twin of `with_enum_decl_or_generic`.
+    pub(super) fn with_struct_decl_or_generic<R>(
+        &self,
+        id: StructId,
+        f: impl FnOnce(Option<&StructDecl>) -> R,
+    ) -> R {
+        if id.index() < self.structs().len() {
+            return f(Some(&self.structs()[id.index()]));
+        }
+        match self.generics() {
+            Some(cell) => {
+                let guard = cell.borrow();
+                f(guard.struct_decl(id))
+            }
+            None => f(None),
+        }
+    }
+
+    /// P7.S11-follow (Part 2): `is_copy`/`contains_reference`/`is_linear`
+    /// index `structs`/`enums` slices with no bounds check and recurse over
+    /// fields, so a check-time-only monomorph's id (past `self.structs()`/
+    /// `self.enums()`, still pending in the live `generics` cell) would panic
+    /// them outright rather than merely missing like the single-decl reads
+    /// above. Build the flushed prefix ++ the live cell's unflushed pending
+    /// tail as two owned `Vec`s and hand both to `f` -- the concatenation is
+    /// self-consistent (a pending monomorph's field may itself name another
+    /// pending monomorph, and the extended slice contains it too), so the
+    /// existing recursive dedup argument still terminates.
+    pub(super) fn with_extended_type_slices<R>(
+        &self,
+        f: impl FnOnce(&[StructDecl], &[EnumDecl]) -> R,
+    ) -> R {
+        match self.generics() {
+            Some(cell) => {
+                let guard = cell.borrow();
+                let mut structs = self.structs().to_vec();
+                structs.extend(guard.inst_structs.iter().cloned());
+                let mut enums = self.enums().to_vec();
+                enums.extend(guard.inst_enums.iter().cloned());
+                f(&structs, &enums)
+            }
+            None => f(self.structs(), self.enums()),
+        }
+    }
 }
 
 impl<'a> Ctx<'a> {
@@ -2114,5 +2182,85 @@ mod tests {
             granted.contains("unused"),
             "an ancestor name the body never mentions is still granted: {granted:?}"
         );
+    }
+
+    #[test]
+    fn with_struct_decl_or_generic_falls_back_to_the_live_cell() {
+        let decl = crate::ast::GenericStructDecl {
+            name: "Box".to_string(),
+            ty_var_names: vec!["'T".to_string()],
+            fields: vec![("val".to_string(), crate::ast::PolyType::Var(0))],
+            span: Span::default(),
+            module: 0,
+        };
+        let structs: Vec<StructDecl> = Vec::new();
+        let enums: Vec<EnumDecl> = Vec::new();
+        let mut generics = GenericTypes::with_bases(structs.len(), enums.len());
+        generics.structs.push(decl);
+        let mut arrays = Vec::new();
+        let mut cells = Vec::new();
+        let mut refs = Vec::new();
+        let regs = crate::ast::MutRegistries {
+            structs: &structs,
+            enums: &enums,
+            arrays: &mut arrays,
+            cells: &mut cells,
+            refs: &mut refs,
+        };
+        let minted = generics.instantiate_struct(0, &[Type::I64], 0, regs);
+        let Type::Struct(id, _) = minted else {
+            panic!("expected a Type::Struct")
+        };
+        let cell = RefCell::new(generics);
+        let word = bare_word("main", 0);
+        let ctx = word_ctx(
+            &word,
+            &structs,
+            &enums,
+            &[],
+            None,
+            &CombinatorIndex::new(),
+            Some(&cell),
+        );
+        assert!(
+            ctx.with_struct_decl_or_generic(id, |d| d.is_some()),
+            "an unflushed mint must resolve through the live cell"
+        );
+        ctx.with_struct_decl_or_generic(id, |d| {
+            assert_eq!(
+                d.expect("resolves").fields,
+                vec![("val".to_string(), Type::I64)]
+            );
+        });
+    }
+
+    /// The flushed-side twin: an in-range `EnumId` reads the concrete
+    /// `ctx.enums()` slice directly and never touches the live cell at all.
+    #[test]
+    fn with_enum_decl_or_generic_prefers_the_flushed_slice() {
+        let enums = vec![EnumDecl {
+            name: "Res".to_string(),
+            name_static: "Res",
+            variants: Vec::new(),
+            span: Span::default(),
+            module: 0,
+        }];
+        let structs: Vec<StructDecl> = Vec::new();
+        let generics = GenericTypes::with_bases(structs.len(), enums.len());
+        let cell = RefCell::new(generics);
+        let word = bare_word("main", 0);
+        let ctx = word_ctx(
+            &word,
+            &structs,
+            &enums,
+            &[],
+            None,
+            &CombinatorIndex::new(),
+            Some(&cell),
+        );
+        let id = EnumId::from_index(0);
+        ctx.with_enum_decl_or_generic(id, |d| {
+            assert_eq!(d.expect("in-range id resolves").name, "Res");
+        });
     }
 }
