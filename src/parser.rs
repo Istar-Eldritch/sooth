@@ -279,7 +279,7 @@ pub fn reject_reserved_name(kind: &str, name: &str, span: Span) -> Result<(), St
     // by any bound bracket -- a user-declared trait named `Len` would
     // otherwise be silently unreachable from any bracket, the same reason
     // `Slice`/`array` are reserved above.
-    if kind == "trait" && name == "Len" {
+    if kind == "trait" && name == LEN_KIND_NAME {
         return Err(format!(
             "error: `{name}` is reserved for the header bracket's kind annotation (`'N: {name}`) and cannot be used as a {kind} name at line {}, col {}",
             span.line, span.col
@@ -287,6 +287,12 @@ pub fn reject_reserved_name(kind: &str, name: &str, span: Span) -> Result<(), St
     }
     Ok(())
 }
+
+/// P7.S6a (R2.2): the only spellable header-bracket kind annotation
+/// (`'N: Len`). Shared between `reject_reserved_name` (which reserves the
+/// name against `trait:`) and `parse_header_bracket` (which accepts the
+/// spelling) so the two can't drift apart.
+pub const LEN_KIND_NAME: &str = "Len";
 
 /// P7.S6 (R1): the named array type's spelling. `array[T N]` resolves
 /// through the interned array registry, so it is intercepted by name ahead
@@ -5400,7 +5406,7 @@ impl<'t> Parser<'t> {
                     }
                     let kind = if colon_follows {
                         let (kind_name, kind_span) = self.expect_word_any_spanned()?;
-                        if kind_name != "Len" {
+                        if kind_name != LEN_KIND_NAME {
                             return Err(header_bracket_unknown_kind_error(&kind_name, kind_span));
                         }
                         Kind::Len
@@ -10965,6 +10971,7 @@ mod tests {
     fn parse_header_bracket_unknown_kind_annotation_is_error() {
         let err = header_bracket_vars("['T 'N: Foo]").unwrap_err();
         assert!(err.contains("Len"), "{err}");
+        assert!(err.contains("line 1, col"), "{err}");
     }
 
     #[test]
@@ -10984,7 +10991,7 @@ mod tests {
 
     #[test]
     fn reject_reserved_name_rejects_trait_len() {
-        let err = parse_src("trait: Len : show ( 'T -- ) ; ;").unwrap_err();
+        let err = parse_src("trait: Len['T] : show ( 'T -- ) ; ;").unwrap_err();
         assert!(err.contains("reserved"), "{err}");
     }
 
