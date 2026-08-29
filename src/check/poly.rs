@@ -2432,12 +2432,20 @@ fn poly_cross_match(
         }
         // Same header, argument by argument. `name` carries no identity (see
         // `PolyType::Generic`'s own doc), so it takes no part in the compare.
+        // P7.S6a (R8, round-4 fix): `len_args` must match exactly, mirroring
+        // the `Array` arm's own `dl == sl` guard one level up -- a header
+        // carrying a *concrete* length (spellable since R7) is otherwise
+        // invisible here, so a cross-call from a body declared over one
+        // concrete length to a callee declared over a different concrete
+        // length passed silently, either lowering the wrong monomorph or
+        // tripping `subst_polytype`'s `.expect` in `src/ir/driver.rs`.
         (
             PolyType::Generic {
                 is_enum: de,
                 idx: di,
                 module: dm,
                 args: da,
+                len_args: dl_args,
                 ..
             },
             PolyType::Generic {
@@ -2445,9 +2453,10 @@ fn poly_cross_match(
                 idx: si,
                 module: sm,
                 args: sa,
+                len_args: sl_args,
                 ..
             },
-        ) if (de, di, dm, da.len()) == (se, si, sm, sa.len()) => {
+        ) if (de, di, dm, da.len()) == (se, si, sm, sa.len()) && dl_args == sl_args => {
             for (d, sup) in da.iter().zip(sa) {
                 poly_cross_match(d, sup, mapping, callee_sig, caller_sig, callee, span, ctx)?;
             }
@@ -12609,6 +12618,32 @@ mod tests {
         .unwrap_err();
         assert!(
             err.contains("a length variable in the callee's signature"),
+            "unexpected message: {err}"
+        );
+    }
+
+    /// P7.S6a (R8, round-4 review fix): a header carrying a *concrete*
+    /// length (spellable since R7) is invisible to `poly_mentions_len_var`
+    /// (it only matches `Len::Var`), so this cross-call reaches
+    /// `poly_cross_match`'s `Generic`/`Generic` arm rather than being turned
+    /// away earlier the way a length-*variable* header is above. Before this
+    /// arm compared `len_args`, the guard tuple ignored them entirely and
+    /// admitted `caller`'s `Buffer['T 8]` operand into `sink`'s declared
+    /// `Buffer['T 4]` parameter -- silently accepted at check time, then
+    /// either lowered against the wrong monomorph or tripped
+    /// `subst_polytype`'s `.expect` in `src/ir/driver.rs` when the other
+    /// monomorph was never separately minted.
+    #[test]
+    fn check_cross_call_rejects_a_mismatched_concrete_length_in_a_generic_header() {
+        let err = check_src(
+            "type: Buffer['T 'N: Len] data array['T 'N] ;\n\
+             : sink['T]   ( Buffer['T 4] -- ) drop ;\n\
+             : caller['T] ( Buffer['T 8] -- ) sink ;\n\
+             : main ( -- ) ;\n",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("expected `Buffer['T 4]`") && err.contains("found `Buffer['T 8]`"),
             "unexpected message: {err}"
         );
     }

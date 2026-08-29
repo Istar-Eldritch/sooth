@@ -131,6 +131,31 @@ fn distinct_buffer_lengths_are_distinct_types() {
     assert!(err.contains("array[u8 512]"), "{err}");
 }
 
+/// R8a (round-4 review fix): the sibling of the golden above, but through a
+/// poly-body **cross-call** rather than an ordinary call -- `sink` and
+/// `caller` are both generic (`['T]`), so this reaches `poly_cross_match`'s
+/// `Generic`/`Generic` arm specifically, not the plain field-type mismatch
+/// the non-generic test above already covers. Before that arm compared
+/// `len_args`, this exact program built and ran silently (printing nothing
+/// useful and exiting 0), since a body declared over `Buffer['T 8]` could
+/// pass its operand straight into a callee declared over `Buffer['T 4]`.
+#[test]
+fn poly_body_cross_call_rejects_a_mismatched_concrete_buffer_length() {
+    let src = format!(
+        "{BUFFER_HEADER}\
+         : sink['T]   ( Buffer['T 4] -- ) drop ;\n\
+         : bad_caller['T] ( Buffer['T 8] -- ) sink ;\n\
+         : mk8 ( array[u8 8] -- Buffer[u8 8] ) Buffer ;\n\
+         : main ( -- )
+           0 >u8 8 fill mk8 bad_caller
+         ;\n"
+    );
+    let (_t, entry) = single_file("cross-call-length", &src);
+    let err = build_error(&entry);
+    assert!(err.contains("expected `Buffer['T 4]`"), "{err}");
+    assert!(err.contains("found `Buffer['T 8]`"), "{err}");
+}
+
 /// R7/R8a: calling `capacity` with a matching `array[u8 256]`/`Buffer[u8
 /// 256]` pair typechecks and returns `256` -- the positive signature-
 /// unification case, proving `'N` unifies across the two occurrences.

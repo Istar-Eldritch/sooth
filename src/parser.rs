@@ -3674,7 +3674,6 @@ impl<'t> Parser<'t> {
                 self.generics.structs[idx].len_var_names.len(),
             )
         };
-        let _arity = ty_arity + len_arity;
         if !matches!(self.peek(), Some((Token::LBracket, _))) {
             return Err(generic_arity_error(name, ty_arity, len_arity, 0, 0, span));
         }
@@ -5589,7 +5588,6 @@ impl<'t> Parser<'t> {
         len_arity: usize,
         span: Span,
     ) -> Result<(Vec<Type>, Vec<Len>), String> {
-        let _arity = ty_arity + len_arity;
         if !matches!(self.peek(), Some((Token::LBracket, _))) {
             return Err(generic_arity_error(name, ty_arity, len_arity, 0, 0, span));
         }
@@ -6088,7 +6086,6 @@ impl<'t> Parser<'t> {
                 self.generics.structs[idx].len_var_names.len(),
             )
         };
-        let _arity = ty_arity + len_arity;
         if !matches!(self.peek(), Some((Token::LBracket, _))) {
             return Err(generic_arity_error(name, ty_arity, len_arity, 0, 0, span));
         }
