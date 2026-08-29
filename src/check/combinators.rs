@@ -442,6 +442,22 @@ pub(super) fn inline_combinator(
         None
     };
     prov.inline_uid = saved_inline_uid;
+    // P7.S11-follow (Part 1): force the combinator's declared outputs
+    // through `apply_subst` here, ahead of the body splice, so a
+    // check-time monomorph the combinator's own signature mints (the
+    // `map`/`and_then`/`wrap` shape) lands in the live `generics_cell`
+    // before the callee body -- and, via Part 4, the enclosing word --
+    // resolves it. `apply_subst` is fallible (`poly_unbound_output_error`);
+    // propagate the `Err` rather than swallow it, or a broken signature
+    // could splice a garbage monomorph.
+    if let Some(sig) = comb.word.poly.as_ref() {
+        let subst = poly_subst
+            .as_ref()
+            .expect("a `poly` signature always fills `poly_subst`");
+        for out in &sig.outputs {
+            apply_subst(sig, out, subst, name, span, ctx, arrays, cells, refs)?;
+        }
+    }
     // R6: a self-tail combinator opens a splice-time loop. Its body is spliced
     // with `tail = true` so its own tail-position self-call is recognized as
     // the back-edge (above). 6d/R6: the nested-loop rejection is retired --
@@ -877,5 +893,22 @@ mod tests {
         let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
         check(&mut module)
             .expect("a self-tail `inline` word is the R4-relaxed shape, not a cycle error");
+    }
+
+    /// P7.S11-follow (Part 1): a combinator's declared output monomorph is
+    /// forced through `apply_subst` ahead of the body splice, so the
+    /// enclosing word resolves its generated constructor -- mutation-tested
+    /// against golden 6 (`tests/phase7_slice11.rs`): deleting this grounding
+    /// re-breaks it (the constructor would then only resolve via `wrap`'s
+    /// own def-site walk, never at `main`'s call site).
+    #[test]
+    fn inline_combinator_grounds_its_declared_outputs() {
+        let src = "type: Result['T 'E] | Ok 'T | Err 'E ;\n\
+                   : wrap inline ( 'T ~[ 'T -- 'T ] -- Result['T i64] ) call Ok ;\n\
+                   : main ( -- ) 7 ~[ 1 add ] wrap drop ;\n";
+        let tokens = lex(src).unwrap();
+        let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
+        check(&mut module)
+            .expect("wrap's own output mint must resolve `Ok` before the body splice");
     }
 }

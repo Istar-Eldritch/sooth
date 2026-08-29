@@ -2292,19 +2292,16 @@ fn check_eliminator_call(
     // always present as underflow and the exhaustiveness pass below could
     // never name it. Collection stops at the first operand that is not a
     // tagged quotation literal; that operand is the scrutinee slot.
+    // P7.S11-follow (Part 3): the tagged-quotation-literal stop condition is
+    // factored into `terms::eliminator_arm_at`, shared with
+    // `scrutinee_enum_id_of_family`'s non-destructive peek -- this remains
+    // the only caller that pops, over the count that shared test decides.
     let mut arms: Vec<(QuotId, VariantTag)> = Vec::new();
     while let Some(top) = stack.last().copied() {
-        let Some(QuotOperand::Literal(qid)) = resolve_quotation_operand(top) else {
+        let Some(arm) = self::terms::eliminator_arm_at(top, prov) else {
             break;
         };
-        let Some(tag) = prov.quotations[qid.0]
-            .annot
-            .as_ref()
-            .and_then(|a| a.variant_tag.as_ref())
-        else {
-            break;
-        };
-        arms.push((qid, tag.clone()));
+        arms.push(arm);
         stack.pop();
     }
     // The checker pushes operands in written source order, so popping off the
