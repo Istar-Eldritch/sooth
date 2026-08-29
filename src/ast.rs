@@ -853,13 +853,14 @@ impl GenericTypes {
             // resolves against the instantiation's own length-argument list,
             // exactly as `PolyType::Var` resolves against `args` above.
             //
-            // `v` is in bounds because every path that reaches an
-            // instantiation either supplies the header's full length list
-            // (`parse_generic_field_application`, R2a) or refuses to
-            // instantiate a length-declaring header at all
-            // (`generic_length_application_unsupported_error`'s three call
-            // sites in `src/parser.rs`, covering both use-site paths until
-            // R6/R7 land their real length splits).
+            // `v` is in bounds for every parser-driven instantiation --
+            // `parse_generic_field_application` (R2a), `resolve_type_or_
+            // apply`/`parse_type_arguments` (R6) and `parse_poly_generic_
+            // application` (R7), all in `src/parser.rs`, only collapse to a
+            // concrete instantiation once every length is concrete. `src/
+            // check/poly.rs`'s phase-3 `&[]` placeholders for a poly body's
+            // own field access are the one exception, deferred to phase 5
+            // (R8a).
             PolyType::Array(elem, Len::Var(v)) => {
                 let elem = self.substitute_generic_field(elem, args, lens, regs.reborrow());
                 let Len::Concrete(count) = lens[*v as usize] else {
