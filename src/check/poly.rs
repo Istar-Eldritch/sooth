@@ -3165,12 +3165,11 @@ fn poly_eliminator_call(
             idx,
             module,
             args,
+            len_args,
             name: header,
-        } if generic_surface_name(header) == family_name => Operative::Generic {
-            idx: *idx,
-            module: *module,
-            args: args.clone(),
-        },
+        } if generic_surface_name(header) == family_name => {
+            operative_generic_from_scrutinee(*idx, *module, args, len_args)
+        }
         // R5.1: a generic *struct* application, or a generic enum of another
         // family, is an ordinary mismatch -- rendered rather than interned,
         // since neither side need have a `Type`.
@@ -3301,7 +3300,12 @@ fn poly_eliminator_call(
             // R5.4: each arm's narrowed input carries the *scrutinee's own*
             // argument list, unchanged. Nothing re-unifies: the scrutinee already
             // carries the substitution.
-            Operative::Generic { idx, module, args } => {
+            Operative::Generic {
+                idx,
+                module,
+                args,
+                len_args,
+            } => {
                 // A `PolyType::Generic` slot exists only where the parser resolved
                 // a generic header into `GenericTypes`, which is the build path
                 // `check_module` threads the live cell through. The two Ctx-less
@@ -3326,6 +3330,7 @@ fn poly_eliminator_call(
                                 *module,
                                 vi,
                                 args.clone(),
+                                len_args.clone(),
                             )
                         })
                         .collect(),
@@ -3465,7 +3470,30 @@ enum Operative {
         idx: u32,
         module: u32,
         args: Vec<PolyType>,
+        /// P7.S6a (R3): carried forward from the scrutinee's own
+        /// `PolyType::Generic.len_args`, unchanged (R5.4's rule, one level
+        /// up: nothing re-unifies here either).
+        len_args: Vec<Len>,
     },
+}
+
+/// P7.S6a (R3, added review round 4): the `Operative::Generic` construction
+/// site `poly_eliminator_call` reaches when its scrutinee is an ungrounded
+/// `PolyType::Generic { is_enum: true, .. }` -- carries the scrutinee's own
+/// `len_args` forward unchanged, mirroring `generic_variant_type`'s own
+/// carry-forward one level up (R5.4's rule: nothing re-unifies here either).
+fn operative_generic_from_scrutinee(
+    idx: u32,
+    module: u32,
+    args: &[PolyType],
+    len_args: &[Len],
+) -> Operative {
+    Operative::Generic {
+        idx,
+        module,
+        args: args.to_vec(),
+        len_args: len_args.to_vec(),
+    }
 }
 
 /// P7 slice 3b-follow (R1): one arm handed to `poly_walk_arms` -- the literal
@@ -4259,6 +4287,7 @@ fn poly_construction_fallback(
             module,
             args,
             name,
+            ..
         } if *oe == is_enum && *oidx as usize == idx => Some((*module, args.as_slice(), *name)),
         _ => None,
     })
@@ -4361,12 +4390,13 @@ fn poly_destructure_generic(
         module,
         vi,
         args,
+        len_args,
         ..
     } = &top.pt
     else {
         return None;
     };
-    let (idx, module, vi, args) = (*idx, *module, *vi, args.clone());
+    let (idx, module, vi, args, len_args) = (*idx, *module, *vi, args.clone(), len_args.clone());
     let cell = ctx
         .generics()
         .expect("a `GenericVariant` operand is only built from a live instantiator");
@@ -4401,6 +4431,9 @@ fn poly_destructure_generic(
     // `EnumWord::Destructure` lookup (`apply_subst`'s `Generic` arm grounds
     // this to `Type::Enum`, which is what `check_poly_call`'s `enum_words`
     // fixpoint filters on).
+    // P7.S6a (R3): the scrutinee's own `len_args` -- carried forward
+    // unchanged, the same shape `generic_variant_type`'s own carry-forward
+    // uses one level up.
     tctx.enum_sites.push((
         span,
         PolyType::Generic {
@@ -4408,6 +4441,7 @@ fn poly_destructure_generic(
             idx,
             module,
             args,
+            len_args,
             name: header_name,
         },
     ));
@@ -4542,10 +4576,16 @@ fn poly_construct_generic(
             refs,
         };
         let mut g = cell.borrow_mut();
+        // P7.S6a (R5): `poly_bind_construction_arg`'s own catch-all already
+        // restricts every field this construction path can bind to
+        // `Var`/`Concrete` (an array-shaped field panics there today,
+        // pre-existing and unrelated to this slice), so this call never has
+        // a length to infer -- a permanent empty list, not a phase-scoped
+        // placeholder.
         let ty = if is_enum {
-            g.instantiate_enum(idx, &concrete_args, module, regs)
+            g.instantiate_enum(idx, &concrete_args, &[], module, regs)
         } else {
-            g.instantiate_struct(idx, &concrete_args, module, regs)
+            g.instantiate_struct(idx, &concrete_args, &[], module, regs)
         };
         PolyType::Concrete(ty)
     } else {
@@ -4554,6 +4594,7 @@ fn poly_construct_generic(
             idx: idx as u32,
             module,
             args: resolved,
+            len_args: vec![],
             name: header_name,
         }
     };
@@ -6967,6 +7008,7 @@ fn match_impl_target_rec(
             idx,
             module,
             args,
+            len_args: _,
             name: _,
         } => {
             let generics = generics?;
@@ -7086,6 +7128,7 @@ fn collect_positions(
             idx,
             module,
             args,
+            len_args: _,
             name: _,
         } => {
             let generics = generics?;
@@ -7849,11 +7892,16 @@ pub(super) fn unify_poly_input(
         // instantiation of this exact header (wrong id, wrong header, or a
         // hand-written concrete type sharing no dedup key at all) is a
         // rendered mismatch, never a panic.
+        // P7.S6a (R8a lands signature-unification length binding in a
+        // later phase): `len_args` is not yet bound against `subst.len`
+        // here -- phase 3's scope is the mechanical compile-forced ripple
+        // only.
         PolyType::Generic {
             is_enum,
             idx,
             module,
             args,
+            len_args: _,
             name: _,
         } => {
             let Some(cell) = ctx.generics() else {
@@ -8044,11 +8092,18 @@ pub(super) fn apply_subst(
         // `unify_poly_input`'s `Generic` arm reads. Substituting every
         // argument first (recursively) means a nested variable-bearing
         // argument grounds bottom-up, exactly as `Array`'s element does.
+        // PLACEHOLDER, replaced by R8a: `len_args` is populated in a
+        // checker-visible `PolySig` only once R7's signature-parsing fold
+        // lands (a later phase), so this arm never actually receives a
+        // non-empty `len_args` to drop in this phase -- an empty length list
+        // is passed through to `instantiate_*` until R8a resolves it through
+        // `subst.len`.
         PolyType::Generic {
             is_enum,
             idx,
             module,
             args,
+            len_args: _,
             name: _,
         } => {
             let Some(cell) = ctx.generics() else {
@@ -8080,9 +8135,9 @@ pub(super) fn apply_subst(
             };
             let mut g = cell.borrow_mut();
             Ok(if *is_enum {
-                g.instantiate_enum(*idx as usize, &concrete_args, *module, regs)
+                g.instantiate_enum(*idx as usize, &concrete_args, &[], *module, regs)
             } else {
-                g.instantiate_struct(*idx as usize, &concrete_args, *module, regs)
+                g.instantiate_struct(*idx as usize, &concrete_args, &[], *module, regs)
             })
         }
         // P7.S12 (R3.1/R4.1): ground the header the same way the `Generic`
@@ -8097,11 +8152,14 @@ pub(super) fn apply_subst(
         // `id.index() - 0`, which can land inside `inst_enums` and return
         // the *wrong* decl for an id that in fact names an already-flushed
         // entry, rather than falling through to `None`.
+        // PLACEHOLDER, replaced by R8a -- the same interim empty length
+        // list the `Generic` arm above passes, for the same reason.
         PolyType::GenericVariant {
             idx,
             module,
             vi,
             args,
+            len_args: _,
             name: _,
         } => {
             let Some(cell) = ctx.generics() else {
@@ -8127,7 +8185,7 @@ pub(super) fn apply_subst(
             };
             let mut g = cell.borrow_mut();
             let Type::Enum(id, _) =
-                g.instantiate_enum(*idx as usize, &concrete_args, *module, regs)
+                g.instantiate_enum(*idx as usize, &concrete_args, &[], *module, regs)
             else {
                 unreachable!("instantiate_enum always returns Type::Enum")
             };
@@ -9165,9 +9223,18 @@ pub(crate) fn poly_type_str(pt: &PolyType, sig: &PolySig) -> String {
         // P7 slice 3a: `Name['A 'B]` in the signature's own variable
         // spellings -- `name` is cached on the variant for exactly this
         // (see `PolyType::Generic`'s doc), so no registry lookup is needed.
-        PolyType::Generic { name, args, .. } => {
-            let args: Vec<String> = args.iter().map(|a| poly_type_str(a, sig)).collect();
-            format!("{name}[{}]", args.join(" "))
+        PolyType::Generic {
+            name,
+            args,
+            len_args,
+            ..
+        } => {
+            let mut parts: Vec<String> = args.iter().map(|a| poly_type_str(a, sig)).collect();
+            parts.extend(len_args.iter().map(|l| match l {
+                Len::Concrete(n) => n.to_string(),
+                Len::Var(id) => sig.len_var_names[*id as usize].clone(),
+            }));
+            format!("{name}[{}]", parts.join(" "))
         }
         // P7.S12 (R3.3): `Enum.Variant`, mirroring `Type::Variant`'s own
         // display spelling -- `name` is cached on the variant for exactly
@@ -12950,9 +13017,38 @@ mod tests {
             idx: 0,
             module: 0,
             args: vec![PolyType::Var(0), PolyType::Var(1)],
+            len_args: vec![],
             name: "Result",
         };
         assert_eq!(poly_type_str(&result, &sig), "Result['T 'E]");
+    }
+
+    #[test]
+    fn poly_type_str_renders_a_generic_application_with_len_args() {
+        // P7.S6a (R3): the `Generic` arm's `len_args` widening -- a
+        // length-carrying generic application must print its length
+        // component (by the signature's own length-variable spelling for a
+        // `Var`, literally for a `Concrete`) after the type args, not print
+        // `Buffer[i64]` for `Buffer[i64 256]`.
+        let sig = PolySig {
+            row_in: None,
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            row_out: None,
+            bounds: Vec::new(),
+            ty_var_names: Vec::new(),
+            len_var_names: vec!["'N".to_string()],
+            row_var_names: Vec::new(),
+        };
+        let buffer = PolyType::Generic {
+            is_enum: false,
+            idx: 0,
+            module: 0,
+            args: vec![PolyType::Concrete(Type::I64)],
+            len_args: vec![Len::Concrete(256), Len::Var(0)],
+            name: "Buffer",
+        };
+        assert_eq!(poly_type_str(&buffer, &sig), "Buffer[i64 256 'N]");
     }
 
     #[test]
@@ -12965,6 +13061,7 @@ mod tests {
             idx: 0,
             module: 0,
             args: Vec::new(),
+            len_args: vec![],
             name: "Result",
         })];
         assert!(receiver_is_aggregate_projection(&stack));
@@ -13487,6 +13584,7 @@ mod tests {
         generics.enums.push(GenericEnumDecl {
             name: "Opt".to_string(),
             ty_var_names: vec!["'T".to_string()],
+            len_var_names: vec![],
             variants: vec![
                 GenericVariantDecl {
                     name: "None".to_string(),
@@ -13503,7 +13601,14 @@ mod tests {
             module: 0,
         });
         let cell = RefCell::new(generics);
-        let pty = crate::ast::generic_variant_type(&cell.borrow(), 0, 0, 1, vec![PolyType::Var(0)]);
+        let pty = crate::ast::generic_variant_type(
+            &cell.borrow(),
+            0,
+            0,
+            1,
+            vec![PolyType::Var(0)],
+            vec![],
+        );
         let sig = ref_sig();
         let mut subst = Subst::default();
         subst.ty.push((0, Type::I64));
@@ -13586,6 +13691,217 @@ mod tests {
         )
         .expect("the memoized instantiation grounds the same way after the flush");
         assert_eq!(flushed, unflushed);
+    }
+
+    /// P7.S6a (R3, added review round 4): the `Operative::Generic`
+    /// construction site `poly_eliminator_call` reaches when its scrutinee
+    /// is an ungrounded `PolyType::Generic { is_enum: true, .. }` carries
+    /// the scrutinee's own `len_args` forward -- must fail if this
+    /// construction site (as opposed to its already-covered
+    /// destructure/consumption site) drops it.
+    ///
+    /// Review fix: the prior version of this test called
+    /// `operative_generic_from_scrutinee` directly with hand-supplied
+    /// arguments, which only pins the helper's own body -- it would still
+    /// pass if the real call site (`poly_eliminator_call`'s match arm at
+    /// `:3171`) stopped calling the helper, or called it with the wrong
+    /// field (e.g. `args` twice, or a hardcoded `&[]`). This drives
+    /// `poly_eliminator_call` itself with a hand-built `Generic` scrutinee
+    /// and lets its `Full` arm destructure through `poly_destructure_generic`
+    /// (the already-covered sibling site), whose own `enum_sites.push` reads
+    /// the `len_args` off the *narrowed arm type* the match arm under test
+    /// built -- so a dropped or wrong `len_args` at `:3171` surfaces here as
+    /// a mismatched recorded site, not just as a mismatched helper return.
+    #[test]
+    fn operative_generic_construction_site_carries_len_args_from_its_scrutinee() {
+        let mut generics = GenericTypes::with_bases(0, 0);
+        generics.enums.push(GenericEnumDecl {
+            name: "Ring".to_string(),
+            ty_var_names: vec!["'T".to_string()],
+            len_var_names: vec!["'N".to_string()],
+            variants: vec![
+                GenericVariantDecl {
+                    name: "Full".to_string(),
+                    fields: vec![("0".to_string(), PolyType::Var(0))],
+                    span: Span::default(),
+                },
+                GenericVariantDecl {
+                    name: "Empty".to_string(),
+                    fields: Vec::new(),
+                    span: Span::default(),
+                },
+            ],
+            span: Span::default(),
+            module: 0,
+        });
+        let cell = RefCell::new(generics);
+        let scrutinee_len_args = vec![Len::Var(0), Len::Concrete(4)];
+        let scrutinee_pt = PolyType::Generic {
+            is_enum: true,
+            idx: 0,
+            module: 0,
+            args: vec![PolyType::Var(0)],
+            len_args: scrutinee_len_args.clone(),
+            name: "Ring",
+        };
+        let mut scope = PolyScope::default();
+        let full_quot = scope.intern_quotation(PolyQuotLit {
+            body: vec![
+                Term {
+                    kind: TermKind::Call("Full>".to_string(), Vec::new()),
+                    span: Span::default(),
+                },
+                Term {
+                    kind: TermKind::Call("drop".to_string(), Vec::new()),
+                    span: Span::default(),
+                },
+            ],
+            span: Span::default(),
+            is_inline: true,
+            annot: Some(AnnotEffect {
+                inputs: Vec::new(),
+                outputs: Vec::new(),
+                span: Span::default(),
+                variant_tag: Some(VariantTag {
+                    name: "Full".to_string(),
+                    mode: VariantTagMode::Owning,
+                }),
+            }),
+        });
+        let empty_quot = scope.intern_quotation(PolyQuotLit {
+            body: vec![Term {
+                kind: TermKind::Call("Empty>".to_string(), Vec::new()),
+                span: Span::default(),
+            }],
+            span: Span::default(),
+            is_inline: true,
+            annot: Some(AnnotEffect {
+                inputs: Vec::new(),
+                outputs: Vec::new(),
+                span: Span::default(),
+                variant_tag: Some(VariantTag {
+                    name: "Empty".to_string(),
+                    mode: VariantTagMode::Owning,
+                }),
+            }),
+        });
+        let stack = vec![
+            PolySlot::new(scrutinee_pt),
+            PolySlot::quotation(full_quot),
+            PolySlot::quotation(empty_quot),
+        ];
+        let sig = bare_sig();
+        let probe = probe_word();
+        let base_ctx = probe_ctx(&probe);
+        let ctx = Ctx {
+            generics: Some(&cell),
+            ..base_ctx
+        };
+        let env: HashMap<String, Vec<Overload>> = HashMap::new();
+        let mut obligations = Vec::new();
+        let mut enum_sites = Vec::new();
+        let mut tctx = TraitCtx::scratch(&mut obligations, &mut enum_sites);
+        poly_eliminator_call(
+            EliminatorTarget::Generic { idx: 0 },
+            "Ring?",
+            Span::default(),
+            stack,
+            &mut scope,
+            &sig,
+            &ctx,
+            &env,
+            &CombinatorEnv::default(),
+            &[],
+            &[],
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &mut HashMap::new(),
+            &mut tctx,
+            scratch_cross!(),
+            false,
+        )
+        .expect("a Full/Empty eliminator over a Generic scrutinee dispatches");
+        // `poly_eliminator_call` records its own scrutinee site plus the
+        // `Full` arm's own destructure site (the already-covered sibling in
+        // `poly_destructure_generic`); every one of them must carry the
+        // scrutinee's own `len_args` unchanged, since a dropped or
+        // wrong-valued `len_args` at the construction site under test
+        // (`:3171`) would poison every downstream site alike.
+        assert!(!enum_sites.is_empty(), "at least one site is recorded");
+        for (span, site) in &enum_sites {
+            let PolyType::Generic { len_args, .. } = site else {
+                panic!("the recorded site is a Generic scrutinee: {site:?}")
+            };
+            assert_eq!(
+                len_args, &scrutinee_len_args,
+                "every recorded site (span {span:?}) must carry the construction \
+                 site's own len_args unchanged"
+            );
+        }
+    }
+
+    /// P7.S6a (R3, added review round 4): `poly_destructure_generic`'s own
+    /// `enum_sites.push` (`:4406-4412`) rebuilds a `PolyType::Generic` from
+    /// the narrowed `PolyType::GenericVariant` operand's own `len_args` --
+    /// must fail if this carry-forward is dropped, silently losing the
+    /// length the moment lowering re-grounds it.
+    #[test]
+    fn poly_destructure_generic_enum_sites_push_carries_len_args() {
+        let mut generics = GenericTypes::with_bases(0, 0);
+        generics.enums.push(GenericEnumDecl {
+            name: "Buffer".to_string(),
+            ty_var_names: vec!["'T".to_string()],
+            len_var_names: vec!["'N".to_string()],
+            variants: vec![GenericVariantDecl {
+                name: "Full".to_string(),
+                fields: vec![("0".to_string(), PolyType::Var(0))],
+                span: Span::default(),
+            }],
+            span: Span::default(),
+            module: 0,
+        });
+        let cell = RefCell::new(generics);
+        let scrutinee_len_args = vec![Len::Var(0)];
+        let scrutinee_pt = crate::ast::generic_variant_type(
+            &cell.borrow(),
+            0,
+            0,
+            0,
+            vec![PolyType::Var(0)],
+            scrutinee_len_args.clone(),
+        );
+        let mut stack = vec![PolySlot::new(scrutinee_pt)];
+        let effect = StackEffect {
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+        };
+        let enums: Vec<EnumDecl> = Vec::new();
+        let ctx = Ctx {
+            mangled: "f",
+            effect: &effect,
+            structs: &[],
+            enums: &enums,
+            statics: &[],
+            module: 0,
+            modules: None,
+            self_tail_call: false,
+            generics: Some(&cell),
+        };
+        let mut obligations = Vec::new();
+        let mut enum_sites = Vec::new();
+        let mut tctx = TraitCtx::scratch(&mut obligations, &mut enum_sites);
+        poly_destructure_generic("Full>", Span::default(), &mut stack, &ctx, &mut tctx)
+            .expect("a `Full>` destructure over the matching narrowed variant must dispatch");
+        assert_eq!(enum_sites.len(), 1, "the destructure call site is recorded");
+        let PolyType::Generic { len_args, .. } = &enum_sites[0].1 else {
+            panic!(
+                "the recorded site is a Generic scrutinee: {:?}",
+                enum_sites[0].1
+            )
+        };
+        assert_eq!(len_args, &scrutinee_len_args);
     }
 
     // -- Phase 2 (R-B1..R-B6): production and checking --------------------

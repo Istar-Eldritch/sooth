@@ -470,13 +470,18 @@ fn poly_type_shape_str(pt: &PolyType) -> String {
             )
         }
         PolyType::OwnedCell(payload) => format!("^{}", poly_type_shape_str(payload)),
-        PolyType::Generic { name, args, .. } => {
-            let a = args
-                .iter()
-                .map(poly_type_shape_str)
-                .collect::<Vec<_>>()
-                .join(" ");
-            format!("{name}[{a}]")
+        PolyType::Generic {
+            name,
+            args,
+            len_args,
+            ..
+        } => {
+            let mut parts: Vec<String> = args.iter().map(poly_type_shape_str).collect();
+            parts.extend(len_args.iter().map(|l| match l {
+                Len::Concrete(n) => n.to_string(),
+                Len::Var(id) => format!("'N{id}"),
+            }));
+            format!("{name}[{}]", parts.join(" "))
         }
         PolyType::Quotation(_, _, _, _, _) => "[quotation]".to_string(),
         PolyType::QuotLit => "[quotlit]".to_string(),
@@ -1854,6 +1859,25 @@ fn generic_arity_error(name: &str, declared: usize, supplied: usize, span: Span)
     )
 }
 
+/// P7.S6a (R6/R7 not yet landed): neither *use-site* application path has
+/// syntax yet to supply a length argument -- `resolve_type_or_apply`'s
+/// concrete path (`Buffer[i64]`) and `parse_poly_generic_application`'s
+/// signature path (`Buffer['T]`, and an `impl:` target, which R7 notes routes
+/// through the same fold) both instantiate with an empty length list.
+/// Applying either to a header that declares a length variable would
+/// otherwise reach `substitute_generic_field`'s `Array(_, Len::Var(v))` arm
+/// with an empty `lens`, indexing out of bounds the moment the field is
+/// substituted -- a located error here, naming the header and the length
+/// variable it declares, instead of that panic. The field-level twin
+/// (`parse_generic_field_application`) needs no such rejection: R2a landed
+/// its real length split.
+fn generic_length_application_unsupported_error(name: &str, len_var: &str, span: Span) -> String {
+    format!(
+        "error: generic type `{name}` declares a length parameter (`{len_var}`) at line {}, col {} (applying `{name}[...]` at a use site cannot supply one yet; only a type-only header can be applied this way)",
+        span.line, span.col,
+    )
+}
+
 /// P7.S6 (R2): `array` in a type position with no following `[` is a located
 /// error naming the required form, not "unknown type `array`". Raised at the
 /// single funnel `resolve_type_or_apply`, which every bare-word type reader
@@ -1985,12 +2009,21 @@ fn generic_field_type_str(
         PolyType::OwnedCell(payload) => {
             format!("^{}", generic_field_type_str(payload, ty_vars, len_vars))
         }
-        PolyType::Generic { name, args, .. } => {
-            let args: Vec<String> = args
+        PolyType::Generic {
+            name,
+            args,
+            len_args,
+            ..
+        } => {
+            let mut parts: Vec<String> = args
                 .iter()
                 .map(|a| generic_field_type_str(a, ty_vars, len_vars))
                 .collect();
-            format!("{name}[{}]", args.join(" "))
+            parts.extend(len_args.iter().map(|l| match l {
+                Len::Concrete(n) => n.to_string(),
+                Len::Var(v) => len_vars[*v as usize].0.clone(),
+            }));
+            format!("{name}[{}]", parts.join(" "))
         }
         // R7 rejects a variable-bearing quotation field at the parser, and a
         // concrete one folds to `Concrete`, so neither reaches here.
@@ -3605,6 +3638,21 @@ impl<'t> Parser<'t> {
         module: u32,
         span: Span,
     ) -> Result<RawTy, String> {
+        // P7.S6a: the signature twin of `resolve_type_or_apply`'s rejection.
+        // R7 lands this path's real length split in a later phase; until then
+        // the `RawTy::Generic` fold below instantiates with an empty length
+        // list, so a length-declaring header must not reach it (see
+        // `generic_length_application_unsupported_error`).
+        let len_var = if is_enum {
+            self.generics.enums[idx].len_var_names.first()
+        } else {
+            self.generics.structs[idx].len_var_names.first()
+        };
+        if let Some(len_var) = len_var {
+            return Err(generic_length_application_unsupported_error(
+                name, len_var, span,
+            ));
+        }
         let arity = if is_enum {
             self.generics.enums[idx].ty_var_names.len()
         } else {
@@ -4061,11 +4109,16 @@ impl<'t> Parser<'t> {
                         cells: self.owned_cells,
                         refs: self.refs,
                     };
+                    // P7.S6a (R7 lands the real length split in a later
+                    // phase): `RawTy::Generic` carries no length component
+                    // yet, so an empty placeholder is the only value there
+                    // is to pass here.
                     PolyType::Concrete(if is_enum {
-                        self.generics.instantiate_enum(idx, &concrete, module, regs)
+                        self.generics
+                            .instantiate_enum(idx, &concrete, &[], module, regs)
                     } else {
                         self.generics
-                            .instantiate_struct(idx, &concrete, module, regs)
+                            .instantiate_struct(idx, &concrete, &[], module, regs)
                     })
                 } else {
                     let name: &'static str = Box::leak(name.into_boxed_str());
@@ -4074,6 +4127,7 @@ impl<'t> Parser<'t> {
                         idx: idx as u32,
                         module,
                         args,
+                        len_args: vec![],
                         name,
                     }
                 }
@@ -5173,11 +5227,13 @@ impl<'t> Parser<'t> {
                     let is_enum = self.current_typedef_is_enum();
                     let (name, ty_vars, len_vars, type_span) = self.parse_generic_header()?;
                     let ty_var_names = ty_vars.iter().map(|(n, _)| n.clone()).collect();
+                    let len_var_names = len_vars.iter().map(|(n, _)| n.clone()).collect();
                     let idx = if is_enum {
                         self.generics
                             .push_enum_placeholder(crate::ast::GenericEnumDecl {
                                 name: name.clone(),
                                 ty_var_names,
+                                len_var_names,
                                 variants: Vec::new(),
                                 span: type_span,
                                 module: self.module,
@@ -5187,6 +5243,7 @@ impl<'t> Parser<'t> {
                             .push_struct_placeholder(crate::ast::GenericStructDecl {
                                 name: name.clone(),
                                 ty_var_names,
+                                len_var_names,
                                 fields: Vec::new(),
                                 span: type_span,
                                 module: self.module,
@@ -5359,6 +5416,17 @@ impl<'t> Parser<'t> {
             }
         }
         if let Some(idx) = self.generics.find_struct(base, owner) {
+            // P7.S6a: R6 has not landed the real length split yet, so this
+            // path can never supply one -- a header declaring a length
+            // parameter is rejected here, before `instantiate_struct` would
+            // otherwise be handed an empty `lens` for a field that indexes
+            // into it (`substitute_generic_field`'s `Array(_, Len::Var(v))`
+            // arm, `src/ast.rs`).
+            if let Some(len_var) = self.generics.structs[idx].len_var_names.first() {
+                return Err(generic_length_application_unsupported_error(
+                    name, len_var, span,
+                ));
+            }
             let arity = self.generics.structs[idx].ty_var_names.len();
             let args = self.parse_type_arguments(name, arity, span)?;
             let regs = MutRegistries {
@@ -5368,11 +5436,20 @@ impl<'t> Parser<'t> {
                 cells: self.owned_cells,
                 refs: self.refs,
             };
+            // P7.S6a (R6 lands the real length split in a later phase):
+            // `parse_type_arguments` reads type arguments only, so an empty
+            // placeholder is the only length list there is to pass here --
+            // sound now that a length-declaring header is rejected above.
             return Ok(self
                 .generics
-                .instantiate_struct(idx, &args, self.module, regs));
+                .instantiate_struct(idx, &args, &[], self.module, regs));
         }
         if let Some(idx) = self.generics.find_enum(base, owner) {
+            if let Some(len_var) = self.generics.enums[idx].len_var_names.first() {
+                return Err(generic_length_application_unsupported_error(
+                    name, len_var, span,
+                ));
+            }
             let arity = self.generics.enums[idx].ty_var_names.len();
             let args = self.parse_type_arguments(name, arity, span)?;
             let regs = MutRegistries {
@@ -5384,7 +5461,7 @@ impl<'t> Parser<'t> {
             };
             return Ok(self
                 .generics
-                .instantiate_enum(idx, &args, self.module, regs));
+                .instantiate_enum(idx, &args, &[], self.module, regs));
         }
         self.resolve_type(name, span)
     }
@@ -5899,6 +5976,18 @@ impl<'t> Parser<'t> {
     /// argument list instantiates immediately and folds to `Concrete`,
     /// byte-for-byte as `resolve_type_or_apply` already does; otherwise the
     /// application stays `PolyType::Generic` for substitution to ground.
+    ///
+    /// P7.S6a (R2a, phase 3): the argument list splits into `0..ty_arity`
+    /// field-type arguments (parsed exactly as before) and
+    /// `ty_arity..ty_arity+len_arity` length arguments -- a `'`-prefixed
+    /// token resolved against *this* header's own length-variable list
+    /// (`Len::Var`, `resolve_field_len_var`), or a decimal literal
+    /// (`Len::Concrete`), mirroring `parse_generic_field_array`'s own count
+    /// reader one level down. The eager concrete-collapse gates on every
+    /// length argument being `Len::Concrete` too, not just every type
+    /// argument, so a variable type paired with a concrete length
+    /// (`Buffer['T 4]`) and a concrete type paired with a variable length
+    /// stay `PolyType::Generic` alike.
     #[allow(clippy::too_many_arguments)]
     fn parse_generic_field_application(
         &mut self,
@@ -5913,16 +6002,24 @@ impl<'t> Parser<'t> {
         module: u32,
         span: Span,
     ) -> Result<PolyType, String> {
-        let arity = if is_enum {
-            self.generics.enums[idx].ty_var_names.len()
+        let (ty_arity, len_arity) = if is_enum {
+            (
+                self.generics.enums[idx].ty_var_names.len(),
+                self.generics.enums[idx].len_var_names.len(),
+            )
         } else {
-            self.generics.structs[idx].ty_var_names.len()
+            (
+                self.generics.structs[idx].ty_var_names.len(),
+                self.generics.structs[idx].len_var_names.len(),
+            )
         };
+        let arity = ty_arity + len_arity;
         if !matches!(self.peek(), Some((Token::LBracket, _))) {
             return Err(generic_arity_error(name, arity, 0, span));
         }
         self.pos += 1;
         let mut args = Vec::new();
+        let mut lens: Vec<Len> = Vec::new();
         loop {
             match self.peek() {
                 Some((Token::RBracket, _)) => {
@@ -5932,19 +6029,33 @@ impl<'t> Parser<'t> {
                 None => {
                     return Err(self.eof_error("`]` (unterminated generic type application)"));
                 }
-                // P7.S6a phase 2: this field-application parser's own
-                // type/length arity split (`parse_generic_field_application`'s
-                // R2a widening) is phase 3 work, gated on R3's
-                // `len_var_names` AST field -- `len_vars`/`used_len` are
-                // threaded through here only so this call still compiles
-                // against `parse_generic_field_shape`'s widened signature.
-                _ => args.push(
-                    self.parse_generic_field_shape(decl_name, ty_vars, used, len_vars, used_len)?,
-                ),
+                _ => {}
             }
+            if args.len() < ty_arity {
+                args.push(
+                    self.parse_generic_field_shape(decl_name, ty_vars, used, len_vars, used_len)?,
+                );
+                continue;
+            }
+            if let Some((Token::Word(w), wspan)) = self.peek() {
+                if w.starts_with('\'') {
+                    let (w, wspan) = (w.clone(), *wspan);
+                    self.pos += 1;
+                    lens.push(Len::Var(self.resolve_field_len_var(
+                        decl_name, len_vars, used_len, &w, wspan,
+                    )?));
+                    continue;
+                }
+            }
+            lens.push(Len::Concrete(self.parse_array_count(name)?));
         }
-        if args.len() != arity {
-            return Err(generic_arity_error(name, arity, args.len(), span));
+        if args.len() != ty_arity || lens.len() != len_arity {
+            return Err(generic_arity_error(
+                name,
+                arity,
+                args.len() + lens.len(),
+                span,
+            ));
         }
         let concrete: Option<Vec<Type>> = args
             .iter()
@@ -5953,7 +6064,11 @@ impl<'t> Parser<'t> {
                 _ => None,
             })
             .collect();
-        if let Some(concrete) = concrete {
+        let concrete_lens: Option<Vec<Len>> = lens
+            .iter()
+            .all(|l| matches!(l, Len::Concrete(_)))
+            .then(|| lens.clone());
+        if let (Some(concrete), Some(concrete_lens)) = (concrete, concrete_lens) {
             let regs = MutRegistries {
                 structs: self.structs,
                 enums: self.enums,
@@ -5962,10 +6077,11 @@ impl<'t> Parser<'t> {
                 refs: self.refs,
             };
             return Ok(PolyType::Concrete(if is_enum {
-                self.generics.instantiate_enum(idx, &concrete, module, regs)
+                self.generics
+                    .instantiate_enum(idx, &concrete, &concrete_lens, module, regs)
             } else {
                 self.generics
-                    .instantiate_struct(idx, &concrete, module, regs)
+                    .instantiate_struct(idx, &concrete, &concrete_lens, module, regs)
             }));
         }
         Ok(PolyType::Generic {
@@ -5973,6 +6089,7 @@ impl<'t> Parser<'t> {
             idx: idx as u32,
             module,
             args,
+            len_args: lens,
             name: Box::leak(name.to_string().into_boxed_str()),
         })
     }
@@ -7166,6 +7283,7 @@ mod tests {
         generics.enums.push(crate::ast::GenericEnumDecl {
             name: "Shape".to_string(),
             ty_var_names: vec!["T".to_string()],
+            len_var_names: vec![],
             variants: vec![crate::ast::GenericVariantDecl {
                 name: "Circle".to_string(),
                 fields: vec![("r".to_string(), PolyType::Var(0))],
@@ -8454,6 +8572,75 @@ mod tests {
         );
         assert!(err.contains("1 was supplied"), "unexpected: {err}");
         assert!(err.contains("line 2, col 7"), "unlocated: {err}");
+    }
+
+    #[test]
+    fn concrete_application_of_a_length_carrying_header_is_a_located_error() {
+        // P7.S6a: R6 has not landed the real length split for a concrete
+        // use site (`Buffer[i64]`) yet -- applying a header that declares a
+        // length variable through this path used to reach
+        // `substitute_generic_field`'s `Array(_, Len::Var(v))` arm with an
+        // empty `lens` and index out of bounds. It is a located error
+        // instead, naming the header and the length variable it declares.
+        let err = parse_src(
+            "type: Buffer['T 'N: Len] data array['T 'N] ;\n\
+             : f ( Buffer[i64] -- ) drop ;\n",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("generic type `Buffer` declares a length parameter (`'N`)"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("line 2, col 7"), "unlocated: {err}");
+    }
+
+    #[test]
+    fn signature_application_of_a_length_carrying_header_is_a_located_error() {
+        // P7.S6a: the *signature* path (`parse_poly_generic_application`) is
+        // reached whenever any slot in the signature bears a type variable,
+        // and its `RawTy::Generic` fold instantiates with an empty length
+        // list until R7 lands. Before the guard this program panicked in
+        // `substitute_generic_field` with "index out of bounds: the len is 0
+        // but the index is 0", not a diagnostic.
+        let err = parse_src(
+            "type: Buffer['T 'N: Len] data array['T 'N] ;\n\
+             : f ( 'T Buffer[i64] -- 'T ) swap drop ;\n",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("generic type `Buffer` declares a length parameter (`'N`)"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("line 2, col 10"), "unlocated: {err}");
+    }
+
+    #[test]
+    fn signature_application_of_a_length_carrying_enum_header_is_a_located_error() {
+        // The enum twin: the same guard, read off `enums[idx].len_var_names`.
+        let err = parse_src(
+            "type: Ring['T 'N: Len] | Full data array['T 'N] | Empty ;\n\
+             : f ( 'T Ring[i64] -- 'T ) swap drop ;\n",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("generic type `Ring` declares a length parameter (`'N`)"),
+            "unexpected message: {err}"
+        );
+    }
+
+    #[test]
+    fn concrete_application_of_a_length_carrying_enum_header_is_a_located_error() {
+        // The enum twin of the struct case above -- the same rejection,
+        // through `find_enum` rather than `find_struct`.
+        let err = parse_src(
+            "type: Ring['T 'N: Len] | Full data array['T 'N] | Empty ;\n\
+             : f ( Ring[i64] -- ) drop ;\n",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("generic type `Ring` declares a length parameter (`'N`)"),
+            "unexpected message: {err}"
+        );
     }
 
     #[test]
@@ -11274,6 +11461,52 @@ mod tests {
         assert!(err.contains("array['T 'N]"), "{err}");
     }
 
+    // ---- P7.S6a Phase 3: R2a's parse_generic_field_application widening ----
+
+    #[test]
+    fn parse_generic_field_application_splits_type_and_length_args() {
+        // `Buffer['T 'N]` inside `Pair`'s own field list -- `Buffer`'s
+        // trailing `'N` resolves as a length variable against `Pair`'s own
+        // header bracket, not an arity error.
+        let module =
+            parse_src("type: Buffer['T 'N: Len] data array['T 'N] ;\ntype: Pair['T 'N: Len] a Buffer['T 'N] ;")
+                .unwrap();
+        let pair = &module.generic_structs[1];
+        assert_eq!(pair.fields.len(), 1);
+        let PolyType::Generic {
+            is_enum,
+            args,
+            len_args,
+            ..
+        } = &pair.fields[0].1
+        else {
+            panic!(
+                "a nested header application stays PolyType::Generic: {:?}",
+                pair.fields[0].1
+            )
+        };
+        assert!(!is_enum);
+        assert_eq!(*args, vec![PolyType::Var(0)]);
+        assert_eq!(*len_args, vec![Len::Var(0)]);
+    }
+
+    #[test]
+    fn parse_generic_field_application_concrete_type_variable_length_does_not_collapse() {
+        // A variable type, a concrete length, inside a field: stays
+        // `PolyType::Generic`, not `Concrete` -- the field-application twin
+        // of R7's collapse-gate test.
+        let module = parse_src(
+            "type: Buffer['T 'N: Len] data array['T 'N] ;\ntype: Pair['T] a Buffer['T 4] ;",
+        )
+        .unwrap();
+        let pair = &module.generic_structs[1];
+        assert!(
+            matches!(pair.fields[0].1, PolyType::Generic { .. }),
+            "a variable type argument must not collapse: {:?}",
+            pair.fields[0].1
+        );
+    }
+
     #[test]
     fn parse_optional_bound_bracket_len_annotation_validates_against_signature() {
         // R2b; the fixture is array-based per R2b's phase-1
@@ -11620,6 +11853,29 @@ mod tests {
     }
 
     #[test]
+    fn generic_field_type_str_renders_generic_len_args() {
+        // P7.S6a (R3): the `Generic` arm's `len_args` widening -- a
+        // length-carrying generic field type must render its length
+        // component (by surface spelling for a `Var`, literally for a
+        // `Concrete`) after the type args, not print `Buffer['T]` for
+        // `Buffer['T 'N]`.
+        let ty_vars = [("'T".to_string(), Span::default())];
+        let len_vars = [("'N".to_string(), Span::default())];
+        let buffer = PolyType::Generic {
+            is_enum: false,
+            idx: 0,
+            module: 0,
+            args: vec![PolyType::Var(0)],
+            len_args: vec![Len::Var(0), Len::Concrete(4)],
+            name: "Buffer",
+        };
+        assert_eq!(
+            generic_field_type_str(&buffer, &ty_vars, &len_vars),
+            "Buffer['T 'N 4]"
+        );
+    }
+
+    #[test]
     fn parse_poly_slot_bare_bracket_is_quotation() {
         // R4: an array-shaped bare bracket in a poly slot is a quotation
         // effect now, not an array -- so it is R4a's missing-`--` error.
@@ -11735,5 +11991,23 @@ mod tests {
         // member words.
         let arr = PolyType::Array(Box::new(PolyType::Var(0)), Len::Concrete(4));
         assert_eq!(poly_type_shape_str(&arr), "['T0 4]");
+    }
+
+    #[test]
+    fn poly_type_shape_str_renders_generic_len_args() {
+        // P7.S6a (R3): the `Generic` arm's `len_args` widening -- a
+        // length-carrying generic application must print its length
+        // component after the type args, not silently drop it (`Buffer[i64]`
+        // for `Buffer[i64 256]` would misname the very arity/overlap errors
+        // this slice's distinct-monomorph feature is likely to trigger).
+        let buffer = PolyType::Generic {
+            is_enum: false,
+            idx: 0,
+            module: 0,
+            args: vec![PolyType::Concrete(Type::I64)],
+            len_args: vec![Len::Concrete(256), Len::Var(0)],
+            name: "Buffer",
+        };
+        assert_eq!(poly_type_shape_str(&buffer), "Buffer[i64 256 'N0]");
     }
 }

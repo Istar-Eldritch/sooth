@@ -545,6 +545,10 @@ pub struct GenericStructDecl {
     /// each keeping its leading `'` (e.g. `"'T"`) -- the id space a field's
     /// `PolyType::Var` indexes into.
     pub ty_var_names: Vec<String>,
+    /// P7.S6a (R3): the header's bound length-variable names, parallel to
+    /// `ty_var_names` but in the separate length id space `Len::Var`
+    /// indexes into.
+    pub len_var_names: Vec<String>,
     pub fields: Vec<(String, PolyType)>,
     pub span: Span,
     pub module: u32,
@@ -556,6 +560,7 @@ pub struct GenericStructDecl {
 pub struct GenericEnumDecl {
     pub name: String,
     pub ty_var_names: Vec<String>,
+    pub len_var_names: Vec<String>,
     pub variants: Vec<GenericVariantDecl>,
     pub span: Span,
     pub module: u32,
@@ -598,9 +603,11 @@ pub struct GenericTypes {
     /// carries, so this is injective where the rendered *name* the fix
     /// below still is not -- see `type_instantiation_name`. Kept off
     /// `StructDecl`/`EnumDecl` themselves so those stay shaped exactly like
-    /// a hand-written concrete `type:` (R5).
-    struct_keys: Vec<(usize, u32, Vec<Type>)>,
-    enum_keys: Vec<(usize, u32, Vec<Type>)>,
+    /// a hand-written concrete `type:` (R5). P7.S6a (R5): widened with a
+    /// fourth, parallel length-argument list, so `Buffer[u8 256]` and
+    /// `Buffer[u8 512]` mint distinct monomorphs instead of colliding.
+    struct_keys: Vec<(usize, u32, Vec<Type>, Vec<Len>)>,
+    enum_keys: Vec<(usize, u32, Vec<Type>, Vec<Len>)>,
     /// P7 slice 3a phase 2 (R2): the resolved `Type` each `struct_keys` entry
     /// minted, parallel by index. Reading `id`/`name` back from here (rather
     /// than recomputing `struct_base + i`) is what makes a downstream mint
@@ -627,9 +634,9 @@ pub struct GenericTypes {
     /// header. The `StructId` is already handed out and never changes; only
     /// the field list is owed, and `fill_struct_fields` pays it once that
     /// header's real fields are known.
-    deferred_structs: Vec<(usize, usize, Vec<Type>)>,
+    deferred_structs: Vec<(usize, usize, Vec<Type>, Vec<Len>)>,
     /// The enum twin of `deferred_structs`.
-    deferred_enums: Vec<(usize, usize, Vec<Type>)>,
+    deferred_enums: Vec<(usize, usize, Vec<Type>, Vec<Len>)>,
     struct_base: usize,
     enum_base: usize,
 }
@@ -774,9 +781,25 @@ fn type_arg_key(t: &Type, regs: NameRegistries) -> String {
 /// delimiter, so no source type-name token can ever equal one of these.
 /// `regs` is threaded through only to break a struct/enum argument's
 /// bare-name tie, at whatever depth it sits (`type_arg_key`).
-pub fn type_instantiation_name(base: &str, args: &[Type], regs: NameRegistries) -> String {
-    let args: Vec<String> = args.iter().map(|t| type_arg_key(t, regs)).collect();
-    format!("{base}[{}]", args.join(" "))
+///
+/// P7.S6a (R5): `lens` renders after every type argument, in the same
+/// bracket, so `Buffer[u8 256]` and `Buffer[u8 512]` -- two distinct
+/// monomorphs once `struct_keys`/`enum_keys` carry a length component --
+/// also render distinct names, rather than colliding on `Buffer[u8]` for
+/// both. Empty on a zero-length-arg call, so every existing generic type's
+/// symbol renders byte-identical to before this ruling.
+pub fn type_instantiation_name(
+    base: &str,
+    args: &[Type],
+    lens: &[Len],
+    regs: NameRegistries,
+) -> String {
+    let mut parts: Vec<String> = args.iter().map(|t| type_arg_key(t, regs)).collect();
+    parts.extend(lens.iter().map(|l| match l {
+        Len::Concrete(n) => n.to_string(),
+        Len::Var(v) => format!("'N{v}"),
+    }));
+    format!("{base}[{}]", parts.join(" "))
 }
 
 /// D7: the bare surface spelling a monomorphized `StructDecl`/`EnumDecl`/
@@ -806,35 +829,52 @@ impl GenericTypes {
     /// recursive; R6's mint-and-memo-before-substitute ordering is what makes
     /// a self-referential header terminate there.
     ///
-    /// The remaining panic is truthful, not a deferral. Three shapes reach it
-    /// and none is constructible: a `PolyType::Quotation` (R7 rejects a
+    /// The remaining panic is truthful, not a deferral. Two shapes reach it
+    /// and neither is constructible: a `PolyType::Quotation` (R7 rejects a
     /// quotation field naming a type variable at the parser, and a *concrete*
-    /// quotation field folds to `Concrete` instead), a `QuotLit` (a poly-body
-    /// marker that never reaches a declaration), and an array over a
-    /// `Len::Var` (N3: a generic `type:` header binds no length variable).
+    /// quotation field folds to `Concrete` instead) and a `QuotLit` (a
+    /// poly-body marker that never reaches a declaration).
     fn substitute_generic_field(
         &mut self,
         pty: &PolyType,
         args: &[Type],
+        lens: &[Len],
         mut regs: MutRegistries,
     ) -> Type {
         match pty {
             PolyType::Concrete(t) => *t,
             PolyType::Var(v) => args[*v as usize],
-            // N3: a generic `type:` header binds no length variable
-            // (`parse_header_bracket` takes only `'`-prefixed type
-            // variables), so a field's count is always literal. A `Len::Var`
-            // arm here would be unconstructible dead code.
             PolyType::Array(elem, Len::Concrete(count)) => {
-                let elem = self.substitute_generic_field(elem, args, regs.reborrow());
+                let elem = self.substitute_generic_field(elem, args, lens, regs.reborrow());
                 intern_array_type(regs.arrays, elem, *count)
             }
+            // P7.S6a (R4): a field's array count naming a header-bound
+            // length variable (`type: Buffer['T 'N: Len] data array['T 'N] ;`)
+            // resolves against the instantiation's own length-argument list,
+            // exactly as `PolyType::Var` resolves against `args` above.
+            //
+            // `v` is in bounds because every path that reaches an
+            // instantiation either supplies the header's full length list
+            // (`parse_generic_field_application`, R2a) or refuses to
+            // instantiate a length-declaring header at all
+            // (`generic_length_application_unsupported_error`'s three call
+            // sites in `src/parser.rs`, covering both use-site paths until
+            // R6/R7 land their real length splits).
+            PolyType::Array(elem, Len::Var(v)) => {
+                let elem = self.substitute_generic_field(elem, args, lens, regs.reborrow());
+                let Len::Concrete(count) = lens[*v as usize] else {
+                    unreachable!(
+                        "an instantiation's own length-argument list is always concrete by the time a field is substituted (R2a's field application collapses eagerly only when every length is a literal)"
+                    )
+                };
+                intern_array_type(regs.arrays, elem, count)
+            }
             PolyType::Ref(referent, mutable) => {
-                let referent = self.substitute_generic_field(referent, args, regs.reborrow());
+                let referent = self.substitute_generic_field(referent, args, lens, regs.reborrow());
                 intern_ref_type(regs.refs, referent, *mutable)
             }
             PolyType::OwnedCell(payload) => {
-                let payload = self.substitute_generic_field(payload, args, regs.reborrow());
+                let payload = self.substitute_generic_field(payload, args, lens, regs.reborrow());
                 intern_owned_cell_type(regs.cells, payload)
             }
             // R4: ground every argument first, then mint (or memo-hit) the
@@ -846,20 +886,28 @@ impl GenericTypes {
                 idx,
                 module,
                 args: header_args,
+                len_args: header_len_args,
                 name: _,
             } => {
                 let mut concrete = Vec::with_capacity(header_args.len());
                 for a in header_args {
-                    concrete.push(self.substitute_generic_field(a, args, regs.reborrow()));
+                    concrete.push(self.substitute_generic_field(a, args, lens, regs.reborrow()));
                 }
+                let concrete_lens: Vec<Len> = header_len_args
+                    .iter()
+                    .map(|l| match l {
+                        Len::Concrete(n) => Len::Concrete(*n),
+                        Len::Var(v) => lens[*v as usize].clone(),
+                    })
+                    .collect();
                 if *is_enum {
-                    self.instantiate_enum(*idx as usize, &concrete, *module, regs)
+                    self.instantiate_enum(*idx as usize, &concrete, &concrete_lens, *module, regs)
                 } else {
-                    self.instantiate_struct(*idx as usize, &concrete, *module, regs)
+                    self.instantiate_struct(*idx as usize, &concrete, &concrete_lens, *module, regs)
                 }
             }
             other => unreachable!(
-                "a generic `type:` field cannot have shape {other:?}: a quotation field naming a type variable is rejected at the parser, a quotation-literal marker never reaches a declaration, and no header binds a length variable"
+                "a generic `type:` field cannot have shape {other:?}: a quotation field naming a type variable is rejected at the parser, a quotation-literal marker never reaches a declaration"
             ),
         }
     }
@@ -933,18 +981,34 @@ impl GenericTypes {
     /// lowering (`subst_polytype`), which only ever looks up an
     /// instantiation check has already minted, never mints one itself (the
     /// same division the array/ref arms already draw).
-    pub fn lookup_struct(&self, idx: usize, module: u32, args: &[Type]) -> Option<Type> {
+    ///
+    /// P7.S6a (R5): `lens` joins `(idx, module, args)` in the dedup key, so
+    /// `Buffer[u8 256]` and `Buffer[u8 512]` -- identical `idx`/`module`/
+    /// `args`, distinct lengths -- do not collide onto the same lookup hit.
+    pub fn lookup_struct(
+        &self,
+        idx: usize,
+        module: u32,
+        args: &[Type],
+        lens: &[Len],
+    ) -> Option<Type> {
         self.struct_keys
             .iter()
-            .position(|(gi, m, a)| *gi == idx && *m == module && a == args)
+            .position(|(gi, m, a, l)| *gi == idx && *m == module && a == args && l == lens)
             .map(|i| self.struct_resolved[i])
     }
 
     /// The enum twin of `lookup_struct`.
-    pub fn lookup_enum(&self, idx: usize, module: u32, args: &[Type]) -> Option<Type> {
+    pub fn lookup_enum(
+        &self,
+        idx: usize,
+        module: u32,
+        args: &[Type],
+        lens: &[Len],
+    ) -> Option<Type> {
         self.enum_keys
             .iter()
-            .position(|(gi, m, a)| *gi == idx && *m == module && a == args)
+            .position(|(gi, m, a, l)| *gi == idx && *m == module && a == args && l == lens)
             .map(|i| self.enum_resolved[i])
     }
 
@@ -958,12 +1022,21 @@ impl GenericTypes {
     /// declared `Result['T 'E]`-shaped input: it needs to recover the *args*
     /// a concrete `Result[i64 str]` was built from, to bind `'T`/`'E`
     /// against them.
+    ///
+    /// P7.S6a (R5): `struct_keys`' entry tuple now carries a fourth,
+    /// length-argument element too, but this function's own **public return
+    /// signature stays `Option<(usize, u32, &[Type])>` in this phase** --
+    /// the length component is deliberately discarded here (`_lens`), not
+    /// yet exposed. R8's own phase widens the return type to `Option<(usize,
+    /// u32, &[Type], &[Len])>` and updates every consumer atomically; this
+    /// phase only has to keep this function itself compiling against the
+    /// widened tuple shape it destructures.
     pub fn struct_instantiation_of(&self, id: StructId) -> Option<(usize, u32, &[Type])> {
         let i = self
             .struct_resolved
             .iter()
             .position(|t| matches!(t, Type::Struct(sid, _) if *sid == id))?;
-        let (gi, m, args) = &self.struct_keys[i];
+        let (gi, m, args, _lens) = &self.struct_keys[i];
         Some((*gi, *m, args))
     }
 
@@ -973,7 +1046,7 @@ impl GenericTypes {
             .enum_resolved
             .iter()
             .position(|t| matches!(t, Type::Enum(eid, _) if *eid == id))?;
-        let (gi, m, args) = &self.enum_keys[i];
+        let (gi, m, args, _lens) = &self.enum_keys[i];
         Some((*gi, *m, args))
     }
 
@@ -1008,16 +1081,16 @@ impl GenericTypes {
     ) {
         self.structs[idx].fields = fields;
         self.struct_pending.retain(|p| *p != idx);
-        let owed: Vec<(usize, Vec<Type>)> = self
+        let owed: Vec<(usize, Vec<Type>, Vec<Len>)> = self
             .deferred_structs
             .iter()
-            .filter(|(_, header, _)| *header == idx)
-            .map(|(inst, _, args)| (*inst, args.clone()))
+            .filter(|(_, header, _, _)| *header == idx)
+            .map(|(inst, _, args, lens)| (*inst, args.clone(), lens.clone()))
             .collect();
         self.deferred_structs
-            .retain(|(_, header, _)| *header != idx);
-        for (inst, args) in owed {
-            let fields = self.substituted_struct_fields(idx, &args, regs.reborrow());
+            .retain(|(_, header, _, _)| *header != idx);
+        for (inst, args, lens) in owed {
+            let fields = self.substituted_struct_fields(idx, &args, &lens, regs.reborrow());
             self.inst_structs[inst].fields = fields;
         }
     }
@@ -1035,16 +1108,18 @@ impl GenericTypes {
     ) {
         self.enums[idx].variants = variants;
         self.enum_pending.retain(|p| *p != idx);
-        let owed: Vec<(usize, Vec<Type>)> = self
+        let owed: Vec<(usize, Vec<Type>, Vec<Len>)> = self
             .deferred_enums
             .iter()
-            .filter(|(_, header, _)| *header == idx)
-            .map(|(inst, _, args)| (*inst, args.clone()))
+            .filter(|(_, header, _, _)| *header == idx)
+            .map(|(inst, _, args, lens)| (*inst, args.clone(), lens.clone()))
             .collect();
-        self.deferred_enums.retain(|(_, header, _)| *header != idx);
-        for (inst, args) in owed {
+        self.deferred_enums
+            .retain(|(_, header, _, _)| *header != idx);
+        for (inst, args, lens) in owed {
             let name = self.inst_enums[inst].name.clone();
-            let variants = self.substituted_enum_variants(idx, &args, &name, regs.reborrow());
+            let variants =
+                self.substituted_enum_variants(idx, &args, &lens, &name, regs.reborrow());
             self.inst_enums[inst].variants = variants;
         }
     }
@@ -1064,12 +1139,13 @@ impl GenericTypes {
         &mut self,
         idx: usize,
         args: &[Type],
+        lens: &[Len],
         mut regs: MutRegistries,
     ) -> Vec<(String, Type)> {
         let fields = self.structs[idx].fields.clone();
         let mut out = Vec::with_capacity(fields.len());
         for (fname, pty) in &fields {
-            let ty = self.substitute_generic_field(pty, args, regs.reborrow());
+            let ty = self.substitute_generic_field(pty, args, lens, regs.reborrow());
             out.push((fname.clone(), ty));
         }
         out
@@ -1084,17 +1160,18 @@ impl GenericTypes {
         &mut self,
         idx: usize,
         args: &[Type],
+        lens: &[Len],
         name: &str,
         mut regs: MutRegistries,
     ) -> Vec<VariantDecl> {
         let variants = self.enums[idx].variants.clone();
         let mut out = Vec::with_capacity(variants.len());
         for variant in &variants {
-            let vname = type_instantiation_name(&variant.name, args, regs.names());
+            let vname = type_instantiation_name(&variant.name, args, lens, regs.names());
             let display = format!("{name}.{}", generic_surface_name(&variant.name));
             let mut fields = Vec::with_capacity(variant.fields.len());
             for (fname, pty) in &variant.fields {
-                let ty = self.substitute_generic_field(pty, args, regs.reborrow());
+                let ty = self.substitute_generic_field(pty, args, lens, regs.reborrow());
                 fields.push((fname.clone(), ty));
             }
             out.push(VariantDecl {
@@ -1136,17 +1213,28 @@ impl GenericTypes {
     /// into one `StructId` with the wrong layout. The result is an ordinary
     /// `StructDecl`, indistinguishable from a hand-written concrete `type:`
     /// of the same shape.
+    ///
+    /// P7.S6a (R5): takes a length-argument list alongside `args`, so
+    /// `Buffer[u8 256]` and `Buffer[u8 512]` mint distinct monomorphs
+    /// instead of colliding on `struct_keys`' old `(idx, module, args)`
+    /// key. `lens` is expected concrete (`Len::Concrete`) by the time a real
+    /// mint reaches here -- R6/R7's parse-time application never produces a
+    /// `Len::Var` in this position -- but two check-time callers
+    /// (`poly_construct_generic`, `apply_subst`'s `Generic`/`GenericVariant`
+    /// arms) still pass an explicit empty placeholder in this phase, ahead
+    /// of R8a's real `subst.len`-resolved value (see those call sites).
     pub fn instantiate_struct(
         &mut self,
         idx: usize,
         args: &[Type],
+        lens: &[Len],
         module: u32,
         mut regs: MutRegistries,
     ) -> Type {
-        if let Some(ty) = self.lookup_struct(idx, module, args) {
+        if let Some(ty) = self.lookup_struct(idx, module, args, lens) {
             return ty;
         }
-        let name = type_instantiation_name(&self.structs[idx].name, args, regs.names());
+        let name = type_instantiation_name(&self.structs[idx].name, args, lens, regs.names());
         let span = self.structs[idx].span;
         let name_static: &'static str = Box::leak(name.clone().into_boxed_str());
         let id = StructId::from_index(self.struct_base + self.inst_structs.len());
@@ -1159,7 +1247,8 @@ impl GenericTypes {
         // pushes stay in lockstep: `struct_keys`, `struct_resolved` and
         // `inst_structs` are parallel vectors, and the minted id is
         // `struct_base + inst_structs.len()`.
-        self.struct_keys.push((idx, module, args.to_vec()));
+        self.struct_keys
+            .push((idx, module, args.to_vec(), lens.to_vec()));
         self.struct_resolved.push(ty);
         let inst = self.inst_structs.len();
         self.inst_structs.push(StructDecl {
@@ -1177,9 +1266,10 @@ impl GenericTypes {
         // handed out -- a `Type::Struct` is an opaque handle -- so only the
         // field list is owed, to `fill_struct_fields`.
         if self.struct_pending.contains(&idx) {
-            self.deferred_structs.push((inst, idx, args.to_vec()));
+            self.deferred_structs
+                .push((inst, idx, args.to_vec(), lens.to_vec()));
         } else {
-            let fields = self.substituted_struct_fields(idx, args, regs.reborrow());
+            let fields = self.substituted_struct_fields(idx, args, lens, regs.reborrow());
             self.inst_structs[inst].fields = fields;
         }
         ty
@@ -1194,20 +1284,22 @@ impl GenericTypes {
         &mut self,
         idx: usize,
         args: &[Type],
+        lens: &[Len],
         module: u32,
         mut regs: MutRegistries,
     ) -> Type {
-        if let Some(ty) = self.lookup_enum(idx, module, args) {
+        if let Some(ty) = self.lookup_enum(idx, module, args, lens) {
             return ty;
         }
-        let name = type_instantiation_name(&self.enums[idx].name, args, regs.names());
+        let name = type_instantiation_name(&self.enums[idx].name, args, lens, regs.names());
         let span = self.enums[idx].span;
         let name_static: &'static str = Box::leak(name.clone().into_boxed_str());
         let id = EnumId::from_index(self.enum_base + self.inst_enums.len());
         let ty = Type::Enum(id, name_static);
         // R6/R2: the struct twin's reasoning and its three-vector lockstep,
         // verbatim.
-        self.enum_keys.push((idx, module, args.to_vec()));
+        self.enum_keys
+            .push((idx, module, args.to_vec(), lens.to_vec()));
         self.enum_resolved.push(ty);
         let inst = self.inst_enums.len();
         self.inst_enums.push(EnumDecl {
@@ -1218,9 +1310,10 @@ impl GenericTypes {
             module,
         });
         if self.enum_pending.contains(&idx) {
-            self.deferred_enums.push((inst, idx, args.to_vec()));
+            self.deferred_enums
+                .push((inst, idx, args.to_vec(), lens.to_vec()));
         } else {
-            let variants = self.substituted_enum_variants(idx, args, &name, regs.reborrow());
+            let variants = self.substituted_enum_variants(idx, args, lens, &name, regs.reborrow());
             self.inst_enums[inst].variants = variants;
         }
         ty
@@ -1843,12 +1936,14 @@ pub fn ground_member_poly(pty: &PolyType, target: &PolyType) -> PolyType {
             idx,
             module,
             args,
+            len_args,
             name,
         } => PolyType::Generic {
             is_enum: *is_enum,
             idx: *idx,
             module: *module,
             args: args.iter().map(|a| ground_member_poly(a, target)).collect(),
+            len_args: len_args.clone(),
             name,
         },
         PolyType::Quotation(ins, outs, is_inline, row_in, row_out) => PolyType::Quotation(
@@ -2042,6 +2137,11 @@ pub enum PolyType {
         idx: u32,
         module: u32,
         args: Vec<PolyType>,
+        /// P7.S6a (R3): the header's own length-argument list, parallel to
+        /// `args` -- a `Len::Var` here indexes the *enclosing signature's*
+        /// `PolySig::len_var_names`, exactly as `args`' own `PolyType::Var`
+        /// does for `ty_var_names`.
+        len_args: Vec<Len>,
         name: &'static str,
     },
     /// P7.S12 (R3): a generic enum's variant narrowed by an eliminator arm
@@ -2063,6 +2163,9 @@ pub enum PolyType {
         module: u32,
         vi: usize,
         args: Vec<PolyType>,
+        /// P7.S6a (R3): carried forward unchanged from the scrutinee's own
+        /// `Generic { .. }.len_args`, mirroring `args`' own carry-forward.
+        len_args: Vec<Len>,
         name: &'static str,
     },
 }
@@ -2079,6 +2182,7 @@ pub fn generic_variant_type(
     module: u32,
     vi: usize,
     args: Vec<PolyType>,
+    len_args: Vec<Len>,
 ) -> PolyType {
     let decl = &generics.enums[idx as usize];
     let variant = &decl.variants[vi];
@@ -2088,6 +2192,7 @@ pub fn generic_variant_type(
         module,
         vi,
         args,
+        len_args,
         name: Box::leak(display.into_boxed_str()),
     }
 }
@@ -3722,6 +3827,7 @@ mod tests {
         let decl = GenericStructDecl {
             name: "Box".to_string(),
             ty_var_names: vec!["'T".to_string()],
+            len_var_names: vec![],
             fields: vec![("val".to_string(), PolyType::Var(0))],
             span: Span::default(),
             module: 0,
@@ -3729,9 +3835,9 @@ mod tests {
         let mut generics = GenericTypes::with_bases(3, 1);
         generics.structs.push(decl);
         let mut scratch = ScratchRegs::default();
-        let a = generics.instantiate_struct(0, &[Type::I64], 0, scratch.regs());
-        let b = generics.instantiate_struct(0, &[Type::I64], 0, scratch.regs());
-        let c = generics.instantiate_struct(0, &[Type::U32], 0, scratch.regs());
+        let a = generics.instantiate_struct(0, &[Type::I64], &[], 0, scratch.regs());
+        let b = generics.instantiate_struct(0, &[Type::I64], &[], 0, scratch.regs());
+        let c = generics.instantiate_struct(0, &[Type::U32], &[], 0, scratch.regs());
         assert_eq!(a, b);
         assert_ne!(a, c);
         assert_eq!(generics.inst_structs.len(), 2);
@@ -3743,12 +3849,88 @@ mod tests {
         );
     }
 
+    /// A one-type-variable, one-length-variable generic struct header with a
+    /// `data array['T 'N]` field -- the `Buffer` fixture R5's distinct-
+    /// monomorph tests instantiate.
+    fn buffer_header() -> GenericStructDecl {
+        GenericStructDecl {
+            name: "Buffer".to_string(),
+            ty_var_names: vec!["'T".to_string()],
+            len_var_names: vec!["'N".to_string()],
+            fields: vec![(
+                "data".to_string(),
+                PolyType::Array(Box::new(PolyType::Var(0)), Len::Var(0)),
+            )],
+            span: Span::default(),
+            module: 0,
+        }
+    }
+
+    /// P7.S6a (R5): `Buffer[u8 256]` and `Buffer[u8 512]` mint distinct
+    /// monomorphs -- the collision `struct_keys`' old `Vec<Type>`-only key
+    /// would silently produce, since the type argument alone (`u8`) is
+    /// identical between the two.
+    #[test]
+    fn instantiate_struct_distinct_lengths_mint_distinct_monomorphs() {
+        let mut generics = GenericTypes::with_bases(0, 0);
+        generics.structs.push(buffer_header());
+        let mut scratch = ScratchRegs::default();
+        let a =
+            generics.instantiate_struct(0, &[Type::U32], &[Len::Concrete(256)], 0, scratch.regs());
+        let b =
+            generics.instantiate_struct(0, &[Type::U32], &[Len::Concrete(512)], 0, scratch.regs());
+        assert_ne!(a, b, "distinct lengths must mint distinct StructIds");
+        assert_eq!(generics.inst_structs.len(), 2);
+        assert_eq!(generics.struct_keys.len(), 2);
+    }
+
+    /// The dedup floor R5's widening must not break: two applications at the
+    /// *same* length still hit one monomorph.
+    #[test]
+    fn instantiate_struct_same_length_dedups() {
+        let mut generics = GenericTypes::with_bases(0, 0);
+        generics.structs.push(buffer_header());
+        let mut scratch = ScratchRegs::default();
+        let a =
+            generics.instantiate_struct(0, &[Type::U32], &[Len::Concrete(256)], 0, scratch.regs());
+        let b =
+            generics.instantiate_struct(0, &[Type::U32], &[Len::Concrete(256)], 0, scratch.regs());
+        assert_eq!(a, b);
+        assert_eq!(generics.inst_structs.len(), 1);
+    }
+
+    /// P7.S6a (R5): the mangled symbol carries the length, and two distinct
+    /// lengths render distinct names -- the "differs", not just "contains",
+    /// clause a dropped-length-in-the-renderer-only mutation needs to fail
+    /// against (mutation 2's own dedup key can stay fixed while this still
+    /// catches a renderer-only regression).
+    #[test]
+    fn type_instantiation_name_renders_length_args() {
+        let arrays = Vec::new();
+        let enums = Vec::new();
+        let structs = Vec::new();
+        let cells = Vec::new();
+        let refs = Vec::new();
+        let regs = NameRegistries {
+            structs: &structs,
+            enums: &enums,
+            arrays: &arrays,
+            cells: &cells,
+            refs: &refs,
+        };
+        let name_256 = type_instantiation_name("Buffer", &[Type::U32], &[Len::Concrete(256)], regs);
+        let name_512 = type_instantiation_name("Buffer", &[Type::U32], &[Len::Concrete(512)], regs);
+        assert!(name_256.contains("256"));
+        assert_ne!(name_256, name_512);
+    }
+
     /// A one-variable generic struct header with a single field of the given
     /// shape, the fixture every R4 substitution test below instantiates.
     fn header_with_field(name: &'static str, field: PolyType) -> GenericStructDecl {
         GenericStructDecl {
             name: name.to_string(),
             ty_var_names: vec!["'T".to_string()],
+            len_var_names: vec![],
             fields: vec![("f".to_string(), field)],
             span: Span::default(),
             module: 0,
@@ -3766,13 +3948,85 @@ mod tests {
             PolyType::Array(Box::new(PolyType::Var(0)), Len::Concrete(2)),
         ));
         let mut scratch = ScratchRegs::default();
-        generics.instantiate_struct(0, &[Type::I64], 0, scratch.regs());
+        generics.instantiate_struct(0, &[Type::I64], &[], 0, scratch.regs());
         let (_, ty) = &generics.inst_structs[0].fields[0];
         let Type::Array(id, _) = ty else {
             panic!("an array field grounds to Type::Array: {ty:?}")
         };
         assert_eq!(scratch.arrays[id.index()].element, Type::I64);
         assert_eq!(scratch.arrays[id.index()].count, 2);
+    }
+
+    /// P7.S6a (R4): `data array['T 'N]` at `'N = 3` grounds the field's own
+    /// `Len::Var` to the instantiation's length-argument list -- the arm
+    /// that used to be `unreachable!()` before this slice (N3's own doc,
+    /// now stale).
+    #[test]
+    fn substitute_generic_field_array_of_len_var_interns_concrete_count() {
+        let mut generics = GenericTypes::with_bases(0, 0);
+        generics.structs.push(header_with_field(
+            "Buffer",
+            PolyType::Array(Box::new(PolyType::Var(0)), Len::Var(0)),
+        ));
+        let mut scratch = ScratchRegs::default();
+        generics.instantiate_struct(0, &[Type::U32], &[Len::Concrete(3)], 0, scratch.regs());
+        let (_, ty) = &generics.inst_structs[0].fields[0];
+        let Type::Array(id, _) = ty else {
+            panic!("a length-variable array field grounds to Type::Array: {ty:?}")
+        };
+        assert_eq!(scratch.arrays[id.index()].element, Type::U32);
+        assert_eq!(scratch.arrays[id.index()].count, 3);
+    }
+
+    /// P7.S6a (R4): a nested `PolyType::Generic` field (the shape
+    /// `parse_generic_field_application` produces) whose own `len_args`
+    /// contains a `Len::Var` grounds correctly when the *outer* header is
+    /// instantiated -- the `Generic` arm's own length forwarding, not just
+    /// the `Array` arm's.
+    #[test]
+    fn substitute_generic_field_nested_generic_forwards_its_own_len_args() {
+        let mut generics = GenericTypes::with_bases(0, 0);
+        generics.structs.push(GenericStructDecl {
+            name: "Inner".to_string(),
+            ty_var_names: vec!["'T".to_string()],
+            len_var_names: vec!["'N".to_string()],
+            fields: vec![(
+                "data".to_string(),
+                PolyType::Array(Box::new(PolyType::Var(0)), Len::Var(0)),
+            )],
+            span: Span::default(),
+            module: 0,
+        });
+        generics.structs.push(GenericStructDecl {
+            name: "Outer".to_string(),
+            ty_var_names: vec!["'T".to_string()],
+            len_var_names: vec!["'N".to_string()],
+            fields: vec![(
+                "inner".to_string(),
+                PolyType::Generic {
+                    is_enum: false,
+                    idx: 0,
+                    module: 0,
+                    args: vec![PolyType::Var(0)],
+                    len_args: vec![Len::Var(0)],
+                    name: "Inner",
+                },
+            )],
+            span: Span::default(),
+            module: 0,
+        });
+        let mut scratch = ScratchRegs::default();
+        generics.instantiate_struct(1, &[Type::U32], &[Len::Concrete(5)], 0, scratch.regs());
+        let (_, outer_field) = &generics.inst_structs[0].fields[0];
+        let Type::Struct(inner_id, _) = outer_field else {
+            panic!("the nested generic field grounds to Type::Struct: {outer_field:?}")
+        };
+        let inner_decl = &generics.inst_structs[inner_id.index()];
+        let (_, inner_field) = &inner_decl.fields[0];
+        let Type::Array(array_id, _) = inner_field else {
+            panic!("the inner header's own field grounds to Type::Array: {inner_field:?}")
+        };
+        assert_eq!(scratch.arrays[array_id.index()].count, 5);
     }
 
     /// The nesting claim, which the single-level test cannot make: the arm has
@@ -3791,7 +4045,7 @@ mod tests {
             ),
         ));
         let mut scratch = ScratchRegs::default();
-        generics.instantiate_struct(0, &[Type::U32], 0, scratch.regs());
+        generics.instantiate_struct(0, &[Type::U32], &[], 0, scratch.regs());
         let (_, ty) = &generics.inst_structs[0].fields[0];
         let Type::Array(outer, _) = ty else {
             panic!("expected Type::Array: {ty:?}")
@@ -3816,7 +4070,7 @@ mod tests {
             PolyType::OwnedCell(Box::new(PolyType::Var(0))),
         ));
         let mut scratch = ScratchRegs::default();
-        generics.instantiate_struct(0, &[Type::F64], 0, scratch.regs());
+        generics.instantiate_struct(0, &[Type::F64], &[], 0, scratch.regs());
         let (_, ty) = &generics.inst_structs[0].fields[0];
         let Type::OwnedCell(id, _) = ty else {
             panic!("a `^` field grounds to Type::OwnedCell: {ty:?}")
@@ -3836,7 +4090,7 @@ mod tests {
             PolyType::Ref(Box::new(PolyType::Var(0)), false),
         ));
         let mut scratch = ScratchRegs::default();
-        generics.instantiate_struct(0, &[Type::I64], 0, scratch.regs());
+        generics.instantiate_struct(0, &[Type::I64], &[], 0, scratch.regs());
         let (_, ty) = &generics.inst_structs[0].fields[0];
         let Type::Ref(id, mutable, _) = ty else {
             panic!("a `&` field grounds to Type::Ref: {ty:?}")
@@ -3855,6 +4109,7 @@ mod tests {
         generics.enums.push(GenericEnumDecl {
             name: "Holder".to_string(),
             ty_var_names: vec!["'T".to_string()],
+            len_var_names: vec![],
             variants: vec![GenericVariantDecl {
                 name: "Some".to_string(),
                 fields: vec![(
@@ -3867,7 +4122,7 @@ mod tests {
             module: 0,
         });
         let mut scratch = ScratchRegs::default();
-        generics.instantiate_enum(0, &[Type::I64], 0, scratch.regs());
+        generics.instantiate_enum(0, &[Type::I64], &[], 0, scratch.regs());
         let (_, ty) = &generics.inst_enums[0].variants[0].fields[0];
         let Type::Array(id, _) = ty else {
             panic!("a variant's array field grounds to Type::Array: {ty:?}")
@@ -3892,11 +4147,12 @@ mod tests {
                 idx: 0,
                 module: 0,
                 args: vec![PolyType::Var(0)],
+                len_args: vec![],
                 name: "L",
             })),
         ));
         let mut scratch = ScratchRegs::default();
-        let ty = generics.instantiate_struct(0, &[Type::I64], 0, scratch.regs());
+        let ty = generics.instantiate_struct(0, &[Type::I64], &[], 0, scratch.regs());
         assert_eq!(
             generics.inst_structs.len(),
             1,
@@ -3925,6 +4181,7 @@ mod tests {
         generics.structs.push(GenericStructDecl {
             name: "A".to_string(),
             ty_var_names: vec!["'K".to_string(), "'V".to_string()],
+            len_var_names: vec![],
             fields: vec![(
                 "next".to_string(),
                 PolyType::OwnedCell(Box::new(PolyType::Generic {
@@ -3932,6 +4189,7 @@ mod tests {
                     idx: 0,
                     module: 0,
                     args: vec![PolyType::Var(1), PolyType::Var(0)],
+                    len_args: vec![],
                     name: "A",
                 })),
             )],
@@ -3939,10 +4197,10 @@ mod tests {
             module: 0,
         });
         let mut scratch = ScratchRegs::default();
-        let a = generics.instantiate_struct(0, &[Type::I64, Type::U32], 0, scratch.regs());
+        let a = generics.instantiate_struct(0, &[Type::I64, Type::U32], &[], 0, scratch.regs());
         assert_eq!(generics.inst_structs.len(), 2);
         let swapped = generics
-            .lookup_struct(0, 0, &[Type::U32, Type::I64])
+            .lookup_struct(0, 0, &[Type::U32, Type::I64], &[])
             .expect("the swapped instantiation was minted by the recursion");
         assert_ne!(a, swapped);
         let payload_of = |ty: &Type| {
@@ -3985,6 +4243,7 @@ mod tests {
         let decl = GenericStructDecl {
             name: "Box".to_string(),
             ty_var_names: vec!["'T".to_string()],
+            len_var_names: vec![],
             fields: vec![("val".to_string(), PolyType::Var(0))],
             span: Span::default(),
             module: 0,
@@ -3996,14 +4255,14 @@ mod tests {
         // Parse-time: one instance, flushed onto the live registry exactly as
         // `assemble_module` does after the whole closure has parsed.
         let mut scratch = ScratchRegs::default();
-        let a = generics.instantiate_struct(0, &[Type::I64], 0, scratch.regs());
+        let a = generics.instantiate_struct(0, &[Type::I64], &[], 0, scratch.regs());
         generics.flush_structs_into(&mut structs);
         generics.rebase(structs.len(), 0);
 
         // Downstream (check/lowering-time): a *different* argument list mints
         // a fresh entry, whose id must count from the post-flush length, not
         // from the stale base `a` was minted against.
-        let b = generics.instantiate_struct(0, &[Type::U32], 0, scratch.regs());
+        let b = generics.instantiate_struct(0, &[Type::U32], &[], 0, scratch.regs());
         generics.flush_structs_into(&mut structs);
 
         assert_ne!(a, b, "a downstream mint of a distinct instantiation must not collide with the earlier parse-time one");
@@ -4032,6 +4291,7 @@ mod tests {
         let decl = GenericEnumDecl {
             name: "Res".to_string(),
             ty_var_names: vec!["'T".to_string()],
+            len_var_names: vec![],
             variants: vec![GenericVariantDecl {
                 name: "Ok".to_string(),
                 fields: vec![("val".to_string(), PolyType::Var(0))],
@@ -4043,8 +4303,8 @@ mod tests {
         let mut generics = GenericTypes::with_bases(0, 1);
         generics.enums.push(decl);
         let mut scratch = ScratchRegs::default();
-        let a = generics.instantiate_enum(0, &[Type::I64], 0, scratch.regs());
-        let b = generics.instantiate_enum(0, &[Type::I64], 0, scratch.regs());
+        let a = generics.instantiate_enum(0, &[Type::I64], &[], 0, scratch.regs());
+        let b = generics.instantiate_enum(0, &[Type::I64], &[], 0, scratch.regs());
         assert_eq!(a, b);
         assert_eq!(generics.inst_enums.len(), 1);
         assert_eq!(a, Type::Enum(EnumId::from_index(1), "Res[i64]"));
@@ -4059,6 +4319,7 @@ mod tests {
         let decl = GenericEnumDecl {
             name: "Res".to_string(),
             ty_var_names: vec!["'T".to_string()],
+            len_var_names: vec![],
             variants: vec![GenericVariantDecl {
                 name: "Ok".to_string(),
                 fields: vec![("val".to_string(), PolyType::Var(0))],
@@ -4070,7 +4331,7 @@ mod tests {
         let mut generics = GenericTypes::with_bases(0, 1);
         generics.enums.push(decl);
         let mut scratch = ScratchRegs::default();
-        generics.instantiate_enum(0, &[Type::I64], 0, scratch.regs());
+        generics.instantiate_enum(0, &[Type::I64], &[], 0, scratch.regs());
         assert_eq!(
             generics.inst_enums[0].variants[0].display_static,
             "Res[i64].Ok"
@@ -4110,6 +4371,7 @@ mod tests {
         let decl = GenericEnumDecl {
             name: "Res".to_string(),
             ty_var_names: vec!["'T".to_string()],
+            len_var_names: vec![],
             variants: vec![GenericVariantDecl {
                 name: "Ok".to_string(),
                 fields: vec![("val".to_string(), PolyType::Var(0))],
@@ -4121,7 +4383,7 @@ mod tests {
         let mut generics = GenericTypes::with_bases(0, 1);
         generics.enums.push(decl);
         let mut scratch = ScratchRegs::default();
-        generics.instantiate_enum(0, &[Type::I64], 0, scratch.regs());
+        generics.instantiate_enum(0, &[Type::I64], &[], 0, scratch.regs());
         let mono = variant_type(&generics.inst_enums, EnumId::from_index(0), 0);
         assert_eq!(mono.name(), "Res[i64].Ok");
     }
@@ -4136,6 +4398,7 @@ mod tests {
         let decl = GenericEnumDecl {
             name: "Pair".to_string(),
             ty_var_names: vec!["'A".to_string()],
+            len_var_names: vec![],
             variants: vec![GenericVariantDecl {
                 name: "One".to_string(),
                 fields: vec![("val".to_string(), PolyType::Var(0))],
@@ -4147,13 +4410,71 @@ mod tests {
         let mut generics = GenericTypes::with_bases(0, 0);
         generics.enums.push(decl);
         let args = vec![PolyType::Var(0)];
-        let a = generic_variant_type(&generics, 0, 0, 0, args.clone());
-        let b = generic_variant_type(&generics, 0, 0, 0, args);
+        let a = generic_variant_type(&generics, 0, 0, 0, args.clone(), vec![]);
+        let b = generic_variant_type(&generics, 0, 0, 0, args, vec![]);
         assert_eq!(a, b);
         let PolyType::GenericVariant { name, .. } = a else {
             panic!("generic_variant_type always returns GenericVariant: {a:?}")
         };
         assert_eq!(name, "Pair.One");
+    }
+
+    /// P7.S6a (R3): a `PolyType::Generic` with a non-empty `len_args`,
+    /// narrowed into a `PolyType::GenericVariant` via `generic_variant_type`,
+    /// carries the same `len_args` forward unchanged -- must fail if
+    /// `len_args` is dropped at the `Operative`/`GenericVariant` boundary.
+    #[test]
+    fn generic_variant_type_carries_len_args_from_its_scrutinee() {
+        let decl = GenericEnumDecl {
+            name: "Buffer".to_string(),
+            ty_var_names: vec!["'A".to_string()],
+            len_var_names: vec!["'N".to_string()],
+            variants: vec![GenericVariantDecl {
+                name: "Full".to_string(),
+                fields: vec![("val".to_string(), PolyType::Var(0))],
+                span: Span::default(),
+            }],
+            span: Span::default(),
+            module: 0,
+        };
+        let mut generics = GenericTypes::with_bases(0, 0);
+        generics.enums.push(decl);
+        let scrutinee_len_args = vec![Len::Var(0)];
+        let pt = generic_variant_type(
+            &generics,
+            0,
+            0,
+            0,
+            vec![PolyType::Var(0)],
+            scrutinee_len_args.clone(),
+        );
+        let PolyType::GenericVariant { len_args, .. } = pt else {
+            panic!("generic_variant_type always returns GenericVariant: {pt:?}")
+        };
+        assert_eq!(len_args, scrutinee_len_args);
+    }
+
+    /// P7.S6a (R3): `ground_member_poly`'s `Generic` arm clone-forwards
+    /// `len_args` unchanged, exactly as its neighboring `Array` arm already
+    /// clones a bare array's `len` through -- named per CLAUDE.md's "every
+    /// stage function gets a happy-path test", not left as an unwitnessed
+    /// mechanical claim.
+    #[test]
+    fn ground_member_poly_generic_arm_clones_len_args_unchanged() {
+        let pty = PolyType::Generic {
+            is_enum: false,
+            idx: 0,
+            module: 0,
+            args: vec![PolyType::Var(0)],
+            len_args: vec![Len::Concrete(4), Len::Var(0)],
+            name: "Buffer",
+        };
+        let target = PolyType::Concrete(Type::I64);
+        let grounded = ground_member_poly(&pty, &target);
+        let PolyType::Generic { len_args, .. } = grounded else {
+            panic!("ground_member_poly's Generic arm stays Generic: {grounded:?}")
+        };
+        assert_eq!(len_args, vec![Len::Concrete(4), Len::Var(0)]);
     }
 
     /// P7.S12 (R4.1/R4.3): a `Var` field resolves positionally against the
@@ -4193,6 +4514,7 @@ mod tests {
             type_instantiation_name(
                 "Box",
                 &[arg],
+                &[],
                 NameRegistries {
                     structs: &structs,
                     ..EMPTY_REGS
@@ -4224,8 +4546,8 @@ mod tests {
             structs: &structs,
             ..EMPTY_REGS
         };
-        let local_name = type_instantiation_name("Box", &[local], regs);
-        let imported_name = type_instantiation_name("Box", &[imported], regs);
+        let local_name = type_instantiation_name("Box", &[local], &[], regs);
+        let imported_name = type_instantiation_name("Box", &[imported], &[], regs);
         assert_ne!(
             local_name, imported_name,
             "two structs sharing a bare name must not render the same instantiation name"
@@ -4286,22 +4608,22 @@ mod tests {
                 "the interned spellings collide, which is the premise"
             );
             assert_ne!(
-                type_instantiation_name("Box", &[*a], regs),
-                type_instantiation_name("Box", &[*b], regs),
+                type_instantiation_name("Box", &[*a], &[], regs),
+                type_instantiation_name("Box", &[*b], &[], regs),
                 "a wrapped ambiguous argument must still render distinctly: {}",
                 a.name()
             );
         }
         assert_eq!(
-            type_instantiation_name("Box", &[wrapped[0].0], regs),
+            type_instantiation_name("Box", &[wrapped[0].0], &[], regs),
             "Box[&P.0]"
         );
         assert_eq!(
-            type_instantiation_name("Box", &[wrapped[1].1], regs),
+            type_instantiation_name("Box", &[wrapped[1].1], &[], regs),
             "Box[^P.1]"
         );
         assert_eq!(
-            type_instantiation_name("Box", &[wrapped[2].0], regs),
+            type_instantiation_name("Box", &[wrapped[2].0], &[], regs),
             "Box[[P.0 2]]"
         );
     }
@@ -4319,8 +4641,14 @@ mod tests {
             refs: &refs,
             ..EMPTY_REGS
         };
-        assert_eq!(type_instantiation_name("Box", &[r], regs), "Box[&!i64]");
-        assert_eq!(type_instantiation_name("Box", &[a], regs), "Box[[i64 4]]");
+        assert_eq!(
+            type_instantiation_name("Box", &[r], &[], regs),
+            "Box[&!i64]"
+        );
+        assert_eq!(
+            type_instantiation_name("Box", &[a], &[], regs),
+            "Box[[i64 4]]"
+        );
     }
 
     #[test]
