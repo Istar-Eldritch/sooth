@@ -321,3 +321,49 @@ for the spec, both tractable and now precisely characterized rather than open-en
 static type, so the pre-existing `phase7_slice12.rs` honest-ungrounded diagnostic does not
 regress for the non-combinator case. Neither is a structural unknown; both are spec-level
 requirements. **Ready to spec: yes.**
+
+## Correction: item 2 above misdiagnosed gate (iii) as permissive; it is gate (v) (2026-08-29)
+
+Re-checked against current baseline `main` (debug-printed and reverted, nothing landed):
+`instantiate_enum` for `Pair[f64]` genuinely fires when `phase7_slice12.rs`'s
+`concrete_body_generic_eliminator_message_does_not_fabricate_an_instantiation` fixture's
+`main` calls `wrap` -- a real monomorph is minted **mid-word**, through the *ordinary*
+poly-call path (`apply_subst`'s `Generic` arm at `src/check/poly.rs:8260`), not through
+`inline_combinator` at all (`wrap` here is a plain, non-`inline` poly word). Yet the
+eliminator still rejects the scrutinee as "ungrounded," because `eliminator_registry`'s
+classification (`Concrete`/`Generic`) is frozen at pre-loop build time (`src/check.rs:661`)
+and never re-consulted once a mint happens later.
+
+This means the "item 2" diagnosis above is **wrong**: gate (iii)'s `scrutinee_enum_id_of_
+family` fallback correctly recognized this scrutinee as grounded -- it is a real,
+already-minted `Type::Enum` -- so it is not being "too permissive." What actually fails is
+gate (iv), and it fails because its fix was scoped to only one of *two* originating sites
+for a mid-word mint:
+
+- **(iv-a)**, already covered: a mint inside `inline_combinator`'s splice-local clone,
+  escaping outward to the enclosing word once the splice returns.
+- **(iv-b)**, not covered, the actual cause here: a mint from an **ordinary poly call**
+  (`main` calling `wrap` directly, no splice, no combinator) inside the enclosing word's
+  own body walk. `apply_subst`'s `Generic` arm mints into the live `generics_cell`
+  regardless of call shape, but that mint is only flushed into `structs`/`enums`/`env` at
+  **end-of-word** (`src/check.rs:1004-1006`) -- too late for sibling terms later in the
+  *same* word (here, the eliminator's own arm bodies, called right after `wrap` returns).
+
+**Gate (v): propagation must happen at both originating sites**, not just the splice.
+Whatever mechanism escapes a mint out to the enclosing word's live state for (iv-a) needs
+to run for any mid-word `apply_subst` mint, splice or not -- likely the same code path,
+triggered from the ordinary per-term dispatch rather than only from `inline_combinator`.
+
+**Open scope question for the spec, not a decision I can make in discovery:**
+`phase7_slice12.rs`'s fixture is very likely a **fourth instance of the same bug class**
+goldens 6/9/10 pin (a real check-time mint invisible to later same-word lookups), not a
+legitimately-different "must stay rejected" case -- its own doc comment's claim that "a
+concrete body cannot eliminate the header while it is ungrounded" is "always true" appears
+to be false once a real mid-word mint like this one exists. Whether this slice's scope
+extends to fixing gate (v) too (flip this fourth fixture, same as the other three) or
+deliberately draws the line at combinator/`inline`-splice sites only and leaves ordinary
+poly-call mid-word mints as a separate follow-on is a real design choice for the spec to
+make explicitly, not an implementation detail.
+
+**Ready to spec: yes, with this scope question named as an explicit open decision** rather
+than silently resolved either way.
