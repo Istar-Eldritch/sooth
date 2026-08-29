@@ -1273,7 +1273,7 @@ pub fn scan_exports(tokens: &[(Token, Span)]) -> Result<Vec<(String, Span)>, Str
 /// diagnostics), and the `type:` keyword's span. Registered as a placeholder
 /// by `parse_generic_typedefs`' stage (a), then handed back to stage (b) to
 /// parse that header's own field/variant list against.
-type GenericHeader = (String, Vec<(String, Span)>, Span);
+type GenericHeader = (String, Vec<(String, Span)>, Vec<(String, Span)>, Span);
 
 /// A parsed polymorphic type before folding to `PolyType`: a concrete type, a
 /// type variable (already interned to its id), or an array whose element
@@ -1788,6 +1788,27 @@ fn phantom_ty_var_error(decl_name: &str, name: &str, span: Span) -> String {
     )
 }
 
+/// P7.S6a (R2a): the length-path twin of `unbound_generic_ty_var_error` -- a
+/// generic `type:` field naming a `'`-prefixed length variable its header
+/// never bound (as a length variable; it may still be an unrelated type
+/// variable, which reports the same way `unbound_generic_ty_var_error` does).
+fn unbound_generic_len_var_error(name: &str, decl_name: &str, span: Span) -> String {
+    format!(
+        "error: `{name}` at line {}, col {} is not a length variable bound by `type: {decl_name}`'s header",
+        span.line, span.col
+    )
+}
+
+/// P7.S6a (R2a): the length-path twin of `phantom_ty_var_error` -- a generic
+/// `type:` header binds a length variable that never appears in any field's
+/// array count (or a nested application's length-argument position).
+fn phantom_len_var_error(decl_name: &str, name: &str, span: Span) -> String {
+    format!(
+        "error: length variable `{name}` at line {}, col {} is bound by `type: {decl_name}`'s header but appears in no field (a phantom parameter cannot be disambiguated at a call site)",
+        span.line, span.col
+    )
+}
+
 /// Phase 5 slice 1: the generic path's twin of the concrete odd-field-count
 /// error. It names the header's bound variables because the likeliest way to
 /// reach it is writing a `'`-prefixed *field* name inside the header bracket
@@ -1895,6 +1916,16 @@ fn bracket_var_unused_error(name: &str, span: Span, word_name: &str) -> String {
     )
 }
 
+/// P7.S6a (R2b): the length-path twin of `bracket_var_unused_error` -- a
+/// bracket-declared `'N: Len` whose name never appears in the word's effect
+/// in a length position.
+fn bracket_len_var_unused_error(name: &str, span: Span, word_name: &str) -> String {
+    format!(
+        "error: length variable `{name}` declared in the bound bracket of `{word_name}` at line {}, col {} never appears in the effect",
+        span.line, span.col
+    )
+}
+
 /// P7.S3t (R2): the note a malformed *first* element carries. A glued bracket
 /// re-points a spelling that used to parse as a call followed by a quotation or
 /// array literal, so the element error has to say that the glue is what put the
@@ -1922,31 +1953,42 @@ fn instantiation_ty_var_error(var: &str, span: Span) -> String {
 /// the declaration's own variable spellings. `PolyType` carries variable
 /// *indices*, so rendering one needs the header's `ty_vars` table; the
 /// checker's `poly_type_str` does the same job against a `PolySig` instead.
-fn generic_field_type_str(pty: &PolyType, ty_vars: &[(String, Span)]) -> String {
+fn generic_field_type_str(
+    pty: &PolyType,
+    ty_vars: &[(String, Span)],
+    len_vars: &[(String, Span)],
+) -> String {
     match pty {
         PolyType::Concrete(t) => t.name().to_string(),
         PolyType::Var(v) => ty_vars[*v as usize].0.clone(),
         PolyType::Array(elem, len) => {
             let n = match len {
                 Len::Concrete(n) => n.to_string(),
-                // N3: a struct header binds no length variable, so R1's
-                // array arm only ever builds `Len::Concrete`.
-                Len::Var(_) => unreachable!("a generic `type:` field has no length variable"),
+                // P7.S6a (R2a): a header-bound length variable, rendered by
+                // its own surface spelling exactly as `Var` renders a type
+                // variable's -- reachable unconditionally from
+                // `parse_generic_field_array`'s own error-string build, not
+                // only on a parse error, so this can never be `unreachable!()`.
+                Len::Var(v) => len_vars[*v as usize].0.clone(),
             };
-            format!("array[{} {}]", generic_field_type_str(elem, ty_vars), n)
+            format!(
+                "array[{} {}]",
+                generic_field_type_str(elem, ty_vars, len_vars),
+                n
+            )
         }
         PolyType::Ref(referent, mutable) => format!(
             "&{}{}",
             if *mutable { "!" } else { "" },
-            generic_field_type_str(referent, ty_vars)
+            generic_field_type_str(referent, ty_vars, len_vars)
         ),
         PolyType::OwnedCell(payload) => {
-            format!("^{}", generic_field_type_str(payload, ty_vars))
+            format!("^{}", generic_field_type_str(payload, ty_vars, len_vars))
         }
         PolyType::Generic { name, args, .. } => {
             let args: Vec<String> = args
                 .iter()
-                .map(|a| generic_field_type_str(a, ty_vars))
+                .map(|a| generic_field_type_str(a, ty_vars, len_vars))
                 .collect();
             format!("{name}[{}]", args.join(" "))
         }
@@ -2076,6 +2118,20 @@ fn check_no_phantom_ty_var(
     if let Some(idx) = used.iter().position(|&u| !u) {
         let (name, span) = &ty_vars[idx];
         return Err(phantom_ty_var_error(decl_name, name, *span));
+    }
+    Ok(())
+}
+
+/// P7.S6a (R2a): the length-path twin of `check_no_phantom_ty_var`, called
+/// alongside it once a header's whole field/variant list is known.
+fn check_no_phantom_len_var(
+    decl_name: &str,
+    len_vars: &[(String, Span)],
+    used_len: &[bool],
+) -> Result<(), String> {
+    if let Some(idx) = used_len.iter().position(|&u| !u) {
+        let (name, span) = &len_vars[idx];
+        return Err(phantom_len_var_error(decl_name, name, *span));
     }
     Ok(())
 }
@@ -2291,25 +2347,33 @@ impl<'t> Parser<'t> {
     /// P7.S6 (R6): parse the optional bound bracket `[ 'T: Copy 'U: Ord ]` that
     /// sits after `inline` and before `(` in a word definition. Returns
     /// `None` if no bracket is present, or a side table of
-    /// `(name, span, Vec<Bound>)` entries. The bracket is parsed into a local
-    /// side table and attached to effect-derived ids *after* `parse_poly_effect`
-    /// (never pre-interned), so ids stay effect-derived and `PolySig.ty_var_names`
-    /// order is unchanged.
+    /// `(name, span, Vec<Bound>, is_len_kind)` entries. The bracket is parsed
+    /// into a local side table and attached to effect-derived ids *after*
+    /// `parse_poly_effect` (never pre-interned), so ids stay effect-derived
+    /// and `PolySig.ty_var_names` order is unchanged.
     ///
     /// The bracket's grammar (R6a): `[' var_decl+ ]`, where each `var_decl`
     /// is `'T` or `'T: bound_list`. A `bound_list` ends at the next `'`-prefixed
     /// word or `]`; an unrecognised name inside a bound list is an
     /// unknown-capability error (bracket mode), not a silent break.
+    ///
+    /// P7.S6a (R2b): a bound position whose colon is immediately followed by
+    /// the bare word `Len` and nothing else is a *kind* annotation, not a
+    /// capability bound -- the trailing `is_len_kind` flag marks it, and no
+    /// `parse_capabilities` call runs (so `Len` never becomes a fake
+    /// `Bound`). `Len` can never legitimately name a trait bound: R2.2
+    /// reserves it as a trait name, so intercepting it unconditionally here
+    /// costs no real capability its spelling.
     #[allow(clippy::type_complexity)]
     fn parse_optional_bound_bracket(
         &mut self,
-    ) -> Result<Option<Vec<(String, Span, Vec<Bound>)>>, String> {
+    ) -> Result<Option<Vec<(String, Span, Vec<Bound>, bool)>>, String> {
         if !matches!(self.peek(), Some((Token::LBracket, _))) {
             return Ok(None);
         }
         let bracket_span = self.peek().map(|(_, s)| *s).unwrap_or_default();
         self.pos += 1; // consume `[`
-        let mut entries: Vec<(String, Span, Vec<Bound>)> = Vec::new();
+        let mut entries: Vec<(String, Span, Vec<Bound>, bool)> = Vec::new();
         loop {
             match self.peek() {
                 Some((Token::RBracket, _)) => {
@@ -2336,19 +2400,24 @@ impl<'t> Parser<'t> {
                     if bound_follows && !glued_colon {
                         self.pos += 1;
                     }
-                    let bounds = if bound_follows {
+                    let is_len_kind = bound_follows
+                        && matches!(self.peek(), Some((Token::Word(k), _)) if k == LEN_KIND_NAME);
+                    let bounds = if is_len_kind {
+                        self.pos += 1;
+                        Vec::new()
+                    } else if bound_follows {
                         self.parse_capabilities(span, true)?
                     } else {
                         Vec::new()
                     };
-                    if entries.iter().any(|(n, _, _)| n == &name) {
+                    if entries.iter().any(|(n, _, _, _)| n == &name) {
                         return Err(duplicate_generic_ty_var_error(
                             &name,
                             "<bound bracket>",
                             span,
                         ));
                     }
-                    entries.push((name, span, bounds));
+                    entries.push((name, span, bounds, is_len_kind));
                 }
                 Some((tok, span)) => {
                     return Err(bound_bracket_non_var_error(tok, *span));
@@ -2366,13 +2435,28 @@ impl<'t> Parser<'t> {
     /// interned. Each bracket entry's variable name is looked up in
     /// `sig.ty_var_names`; a name that never appears in the effect is a
     /// located error (it would leave a bound on a variable with no slot).
+    ///
+    /// P7.S6a (R2b): an `is_len_kind` entry is a pure validation, not a
+    /// bound -- it looks its name up in `sig.len_var_names` instead, and
+    /// pushes nothing to `sig.bounds`. A word's variable ids are already
+    /// effect-first-mention-derived, so `sig.len_var_names` needs no new
+    /// interning path here: `'N: Len` only confirms a length variable the
+    /// effect itself already bound.
     fn attach_bracket_bounds(
         &self,
         sig: &mut PolySig,
-        bracket: &[(String, Span, Vec<Bound>)],
+        bracket: &[(String, Span, Vec<Bound>, bool)],
         word_name: &str,
     ) -> Result<(), String> {
-        for (name, span, bounds) in bracket {
+        for (name, span, bounds, is_len_kind) in bracket {
+            if *is_len_kind {
+                sig.len_var_names
+                    .iter()
+                    .any(|n| n == name)
+                    .then_some(())
+                    .ok_or_else(|| bracket_len_var_unused_error(name, *span, word_name))?;
+                continue;
+            }
             let id = sig
                 .ty_var_names
                 .iter()
@@ -4853,8 +4937,10 @@ impl<'t> Parser<'t> {
         &mut self,
         name: &str,
         ty_vars: &[(String, Span)],
+        len_vars: &[(String, Span)],
     ) -> Result<Vec<(String, PolyType)>, String> {
         let mut used = vec![false; ty_vars.len()];
+        let mut used_len = vec![false; len_vars.len()];
         let mut fields = Vec::new();
         loop {
             match self.peek() {
@@ -4871,7 +4957,13 @@ impl<'t> Parser<'t> {
                             *span,
                         ));
                     }
-                    let ty = self.parse_generic_field_type_expr(name, ty_vars, &mut used)?;
+                    let ty = self.parse_generic_field_type_expr(
+                        name,
+                        ty_vars,
+                        &mut used,
+                        len_vars,
+                        &mut used_len,
+                    )?;
                     fields.push((field_name, ty));
                 }
                 None => return Err(self.eof_error("`;` (unterminated `type:` declaration)")),
@@ -4879,6 +4971,7 @@ impl<'t> Parser<'t> {
         }
         self.expect(Token::Semicolon)?;
         check_no_phantom_ty_var(name, ty_vars, &used)?;
+        check_no_phantom_len_var(name, len_vars, &used_len)?;
         Ok(fields)
     }
 
@@ -4888,18 +4981,26 @@ impl<'t> Parser<'t> {
         &mut self,
         name: &str,
         ty_vars: &[(String, Span)],
+        len_vars: &[(String, Span)],
         type_span: Span,
     ) -> Result<Vec<crate::ast::GenericVariantDecl>, String> {
         if matches!(self.peek(), Some((Token::Pipe, _))) {
             self.pos += 1;
         }
         let mut used = vec![false; ty_vars.len()];
+        let mut used_len = vec![false; len_vars.len()];
         let mut variants = Vec::new();
         loop {
             match self.peek() {
                 Some((Token::Semicolon, _)) => break,
                 Some((Token::Word(_), _)) => {
-                    variants.push(self.parse_generic_variant_fields(name, ty_vars, &mut used)?);
+                    variants.push(self.parse_generic_variant_fields(
+                        name,
+                        ty_vars,
+                        &mut used,
+                        len_vars,
+                        &mut used_len,
+                    )?);
                     if matches!(self.peek(), Some((Token::Pipe, _))) {
                         self.pos += 1;
                     } else {
@@ -4923,6 +5024,7 @@ impl<'t> Parser<'t> {
             ));
         }
         check_no_phantom_ty_var(name, ty_vars, &used)?;
+        check_no_phantom_len_var(name, len_vars, &used_len)?;
         Ok(variants)
     }
 
@@ -4930,18 +5032,28 @@ impl<'t> Parser<'t> {
     /// -- leaving the cursor at the first field/variant token. Everything a
     /// placeholder registration needs (name, bound variables, span) is known
     /// here; nothing a field list needs is missing.
+    ///
+    /// P7.S6a (R2a): `GenericHeader` now carries the header's type-variable
+    /// and length-variable lists separately -- `parse_header_bracket`
+    /// already tags each entry with its `Kind`; this is where that per-entry
+    /// kind gets split into the two lists every downstream field/variant
+    /// parser consumes.
     fn parse_generic_header(&mut self) -> Result<GenericHeader, String> {
         let type_span = self.expect_word("type:")?;
         let (name, _) = self.expect_word_any_spanned()?;
         // `header_is_generic` gates every route here, so the `[` is present.
-        // P7.S6a: `GenericHeader`'s own split into a type-variable list and a
-        // length-variable list is P7.S6a phase 2 (R2a); until then this
-        // strips the kind `parse_header_bracket` now carries per entry,
-        // leaving every bound name (of either kind) in the one list exactly
-        // as before R2's annotation existed.
         let vars = self.parse_header_bracket(&name)?;
-        let ty_vars = vars.into_iter().map(|(n, s, _)| (n, s)).collect();
-        Ok((name, ty_vars, type_span))
+        let ty_vars = vars
+            .iter()
+            .filter(|(_, _, k)| *k == Kind::Star)
+            .map(|(n, s, _)| (n.clone(), *s))
+            .collect();
+        let len_vars = vars
+            .iter()
+            .filter(|(_, _, k)| *k == Kind::Len)
+            .map(|(n, s, _)| (n.clone(), *s))
+            .collect();
+        Ok((name, ty_vars, len_vars, type_span))
     }
 
     /// One generic variant's field list, mirroring `parse_variant_fields`
@@ -4950,11 +5062,14 @@ impl<'t> Parser<'t> {
     /// module-level pre-pass skips every generic header entirely (its
     /// variant names are only ever seen by this parser), so this is the one
     /// site that can reject a generic variant named `^Evil`.
+    #[allow(clippy::too_many_arguments)]
     fn parse_generic_variant_fields(
         &mut self,
         decl_name: &str,
         ty_vars: &[(String, Span)],
         used: &mut [bool],
+        len_vars: &[(String, Span)],
+        used_len: &mut [bool],
     ) -> Result<crate::ast::GenericVariantDecl, String> {
         let (vname, vspan) = self.expect_word_any_spanned()?;
         reject_reserved_name("variant", &vname, vspan)?;
@@ -4967,7 +5082,9 @@ impl<'t> Parser<'t> {
                 // attributeless field -- no lookahead needed, unlike the
                 // named-field-missing-its-type case below.
                 Some((Token::Word(w), _)) if w.starts_with('\'') => {
-                    let ty = self.parse_generic_field_type_expr(decl_name, ty_vars, used)?;
+                    let ty = self.parse_generic_field_type_expr(
+                        decl_name, ty_vars, used, len_vars, used_len,
+                    )?;
                     fields.push((POSITIONAL_FIELD_NAME.to_string(), ty));
                 }
                 Some(_) => {
@@ -4991,7 +5108,9 @@ impl<'t> Parser<'t> {
                             ));
                         }
                     }
-                    let ty = self.parse_generic_field_type_expr(decl_name, ty_vars, used)?;
+                    let ty = self.parse_generic_field_type_expr(
+                        decl_name, ty_vars, used, len_vars, used_len,
+                    )?;
                     fields.push((field_name, ty));
                 }
                 None => return Err(self.eof_error("`;` or `|` (unterminated `type:` declaration)")),
@@ -5052,7 +5171,7 @@ impl<'t> Parser<'t> {
                     self.skip_typedef();
                 } else {
                     let is_enum = self.current_typedef_is_enum();
-                    let (name, ty_vars, type_span) = self.parse_generic_header()?;
+                    let (name, ty_vars, len_vars, type_span) = self.parse_generic_header()?;
                     let ty_var_names = ty_vars.iter().map(|(n, _)| n.clone()).collect();
                     let idx = if is_enum {
                         self.generics
@@ -5073,7 +5192,7 @@ impl<'t> Parser<'t> {
                                 module: self.module,
                             })
                     };
-                    headers.push((is_enum, idx, self.pos, (name, ty_vars, type_span)));
+                    headers.push((is_enum, idx, self.pos, (name, ty_vars, len_vars, type_span)));
                     self.skip_typedef();
                 }
                 i = self.pos;
@@ -5081,11 +5200,11 @@ impl<'t> Parser<'t> {
             }
             i += 1;
         }
-        for (is_enum, idx, pos, (name, ty_vars, type_span)) in headers {
+        for (is_enum, idx, pos, (name, ty_vars, len_vars, type_span)) in headers {
             self.pos = pos;
             if is_enum {
-                let variants =
-                    self.parse_generic_enum_typedef_variants(&name, &ty_vars, type_span)?;
+                let variants = self
+                    .parse_generic_enum_typedef_variants(&name, &ty_vars, &len_vars, type_span)?;
                 // Disjoint field borrows: `regs` borrows the concrete
                 // registries, `generics` is a separate field.
                 let regs = MutRegistries {
@@ -5097,7 +5216,7 @@ impl<'t> Parser<'t> {
                 };
                 self.generics.fill_enum_variants(idx, variants, regs);
             } else {
-                let fields = self.parse_generic_typedef_fields(&name, &ty_vars)?;
+                let fields = self.parse_generic_typedef_fields(&name, &ty_vars, &len_vars)?;
                 let regs = MutRegistries {
                     structs: self.structs,
                     enums: self.enums,
@@ -5453,14 +5572,17 @@ impl<'t> Parser<'t> {
     /// P7.S3n (R8): the finished type tree is walked for a *growing*
     /// self-reference before it is returned, so a declaration that could
     /// only instantiate forever is rejected here rather than hanging later.
+    #[allow(clippy::too_many_arguments)]
     fn parse_generic_field_type_expr(
         &mut self,
         decl_name: &str,
         ty_vars: &[(String, Span)],
         used: &mut [bool],
+        len_vars: &[(String, Span)],
+        used_len: &mut [bool],
     ) -> Result<PolyType, String> {
         let span = self.peek().map(|(_, s)| *s).unwrap_or_default();
-        let pty = self.parse_generic_field_shape(decl_name, ty_vars, used)?;
+        let pty = self.parse_generic_field_shape(decl_name, ty_vars, used, len_vars, used_len)?;
         reject_growing_generic_argument(decl_name, &pty, span)?;
         Ok(pty)
     }
@@ -5468,11 +5590,14 @@ impl<'t> Parser<'t> {
     /// R1's descent proper, split from `parse_generic_field_type_expr` so
     /// R8's whole-tree growth check runs once per *field* rather than once
     /// per node the recursion visits.
+    #[allow(clippy::too_many_arguments)]
     fn parse_generic_field_shape(
         &mut self,
         decl_name: &str,
         ty_vars: &[(String, Span)],
         used: &mut [bool],
+        len_vars: &[(String, Span)],
+        used_len: &mut [bool],
     ) -> Result<PolyType, String> {
         if let Some((Token::TildeLBracket, span)) = self.peek() {
             return Err(tilde_quotation_position_error(*span));
@@ -5480,7 +5605,7 @@ impl<'t> Parser<'t> {
         // P7.S6 (R1): `array[T N]` -- the named array type.
         if self.array_type_ahead() {
             self.pos += 1;
-            return self.parse_generic_field_array(decl_name, ty_vars, used);
+            return self.parse_generic_field_array(decl_name, ty_vars, used, len_vars, used_len);
         }
         // P7.S6 (R4): a bare `[` opens a quotation effect unconditionally;
         // an array field is spelled `array['T N]` and was taken above.
@@ -5515,7 +5640,8 @@ impl<'t> Parser<'t> {
                 let remainder = &w[sigil_len..];
                 if remainder.is_empty() {
                     self.pos += 1;
-                    let inner = self.parse_generic_field_shape(decl_name, ty_vars, used)?;
+                    let inner = self
+                        .parse_generic_field_shape(decl_name, ty_vars, used, len_vars, used_len)?;
                     return Ok(self.fold_field_ref(inner, mutable));
                 }
                 let remainder = remainder.to_string();
@@ -5546,7 +5672,8 @@ impl<'t> Parser<'t> {
                     && matches!(self.tokens.get(self.pos + 1), Some((Token::LBracket, _)))
                 {
                     self.pos += 1;
-                    let inner = self.parse_generic_field_array(decl_name, ty_vars, used)?;
+                    let inner = self
+                        .parse_generic_field_array(decl_name, ty_vars, used, len_vars, used_len)?;
                     return Ok(self.fold_field_ref(inner, mutable));
                 }
                 // A run glued to a generic header that is then applied
@@ -5564,6 +5691,8 @@ impl<'t> Parser<'t> {
                             decl_name,
                             ty_vars,
                             used,
+                            len_vars,
+                            used_len,
                             &remainder,
                             is_enum,
                             idx,
@@ -5587,52 +5716,59 @@ impl<'t> Parser<'t> {
                     col: span.col + run_len as u32,
                     ..span
                 };
-                let inner = if remainder.is_empty() {
-                    self.pos += 1;
-                    if matches!(self.peek(), Some((Token::Semicolon | Token::Pipe, _)))
-                        || self.peek().is_none()
-                    {
-                        return Err(owned_cell_no_payload_error(&w, span));
-                    }
-                    Some(self.parse_generic_field_shape(decl_name, ty_vars, used)?)
-                } else if remainder.starts_with('\'') {
-                    self.pos += 1;
-                    let id = self.resolve_field_ty_var(
-                        decl_name,
-                        ty_vars,
-                        used,
-                        &remainder,
-                        remainder_span,
-                    )?;
-                    Some(PolyType::Var(id))
-                } else if remainder == ARRAY_TYPE_NAME
-                    && matches!(self.tokens.get(self.pos + 1), Some((Token::LBracket, _)))
-                {
-                    // P7.S6 (R1a): `^array['T 4]` -- same interception as
-                    // the `&` arm above, dispatching into the generic-field
-                    // array reader.
-                    self.pos += 1;
-                    Some(self.parse_generic_field_array(decl_name, ty_vars, used)?)
-                } else if matches!(self.tokens.get(self.pos + 1), Some((Token::LBracket, _))) {
-                    match self.poly_generic_header(&remainder, remainder_span)? {
-                        Some((is_enum, idx, module)) => {
-                            self.pos += 1;
-                            Some(self.parse_generic_field_application(
-                                decl_name,
-                                ty_vars,
-                                used,
-                                &remainder,
-                                is_enum,
-                                idx,
-                                module,
-                                remainder_span,
-                            )?)
+                let inner =
+                    if remainder.is_empty() {
+                        self.pos += 1;
+                        if matches!(self.peek(), Some((Token::Semicolon | Token::Pipe, _)))
+                            || self.peek().is_none()
+                        {
+                            return Err(owned_cell_no_payload_error(&w, span));
                         }
-                        None => None,
-                    }
-                } else {
-                    None
-                };
+                        Some(self.parse_generic_field_shape(
+                            decl_name, ty_vars, used, len_vars, used_len,
+                        )?)
+                    } else if remainder.starts_with('\'') {
+                        self.pos += 1;
+                        let id = self.resolve_field_ty_var(
+                            decl_name,
+                            ty_vars,
+                            used,
+                            &remainder,
+                            remainder_span,
+                        )?;
+                        Some(PolyType::Var(id))
+                    } else if remainder == ARRAY_TYPE_NAME
+                        && matches!(self.tokens.get(self.pos + 1), Some((Token::LBracket, _)))
+                    {
+                        // P7.S6 (R1a): `^array['T 4]` -- same interception as
+                        // the `&` arm above, dispatching into the generic-field
+                        // array reader.
+                        self.pos += 1;
+                        Some(self.parse_generic_field_array(
+                            decl_name, ty_vars, used, len_vars, used_len,
+                        )?)
+                    } else if matches!(self.tokens.get(self.pos + 1), Some((Token::LBracket, _))) {
+                        match self.poly_generic_header(&remainder, remainder_span)? {
+                            Some((is_enum, idx, module)) => {
+                                self.pos += 1;
+                                Some(self.parse_generic_field_application(
+                                    decl_name,
+                                    ty_vars,
+                                    used,
+                                    len_vars,
+                                    used_len,
+                                    &remainder,
+                                    is_enum,
+                                    idx,
+                                    module,
+                                    remainder_span,
+                                )?)
+                            }
+                            None => None,
+                        }
+                    } else {
+                        None
+                    };
                 if let Some(mut inner) = inner {
                     for _ in 0..run_len {
                         inner = self.fold_field_owned_cell(inner);
@@ -5651,7 +5787,8 @@ impl<'t> Parser<'t> {
                 if let Some((is_enum, idx, module)) = self.poly_generic_header(&w, span)? {
                     self.pos += 1;
                     return self.parse_generic_field_application(
-                        decl_name, ty_vars, used, &w, is_enum, idx, module, span,
+                        decl_name, ty_vars, used, len_vars, used_len, &w, is_enum, idx, module,
+                        span,
                     );
                 }
             }
@@ -5680,33 +5817,85 @@ impl<'t> Parser<'t> {
         Ok(idx as u32)
     }
 
+    /// P7.S6a (R2a): the length-path twin of `resolve_field_ty_var`. Unlike a
+    /// word signature's `intern_len_var` (which *mints* an id on first
+    /// sight), a header field only *resolves*: every length variable was
+    /// already bound by the header's own bracket (R2), so an unresolvable
+    /// `'N` is a located error rather than a fresh interning.
+    fn resolve_field_len_var(
+        &self,
+        decl_name: &str,
+        len_vars: &[(String, Span)],
+        used_len: &mut [bool],
+        name: &str,
+        span: Span,
+    ) -> Result<u32, String> {
+        let idx = len_vars
+            .iter()
+            .position(|(n, _)| n == name)
+            .ok_or_else(|| unbound_generic_len_var_error(name, decl_name, span))?;
+        used_len[idx] = true;
+        Ok(idx as u32)
+    }
+
     /// A generic field's array type `[ elem count ]`, `elem` recursing so a
-    /// nested `array[array['T 2] 2]` falls out. N3: a struct header binds no *length*
-    /// variable, so the count is always a literal here -- `parse_array_count`
-    /// is reused verbatim and no `Len::Var` path exists.
+    /// nested `array[array['T 2] 2]` falls out. P7.S6a (R2a): the count is
+    /// either a `'`-prefixed token resolved against the header's own
+    /// length-variable list (`Len::Var`), mirroring `parse_poly_array`'s
+    /// existing `'N` arm, or a decimal literal read through
+    /// `parse_array_count` exactly as before (`Len::Concrete`).
     fn parse_generic_field_array(
         &mut self,
         decl_name: &str,
         ty_vars: &[(String, Span)],
         used: &mut [bool],
+        len_vars: &[(String, Span)],
+        used_len: &mut [bool],
     ) -> Result<PolyType, String> {
         self.expect(Token::LBracket)?;
-        let elem = self.parse_generic_field_shape(decl_name, ty_vars, used)?;
-        // `parse_array_count`'s linear-element rejection needs a concrete
-        // element type; over a variable element there is none to give it, so
-        // the count is read as a bare literal and the element's linearity is
-        // left to the checker, exactly as it is for a concrete array field.
-        let count = match &elem {
-            PolyType::Concrete(t) => self.parse_array_count(t.name())?,
-            elem => self.parse_array_count(&generic_field_type_str(elem, ty_vars))?,
+        let elem = self.parse_generic_field_shape(decl_name, ty_vars, used, len_vars, used_len)?;
+        let len = if let Some((Token::Word(w), span)) = self.peek() {
+            if w.starts_with('\'') {
+                let (w, span) = (w.clone(), *span);
+                self.pos += 1;
+                Len::Var(self.resolve_field_len_var(decl_name, len_vars, used_len, &w, span)?)
+            } else {
+                Len::Concrete(
+                    self.parse_generic_field_array_count(decl_name, &elem, ty_vars, len_vars)?,
+                )
+            }
+        } else {
+            Len::Concrete(
+                self.parse_generic_field_array_count(decl_name, &elem, ty_vars, len_vars)?,
+            )
         };
         self.expect(Token::RBracket)?;
-        Ok(match elem {
-            PolyType::Concrete(t) => {
+        Ok(match (elem, len) {
+            (PolyType::Concrete(t), Len::Concrete(count)) => {
                 PolyType::Concrete(crate::ast::intern_array_type(self.arrays, t, count))
             }
-            elem => PolyType::Array(Box::new(elem), Len::Concrete(count)),
+            (elem, len) => PolyType::Array(Box::new(elem), len),
         })
+    }
+
+    /// `parse_generic_field_array`'s literal-count read, split out so both
+    /// its `'`-prefixed and literal branches share the same
+    /// `parse_array_count` call. `parse_array_count`'s linear-element
+    /// rejection needs a concrete element type; over a variable element
+    /// there is none to give it, so the count is read as a bare literal and
+    /// the element's linearity is left to the checker, exactly as it is for
+    /// a concrete array field.
+    fn parse_generic_field_array_count(
+        &mut self,
+        _decl_name: &str,
+        elem: &PolyType,
+        ty_vars: &[(String, Span)],
+        len_vars: &[(String, Span)],
+    ) -> Result<u32, String> {
+        match elem {
+            PolyType::Concrete(t) => self.parse_array_count(t.name()),
+            elem => self.parse_array_count(&generic_field_type_str(elem, ty_vars, len_vars)),
+        }
     }
 
     /// A generic field's generic-type application, each argument a field type
@@ -5721,6 +5910,8 @@ impl<'t> Parser<'t> {
         decl_name: &str,
         ty_vars: &[(String, Span)],
         used: &mut [bool],
+        len_vars: &[(String, Span)],
+        used_len: &mut [bool],
         name: &str,
         is_enum: bool,
         idx: usize,
@@ -5746,7 +5937,15 @@ impl<'t> Parser<'t> {
                 None => {
                     return Err(self.eof_error("`]` (unterminated generic type application)"));
                 }
-                _ => args.push(self.parse_generic_field_shape(decl_name, ty_vars, used)?),
+                // P7.S6a phase 2: this field-application parser's own
+                // type/length arity split (`parse_generic_field_application`'s
+                // R2a widening) is phase 3 work, gated on R3's
+                // `len_var_names` AST field -- `len_vars`/`used_len` are
+                // threaded through here only so this call still compiles
+                // against `parse_generic_field_shape`'s widened signature.
+                _ => args.push(
+                    self.parse_generic_field_shape(decl_name, ty_vars, used, len_vars, used_len)?,
+                ),
             }
         }
         if args.len() != arity {
@@ -10995,6 +11194,88 @@ mod tests {
         assert!(err.contains("reserved"), "{err}");
     }
 
+    // ---- P7.S6a Phase 2: R2a array-field sub-case, R2b word bound bracket ----
+
+    #[test]
+    fn parse_generic_type_header_with_length_parameter_parses() {
+        // The exit fixture -- must fail before R2a's `'`-prefixed-token arm
+        // exists in `parse_generic_field_array`.
+        let module = parse_src("type: Buffer['T 'N: Len] data array['T 'N] ;").unwrap();
+        let decl = &module.generic_structs[0];
+        assert_eq!(decl.fields.len(), 1);
+        assert_eq!(
+            decl.fields[0].1,
+            PolyType::Array(Box::new(PolyType::Var(0)), Len::Var(0))
+        );
+    }
+
+    #[test]
+    fn parse_generic_field_array_unbound_length_var_is_error() {
+        // `'N` used in a field but never bound by the header bracket -- the
+        // field-path twin of `unbound_generic_ty_var_error`.
+        let err = parse_src("type: Buffer['T] data array['T 'N] ;").unwrap_err();
+        assert!(err.contains("'N"), "{err}");
+        assert!(err.contains("not a length variable"), "{err}");
+    }
+
+    #[test]
+    fn parse_generic_typedef_phantom_length_var_is_error() {
+        // `'N` bound but never used in any field's array count -- must fail
+        // before `used_len` bookkeeping exists.
+        let err = parse_src("type: Buffer['T 'N: Len] data 'T ;").unwrap_err();
+        assert!(err.contains("'N"), "{err}");
+        assert!(err.contains("phantom"), "{err}");
+    }
+
+    #[test]
+    fn parse_generic_field_array_concrete_element_variable_length_does_not_fold_to_concrete() {
+        // A concrete element type, a variable length, plus a `'T` field so
+        // R2.1's type-variable-required check and `check_no_phantom_ty_var`
+        // both clear: builds `PolyType::Array(Concrete(i64), Len::Var)`, not
+        // `PolyType::Concrete(intern_array_type(..))`.
+        let module = parse_src("type: Buffer['T 'N: Len] data 'T count array[i64 'N] ;").unwrap();
+        let decl = &module.generic_structs[0];
+        assert_eq!(decl.fields.len(), 2);
+        assert_eq!(
+            decl.fields[1].1,
+            PolyType::Array(
+                Box::new(PolyType::Concrete(Type::from_name("i64").unwrap())),
+                Len::Var(0)
+            )
+        );
+    }
+
+    #[test]
+    fn generic_field_type_str_renders_a_nested_length_variable_via_parse_error() {
+        // P7.S6a (R2a): `generic_field_type_str`'s own `Array` arm is called
+        // unconditionally to build `parse_array_count`'s error string, so a
+        // nested length-carrying array element must render rather than
+        // panic even when the outer count is malformed.
+        let err = parse_src("type: Grid['T 'N: Len] rows array[array['T 'N] 0] ;").unwrap_err();
+        assert!(err.contains("array['T 'N]"), "{err}");
+    }
+
+    #[test]
+    fn parse_optional_bound_bracket_len_annotation_validates_against_signature() {
+        // R2b; the fixture is array-based per R2b's phase-1
+        // self-containment note, not `Buffer`-based (which needs R7, landing
+        // two phases later).
+        let module =
+            parse_src(": capacity['T 'N: Len] ( &array['T 'N] -- usize ) drop 0 ;").unwrap();
+        let sig = module.words[0].poly.as_ref().expect("poly sig present");
+        assert_eq!(sig.len_var_names, vec!["'N".to_string()]);
+    }
+
+    #[test]
+    fn parse_optional_bound_bracket_len_annotation_unused_is_error() {
+        // A bracket `['T 'N: Len]` on a word whose effect never mentions
+        // `'N` in a length position -- the length-path twin of
+        // `bracket_var_unused_error`.
+        let err = parse_src(": f['T 'N: Len] ( 'T -- 'T ) ;").unwrap_err();
+        assert!(err.contains("'N"), "{err}");
+        assert!(err.contains("never appears in the effect"), "{err}");
+    }
+
     // ---- P7.S6 Phase 2: R5/R5a/R5b/R6/R6a bracket binding sites ----
 
     #[test]
@@ -11284,13 +11565,38 @@ mod tests {
         // for an array type, so a generic struct field's surface spelling is
         // copy-pasteable source.
         let ty_vars = [("'T".to_string(), Span::default())];
+        let len_vars: [(String, Span); 0] = [];
         let arr = PolyType::Array(Box::new(PolyType::Var(0)), Len::Concrete(4));
-        assert_eq!(generic_field_type_str(&arr, &ty_vars), "array['T 4]");
+        assert_eq!(
+            generic_field_type_str(&arr, &ty_vars, &len_vars),
+            "array['T 4]"
+        );
         // A nested array also picks up the new spelling.
         let nested = PolyType::Array(Box::new(arr), Len::Concrete(2));
         assert_eq!(
-            generic_field_type_str(&nested, &ty_vars),
+            generic_field_type_str(&nested, &ty_vars, &len_vars),
             "array[array['T 4] 2]"
+        );
+    }
+
+    #[test]
+    fn generic_field_type_str_renders_a_nested_length_variable() {
+        // P7.S6a (R2a): the pre-fix `Len::Var(_) => unreachable!()` arm is
+        // reachable unconditionally from `parse_generic_field_array`'s own
+        // error-string construction, not only on a parse error -- a nested
+        // array field whose *element* is itself a length-carrying array must
+        // render, not panic, naming the length variable by its surface
+        // spelling exactly as the `Var` arm already renders a type variable.
+        let ty_vars = [("'T".to_string(), Span::default())];
+        let len_vars = [
+            ("'N".to_string(), Span::default()),
+            ("'M".to_string(), Span::default()),
+        ];
+        let inner = PolyType::Array(Box::new(PolyType::Var(0)), Len::Var(0));
+        let outer = PolyType::Array(Box::new(inner), Len::Var(1));
+        assert_eq!(
+            generic_field_type_str(&outer, &ty_vars, &len_vars),
+            "array[array['T 'N] 'M]"
         );
     }
 
