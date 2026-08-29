@@ -16630,7 +16630,7 @@ mod tests {
         assert!(
             fresh
                 .generics
-                .lookup_enum(result_idx, header_module, &[Type::I64, Type::I64])
+                .lookup_enum(result_idx, header_module, &[Type::I64, Type::I64], &[])
                 .is_none(),
             "no parse-time sibling monomorph exists in this fixture"
         );
@@ -16638,7 +16638,7 @@ mod tests {
         assert!(
             module
                 .generics
-                .lookup_enum(result_idx, header_module, &[Type::I64, Type::I64])
+                .lookup_enum(result_idx, header_module, &[Type::I64, Type::I64], &[])
                 .is_none(),
             "the standalone check's own scratch mint must not reach the live GenericTypes cell"
         );
@@ -16703,7 +16703,13 @@ mod tests {
                 Ok(scratch
                     .expect("R1 threads the live cell in")
                     .borrow_mut()
-                    .instantiate_enum(result_idx, &[Type::I64, Type::I64], header_module, regs))
+                    .instantiate_enum(
+                        result_idx,
+                        &[Type::I64, Type::I64],
+                        &[],
+                        header_module,
+                        regs,
+                    ))
             },
         )
         .expect("grounding through the free function succeeds");
