@@ -182,7 +182,7 @@ fn check_term(
             }
             Ok(stack)
         }
-        TermKind::Call(name, type_args, _len_args) => {
+        TermKind::Call(name, type_args, len_args) => {
             // P7.S3t (R3): exactly one of this arm's dispatch routes consumes
             // an explicit type-argument list -- the polymorphic-call
             // interception far below. The guard is written as an *allow*, and
@@ -196,7 +196,7 @@ fn check_term(
             // miscompile rather than a diagnostic, so a genuinely new route
             // needs its own exclusion here, not just an assumption that the
             // guard already covers it.
-            if !type_args.is_empty()
+            if (!type_args.is_empty() || !len_args.is_empty())
                 && !poly_call_takes_type_args(
                     name,
                     span,
@@ -818,8 +818,8 @@ fn check_term(
             // has already established is where a non-empty one may arrive.
             if poly.env.contains_key(name) && !fall_through_to_env {
                 return check_poly_call(
-                    name, span, type_args, &mut stack, ctx, env, scope, arrays, cells, refs,
-                    slices, prov, live, at, poly,
+                    name, span, type_args, len_args, &mut stack, ctx, env, scope, arrays, cells,
+                    refs, slices, prov, live, at, poly,
                 );
             }
             // P7.S3o Phase 3: a bare trait member call (like `cmp` directly)

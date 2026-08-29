@@ -962,13 +962,14 @@ pub(super) fn poly_term(
                 scope.locals.insert(name.clone(), pt);
             }
         }
-        TermKind::Call(name, type_args, _len_args) => {
+        TermKind::Call(name, type_args, len_args) => {
             // P7.S3t (R1/R3): a call inside a polymorphic word's own body is
             // checked symbolically -- there is no `Subst` here to seed, and
             // reaching one would be the multi-hop forwarding case R7 leaves
             // out of the slice. Rejected rather than dropped: a dropped list
-            // links whatever the symbolic path resolved instead.
-            if !type_args.is_empty() {
+            // links whatever the symbolic path resolved instead. P7.S6b (R2a):
+            // an explicit length list is rejected the same way.
+            if !type_args.is_empty() || !len_args.is_empty() {
                 return Err(type_arguments_in_poly_body_error(ctx, span, name));
             }
             return poly_call_term(
@@ -5601,6 +5602,7 @@ pub(super) fn check_poly_call(
     name: &str,
     span: Span,
     type_args: &[Type],
+    len_args: &[Len],
     stack: &mut Vec<Slot>,
     ctx: &Ctx,
     env: &HashMap<String, Vec<Overload>>,
@@ -5660,6 +5662,37 @@ pub(super) fn check_poly_call(
             seeded.push(v as u32);
         }
     }
+    // P7.S6b (R3): the length twin of the type-argument seeding above. R2b:
+    // this slice's parser only ever mints `Len::Concrete` for an explicit
+    // call-site argument (an integer token); a `Len::Var` reaching here would
+    // mean a route this slice does not build exists, an internal-consistency
+    // bug rather than a user-facing diagnostic.
+    let mut seeded_len: Vec<u32> = Vec::new();
+    if !len_args.is_empty() {
+        if len_args.len() != sig.len_var_names.len() {
+            return Err(length_instantiation_arity_error(
+                span,
+                name,
+                &sig,
+                len_args.len(),
+            ));
+        }
+        for (v, ln) in len_args.iter().enumerate() {
+            match ln {
+                Len::Concrete(count) => {
+                    subst.len.push((v as u32, *count));
+                    seeded_len.push(v as u32);
+                }
+                Len::Var(_) => unreachable!(
+                    "R2b: this slice's parser never produces Len::Var at a call-site instantiation"
+                ),
+            }
+        }
+    }
+    // P7.S6b phase 3 (R4) will thread `seeded_len` into `unify_poly_input`'s
+    // `Len::Var` conflict routing; unrouted here, it is still populated
+    // correctly for that phase to consume.
+    let _ = &seeded_len;
     // P7.S3f (R2): the positions materialized against a ground declared
     // `Type::Quotation` input at this call site, threaded onto the recorded
     // `CallInst` so lowering can materialize the caller's phantom argument
@@ -9415,12 +9448,43 @@ pub(super) fn instantiation_arity_error(
         1 => "",
         _ => "s",
     };
-    let note = match sig.len_var_names.is_empty() && sig.row_var_names.is_empty() {
+    let note = match sig.row_var_names.is_empty() {
         true => String::new(),
-        false => "\n  note: a length (`'N`) or row (`..s`) variable is not named by an explicit instantiation; only type variables are".to_string(),
+        false => "\n  note: a row (`..s`) variable is not named by an explicit instantiation; only type and length variables are".to_string(),
     };
     format!(
         "error: `{callee}` (line {}) declares {declared} but was given {given} type argument{plural}{note}",
+        span.line
+    )
+}
+
+/// P7.S6b (R3): the length twin of `instantiation_arity_error`, mirroring
+/// S6a's `generic_arity_error` two-count shape.
+pub(super) fn length_instantiation_arity_error(
+    span: Span,
+    callee: &str,
+    sig: &PolySig,
+    given: usize,
+) -> String {
+    let callee = crate::resolve::demangle_call(callee);
+    let declared = match sig.len_var_names.len() {
+        0 => "no length variables".to_string(),
+        1 => format!("1 length variable (`{}`)", sig.len_var_names[0]),
+        n => format!(
+            "{n} length variables ({})",
+            sig.len_var_names
+                .iter()
+                .map(|v| format!("`{v}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    };
+    let plural = match given {
+        1 => "",
+        _ => "s",
+    };
+    format!(
+        "error: `{callee}` (line {}) declares {declared} but was given {given} length argument{plural}",
         span.line
     )
 }
@@ -11915,19 +11979,77 @@ mod tests {
             "error: `pairwise` (line 2) declares 2 type variables (`'T`, `'U`) but was given 1 type argument"
         );
     }
-    /// P7.S3t (R4): a length variable is not addressable by the list, so a
-    /// callee whose only variable is one declares *no* type variables. Said
-    /// outright, since `alen[i64]` is the natural thing to try.
+    /// P7.S6b: a *type*-argument slot is not addressable against a length
+    /// variable -- `alen[i64]` supplies a type argument, but `alen` declares
+    /// no type variables (only a length one), so it is still an arity error
+    /// on the type side, unrelated to explicit length instantiation (which
+    /// this slice makes reachable via `alen[4]`, not `alen[i64]`).
     #[test]
-    fn an_instantiation_of_a_length_variable_is_rejected() {
+    fn a_type_argument_cannot_bind_a_length_variable() {
         let err = check_src(
             ": alen ( array[i64 'N] -- array[i64 'N] usize ) len ;\n\
              : main ( -- ) 5 4 fill alen[i64] . drop ;",
         )
-        .expect_err("a length variable cannot be given explicitly");
+        .expect_err("a length variable cannot be bound via a type-argument slot");
         assert_eq!(
             err,
-            "error: `alen` (line 2) declares no type variables but was given 1 type argument\n  note: a length (`'N`) or row (`..s`) variable is not named by an explicit instantiation; only type variables are"
+            "error: `alen` (line 2) declares no type variables but was given 1 type argument"
+        );
+    }
+    /// P7.S6b (R3): an explicit length argument binds `'N`, unified against a
+    /// concrete operand's own count -- the accept path for `sum[i64 4]`.
+    /// Non-`inline`, and reads `len` back rather than indexing (phase 4's
+    /// rationale applies identically here: an `inline` fixture would never
+    /// reach `check_poly_call` at all).
+    #[test]
+    fn an_explicit_length_argument_checks_clean_against_a_matching_operand() {
+        check_src(
+            ": sum['T 'N: Len] ( array['T 'N] -- usize ) len swap drop ;\n\
+             : main ( -- ) 0 4 fill sum[i64 4] drop ;",
+        )
+        .expect("the explicit length agrees with the operand's own count");
+    }
+    /// P7.S6b (R3): a wrong explicit length *count* (not a disagreeing
+    /// operand) is the arity error, distinct from R4's conflict routing.
+    #[test]
+    fn a_wrong_explicit_length_argument_count_is_the_arity_error() {
+        let err = check_src(
+            ": pair['T 'N: Len 'M: Len] ( array['T 'N] array['T 'M] -- usize ) drop len swap drop ;\n\
+             : main ( -- ) 0 4 fill 0 4 fill pair[i64 4] drop ;",
+        )
+        .expect_err("one length argument given, two declared");
+        assert_eq!(
+            err,
+            "error: `pair` (line 2) declares 2 length variables (`'N`, `'M`) but was given 1 length argument"
+        );
+    }
+    /// P7.S6b (R2a): the poly-body guard (`type_arguments_in_poly_body_error`)
+    /// widens to length arguments too -- a call inside a polymorphic word's
+    /// own body has no `Subst` to seed, so an explicit length list there is
+    /// rejected outright, not silently dropped.
+    #[test]
+    fn an_explicit_length_argument_inside_a_poly_body_is_rejected() {
+        let err = check_src(
+            ": sum['T 'N: Len] ( array['T 'N] -- usize ) len swap drop ;\n\
+             : wrapper['T 'N: Len] ( array['T 'N] -- usize ) sum[i64 4] ;\n\
+             : main ( -- ) 0 4 fill wrapper[i64 4] drop ;",
+        )
+        .expect_err("an explicit instantiation inside a poly body is rejected");
+        assert_eq!(
+            err,
+            "error: `sum` in `wrapper` (line 2) cannot be explicitly instantiated inside a polymorphic word's own body\n  note: instantiate the enclosing word at its own call site instead; forwarding a type argument through a polymorphic body is not supported"
+        );
+    }
+    /// P7.S6b (R2a): the non-poly dispatch route's `no_type_arguments_error`
+    /// guard widens identically -- a concrete (non-polymorphic) callee given
+    /// an explicit length argument is rejected, not silently dropped.
+    #[test]
+    fn an_explicit_length_argument_on_a_non_poly_callee_is_rejected() {
+        let err = check_src(": addup ( i64 i64 -- i64 ) drop ;\n: main ( -- ) 1 2 addup[4] drop ;")
+            .expect_err("a concrete word takes no explicit length argument");
+        assert_eq!(
+            err,
+            "error: `addup` (line 2) takes no type arguments; only a call to a polymorphic word may be explicitly instantiated"
         );
     }
     /// P7.S3t (R5): the redirect itself, at `unify_poly_input`. One prior
