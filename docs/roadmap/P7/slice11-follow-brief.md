@@ -409,8 +409,8 @@ from reject to a different outcome, zero unrelated regressions anywhere in the s
 The `phase7_slice12.rs` fixture's flip is more interesting than a clean accept: past the now-
 fixed "ungrounded" gate, the checker finds a **second, real, unrelated bug already latent in
 that fixture's own source** -- `~[ ( Nil ) 0.0 ]` never consumes or drops the `0.0` it
-produces, so the honest error becomes `an arm of `Pair?` leaves `Pair[f64].Nil` on the stack`
-(a real linearity violation) rather than a clean exit 0. The old "ungrounded" rejection was
+produces, so the honest error becomes "an arm of `Pair?` leaves `Pair[f64].Nil` on the
+stack" (a real linearity violation) rather than a clean exit 0. The old "ungrounded" rejection was
 firing so early it papered over this fixture's own independent stack-linearity mistake. This
 fixture's migration (unlike the three `phase7_slice11.rs` goldens, which just need their
 assertion flipped) also needs its `Nil` arm fixed to actually consume the value it produces
