@@ -7015,7 +7015,7 @@ fn match_impl_target_rec(
             idx,
             module,
             args,
-            len_args: _,
+            len_args,
             name: _,
         } => {
             let generics = generics?;
@@ -7030,14 +7030,16 @@ fn match_impl_target_rec(
                 };
                 generics.struct_instantiation_of(id)
             };
-            let (found_idx, found_module, found_args, _) = found?;
+            let (found_idx, found_module, found_args, found_lens) = found?;
             if found_idx != *idx as usize
                 || found_module != *module
                 || found_args.len() != args.len()
+                || found_lens.len() != len_args.len()
             {
                 return None;
             }
             let found_args = found_args.to_vec();
+            let found_lens = found_lens.to_vec();
             for (arg_pty, arg_ty) in args.iter().zip(found_args.iter()) {
                 match_impl_target_rec(
                     arg_pty,
@@ -7048,6 +7050,27 @@ fn match_impl_target_rec(
                     Some(generics),
                     subst,
                 )?;
+            }
+            for (len_pat, len_found) in len_args.iter().zip(found_lens.iter()) {
+                let Len::Concrete(found_count) = len_found else {
+                    unreachable!("an instantiation's own length args are always concrete")
+                };
+                match len_pat {
+                    Len::Concrete(k) => {
+                        if *k != *found_count {
+                            return None;
+                        }
+                    }
+                    Len::Var(ln) => {
+                        if let Some(prev) = subst.len_of(*ln) {
+                            if prev != *found_count {
+                                return None;
+                            }
+                        } else {
+                            subst.len.push((*ln, *found_count));
+                        }
+                    }
+                }
             }
             Some(())
         }
@@ -7135,7 +7158,7 @@ fn collect_positions(
             idx,
             module,
             args,
-            len_args: _,
+            len_args,
             name: _,
         } => {
             let generics = generics?;
@@ -7150,16 +7173,23 @@ fn collect_positions(
                 };
                 generics.struct_instantiation_of(id)
             };
-            let (found_idx, found_module, found_args, _) = found?;
+            let (found_idx, found_module, found_args, found_lens) = found?;
             if found_idx != *idx as usize
                 || found_module != *module
                 || found_args.len() != args.len()
+                || found_lens.len() != len_args.len()
             {
                 return None;
             }
             let found_args = found_args.to_vec();
             for (arg_pty, arg_ty) in args.iter().zip(found_args.iter()) {
                 collect_positions(arg_pty, *arg_ty, arrays, cells, refs, Some(generics), out)?;
+            }
+            for len_pat in len_args.iter() {
+                match len_pat {
+                    Len::Concrete(_) => out.push(Position::LenConcrete),
+                    Len::Var(ln) => out.push(Position::LenVar(*ln)),
+                }
             }
             Some(())
         }
@@ -7214,7 +7244,7 @@ fn collect_concrete_positions(
         }
         Type::Struct(id, _) => {
             if let Some(generics) = generics {
-                if let Some((_, _, args, _)) = generics.struct_instantiation_of(id) {
+                if let Some((_, _, args, lens)) = generics.struct_instantiation_of(id) {
                     if !args.is_empty() {
                         for arg_ty in args {
                             collect_concrete_positions(
@@ -7226,6 +7256,9 @@ fn collect_concrete_positions(
                                 out,
                             )?;
                         }
+                        for _ in lens {
+                            out.push(Position::LenConcrete);
+                        }
                         return Some(());
                     }
                 }
@@ -7235,7 +7268,7 @@ fn collect_concrete_positions(
         }
         Type::Enum(id, _) => {
             if let Some(generics) = generics {
-                if let Some((_, _, args, _)) = generics.enum_instantiation_of(id) {
+                if let Some((_, _, args, lens)) = generics.enum_instantiation_of(id) {
                     if !args.is_empty() {
                         for arg_ty in args {
                             collect_concrete_positions(
@@ -7246,6 +7279,9 @@ fn collect_concrete_positions(
                                 Some(generics),
                                 out,
                             )?;
+                        }
+                        for _ in lens {
+                            out.push(Position::LenConcrete);
                         }
                         return Some(());
                     }
@@ -7387,6 +7423,18 @@ fn generic_args_of(pattern: &PolyType, ty_args: &[Type]) -> Vec<PolyType> {
     }
 }
 
+/// The length-argument twin of `generic_args_of`: recovers a per-side
+/// `Vec<Len>`, either a `Generic` pattern's own `len_args`, or
+/// `Len::Concrete`-synthesized from the matched instantiation's own length
+/// list (its phase-5-widened fourth tuple element).
+fn generic_len_args_of(pattern: &PolyType, len_args: &[Len]) -> Vec<Len> {
+    match pattern {
+        PolyType::Generic { len_args, .. } => len_args.clone(),
+        PolyType::Concrete(_) => len_args.to_vec(),
+        _ => unreachable!("ty is generic-shaped, so a matching pattern is Generic or Concrete"),
+    }
+}
+
 fn quotation_parts(pattern: &PolyType, eff: &QuotEffect) -> (Vec<PolyType>, Vec<PolyType>) {
     match pattern {
         PolyType::Quotation(ins, outs, _, _, _) => (ins.clone(), outs.clone()),
@@ -7476,11 +7524,12 @@ fn collect_paired_positions(
         }
         Type::Struct(id, _) => {
             let generics = generics?;
-            let (_, _, ty_args, _) = generics.struct_instantiation_of(id)?;
+            let (_, _, ty_args, len_args) = generics.struct_instantiation_of(id)?;
             if ty_args.is_empty() {
                 return Some(());
             }
             let ty_args = ty_args.to_vec();
+            let len_args = len_args.to_vec();
             let a_args = generic_args_of(a, &ty_args);
             let b_args = generic_args_of(b, &ty_args);
             for ((pa, pb), arg_ty) in a_args.iter().zip(b_args.iter()).zip(ty_args.iter()) {
@@ -7494,16 +7543,25 @@ fn collect_paired_positions(
                     Some(generics),
                     out,
                 )?;
+            }
+            let a_lens = generic_len_args_of(a, &len_args);
+            let b_lens = generic_len_args_of(b, &len_args);
+            for (la, lb) in a_lens.iter().zip(b_lens.iter()) {
+                out.push(PairedLeaf::Aligned(
+                    len_position(la.clone()),
+                    len_position(lb.clone()),
+                ));
             }
             Some(())
         }
         Type::Enum(id, _) => {
             let generics = generics?;
-            let (_, _, ty_args, _) = generics.enum_instantiation_of(id)?;
+            let (_, _, ty_args, len_args) = generics.enum_instantiation_of(id)?;
             if ty_args.is_empty() {
                 return Some(());
             }
             let ty_args = ty_args.to_vec();
+            let len_args = len_args.to_vec();
             let a_args = generic_args_of(a, &ty_args);
             let b_args = generic_args_of(b, &ty_args);
             for ((pa, pb), arg_ty) in a_args.iter().zip(b_args.iter()).zip(ty_args.iter()) {
@@ -7517,6 +7575,14 @@ fn collect_paired_positions(
                     Some(generics),
                     out,
                 )?;
+            }
+            let a_lens = generic_len_args_of(a, &len_args);
+            let b_lens = generic_len_args_of(b, &len_args);
+            for (la, lb) in a_lens.iter().zip(b_lens.iter()) {
+                out.push(PairedLeaf::Aligned(
+                    len_position(la.clone()),
+                    len_position(lb.clone()),
+                ));
             }
             Some(())
         }
@@ -15530,6 +15596,134 @@ mod tests {
         assert!(match_impl_target(&pattern, mismatched_ty, &arrays, &[], &[], None).is_none());
     }
 
+    /// R8b: `match_impl_target_rec`'s `Generic` arm zips `len_args`
+    /// alongside `args`, the same way its `Array` arm zips `len` -- a
+    /// `Buffer['T 4]` pattern matches only `Buffer[u8 4]`, never
+    /// `Buffer[u8 8]`; must fail against the pre-fix `len_args: _` arm,
+    /// which is length-blind and would match either.
+    #[test]
+    fn match_impl_target_generic_zips_len_args_against_concrete_length() {
+        let mut generics = GenericTypes::with_bases(0, 0);
+        generics.structs.push(buffer_header());
+        let mut arrays: Vec<ArrayDecl> = Vec::new();
+        let mut cells: Vec<OwnedCellDecl> = Vec::new();
+        let mut refs: Vec<RefDecl> = Vec::new();
+        let buffer_4 = generics.instantiate_struct(
+            0,
+            &[Type::U32],
+            &[Len::Concrete(4)],
+            0,
+            crate::ast::MutRegistries {
+                structs: &[],
+                enums: &[],
+                arrays: &mut arrays,
+                cells: &mut cells,
+                refs: &mut refs,
+            },
+        );
+        let buffer_8 = generics.instantiate_struct(
+            0,
+            &[Type::U32],
+            &[Len::Concrete(8)],
+            0,
+            crate::ast::MutRegistries {
+                structs: &[],
+                enums: &[],
+                arrays: &mut arrays,
+                cells: &mut cells,
+                refs: &mut refs,
+            },
+        );
+        let pattern = PolyType::Generic {
+            is_enum: false,
+            idx: 0,
+            module: 0,
+            args: vec![PolyType::Var(0)],
+            len_args: vec![Len::Concrete(4)],
+            name: "Buffer",
+        };
+        assert!(
+            match_impl_target(&pattern, buffer_4, &arrays, &cells, &refs, Some(&generics))
+                .is_some(),
+            "`Buffer['T 4]` should match `Buffer[u8 4]`"
+        );
+        assert!(
+            match_impl_target(&pattern, buffer_8, &arrays, &cells, &refs, Some(&generics))
+                .is_none(),
+            "`Buffer['T 4]` should not match `Buffer[u8 8]`"
+        );
+    }
+
+    /// The `Len::Var` half: a shared length variable across a `Generic`
+    /// pattern's own length arg binds from the concrete instantiation,
+    /// mirroring `match_impl_target_shared_len_var_consistency`'s `Array`
+    /// case one level up.
+    #[test]
+    fn match_impl_target_generic_binds_len_var_from_concrete_instantiation() {
+        let mut generics = GenericTypes::with_bases(0, 0);
+        generics.structs.push(buffer_header());
+        let mut arrays: Vec<ArrayDecl> = Vec::new();
+        let mut cells: Vec<OwnedCellDecl> = Vec::new();
+        let mut refs: Vec<RefDecl> = Vec::new();
+        let buffer_256 = generics.instantiate_struct(
+            0,
+            &[Type::U32],
+            &[Len::Concrete(256)],
+            0,
+            crate::ast::MutRegistries {
+                structs: &[],
+                enums: &[],
+                arrays: &mut arrays,
+                cells: &mut cells,
+                refs: &mut refs,
+            },
+        );
+        let pattern = PolyType::Generic {
+            is_enum: false,
+            idx: 0,
+            module: 0,
+            args: vec![PolyType::Var(0)],
+            len_args: vec![Len::Var(0)],
+            name: "Buffer",
+        };
+        let subst = match_impl_target(
+            &pattern,
+            buffer_256,
+            &arrays,
+            &cells,
+            &refs,
+            Some(&generics),
+        )
+        .expect("a concrete Buffer[u8 256] target must bind 'N");
+        assert_eq!(subst.len_of(0), Some(256));
+    }
+
+    /// R8b: `generic_len_args_of` recovers a length list from both shapes --
+    /// a `Generic` pattern's own `len_args`, or `Len::Concrete`-synthesized
+    /// from the matched instantiation's length list -- the sibling
+    /// `generic_args_of` had this coverage, its length twin previously had
+    /// none.
+    #[test]
+    fn generic_len_args_of_recovers_a_length_list_from_both_shapes() {
+        let generic_pattern = PolyType::Generic {
+            is_enum: false,
+            idx: 0,
+            module: 0,
+            args: vec![PolyType::Var(0)],
+            len_args: vec![Len::Var(0)],
+            name: "Buffer",
+        };
+        assert_eq!(
+            generic_len_args_of(&generic_pattern, &[Len::Concrete(256)]),
+            vec![Len::Var(0)]
+        );
+        let concrete_pattern = PolyType::Concrete(Type::U32);
+        assert_eq!(
+            generic_len_args_of(&concrete_pattern, &[Len::Concrete(256)]),
+            vec![Len::Concrete(256)]
+        );
+    }
+
     // P7.S4 Phase 2 (R3): `specificity` / `is_strictly_more_specific` unit
     // tests.
     //
@@ -15711,6 +15905,158 @@ mod tests {
         let b = PolyType::Array(Box::new(PolyType::Var(0)), Len::Var(0));
         assert_eq!(
             specificity(&a, &b, &[], &[], ty, &arrays, &[], &[], None),
+            Some(Ordering::Less)
+        );
+    }
+
+    /// R8b: `collect_paired_positions`'s `Struct` arm pushes a paired length
+    /// leaf via `generic_len_args_of`. The scenario that actually exercises
+    /// this -- and that two identically-concrete-length patterns cannot,
+    /// since `match_impl_target_rec`'s own `Generic` arm already rejects a
+    /// mismatched concrete length before either candidate ever reaches
+    /// `specificity` -- is a length-*variable* pattern (`Buffer['T 'N]`)
+    /// competing against a length-*concrete* pattern (`Buffer['T 4]`) for
+    /// the same concrete operand (`Buffer[u8 4]`): both genuinely match, so
+    /// `specificity` must rank the concrete length as strictly more
+    /// specific than the variable, mirroring `specificity_concrete_target_vs_generic_target`
+    /// one level up (a struct's own length position, not a bare array's).
+    #[test]
+    fn specificity_struct_header_length_positions_are_not_ignored() {
+        let mut generics = GenericTypes::with_bases(0, 0);
+        generics.structs.push(buffer_header());
+        let mut arrays: Vec<ArrayDecl> = Vec::new();
+        let mut cells: Vec<OwnedCellDecl> = Vec::new();
+        let mut refs: Vec<RefDecl> = Vec::new();
+        let buffer_4 = generics.instantiate_struct(
+            0,
+            &[Type::U32],
+            &[Len::Concrete(4)],
+            0,
+            crate::ast::MutRegistries {
+                structs: &[],
+                enums: &[],
+                arrays: &mut arrays,
+                cells: &mut cells,
+                refs: &mut refs,
+            },
+        );
+        let a = PolyType::Generic {
+            is_enum: false,
+            idx: 0,
+            module: 0,
+            args: vec![PolyType::Var(0)],
+            len_args: vec![Len::Concrete(4)],
+            name: "Buffer",
+        };
+        let b = PolyType::Generic {
+            is_enum: false,
+            idx: 0,
+            module: 0,
+            args: vec![PolyType::Var(0)],
+            len_args: vec![Len::Var(0)],
+            name: "Buffer",
+        };
+        // `a`'s concrete length (4) matches `buffer_4`'s actual length, and
+        // `b`'s length variable also matches (it binds anything), so both
+        // are genuine candidates at this call site; `a` must win.
+        assert_eq!(
+            specificity(
+                &a,
+                &b,
+                &[],
+                &[],
+                buffer_4,
+                &arrays,
+                &cells,
+                &refs,
+                Some(&generics)
+            ),
+            Some(Ordering::Less)
+        );
+        assert_eq!(
+            specificity(
+                &b,
+                &a,
+                &[],
+                &[],
+                buffer_4,
+                &arrays,
+                &cells,
+                &refs,
+                Some(&generics)
+            ),
+            Some(Ordering::Greater)
+        );
+    }
+
+    /// R8b: `collect_positions`'s `Generic` arm pushes a `Position` for
+    /// each of a struct pattern's `len_args`. `Buffer['T 'N]` (both type and
+    /// length still variables) flattens to *two* leaves against a bare
+    /// `'T`, not one, once its length position is counted -- without the
+    /// push it would flatten to a single `TyVar` leaf, tying the bare
+    /// variable's own single leaf and yielding `None` (equal, incomparable)
+    /// instead of the correct one-sided verdict below.
+    #[test]
+    fn specificity_bare_var_vs_generic_struct_length_position_depth_mismatch() {
+        let mut generics = GenericTypes::with_bases(0, 0);
+        generics.structs.push(buffer_header());
+        let mut arrays: Vec<ArrayDecl> = Vec::new();
+        let mut cells: Vec<OwnedCellDecl> = Vec::new();
+        let mut refs: Vec<RefDecl> = Vec::new();
+        let buffer_4 = generics.instantiate_struct(
+            0,
+            &[Type::U32],
+            &[Len::Concrete(4)],
+            0,
+            crate::ast::MutRegistries {
+                structs: &[],
+                enums: &[],
+                arrays: &mut arrays,
+                cells: &mut cells,
+                refs: &mut refs,
+            },
+        );
+        let a = PolyType::Var(0);
+        let b = PolyType::Generic {
+            is_enum: false,
+            idx: 0,
+            module: 0,
+            args: vec![PolyType::Var(0)],
+            len_args: vec![Len::Var(0)],
+            name: "Buffer",
+        };
+        // A bare variable is unconditionally less specific than the
+        // structured `Buffer['T 'N]` pattern, which now has *two* leaves
+        // (its type argument and its length argument) once the length
+        // position is counted, forcing the one-sided `BMoreSpecific`
+        // branch in `collect_var_vs_other` rather than a single aligned
+        // pair.
+        assert_eq!(
+            specificity(
+                &a,
+                &b,
+                &[],
+                &[],
+                buffer_4,
+                &arrays,
+                &cells,
+                &refs,
+                Some(&generics)
+            ),
+            Some(Ordering::Greater)
+        );
+        assert_eq!(
+            specificity(
+                &b,
+                &a,
+                &[],
+                &[],
+                buffer_4,
+                &arrays,
+                &cells,
+                &refs,
+                Some(&generics)
+            ),
             Some(Ordering::Less)
         );
     }
