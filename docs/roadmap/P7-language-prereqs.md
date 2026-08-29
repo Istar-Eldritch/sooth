@@ -964,7 +964,7 @@ the kind-annotation syntax `: Len` that **S6a** adds for length parameters, and 
 **P7b** extends to `: * -> *` for higher-kinded type variables. Detail:
 [slice6-spec](./P7/slice6-spec.md).
 
-**P7.S6a -- Length parameters in `type:` headers and the `Kind` type.** `[ planned ]` Sequenced
+**P7.S6a -- Length parameters in `type:` headers and the `Kind` type.** `[ done ]` Sequenced
 after S6 (which lands the bracket binding site), this subslice makes a user-defined type
 carry a length parameter — opening the `Len::Var` door that the N3 comment at
 `src/ast.rs:805` has held shut since Phase 5. A length variable `'N` is not a type: it is a
