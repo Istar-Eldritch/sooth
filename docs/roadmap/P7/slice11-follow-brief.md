@@ -249,3 +249,75 @@ yet prototyped. This remains a design-discovery slice, not a spec-ready single f
 shape of (iv)'s fix (how far the mint propagates, and whether it needs the same mid-walk-
 extensible registry plumbing as (ii) or something narrower) is the open structural question,
 not spec-level detail.
+
+## Gate (iv) prototyped end-to-end: all four goldens pass, two open items found (2026-08-29)
+
+A second discovery pass, in a fresh isolated worktree, rebuilt (i)-(iii) and added a
+broader gate (iv): the `enum_decl_or_generic`/`struct_decl_or_generic` fallback (a live-cell
+read when the id falls past the flushed `structs`/`enums` slice) was wired not just into the
+id-indexed body-walk ops but into every remaining id-indexed lookup that touches a
+check-time-only monomorph outside the splice -- `variant_type`'s call in the per-arm
+expected-input-type computation (`src/check.rs:2454`) and `check_eliminator_call`'s own
+`gate_decl`/`enum_decl` reads (`src/check.rs:2285`, `:2353`, `:2363`). A real (unrelated)
+Rust borrow-check obstacle surfaced and was resolved along the way: `chosen` (an `&Overload`
+borrowed from `env`) had to be cloned to an owned value before a later mutable borrow of
+`poly` in the same expression, since `Overload` already derives `Clone`.
+
+**Result: all four goldens (6, 6b, 9, 10) pass, exit 0, no reverts needed to get there.**
+This is strictly stronger than the first gate-(iv) probe (which only got golden 6 to progress
+past the constructor gate before failing at the accessor) -- the broader fallback wiring
+closes gate (iv) for the combinator/`inline`-splice shape this slice targets.
+
+### Two items surfaced by running the full existing suite against the prototype (not just the four target goldens)
+
+**1. Three `phase7_slice11.rs` goldens flip from reject to accept -- expected, not a
+regression.** `a_check_time_monomorphs_constructors_are_absent_from_the_call_site_env`
+(golden 6's own test), its struct twin `a_check_time_struct_monomorphs_constructor_is_
+absent_from_the_call_site_env` (golden 10), and `a_standalone_mint_after_an_earlier_
+check_time_mint_lands_at_the_right_id` (golden 9) all assert `unknown word .. in main` and
+say so explicitly in their own doc comments: golden 6's reads "pins the out-of-scope
+frozen-env gap so it cannot regress silently or be quietly claimed as fixed." These three
+fixtures exist specifically to pin *this* bug as current behavior pending this slice's fix --
+once gates (i)-(iv) land, all three build and run to exit 0 instead of erroring, which is
+the fix working, not a regression. The spec must include migrating these three fixtures
+(flip the assertion from `build_error` to `build_and_run`/exit-0, update their doc comments
+to describe the now-fixed behavior) alongside the implementation -- the same test-migration
+discipline as any other bug-pinning golden being retired by the fix it pins.
+
+**2. `phase7_slice12.rs`'s `concrete_body_generic_eliminator_message_does_not_fabricate_an_
+instantiation` regresses for real -- gate (iii)'s fallback is too permissive.** This fixture
+is a genuinely-ungrounded case with a different shape from golden 6: `wrap` is an ordinary
+*non-inline* poly word (`: wrap ( 'T -- Pair['T] ) One ;`), not a combinator, so no splice
+ever runs and gate (i)'s output-grounding fix never fires -- `Pair[f64]` is never minted or
+registered anywhere in this program. Before the prototype, this correctly produced the
+honest "`Pair?` names the generic enum `Pair`, but a concrete body cannot eliminate it
+while it is ungrounded" diagnostic. With gate (iii)'s `scrutinee_enum_id_of_family`
+fallback wired in, it instead produces `unknown word Ok>`/`One>` in `main` -- a confusing
+later failure, not the honest one.
+
+Mechanism: `scrutinee_enum_id_of_family` only checks that the scrutinee's *static* type is
+already a concrete `Type::Enum(id, name)` matching the right family -- it does not check
+that any monomorph was actually *minted* (registered into `structs`/`enums`/`env`) anywhere.
+A poly call's own unification can leave a concrete-looking `Type::Enum` on the stack purely
+from substituting `'T = f64` into the *type*, independent of whether anything ever grounded
+that instantiation's constructors/accessors. Gate (iii) as prototyped conflates "the
+scrutinee's type looks concrete" with "this instantiation was actually grounded somewhere" --
+only gate (i)'s splice-site grounding guarantees the latter, and it never runs for this
+fixture's shape (no combinator, no splice). The fallback needs an actual-mint check (e.g.
+confirm `id` resolves to a real decl via `enum_decl_or_generic`, not just that the stack
+type's tag matches), not just a type-shape match, so a genuinely-ungrounded non-combinator
+call keeps getting the honest ungrounded diagnostic instead of falling through to a
+confusing accessor-not-found error two terms later.
+
+### Updated verdict, second pass
+
+Gates (i)-(iv), taken together with the broader fallback wiring, make all four target
+goldens build and run correctly with no revert needed -- confirming the four-gate model
+is complete for the shape P7.S11-follow targets (a combinator/`inline`-splice constructing
+and/or eliminating a generic type with no parse-time sibling monomorph). Two items remain
+for the spec, both tractable and now precisely characterized rather than open-ended:
+(a) migrate three `phase7_slice11.rs` goldens whose whole purpose was pinning this bug, and
+(b) tighten gate (iii)'s scrutinee fallback to require an actual mint, not just a matching
+static type, so the pre-existing `phase7_slice12.rs` honest-ungrounded diagnostic does not
+regress for the non-combinator case. Neither is a structural unknown; both are spec-level
+requirements. **Ready to spec: yes.**
