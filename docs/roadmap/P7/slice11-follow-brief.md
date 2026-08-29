@@ -163,13 +163,13 @@ the `map`/`wrap` shape build end to end needs all three of:
   because enum `drop` doesn't index the *struct* table; that is why the panic hid.)
 - **(iii) Eliminator grounding for a check-time-only monomorph.** Past gate (i), golden 6
   (enum + `Result?`) fails at a *later* gate:
-  `a concrete body cannot eliminate `Result` while it is ungrounded`. The "eliminator
+  `a concrete body cannot eliminate it while it is ungrounded (Result)`. The "eliminator
   registry needs no change" conclusion below is **wrong**: its probe used golden 9's
   parse-time-sibling workaround (`: mki ( i64 -- Result[i64 i64] ) Ok ;`), which seeds a real
   `module.enums` monomorph and masks this gate. Without a parse-time sibling — the exact case
   this slice targets — the eliminator gate fires.
 
-### Verdict
+### Verdict (partially superseded — see gate (iv) addendum below)
 
 This is a **multi-gate architectural slice** (splice-site constructor grounding +
 mid-walk-extensible decl registries + eliminator grounding for a check-time-only monomorph),
@@ -196,3 +196,56 @@ regression fixtures — no new fixture needs writing to prove the bug exists, an
 single fix, not two. The only remaining decision (exactly where in the per-word loop the
 re-projection runs, and how the pre-flush lengths are captured) is spec-level detail, not a
 structural unknown.
+
+## Gates (i)-(iii) validated fixed by prototype; a fourth gate found (2026-08-29)
+
+A follow-on discovery pass built a prototype combining (i) splice-site output grounding in
+`inline_combinator` plus a `struct_decl`/`struct_decl_or_generic` fallback (S11's existing
+`enum_decl` shape, twinned for structs) threaded into the body-walk's id-indexed lookups --
+gate (ii)'s fix. Measured against all four goldens (reverted afterward, nothing landed):
+
+- **Golden 10** (struct + `drop`): now **passes**, exit 0. Previously panicked
+  (`ctx.structs()[id.index()]`, out of bounds) -- confirms gate (ii)'s fix shape is
+  sufficient on its own, no further registry plumbing needed for the struct/drop/layout
+  path.
+- **Golden 9** (parse-time sibling) and **golden 6b** (enum + `drop`, no eliminator): stay
+  green, no regression.
+- **Golden 6** (enum + `Result?` eliminator): progresses past gate (iii) -- with
+  `scrutinee_enum_id_of_family` added (read the concrete `Type::Enum` id straight off the
+  live stack slot when the registry only has a `Generic` entry, rather than trusting the
+  frozen pre-loop registry classification) the "ungrounded scrutinee" error **disappears**,
+  confirming gate (iii)'s fix shape too. But it now fails at a **new, later** error: unknown
+  word `Ok>` in `main`.
+
+### (iv) The eliminator's own arm bodies are checked outside the splice, against the enclosing word's env -- which the splice-local fix never touches
+
+`~[ ( Ok ) Ok> . ]` is not part of `wrap`'s spliced body; it is written in `main`, directly
+adjacent to the `wrap`/`Result?` call, and is checked as part of *`main`'s own* body walk
+using *`main`'s own* `env`/`structs`/`enums` -- the ones `check_word`'s outer loop threads
+in, not the splice-local clone `inline_combinator` built for grounding `wrap`'s callee body.
+Gate (i)'s fix mints `Result[i64 i64]`'s accessor (`Ok>`) sigs only into that splice-local
+clone, which is dropped the moment `inline_combinator` returns -- so by the time `main`'s
+walk reaches the arm quotation a few terms later, the accessor is gone again. This is not a
+fifth independent bug; it is the direct consequence of scoping gate (i)'s fix to the splice:
+**the mint has to escape back into the enclosing word's own live `env`/`structs`/`enums` for
+the remainder of that word's walk**, not just live inside the splice that triggered it. That
+is functionally the original "extend `env` after a mint" idea from the first (retracted)
+version of this brief -- but triggered by a splice-site grounding mid-word, not a per-word
+end-of-loop flush, and it still needs gate (ii)'s mid-walk-extensible registries so *later*
+terms in the same word (the arm bodies) can resolve both the accessor call and any
+id-indexed operation (drop/layout) against the now-larger `structs`/`enums`.
+
+### Updated verdict
+
+Four entangled gates, not three: (i) splice-site output grounding, (ii) mid-walk-extensible
+`structs`/`enums` for id-indexed body ops, (iii) eliminator scrutinee grounding from the live
+stack type rather than the frozen registry, and (iv) propagating (i)'s mint out of the
+splice into the enclosing word's own `env`/`structs`/`enums` so later terms in *that* word
+(typically the eliminator's own arm bodies, always written adjacent to the call rather than
+inside the combinator) see it too. (i)-(iii) are each independently prototyped and confirmed
+to fix their own symptom with no regression on the other three goldens; (iv) is diagnosed
+with a concrete line (arm body fails at the accessor lookup, not the constructor) but not
+yet prototyped. This remains a design-discovery slice, not a spec-ready single fix -- the
+shape of (iv)'s fix (how far the mint propagates, and whether it needs the same mid-walk-
+extensible registry plumbing as (ii) or something narrower) is the open structural question,
+not spec-level detail.
