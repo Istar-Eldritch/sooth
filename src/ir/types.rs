@@ -399,7 +399,7 @@ pub enum Instr {
     ConstF(Value, f64),
     Bin(Value, BinOp, Value, Value),
     Cmp(Value, CmpOp, Value, Value),
-    Call(Option<Value>, String, Vec<Value>),
+    Call(Option<Value>, String, Vec<Value>, CallKind),
     /// Slice 7a (R4/Q3): the address of a (materialized) function symbol as an
     /// `IrType::Code` value (a distinct opaque handle, not `Ptr`). Emitted at
     /// a materialization boundary to fill a quotation's `code` slot; realized
@@ -517,6 +517,17 @@ pub enum Terminator {
     Jmp(BlockId),
 }
 
+/// What kind of function a call site's callee is. A fact about the callee,
+/// not about registers or targets: the backend picks the spelling from it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallKind {
+    /// A Sooth word, or a compiler-emitted call to a runtime helper whose C
+    /// prototype the compiler itself wrote.
+    Word,
+    /// A C function reached through an `extern:` declaration.
+    Extern,
+}
+
 /// Declared signature of a user word or `extern:` declaration. The build path
 /// derives this from declared slot types. A `None` `ret_ty` (e.g. a word with
 /// no output) is treated as `IrType::Int` by callers.
@@ -531,6 +542,15 @@ pub struct Arity {
     /// holds about its callee, so the shape has to travel here rather than be
     /// re-read from the callee's `WordDef` (which lowering never has).
     pub quot_inputs: Vec<(usize, IrType)>,
+    /// `Extern` for an `extern:` declaration (R14). A Sooth extern names a
+    /// fixed input row and so cannot say where the C prototype's `...` begins;
+    /// the backend spells the call in whatever form applies its target's
+    /// variadic-argument convention (on amd64_sysv, a leading `...` makes QBE
+    /// count FP arguments and emit the `%al` setup a variadic callee needs in
+    /// order to spill them — ABI mechanics live at the emit site, not here).
+    /// Without it an `f64` argument reaches the callee as whatever the
+    /// register save area happened to hold.
+    pub callee: CallKind,
 }
 
 /// The ordinary `[ ... ]` quotation slots of a declared input row, as

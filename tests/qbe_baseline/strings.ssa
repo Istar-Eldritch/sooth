@@ -18,10 +18,10 @@ export function $sooth_main() {
 	%v1 =l loadl %straddr0
 	call $printf(l $ufmt, l %v1, ...)
 	%v2 =l loadl %v0
-	%v3 =l call $strlen(l %v2)
+	%v3 =l call $strlen(..., l %v2)
 	call $printf(l $ufmt, l %v3, ...)
 	%v4 =l loadl %v0
-	%v5 =l call $puts(l %v4)
+	%v5 =l call $puts(..., l %v4)
 	ret
 }
 

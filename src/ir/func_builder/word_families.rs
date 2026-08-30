@@ -737,6 +737,7 @@ impl<'a> FuncBuilder<'a> {
             None,
             FREE_SYMBOL.to_string(),
             vec![cell_ptr, size_v],
+            CallKind::Word,
         ));
         next
     }
@@ -882,6 +883,7 @@ impl<'a> FuncBuilder<'a> {
                     Some(ptr),
                     ALLOC_SYMBOL.to_string(),
                     vec![size_v],
+                    CallKind::Word,
                 ));
                 self.store_owned_payload(ptr, payload_val, payload_ty);
                 self.stack.push(ptr);
@@ -901,6 +903,7 @@ impl<'a> FuncBuilder<'a> {
                     None,
                     FREE_SYMBOL.to_string(),
                     vec![cell, size_v],
+                    CallKind::Word,
                 ));
                 self.stack.push(val);
             }
@@ -951,6 +954,7 @@ impl<'a> FuncBuilder<'a> {
             None,
             OOB_TRAP_SYMBOL.to_string(),
             vec![line_v, index, len_v],
+            CallKind::Word,
         ));
         self.seal_block(Terminator::Jmp(ok));
 
@@ -977,6 +981,7 @@ impl<'a> FuncBuilder<'a> {
             None,
             OOB_TRAP_SYMBOL.to_string(),
             vec![line_v, index, len],
+            CallKind::Word,
         ));
         self.seal_block(Terminator::Jmp(ok));
 
@@ -1010,6 +1015,7 @@ impl<'a> FuncBuilder<'a> {
             None,
             SUBSLICE_TRAP_SYMBOL.to_string(),
             vec![line_v, start, len, view_len],
+            CallKind::Word,
         ));
         self.seal_block(Terminator::Jmp(ok));
 
@@ -1547,7 +1553,7 @@ mod tests {
         assert_eq!(
             count(
                 w,
-                |i| matches!(i, Instr::Call(None, sym, _) if sym == OOB_TRAP_SYMBOL)
+                |i| matches!(i, Instr::Call(None, sym, _, _) if sym == OOB_TRAP_SYMBOL)
             ),
             1
         );
@@ -1566,7 +1572,7 @@ mod tests {
         assert_eq!(
             count(
                 w,
-                |i| matches!(i, Instr::Call(None, sym, _) if sym == OOB_TRAP_SYMBOL)
+                |i| matches!(i, Instr::Call(None, sym, _, _) if sym == OOB_TRAP_SYMBOL)
             ),
             0
         );
@@ -1597,7 +1603,7 @@ mod tests {
             .expect("a FieldLoad");
         let free_at = is
             .iter()
-            .position(|i| matches!(i, Instr::Call(None, sym, _) if sym == FREE_SYMBOL))
+            .position(|i| matches!(i, Instr::Call(None, sym, _, _) if sym == FREE_SYMBOL))
             .expect("a free call");
         assert!(
             load_at < free_at,
@@ -1618,7 +1624,7 @@ mod tests {
             .expect("a Blit");
         let free_at = is
             .iter()
-            .position(|i| matches!(i, Instr::Call(None, sym, _) if sym == FREE_SYMBOL))
+            .position(|i| matches!(i, Instr::Call(None, sym, _, _) if sym == FREE_SYMBOL))
             .expect("a free call");
         assert!(
             blit_at < free_at,

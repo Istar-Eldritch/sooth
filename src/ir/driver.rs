@@ -151,6 +151,7 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
                     out_arity: w.effect.outputs.len(),
                     ret_ty,
                     quot_inputs: quot_input_slots(w.effect.inputs.iter().map(|s| s.ty)),
+                    callee: CallKind::Word,
                 },
             )
         })
@@ -169,6 +170,7 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
                 out_arity: decl.effect.outputs.len(),
                 ret_ty,
                 quot_inputs: quot_input_slots(decl.effect.inputs.iter().map(|s| s.ty)),
+                callee: CallKind::Extern,
             },
         );
         extern_symbols.insert(decl.name.clone(), decl.symbol.clone());
@@ -306,6 +308,7 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
                 out_arity: effect.outputs.len(),
                 ret_ty,
                 quot_inputs: quot_input_slots(effect.inputs.iter().map(|s| s.ty)),
+                callee: CallKind::Word,
             },
         );
     }
@@ -922,7 +925,7 @@ mod tests {
                 .iter()
                 .flat_map(|b| &b.instrs)
                 .filter_map(|i| match i {
-                    Instr::Call(_, sym, _) => Some(sym.as_str()),
+                    Instr::Call(_, sym, _, _) => Some(sym.as_str()),
                     _ => None,
                 })
                 .collect();
@@ -1000,7 +1003,7 @@ mod tests {
                 .iter()
                 .flat_map(|b| &b.instrs)
                 .filter_map(|i| match i {
-                    Instr::Call(_, sym, _) => Some(sym.as_str()),
+                    Instr::Call(_, sym, _, _) => Some(sym.as_str()),
                     _ => None,
                 })
                 .collect();
@@ -1045,7 +1048,7 @@ mod tests {
                 .blocks
                 .iter()
                 .flat_map(|b| &b.instrs)
-                .filter(|i| matches!(i, Instr::Call(_, sym, _) if *sym == f.name))
+                .filter(|i| matches!(i, Instr::Call(_, sym, _, _) if *sym == f.name))
                 .count();
             assert_eq!(
                 self_calls, 1,
@@ -1087,7 +1090,7 @@ mod tests {
             .iter()
             .flat_map(|b| &b.instrs)
             .filter_map(|i| match i {
-                Instr::Call(_, sym, _) => Some(sym.as_str()),
+                Instr::Call(_, sym, _, _) => Some(sym.as_str()),
                 _ => None,
             })
             .collect();

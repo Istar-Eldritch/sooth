@@ -46,7 +46,7 @@ pub(super) fn call_symbols(func: &IrFunc) -> Vec<&str> {
     instrs(func)
         .iter()
         .filter_map(|i| match i {
-            Instr::Call(_, sym, _) => Some(sym.as_str()),
+            Instr::Call(_, sym, _, _) => Some(sym.as_str()),
             // Slice 7a (R13a): an indirect call carries no symbol, so it
             // is reported with a sentinel. Widened *before* any lowering
             // can emit `CallIndirect`, so the combinator-splice units

@@ -40,7 +40,7 @@ fn instrs(f: &IrFunc) -> Vec<&Instr> {
 fn self_calls(f: &IrFunc) -> usize {
     instrs(f)
         .iter()
-        .filter(|i| matches!(i, Instr::Call(_, sym, _) if *sym == f.name))
+        .filter(|i| matches!(i, Instr::Call(_, sym, _, _) if *sym == f.name))
         .count()
 }
 

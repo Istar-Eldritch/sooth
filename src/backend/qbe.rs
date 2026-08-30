@@ -7,9 +7,9 @@
 use std::fmt::Write;
 
 use crate::ir::{
-    ArrayLayout, BinOp, BlockId, CmpOp, EnumLayout, Instr, IrFunc, IrModule, IrType, QuotSigId,
-    QuotSigLayout, StaticData, StaticValue, StructLayout, Terminator, Value, ALLOC_SYMBOL,
-    FREE_SYMBOL, OOB_TRAP_SYMBOL, SUBSLICE_TRAP_SYMBOL, TRACE_ALLOC_ENV, WORD_WIDTH,
+    ArrayLayout, BinOp, BlockId, CallKind, CmpOp, EnumLayout, Instr, IrFunc, IrModule, IrType,
+    QuotSigId, QuotSigLayout, StaticData, StaticValue, StructLayout, Terminator, Value,
+    ALLOC_SYMBOL, FREE_SYMBOL, OOB_TRAP_SYMBOL, SUBSLICE_TRAP_SYMBOL, TRACE_ALLOC_ENV, WORD_WIDTH,
 };
 
 /// Reached only from the allocator shim's NULL branch, so unlike
@@ -1159,11 +1159,11 @@ fn emit_instr(
             };
             writeln!(out, "\t{} ={w} {m}{ow} {}, {}", val(*v), val(*a), val(*b))
         }
-        Instr::Call(ret, f, args) => {
+        Instr::Call(ret, f, args, callee) => {
             // A struct argument/return is spelled `:S` so QBE applies its
             // by-value C-ABI classification; the temporary is a pointer to
             // the aggregate on both sides.
-            let a: Vec<String> = args
+            let mut a: Vec<String> = args
                 .iter()
                 .map(|x| {
                     format!(
@@ -1173,6 +1173,23 @@ fn emit_instr(
                     )
                 })
                 .collect();
+            // R14: an `extern:` callee's C prototype may be variadic, and a
+            // Sooth extern declaration cannot say where the `...` begins, so
+            // every argument is spelled variadic (the marker is positional and
+            // leads the row). That is what makes QBE count the call's FP
+            // arguments into `%al`, which a variadic C callee reads to decide
+            // whether to spill the xmm registers its `va_arg` then reads back:
+            // under the fixed spelling an `f64` argument arrives as whatever
+            // the register save area happened to hold. A non-variadic callee
+            // ignores `%al`, so the spelling is safe for every extern.
+            //
+            // Compiler-defined calls stay fully fixed. Do not widen the marker
+            // to them: the `Instr::Print` note below is the caveat, and a
+            // trailing/leading marker only starts to matter on a target whose
+            // ABI passes variadic arguments differently (`arm64_apple`).
+            if *callee == CallKind::Extern {
+                a.insert(0, "...".to_string());
+            }
             match ret {
                 Some(r) => {
                     let w = qbe_abi_ty(ty_of(value_types, *r), layouts);
@@ -1243,6 +1260,14 @@ fn emit_instr(
         // calls left the value in a register. Fix the marker position before
         // adding target selection. Same shape in `sooth_oom_trap`'s `dprintf`
         // and `sooth_trace_event`'s `printf`.
+        //
+        // User externs (R14) carry the OPPOSITE hazard on that target, and a
+        // bigger one: their leading `...` makes QBE spill EVERY argument to the
+        // stack, so a non-variadic callee (`strlen`, `write`, `open`, `close`,
+        // `read`, `puts`) would read garbage. Target selection therefore needs
+        // both fixes: trailing `...` only where the C prototype is actually
+        // variadic -- which Sooth's extern syntax cannot express today -- and
+        // the fixed spelling for the rest. See `CallKind` in `src/ir/types.rs`.
         Instr::Print(v) => match ty_of(value_types, *v) {
             // A float always prints as a `d`: an `f32` widens first (`exts`)
             // since a variadic C call needs the explicit promotion QBE never
@@ -3102,5 +3127,32 @@ type: Counter n i64 ;
             il.contains("call %v1(:Q0 %v0)"),
             "the call goes through the value with a `:Q` aggregate arg: {il}"
         );
+    }
+
+    #[test]
+    fn emit_extern_call_with_f64_arg_is_all_args_variadic() {
+        // R14: a Sooth `extern:` names a fixed input row, so it cannot say
+        // where the C prototype's `...` begins. The backend spells extern
+        // calls with the marker leading the row, which is what makes QBE emit
+        // the `%al` setup a variadic C callee reads before spilling the xmm
+        // registers its `va_arg` then reads back; under the fixed spelling the
+        // `d` argument reaches the callee as whatever the register save area
+        // held. A user-word call keeps the fully-fixed spelling (the
+        // `arm64_apple` caveat on `Instr::Print` above applies to those).
+        let il = emit_src(
+            r#"extern: g-fmt ( cstr f64 -- i32 ) "snprintf" ;
+            : twice ( i64 -- i64 ) | n | n n add ;
+            : main ( -- ) "%g" cstr 2.5 g-fmt drop 3 twice drop ;"#,
+        );
+        let call = il
+            .lines()
+            .find(|l| l.contains("$snprintf"))
+            .expect("the extern call is emitted");
+        assert_eq!(call.trim(), "%v3 =w call $snprintf(..., l %v1, d %v2)");
+        let user = il
+            .lines()
+            .find(|l| l.contains("call $twice"))
+            .expect("the user-word call is emitted");
+        assert_eq!(user.trim(), "%v5 =l call $twice(l %v4)");
     }
 }

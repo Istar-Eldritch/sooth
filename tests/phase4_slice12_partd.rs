@@ -69,7 +69,7 @@ fn apply_call_argument_is_a_materialized_quotation() {
         .iter()
         .flat_map(|b| b.instrs.iter())
         .find_map(|i| match i {
-            Instr::Call(_, sym, args) if sym == "apply" => Some(args),
+            Instr::Call(_, sym, args, _) if sym == "apply" => Some(args),
             _ => None,
         })
         .expect("`main` calls `apply` for real: the splice is retired");

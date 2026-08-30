@@ -139,6 +139,7 @@ impl<'a> FuncBuilder<'a> {
             Some(block),
             ALLOC_SYMBOL.to_string(),
             vec![size_v],
+            CallKind::Word,
         ));
         for ((_, value), offset) in captures.iter().zip(&offsets) {
             let slot = self.field_ptr(block, *offset);
@@ -398,19 +399,19 @@ impl<'a> FuncBuilder<'a> {
             // first.
             IrType::OwnedCell(id) => {
                 let symbol = cell_drop_symbol(id);
-                self.push_instr(Instr::Call(None, symbol, vec![v]));
+                self.push_instr(Instr::Call(None, symbol, vec![v], CallKind::Word));
             }
             IrType::Struct(id) if self.structs.layouts[id.index()].is_linear => {
                 let symbol = struct_drop_symbol(id);
-                self.push_instr(Instr::Call(None, symbol, vec![v]));
+                self.push_instr(Instr::Call(None, symbol, vec![v], CallKind::Word));
             }
             IrType::Enum(id) if self.enums.layouts[id.index()].is_linear => {
                 let symbol = enum_drop_symbol(id);
-                self.push_instr(Instr::Call(None, symbol, vec![v]));
+                self.push_instr(Instr::Call(None, symbol, vec![v], CallKind::Word));
             }
             IrType::Array(id) if self.arrays.layouts[id.index()].is_linear => {
                 let symbol = array_drop_symbol(id);
-                self.push_instr(Instr::Call(None, symbol, vec![v]));
+                self.push_instr(Instr::Call(None, symbol, vec![v], CallKind::Word));
             }
             // P7.S3v (R3): dropping an owning closure runs its per-
             // construction-site disposer (R2) on its env block -- disposing
@@ -501,7 +502,7 @@ impl<'a> FuncBuilder<'a> {
         } else {
             None
         };
-        self.push_instr(Instr::Call(ret, inst.symbol.clone(), args));
+        self.push_instr(Instr::Call(ret, inst.symbol.clone(), args, CallKind::Word));
         if let Some(v) = ret {
             self.stack.push(v);
         }
@@ -976,7 +977,7 @@ mod tests {
         assert_eq!(
             count(
                 w,
-                |i| matches!(i, Instr::Call(_, sym, _) if sym != &spy_drop)
+                |i| matches!(i, Instr::Call(_, sym, _, _) if sym != &spy_drop)
             ),
             0,
             "the constructor emits no call: {is:?}"
@@ -996,7 +997,7 @@ mod tests {
         let calls: Vec<&String> = instrs(w)
             .iter()
             .filter_map(|i| match i {
-                Instr::Call(None, sym, args) if args.len() == 1 => Some(sym),
+                Instr::Call(None, sym, args, _) if args.len() == 1 => Some(sym),
                 _ => None,
             })
             .collect();

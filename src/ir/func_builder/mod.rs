@@ -861,6 +861,7 @@ fn bind_owning_env(b: &mut FuncBuilder, caps: &[EnvCapture], env: Value) {
             None,
             FREE_SYMBOL.to_string(),
             vec![env, size_v],
+            CallKind::Word,
         ));
     }
 }
@@ -911,6 +912,7 @@ fn synthesize_owning_disposer(
         None,
         FREE_SYMBOL.to_string(),
         vec![block, size_v],
+        CallKind::Word,
     ));
     b.seal_block(Terminator::Ret(None));
     IrFunc {
@@ -1002,6 +1004,7 @@ pub(super) fn lower_word_parts(
                 out_arity: effect.outputs.len(),
                 ret_ty: ret,
                 quot_inputs: quot_input_slots(effect.inputs.iter().map(|s| s.ty)),
+                callee: CallKind::Word,
             },
         )
     });

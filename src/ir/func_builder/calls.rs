@@ -284,12 +284,12 @@ impl<'a> FuncBuilder<'a> {
             self.locals.truncate(locals_depth);
             return Ok(());
         }
-        let (in_arity, out_arity, ret_ty) = {
+        let (in_arity, out_arity, ret_ty, callee) = {
             let a = self
                 .env
                 .get(sym_name)
                 .expect("checked resolved call exists");
-            (a.in_arity, a.out_arity, a.ret_ty)
+            (a.in_arity, a.out_arity, a.ret_ty, a.callee)
         };
         let split = self.stack.len() - in_arity;
         let args = self.stack.split_off(split);
@@ -303,7 +303,7 @@ impl<'a> FuncBuilder<'a> {
             None
         };
         let sym = (self.resolve)(sym_name);
-        self.push_instr(Instr::Call(ret, sym, args));
+        self.push_instr(Instr::Call(ret, sym, args, callee));
         if let Some(v) = ret {
             self.stack.push(v);
         }
@@ -914,7 +914,7 @@ impl<'a> FuncBuilder<'a> {
         } else {
             None
         };
-        self.push_instr(Instr::Call(ret, symbol, args));
+        self.push_instr(Instr::Call(ret, symbol, args, arity.callee));
         if let Some(v) = ret {
             self.stack.push(v);
         }

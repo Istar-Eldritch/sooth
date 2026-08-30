@@ -468,6 +468,7 @@ fn synthesize_cell_destructor(
         None,
         FREE_SYMBOL.to_string(),
         vec![param, size_v],
+        CallKind::Word,
     ));
     if let Some(payload) = payload {
         b.emit_drop(payload);
@@ -708,7 +709,7 @@ mod tests {
         let calls: Vec<&String> = instrs(w)
             .iter()
             .filter_map(|i| match i {
-                Instr::Call(None, sym, args) if args.len() == 1 => Some(sym),
+                Instr::Call(None, sym, args, _) if args.len() == 1 => Some(sym),
                 _ => None,
             })
             .collect();
@@ -731,7 +732,7 @@ mod tests {
         let calls: Vec<&String> = instrs(dtor)
             .iter()
             .filter_map(|i| match i {
-                Instr::Call(None, sym, _) => Some(sym),
+                Instr::Call(None, sym, _, _) => Some(sym),
                 _ => None,
             })
             .collect();
@@ -753,7 +754,7 @@ mod tests {
         let calls: Vec<&String> = instrs(dtor)
             .iter()
             .filter_map(|i| match i {
-                Instr::Call(None, sym, _) => Some(sym),
+                Instr::Call(None, sym, _, _) => Some(sym),
                 _ => None,
             })
             .collect();
@@ -788,7 +789,7 @@ mod tests {
             .iter()
             .enumerate()
             .filter_map(|(at, i)| match i {
-                Instr::Call(None, sym, _) => Some((at, sym)),
+                Instr::Call(None, sym, _, _) => Some((at, sym)),
                 _ => None,
             })
             .collect();
@@ -833,7 +834,7 @@ mod tests {
         let calls: Vec<&String> = instrs(dtor)
             .iter()
             .filter_map(|i| match i {
-                Instr::Call(None, sym, _) => Some(sym),
+                Instr::Call(None, sym, _, _) => Some(sym),
                 _ => None,
             })
             .collect();
@@ -860,7 +861,7 @@ mod tests {
         let calls: Vec<&String> = instrs(dtor)
             .iter()
             .filter_map(|i| match i {
-                Instr::Call(None, sym, _) => Some(sym),
+                Instr::Call(None, sym, _, _) => Some(sym),
                 _ => None,
             })
             .collect();
@@ -1219,7 +1220,7 @@ mod tests {
         let calls: Vec<&String> = instrs(w)
             .iter()
             .filter_map(|i| match i {
-                Instr::Call(None, sym, args) if args.len() == 1 => Some(sym),
+                Instr::Call(None, sym, args, _) if args.len() == 1 => Some(sym),
                 _ => None,
             })
             .collect();
@@ -1246,7 +1247,7 @@ mod tests {
         let calls: Vec<&String> = instrs(dtor)
             .iter()
             .filter_map(|i| match i {
-                Instr::Call(None, sym, _) => Some(sym),
+                Instr::Call(None, sym, _, _) => Some(sym),
                 _ => None,
             })
             .collect();
@@ -1282,7 +1283,7 @@ mod tests {
         let spy_drop = struct_drop_symbol(StructId::from_index(0));
         let drop_calls = count(
             dtor,
-            |i| matches!(i, Instr::Call(None, sym, _) if sym == &spy_drop),
+            |i| matches!(i, Instr::Call(None, sym, _, _) if sym == &spy_drop),
         );
         assert_eq!(drop_calls, 1, "one drop call in the loop body, not N");
     }
@@ -1345,7 +1346,7 @@ mod tests {
         let calls: Vec<&String> = instrs(dtor)
             .iter()
             .filter_map(|i| match i {
-                Instr::Call(None, sym, _) => Some(sym),
+                Instr::Call(None, sym, _, _) => Some(sym),
                 _ => None,
             })
             .collect();
