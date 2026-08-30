@@ -1077,14 +1077,12 @@ Sequenced so nothing but the last subslice touches the compiler:
   dogfooded against `bool`/`cmp`/`option`/`result`/`combinators`. Detail:
   [slice7b-testing-brief](./P7/slice7b-testing-brief.md),
   [slice7b-spec](./P7/slice7b-spec.md).
-- **S7c** -- `core::show`'s `Write`/`Show` trait pair (sink-generic via a fixed in-memory
-  render buffer, after the probe round ruled out the two-trait-variable and `str`-chunk
-  shapes; by-value receivers, `write(2)`-bound sink), with `hosted::libc` supplying the
-  `Stdout` sink. Brief probe-verified 260829 with three design blockers found and revised
-  rulings in place; decisions D1-D3 settled (pure-Sooth restoring division; whole-buffer
-  flush; `Show for str` descoped to a `cstr` path in S7d). Spec ready for implementation:
-  [slice7c-spec](./P7/slice7c-spec.md); detail:
-  [slice7c-show-brief](./P7/slice7c-show-brief.md),
+- **S7c** `[ done ]` -- `core::show`'s `Write`/`Show` trait pair (sink-generic via a fixed
+  in-memory render buffer, after the probe round ruled out the two-trait-variable and
+  `str`-chunk shapes; by-value receivers, `write(2)`-bound sink), with `hosted::libc`
+  supplying the `Stdout` sink. Decisions D1-D3 settled (pure-Sooth restoring division;
+  whole-buffer flush; `Show for str` descoped to a `cstr` path in S7d). Detail:
+  [slice7c-spec](./P7/slice7c-spec.md), [slice7c-show-brief](./P7/slice7c-show-brief.md),
   [slice7c-probes](./P7/slice7c-probes.md).
 - **S7d** -- retires the compiler-intrinsic `.` in favor of an ordinary `hosted::show` word
   over S7c's traits; every printing program migrates to an explicit `depends: hosted`/

@@ -9,9 +9,9 @@ Design phase complete (DESIGN.md, Decided section). Backend: **QBE**. Phases 0-6
 complete and merged to `main` — see each phase file's own header for its exit criteria
 and dogfood (Phase 6's S5, nested tag paths, is deferred by design, not owed).
 **Phase 7 (language prerequisites for the stdlib) is in progress**: every slice is done
-and merged except **S7c** (the `Show`/`Write` printing pair — brief probe-verified,
-decisions settled, spec ready for implementation) and **S7d** (retiring the intrinsic
-`.`); 3u (trait objects) is parked for want of a consumer; see
+and merged except **S7d** (retiring the intrinsic `.`, next up now that S7c's
+`Show`/`Write` printing pair has landed); 3u (trait objects) is parked for want of a
+consumer; see
 [P7](./P7-language-prereqs.md) for the full slice breakdown. Per-phase completion history
 (what shipped in which slice,
 defects found and fixed in review) lives in each phase's own file and its
@@ -49,7 +49,7 @@ lines. Each phase file is self-contained: exit criteria, dogfood, slice breakdow
 | **P4** | [Minimal polymorphism + quotations](./P4-polymorphism-quotations.md) | `[L]`  ✅ done |
 | **P5** | [Errors as values](./P5-errors-as-values.md) | `[S]`  ✅ done |
 | **P6** | [Term-level enum elimination](./P6-enum-elimination.md) | `[L]`  ✅ done (S5 deferred by design) |
-| **P7** | [Language prerequisites for the stdlib](./P7-language-prereqs.md) | `[L]` — in progress (S7c spec ready, S7d next; S3u parked) |
+| **P7** | [Language prerequisites for the stdlib](./P7-language-prereqs.md) | `[L]` — in progress (S7d next; S3u parked) |
 | **P7b** | [Higher-kinded types](./P7b-higher-kinded-types.md) | `[L]` — type-class abstraction over type constructors |
 | **P8** | [Packages and modules](./P8-packages-modules.md) | `[L]` |
 | **P9** | [The stdlib layers](./P9-stdlib-layers.md) | `[L]` |
