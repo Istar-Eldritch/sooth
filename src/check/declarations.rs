@@ -681,6 +681,14 @@ fn collect_poly_concrete(t: &PolyType, out: &mut Vec<Type>) {
         PolyType::GenericVariant { .. } => unreachable!(
             "a generic variant is unconstructible outside an eliminator arm's own input row; it never reaches a declared signature"
         ),
+        // P7b.S1 (S1-16): same reasoning as `Generic` -- the applied
+        // variable itself names no concrete `Type`, but a concrete argument
+        // still needs the ordinary check.
+        PolyType::App { args, .. } => {
+            for a in args {
+                collect_poly_concrete(a, out);
+            }
+        }
     }
 }
 
@@ -1621,6 +1629,10 @@ fn type_node(ty: &Type) -> Option<TypeNode> {
         | Type::Quotation(_)
         | Type::InlineQuotation(_)
         | Type::OwningQuotation(_) => None,
+        // P7b.S1 (S1-12): a `CtorImage` is not a concrete value type (any
+        // matcher that would treat it as one routes to S1-15.g), so it
+        // names no field/containment node here either.
+        Type::CtorImage(_) => None,
     }
 }
 

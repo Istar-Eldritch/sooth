@@ -933,6 +933,48 @@ impl GenericTypes {
                     self.instantiate_struct(*idx as usize, &concrete, &concrete_lens, *module, regs)
                 }
             }
+            // P7b.S1 (S1-8): `head` names one of the header's own type
+            // variables, so its binding is `args[head]` exactly as
+            // `PolyType::Var` resolves above -- when the use site bound it
+            // to a constructor image (S1-12), apply this field's own
+            // (substituted) arguments through that header, mirroring the
+            // `Generic` arm above. A binding that is not a `CtorImage` is a
+            // kind mismatch this phase's parser does not yet validate
+            // (S1-15.f is Phase 3): rather than panic, fall back to the
+            // resolved (non-`CtorImage`) binding unapplied -- a pinned
+            // intermediate state, since `CtorImage` is not a concrete value
+            // type and every real consumer routes it to S1-15.g instead.
+            PolyType::App {
+                head,
+                args: field_args,
+            } => {
+                let concrete_field_args: Vec<Type> = field_args
+                    .iter()
+                    .map(|a| self.substitute_generic_field(a, args, lens, regs.reborrow()))
+                    .collect();
+                match args[*head as usize] {
+                    Type::CtorImage(gid) => {
+                        if gid.is_enum {
+                            self.instantiate_enum(
+                                gid.idx as usize,
+                                &concrete_field_args,
+                                &[],
+                                gid.module,
+                                regs,
+                            )
+                        } else {
+                            self.instantiate_struct(
+                                gid.idx as usize,
+                                &concrete_field_args,
+                                &[],
+                                gid.module,
+                                regs,
+                            )
+                        }
+                    }
+                    not_ctor_image => not_ctor_image,
+                }
+            }
             other => unreachable!(
                 "a generic `type:` field cannot have shape {other:?}: a quotation field naming a type variable is rejected at the parser, a quotation-literal marker never reaches a declaration"
             ),
@@ -1990,6 +2032,9 @@ pub fn ground_member_poly(pty: &PolyType, target: &PolyType) -> PolyType {
         PolyType::GenericVariant { .. } => unreachable!(
             "a generic variant is unconstructible outside an eliminator arm's own input row (R3.5); a trait member signature never carries one"
         ),
+        PolyType::App { .. } => unreachable!(
+            "trait member signatures are restricted to concrete/array/reference/generic shapes over 'T (parse_trait_member_effect rejects the rest)"
+        ),
     }
 }
 
@@ -2103,6 +2148,17 @@ pub enum Len {
     Var(u32),
 }
 
+/// P7b.S1 (S1-12): identifies a generic `type:` header -- a *constructor*,
+/// not a monomorph -- mirroring `PolyType::Generic`'s own
+/// `(is_enum, idx, module)` identity so `Type::CtorImage` names exactly the
+/// same header a `PolyType::Generic { .. }` scrutinee would.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GenericId {
+    pub is_enum: bool,
+    pub idx: u32,
+    pub module: u32,
+}
+
 /// R4: a type in a polymorphic signature. A monomorphic sub-type folds to
 /// `Concrete`; a variable-bearing array (`array['T 'N]`, `array[i64 'N]`, `array['T 4]`)
 /// stays `Array`. `Type` itself gains **no** variant (S1): the variable forms
@@ -2158,6 +2214,17 @@ pub enum PolyType {
     /// declared signature -- which is what makes the arms for it outside the
     /// poly walk unreachable rather than merely unexercised.
     QuotLit,
+    /// P7b.S1 (R3/S1-7): a type variable applied to type arguments
+    /// (`'F['T]`), the higher-kinded twin of `Generic` -- a dedicated
+    /// variant rather than reshaping `Generic`'s head to an enum, so
+    /// `Generic`'s registry-index invariant stays intact. `head` names a
+    /// variable (index into `PolySig::ty_var_names`); `args` are the
+    /// applied type expressions and carry type args only -- a `Len`-domain
+    /// application is fenced to S2+.
+    App {
+        head: u32,
+        args: Vec<PolyType>,
+    },
     /// P7 slice 3a (R1/D2): a generic type applied to the enclosing
     /// signature's own variables (`Result['T 'E]`), deferred exactly as
     /// `Ref` defers its `RefId`: there is no `StructId`/`EnumId` to mint
@@ -2259,6 +2326,20 @@ pub fn substitute_generic_variant_field(field_pty: &PolyType, args: &[PolyType])
     match field_pty {
         PolyType::Var(v) => args[*v as usize].clone(),
         PolyType::Concrete(t) => PolyType::Concrete(*t),
+        // P7b.S1 (S1-8): a variant field parses through the same shape
+        // parser as a struct field (`parser.rs:5222`/`:5248`), so an
+        // application (`f 'F['T]`) reaches here too -- substitute its
+        // (symbolic) arguments and carry `head`'s own binding through
+        // unchanged; real grounding (resolving a `CtorImage` head) is
+        // `apply_subst`'s job at Phase 3, which this function -- R4.3's own
+        // doc -- deliberately does not do for any shape.
+        PolyType::App { head, args: fargs } => PolyType::App {
+            head: *head,
+            args: fargs
+                .iter()
+                .map(|a| substitute_generic_variant_field(a, args))
+                .collect(),
+        },
         other => unreachable!(
             "a generic enum variant field is never {other:?}: `array['A N]`, `Inner['A]`, `&'A` and `^'A` are all parser rejections for a variant field"
         ),
@@ -2640,6 +2721,15 @@ pub enum Type {
     /// rejected as an array/slice element (P7.S5), behind a reference, and at
     /// an `extern:` boundary: none of those owns what it names.
     OwningQuotation(&'static QuotEffect),
+    /// P7b.S1 (R5/S1-12): a bare constructor image -- a generic `type:`
+    /// header bound to a higher-kinded variable (`'F := Box`), not a
+    /// monomorph. Ground-flowing (it lives in the same `ty` substitution map
+    /// as every other binding) but **not a concrete value type**: it exists
+    /// only to be resolved as an `App` head (S1-11) or to carry a use-site
+    /// constructor argument (`Wrap[Box i64]`) through to `struct_keys`. Any
+    /// matcher that would treat it as an ordinary value type routes to the
+    /// S1-15.g diagnostic ("constructor used as a type") instead.
+    CtorImage(GenericId),
 }
 
 /// Slice 6a (R4): a declared quotation effect, the payload behind
@@ -2908,6 +2998,14 @@ impl Type {
             // `name_static` by `inline_quotation_type`/`owning_quotation_type`,
             // so these mirror the `Quotation` arm.
             Type::InlineQuotation(eff) | Type::OwningQuotation(eff) => eff.name_static,
+            // P7b.S1 Phase 2 stub: a `CtorImage` names a generic `type:`
+            // header, but `name()` carries no `GenericTypes` registry to
+            // look its declared name up in (unlike every other variant
+            // here, whose name is baked into the variant at construction).
+            // Real rendering is Phase 3's concern, alongside the rest of
+            // the symbol-distinctness ruling (S1-12); this placeholder is
+            // never mangled into a symbol before then.
+            Type::CtorImage(_) => "<constructor image>",
         }
     }
 }

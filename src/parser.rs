@@ -381,7 +381,11 @@ fn member_shape_is_supported(t: &PolyType) -> bool {
         | PolyType::QuotLit
         // P7.S12 (R3.5): unconstructible outside an eliminator arm's own
         // input row, never in a trait member signature.
-        | PolyType::GenericVariant { .. } => false,
+        | PolyType::GenericVariant { .. }
+        // P7b.S1 (R4/S1-8): a trait member signature never mentions a
+        // higher-kinded application (parse_trait_member_effect's restricted
+        // grammar has no route to one).
+        | PolyType::App { .. } => false,
     }
 }
 
@@ -490,6 +494,14 @@ fn poly_type_shape_str(pt: &PolyType) -> String {
         PolyType::GenericVariant { .. } => unreachable!(
             "a generic variant is unconstructible outside an eliminator arm's own input row; it never reaches an impl target shape"
         ),
+        // P7b.S1: `member_shape_is_supported` rejects an `App` shape before
+        // this renderer is ever called on one; kept as a real render (not
+        // an `unreachable!`) since it costs nothing and matches `App`'s
+        // other renderer, `poly_type_str`.
+        PolyType::App { head, args } => {
+            let parts: Vec<String> = args.iter().map(poly_type_shape_str).collect();
+            format!("'T{head}[{}]", parts.join(" "))
+        }
     }
 }
 
@@ -1312,6 +1324,14 @@ enum RawTy {
     /// `Concrete(Type::OwnedCell)` when the payload folds fully concrete --
     /// by `raw_to_poly_type`, exactly as `Ref` folds.
     OwnedCell(Box<RawTy>),
+    /// P7b.S1 (S1-7): a type variable applied to type arguments
+    /// (`'F['T]`), folded to `PolyType::App` by `raw_to_poly_type` -- there
+    /// is no all-concrete fold, since a variable head never grounds to a
+    /// `Type` at parse time (unlike `Generic`'s named header).
+    App {
+        head: u32,
+        args: Vec<RawTy>,
+    },
     /// P7 slice 3a (R1): a generic type applied to poly slots
     /// (`Result['T 'E]`), folded to `PolyType::Generic` -- or to a plain
     /// `Concrete` by instantiating through `GenericTypes`, exactly as the
@@ -2001,6 +2021,27 @@ fn generic_arity_error(
     )
 }
 
+/// P7b.S1 (S1-7): an application supplying zero type arguments (`'F[]`),
+/// pinned as an arity error -- an application always names at least one
+/// argument, unlike a generic header applied to zero variables (which has
+/// no bracket at all).
+fn empty_type_application_error(var: &str, span: Span) -> String {
+    format!(
+        "error: `{var}[]` at line {}, col {} applies `{var}` to zero arguments (an application needs at least one type argument)",
+        span.line, span.col
+    )
+}
+
+/// P7b.S1 (S1-6): a quotation-shaped argument inside a type application's
+/// argument list (`'F[[ i64 -- i64 ]]`) -- S1's application arguments are
+/// type expressions only.
+fn app_arg_quotation_error(span: Span) -> String {
+    format!(
+        "error: expected a type, found `[` at line {}, col {} (a type application's arguments are types, not quotations)",
+        span.line, span.col
+    )
+}
+
 /// P7.S6 (R2): `array` in a type position with no following `[` is a located
 /// error naming the required form, not "unknown type `array`". Raised at the
 /// single funnel `resolve_type_or_apply`, which every bare-word type reader
@@ -2180,6 +2221,15 @@ fn generic_field_type_str(
         PolyType::GenericVariant { .. } => unreachable!(
             "a generic variant is unconstructible outside an eliminator arm's own input row; it is never a generic `type:` field's shape"
         ),
+        // P7b.S1 (S1-8): a header/field application (`f 'F['T]`), rendered
+        // by the applied variable's own surface spelling plus its arguments.
+        PolyType::App { head, args } => {
+            let parts: Vec<String> = args
+                .iter()
+                .map(|a| generic_field_type_str(a, ty_vars, len_vars))
+                .collect();
+            format!("{}[{}]", ty_vars[*head as usize].0, parts.join(" "))
+        }
     }
 }
 
@@ -2238,6 +2288,23 @@ fn reject_growing_generic_argument(
         PolyType::GenericVariant { .. } => unreachable!(
             "a generic variant is unconstructible outside an eliminator arm's own input row; it is never a generic `type:` field's shape"
         ),
+        // P7b.S1 (S1-8): an application field is subject to the same
+        // growth restriction as a `Generic` field -- an argument that is
+        // itself compound and variable-bearing would grow at every
+        // instantiation exactly as a `Generic`'s would.
+        PolyType::App { head, args } => {
+            for arg in args {
+                if !matches!(arg, PolyType::Concrete(_) | PolyType::Var(_)) {
+                    return Err(growing_generic_self_reference_error(
+                        decl_name,
+                        &format!("'F{head}"),
+                        arg,
+                        span,
+                    ));
+                }
+            }
+            Ok(())
+        }
     }
 }
 
@@ -3664,7 +3731,20 @@ impl<'t> Parser<'t> {
         }
         if matches!(self.peek(), Some((Token::Word(w), _)) if w.starts_with('\'')) {
             let (w, span) = self.expect_word_any_spanned()?;
-            return self.parse_poly_ty_var(builder, &w, span);
+            let raw = self.parse_poly_ty_var(builder, &w, span)?;
+            // P7b.S1 (S1-6): the `[`-router. A `[` following the variable is
+            // a type application when its bracket holds no top-depth `--`;
+            // when it does, this is unchanged -- the `[` opens the *next*
+            // slot in the effect (a quotation parameter), not an
+            // application on this variable.
+            if let RawTy::Var(head) = raw {
+                if matches!(self.peek(), Some((Token::LBracket, _)))
+                    && !self.top_depth_arrow_present(0)
+                {
+                    return self.parse_poly_var_application(builder, word_is_output, head, span);
+                }
+            }
+            return Ok(raw);
         }
         // Slice 13 (R-A3): a `&`-led slot, intercepted *before* the
         // `parse_type_expr` fallthrough -- which resolves a reference's
@@ -3920,6 +4000,61 @@ impl<'t> Parser<'t> {
             name: name.to_string(),
             span,
         })
+    }
+
+    /// P7b.S1 (S1-6/S1-7): a type variable applied to type arguments
+    /// (`'F['T]`) -- the higher-kinded twin of `parse_poly_generic_application`,
+    /// but with no known header to read an arity from (the head is a
+    /// *variable*, whose kind is inferred from this very application, S1-3),
+    /// so every argument parses as a type slot with no arity bound.
+    /// Positioned just past the variable; `span` is the variable's own span,
+    /// for the empty-application diagnostic. Arguments are type expressions
+    /// only (S1-6): a quotation-shaped argument is fenced by
+    /// `parse_poly_app_arg`.
+    fn parse_poly_var_application(
+        &mut self,
+        builder: &mut PolyBuilder,
+        word_is_output: bool,
+        head: u32,
+        span: Span,
+    ) -> Result<RawTy, String> {
+        self.expect(Token::LBracket)?;
+        let mut args = Vec::new();
+        loop {
+            match self.peek() {
+                Some((Token::RBracket, _)) => {
+                    self.pos += 1;
+                    break;
+                }
+                None => {
+                    return Err(self.eof_error("`]` (unterminated type application)"));
+                }
+                _ => args.push(self.parse_poly_app_arg(builder, word_is_output)?),
+            }
+        }
+        if args.is_empty() {
+            let var = builder.ty_names[head as usize].clone();
+            return Err(empty_type_application_error(&var, span));
+        }
+        Ok(RawTy::App { head, args })
+    }
+
+    /// P7b.S1 (S1-6): one argument of a type application -- a type
+    /// expression only, never a quotation. A bare `[` here would otherwise
+    /// be read as a quotation effect by `parse_poly_slot`'s own `[` arm,
+    /// which is exactly the shape S1-6 fences: `'F[[ i64 -- i64 ]]` is a
+    /// parse error, not an application argument.
+    fn parse_poly_app_arg(
+        &mut self,
+        builder: &mut PolyBuilder,
+        word_is_output: bool,
+    ) -> Result<RawTy, String> {
+        if let Some((tok, span)) = self.peek() {
+            if matches!(tok, Token::LBracket | Token::TildeLBracket) {
+                return Err(app_arg_quotation_error(*span));
+            }
+        }
+        self.parse_poly_slot(builder, word_is_output)
     }
 
     /// One type-variable slot, already lexed: `'T`, with an optional bound at
@@ -4301,6 +4436,16 @@ impl<'t> Parser<'t> {
                 } else {
                     PolyType::OwnedCell(Box::new(inner))
                 }
+            }
+            // P7b.S1 (S1-7): no all-concrete fold -- the head names a
+            // variable, which never grounds to a `Type` at parse time (that
+            // is Phase 3's `apply_subst`/S1-11 grounding via `CtorImage`).
+            RawTy::App { head, args } => {
+                let args: Vec<PolyType> = args
+                    .into_iter()
+                    .map(|r| self.raw_to_poly_type(r))
+                    .collect::<Result<_, _>>()?;
+                PolyType::App { head, args }
             }
             // P7 slice 3a (R1): the fold mirrors the array fold exactly --
             // if every argument is `PolyType::Concrete`, instantiate through
@@ -4690,6 +4835,24 @@ impl<'t> Parser<'t> {
             self.tokens.get(self.pos)
         };
         let span = opener.map(|(_, s)| *s).unwrap_or_default();
+        if self.top_depth_arrow_present(depth_base) {
+            return Ok(());
+        }
+        Err(quotation_effect_missing_arrow_error(
+            span,
+            opened_with_tilde,
+        ))
+    }
+
+    /// P7b.S1 (S1-6): the boolean scan `require_top_depth_arrow` errors on,
+    /// extracted as a **router predicate** -- whether the bracket the parser
+    /// is positioned at (per `depth_base`, exactly as that function's own
+    /// doc explains) holds a top-depth `--`. Used by `parse_poly_ty_var` to
+    /// decide whether a `[` following a type variable opens a quotation slot
+    /// (present) or a type application (absent); `require_top_depth_arrow`
+    /// itself keeps its own `Result`-returning, error-on-absence contract for
+    /// its existing callers.
+    fn top_depth_arrow_present(&self, depth_base: i32) -> bool {
         let mut depth = depth_base;
         let mut i = self.pos;
         while let Some((tok, _)) = self.tokens.get(i) {
@@ -4701,15 +4864,12 @@ impl<'t> Parser<'t> {
                         break;
                     }
                 }
-                Token::Word(w) if w == "--" && depth == 1 => return Ok(()),
+                Token::Word(w) if w == "--" && depth == 1 => return true,
                 _ => {}
             }
             i += 1;
         }
-        Err(quotation_effect_missing_arrow_error(
-            span,
-            opened_with_tilde,
-        ))
+        false
     }
 
     /// Slice 6a (R2): parse `[ <in-types> -- <out-types> ]` into a
@@ -5787,6 +5947,32 @@ impl<'t> Parser<'t> {
     /// variable, since it parses inside another header's own field list; a
     /// concrete use site never has a length variable in scope, so this one
     /// only ever reads a literal).
+    /// P7b.S1 (S1-8/S1-12): one use-site type argument. A bare word naming
+    /// a generic `type:` header, *not* itself followed by `[`, is a
+    /// constructor image (`Wrap[Box i64]`'s `Box`) rather than an
+    /// under-applied header -- `resolve_type_or_apply` would otherwise
+    /// require it to be applied here and report an arity error. Anything
+    /// else (a concrete type, or a header immediately applied, `Wrap[Box[i64]
+    /// i64]`) parses exactly as before.
+    fn parse_type_argument(&mut self) -> Result<Type, String> {
+        if let Some((Token::Word(w), span)) = self.peek() {
+            if !w.starts_with(['\'', '&', '^']) {
+                let (w, span) = (w.clone(), *span);
+                if !matches!(self.tokens.get(self.pos + 1), Some((Token::LBracket, _))) {
+                    if let Some((is_enum, idx, module)) = self.poly_generic_header(&w, span)? {
+                        self.pos += 1;
+                        return Ok(Type::CtorImage(crate::ast::GenericId {
+                            is_enum,
+                            idx: idx as u32,
+                            module,
+                        }));
+                    }
+                }
+            }
+        }
+        self.parse_type_expr()
+    }
+
     fn parse_type_arguments(
         &mut self,
         name: &str,
@@ -5812,7 +5998,7 @@ impl<'t> Parser<'t> {
                 _ => {}
             }
             if args.len() < ty_arity {
-                args.push(self.parse_type_expr()?);
+                args.push(self.parse_type_argument()?);
                 continue;
             }
             if lens.len() < len_arity {
@@ -5823,7 +6009,7 @@ impl<'t> Parser<'t> {
             // permissively (as a type expression) so the arity check below
             // reports the real supplied count instead of a misleading
             // length-literal error.
-            args.push(self.parse_type_expr()?);
+            args.push(self.parse_type_argument()?);
         }
         if args.len() != ty_arity || lens.len() != len_arity {
             return Err(generic_arity_error(
@@ -5980,9 +6166,17 @@ impl<'t> Parser<'t> {
             let (w, span) = (w.clone(), *span);
             if w.starts_with('\'') {
                 self.pos += 1;
-                return Ok(PolyType::Var(
-                    self.resolve_field_ty_var(decl_name, ty_vars, used, &w, span)?,
-                ));
+                let head = self.resolve_field_ty_var(decl_name, ty_vars, used, &w, span)?;
+                // P7b.S1 (S1-8): the variable arm's own bracket continuation
+                // -- unlike the `&`/`^` arms, which have always had one for a
+                // named generic header. A field `f 'F['T]` applies the
+                // header's own type variable to its argument list.
+                if matches!(self.peek(), Some((Token::LBracket, _))) {
+                    return self.parse_generic_field_var_application(
+                        decl_name, ty_vars, used, len_vars, used_len, head, span,
+                    );
+                }
+                return Ok(PolyType::Var(head));
             }
             // A `&`-led field: intercepted before the concrete fall-through,
             // which resolves the referent concretely and would blame `'T` as
@@ -6301,6 +6495,49 @@ impl<'t> Parser<'t> {
     /// argument, so a variable type paired with a concrete length
     /// (`Buffer['T 4]`) and a concrete type paired with a variable length
     /// stay `PolyType::Generic` alike.
+    /// P7b.S1 (S1-8): a header/field application (`f 'F['T]`), the field-
+    /// grammar twin of `parse_poly_var_application` -- no known header to
+    /// read an arity from, so every argument parses as a field-shape type
+    /// expression with no arity bound. A bare `[` argument (a quotation
+    /// shape) is fenced exactly as the effect-grammar production fences it
+    /// (S1-6), and an empty application is the same pinned arity error.
+    #[allow(clippy::too_many_arguments)]
+    fn parse_generic_field_var_application(
+        &mut self,
+        decl_name: &str,
+        ty_vars: &[(String, Span)],
+        used: &mut [bool],
+        len_vars: &[(String, Span)],
+        used_len: &mut [bool],
+        head: u32,
+        span: Span,
+    ) -> Result<PolyType, String> {
+        self.pos += 1; // consume `[`
+        let mut args = Vec::new();
+        loop {
+            match self.peek() {
+                Some((Token::RBracket, _)) => {
+                    self.pos += 1;
+                    break;
+                }
+                None => {
+                    return Err(self.eof_error("`]` (unterminated type application)"));
+                }
+                Some((Token::LBracket | Token::TildeLBracket, arg_span)) => {
+                    return Err(app_arg_quotation_error(*arg_span));
+                }
+                _ => args.push(
+                    self.parse_generic_field_shape(decl_name, ty_vars, used, len_vars, used_len)?,
+                ),
+            }
+        }
+        if args.is_empty() {
+            let var = &ty_vars[head as usize].0;
+            return Err(empty_type_application_error(var, span));
+        }
+        Ok(PolyType::App { head, args })
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn parse_generic_field_application(
         &mut self,
@@ -12005,6 +12242,93 @@ mod tests {
     fn reject_reserved_name_rejects_trait_len() {
         let err = parse_src("trait: Len['T] : show ( 'T -- ) ; ;").unwrap_err();
         assert!(err.contains("reserved"), "{err}");
+    }
+
+    // ---- P7b.S1 Phase 2: S1-6/S1-7/S1-8 application parsing ----
+
+    #[test]
+    fn parse_poly_slot_router_application_before_quotation_parses() {
+        // R4 lookahead router, order 1: `'F['T]` applies before a
+        // separate quotation slot `[ 'T -- 'U ]` follows.
+        let module = parse_src(": fmap['F 'T 'U] ( 'F['T] [ 'T -- 'U ] -- ) drop drop ;").unwrap();
+        let sig = module.words[0].poly.as_ref().expect("poly sig present");
+        assert!(matches!(sig.inputs[0], PolyType::App { head: 0, .. }));
+        assert!(matches!(sig.inputs[1], PolyType::Quotation(..)));
+    }
+
+    #[test]
+    fn parse_poly_slot_router_quotation_before_application_parses() {
+        // R4 lookahead router, order 2: a quotation slot first, an
+        // application afterwards -- both orders must route correctly.
+        let module = parse_src(": fmap['F 'T 'U] ( [ 'T -- 'U ] 'F['T] -- ) drop drop ;").unwrap();
+        let sig = module.words[0].poly.as_ref().expect("poly sig present");
+        assert!(matches!(sig.inputs[0], PolyType::Quotation(..)));
+        assert!(matches!(sig.inputs[1], PolyType::App { .. }));
+    }
+
+    #[test]
+    fn parse_generic_field_shape_variable_application_parses_to_app() {
+        // S1-8: a field `f 'F['T]` parses to `PolyType::App`.
+        let module = parse_src("type: Box['F 'T] f 'F['T] ;").unwrap();
+        assert!(matches!(
+            module.generic_structs[0].fields[0].1,
+            PolyType::App { head: 0, .. }
+        ));
+    }
+
+    #[test]
+    fn parse_type_argument_bare_constructor_parses_to_ctor_image() {
+        // S1-8/S1-12: a use-site constructor type argument (`Wrap[Box i64]`)
+        // parses to `Type::CtorImage`, which the field's own `App`
+        // instantiation semantics (S1-8's stub) then resolves at
+        // instantiation time -- minting `Box[i64]` as `Wrap`'s field.
+        let module = parse_src(
+            "type: Box['T] v 'T ;\ntype: Wrap['F 'T] w 'F['T] ;\n\
+             : mk ( -- Wrap[Box i64] ) drop ;",
+        )
+        .unwrap();
+        let word = &module.words[0];
+        let ret = word.effect.outputs[0].ty;
+        let Type::Struct(id, _) = ret else {
+            panic!("expected a struct return, found {ret:?}")
+        };
+        let inst = &module.structs[id.index()];
+        assert_eq!(inst.fields.len(), 1);
+        let Type::Struct(field_id, field_name) = inst.fields[0].1 else {
+            panic!(
+                "expected `w`'s field to have folded to a struct, found {:?}",
+                inst.fields[0].1
+            )
+        };
+        assert_eq!(field_name, "Box[i64]");
+        assert_eq!(module.structs[field_id.index()].fields[0].1, Type::I64);
+    }
+
+    #[test]
+    fn parse_poly_var_application_quotation_argument_is_error() {
+        // S1-6: an application argument is a type expression only -- a
+        // quotation-shaped argument is a parse error.
+        let err = parse_src(": f['F 'T] ( 'F[[ i64 -- i64 ]] -- ) drop ;").unwrap_err();
+        assert!(err.contains("expected a type, found"), "{err}");
+        assert!(err.contains('['), "{err}");
+    }
+
+    #[test]
+    fn parse_poly_var_application_empty_is_error() {
+        // S1-7: `'F[]` is a pinned arity error.
+        let err = parse_src(": f['F 'T] ( 'F[] -- ) drop ;").unwrap_err();
+        assert!(err.contains("'F[]"), "{err}");
+        assert!(err.contains("zero arguments"), "{err}");
+    }
+
+    #[test]
+    fn raw_to_poly_type_app_fold_has_no_all_concrete_fold() {
+        // S1-7: unlike `Generic`, an `App` never folds to `Concrete` -- the
+        // head names a variable, which never grounds to a `Type` at parse
+        // time. Even a fully-concrete-looking argument list stays `App`.
+        let module = parse_src(": f['F] ( 'F[i64] -- ) drop ;").unwrap();
+        let sig = module.words[0].poly.as_ref().expect("poly sig present");
+        assert!(matches!(sig.inputs[0], PolyType::App { head: 0, .. }));
     }
 
     // ---- P7.S6a Phase 2: R2a array-field sub-case, R2b word bound bracket ----

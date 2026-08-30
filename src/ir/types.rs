@@ -368,6 +368,14 @@ pub fn ir_type_of(ty: Type) -> IrType {
         // reference-mode arm can declare `&Shape.Circle`, which interns a real
         // `RefDecl` and forces `ir_type_of` over it at build time.
         Type::Variant(id, _, _) => IrType::Enum(id),
+        // P7b.S1 (S1-12): a `CtorImage` is not a concrete value type -- it
+        // is resolved as an `App` head or carried as a use-site constructor
+        // argument, never stored, returned, or otherwise lowered. Reaching
+        // here is a checker bug (a bare `CtorImage` escaping to a value-type
+        // position is S1-15.g's diagnostic), not a legal input.
+        Type::CtorImage(_) => unreachable!(
+            "a CtorImage never reaches the backend (S1-15.g rejects it at a value-type position)"
+        ),
     }
 }
 

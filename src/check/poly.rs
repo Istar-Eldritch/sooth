@@ -203,6 +203,10 @@ pub(super) fn poly_is_copy(
         // P7.S12 (R3.1): never `Copy` -- it wraps a possibly-linear payload,
         // and the concrete twin (`Type::Variant`) is never `Copy` either.
         PolyType::GenericVariant { .. } => false,
+        // P7b.S1 (S1-16): conservatively linear, mirroring `Generic` --
+        // `Copy`-ness of an application depends on its head's binding, which
+        // is not resolved here.
+        PolyType::App { .. } => false,
     }
 }
 
@@ -386,6 +390,9 @@ fn is_reference_slot(pt: &PolyType) -> bool {
         // P7.S12 (R3.1): a variant is not a reference itself; a reference
         // nested inside a field is unreachable through this slot.
         PolyType::GenericVariant { .. } => false,
+        // P7b.S1 (S1-16): a higher-kinded application never denotes a
+        // reference itself, mirroring `Generic`.
+        PolyType::App { .. } => false,
     }
 }
 
@@ -2771,6 +2778,9 @@ fn poly_type_mentions_caller_var(pt: &PolyType) -> bool {
         PolyType::GenericVariant { .. } => unreachable!(
             "a generic variant is unconstructible outside an eliminator arm's own input row; it never reaches a declared signature"
         ),
+        // P7b.S1 (S1-16): an application always mentions the applied
+        // variable itself (its `head`), regardless of its arguments.
+        PolyType::App { .. } => true,
     }
 }
 
@@ -2795,6 +2805,10 @@ fn poly_mentions_len_var(pt: &PolyType) -> bool {
         PolyType::GenericVariant { .. } => unreachable!(
             "a generic variant is unconstructible outside an eliminator arm's own input row; it never reaches a declared signature"
         ),
+        // P7b.S1 (S1-7): an application's variant carries type args only --
+        // a `Len`-domain application is fenced to S2+ -- so it mentions a
+        // length variable only through its (type) arguments.
+        PolyType::App { args, .. } => args.iter().any(poly_mentions_len_var),
     }
 }
 
@@ -3429,7 +3443,11 @@ fn poly_eliminator_call(
         | PolyType::Array(..)
         | PolyType::Quotation(..)
         | PolyType::OwnedCell(_)
-        | PolyType::QuotLit => {
+        | PolyType::QuotLit
+        // P7b.S1 (S1-16): a higher-kinded application is not itself an enum
+        // scrutinee (`'F['T]` names no enum family until grounded), so it
+        // reports the same abstract-scrutinee error.
+        | PolyType::App { .. } => {
             return Err(poly_abstract_enum_scrutinee_error(
                 ctx,
                 span,
@@ -3867,7 +3885,11 @@ fn poly_walk_arms(
                 | PolyType::Ref(..)
                 | PolyType::OwnedCell(_)
                 | PolyType::QuotLit
-                | PolyType::Generic { .. } => {}
+                | PolyType::Generic { .. }
+                // P7b.S1 (S1-16): an application is not a narrowed variant
+                // (that is `GenericVariant`'s own shape), so it never
+                // escapes here either.
+                | PolyType::App { .. } => {}
             }
             // S3b L2: nor may a quotation literal, which would then have to be
             // materialised to exist past the arm. Its own span, not the
@@ -4543,6 +4565,17 @@ fn poly_bind_construction_arg(
                 ))
             }
         }
+        // P7b.S1 (S1-8): a construction field can now be an application
+        // (`f 'F['T]`) -- binding the header variable it applies (`head`)
+        // and unifying its arguments against the operand's own shape is
+        // Phase 3 work (real `App` decomposition, S1-10); a located error
+        // rather than a panic or a silent (wrong) bind until then.
+        PolyType::App { .. } => Err(poly_app_not_yet_supported_error(
+            ctx,
+            span,
+            name,
+            &poly_type_str(field_pty, sig),
+        )),
         other => unreachable!("a generic `type:` field is never {other:?}"),
     }
 }
@@ -5191,6 +5224,14 @@ pub(super) fn poly_copy_gate(
         // generic variant -- it wraps a possibly-linear payload -- so this
         // always reaches the error.
         PolyType::GenericVariant { .. } => Err(poly_copy_generic_variant_error(
+            ctx,
+            span,
+            op,
+            &poly_type_str(pt, sig),
+        )),
+        // P7b.S1 (S1-16): `poly_is_copy` never returns `true` for an
+        // application, mirroring `Generic`; reuse its diagnostic.
+        PolyType::App { .. } => Err(poly_copy_generic_error(
             ctx,
             span,
             op,
@@ -7316,6 +7357,10 @@ fn match_impl_target_rec(
         PolyType::GenericVariant { .. } => unreachable!(
             "a generic variant is unconstructible outside an eliminator arm's own input row; it never reaches an impl target pattern"
         ),
+        // P7b.S1 Phase 2 stub (S1-16): `App` decomposition against a
+        // concrete target is Phase 3's `unify_poly_input`/S1-10 work; until
+        // then it simply never matches.
+        PolyType::App { .. } => None,
     }
 }
 
@@ -7448,6 +7493,9 @@ fn collect_positions(
         PolyType::GenericVariant { .. } => unreachable!(
             "a generic variant is unconstructible outside an eliminator arm's own input row; it never reaches an impl target pattern"
         ),
+        // P7b.S1 Phase 2 stub (S1-16): mirrors `match_impl_target_rec`'s
+        // stub -- `App` decomposition is Phase 3's `unify_poly_input` work.
+        PolyType::App { .. } => None,
     }
 }
 
@@ -8296,6 +8344,18 @@ pub(super) fn unify_poly_input(
         PolyType::GenericVariant { .. } => unreachable!(
             "a generic variant is unconstructible outside an eliminator arm's own input row; it never reaches a declared signature"
         ),
+        // P7b.S1 Phase 2 stub (S1-16): `App` decomposition against a
+        // concrete slot (binding the head to a `Type::CtorImage` and its
+        // arguments positionally) is Phase 3's S1-10 work; a located error
+        // rather than a panic or a silent (wrong) bind until then.
+        PolyType::App { .. } => {
+            return Err(poly_app_not_yet_supported_error(
+                ctx,
+                span,
+                name,
+                &poly_type_str(pty, sig),
+            ));
+        }
     }
     Ok(())
 }
@@ -8315,6 +8375,24 @@ pub(super) fn poly_generic_not_yet_groundable_error(
     let where_ = ctx.rendered_word();
     format!(
         "error: `{op}` in {where_} (line {}) names the generic type `{ty}`, which cannot yet be instantiated at a variable-bearing application\n  grounding a generic over its own type variable is not yet implemented",
+        span.line
+    )
+}
+
+/// P7b.S1 Phase 2 stub (S1-16): a declared higher-kinded application
+/// (`'F['T]`) reached unification -- decomposing it against a concrete slot
+/// (binding `'F` to a `Type::CtorImage` and its arguments positionally) is
+/// Phase 3's S1-10 work, not yet implemented.
+pub(super) fn poly_app_not_yet_supported_error(
+    ctx: &Ctx,
+    span: Span,
+    op: &str,
+    ty: &str,
+) -> String {
+    let op = crate::resolve::demangle_call(op);
+    let where_ = ctx.rendered_word();
+    format!(
+        "error: `{op}` in {where_} (line {}) names the application `{ty}`, which cannot yet be checked against a concrete type\n  higher-kinded application (P7b.S1) is not yet fully supported this slice",
         span.line
     )
 }
@@ -8557,6 +8635,16 @@ pub(super) fn apply_subst(
             };
             Ok(Type::Variant(id, *vi, display))
         }
+        // P7b.S1 Phase 2 stub (S1-16/S1-11): grounding an application via
+        // the `Generic` mint route (resolving `head`'s `Type::CtorImage`
+        // binding, substituting its arguments through the constructor's
+        // declared parameters) is Phase 3's S1-11 work.
+        PolyType::App { .. } => Err(poly_app_not_yet_supported_error(
+            ctx,
+            span,
+            name,
+            &poly_type_str(pty, sig),
+        )),
     }
 }
 
@@ -8693,6 +8781,9 @@ pub(super) fn poly_op_on_variable_error(
         PolyType::GenericVariant { .. } => {
             format!("a generic variant `{}`", poly_type_str(pt, sig))
         }
+        // P7b.S1 (S1-16): rendered with the application, mirroring
+        // `Generic`.
+        PolyType::App { .. } => format!("a higher-kinded application `{}`", poly_type_str(pt, sig)),
     };
     format!(
         "error: `{op}` is not permitted on {what} in {where_} (line {})",
@@ -9648,6 +9739,12 @@ pub(crate) fn poly_type_str(pt: &PolyType, sig: &PolySig) -> String {
         // display spelling -- `name` is cached on the variant for exactly
         // this (`generic_variant_type`'s doc), so no registry lookup needed.
         PolyType::GenericVariant { name, .. } => name.to_string(),
+        // P7b.S1 (S1-14): `'F['T]` -- the applied variable's own surface
+        // spelling, then its arguments.
+        PolyType::App { head, args } => {
+            let parts: Vec<String> = args.iter().map(|a| poly_type_str(a, sig)).collect();
+            format!("{}[{}]", sig.ty_var_names[*head as usize], parts.join(" "))
+        }
     }
 }
 

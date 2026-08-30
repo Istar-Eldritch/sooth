@@ -651,6 +651,12 @@ pub(super) fn subst_polytype(
         PolyType::GenericVariant { .. } => unreachable!(
             "a generic variant is unconstructible outside an eliminator arm's own input row; it never reaches a declared signature"
         ),
+        // S1-13: `apply_subst` grounds an `App` to `Generic` before symbol
+        // derivation (S1-11/S1-12), so lowering never sees a bare `App` here
+        // -- this arm exists only for the exhaustive `match` to compile.
+        PolyType::App { .. } => unreachable!(
+            "apply_subst grounds an App to a Generic before lowering ever sees it (S1-11/S1-12)"
+        ),
     }
 }
 
