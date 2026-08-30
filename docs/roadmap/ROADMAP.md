@@ -5,21 +5,14 @@ not a schedule.
 
 ## Current status / next action
 
-Design phase complete (DESIGN.md, Decided section). Backend: **QBE**. Phases 0-5 are
+Design phase complete (DESIGN.md, Decided section). Backend: **QBE**. Phases 0-6 are
 complete and merged to `main` — see each phase file's own header for its exit criteria
-and dogfood. **Phase 6 (term-level enum elimination) is in progress**: Slices 1-3
-(quotation effect annotations; variant types and accessors; the mode-polymorphic
-eliminator word) are done and merged; see [P6](./P6-enum-elimination.md) for the full
-slice breakdown. **Phase 7 (language prerequisites for the
-stdlib) is in progress**: Slices 1-2 (accessors as receiver-directed projections; static
-storage and global sets), 3a-3d, 3f-3g (incl. 3g-follow), 3i (generic instantiation,
-quotations and slicing, self-recursion and its loop transform, and `bool` as an ordinary
-enum), 3s and 3s-follow (`Ord` as a library trait, plus its `inline` trait member),
-3v (dropping and storing a linear-capturing quotation), S4 and S4b (generic `impl:`
-targets with a specificity chain, and bounds on impl variables), and S5 (linear array
-elements, via the `tabulate` combinator) are done and merged; 3u (trait objects) is
-parked for want of a consumer; see [P7](./P7-language-prereqs.md) for the full slice
-breakdown. Per-phase completion history
+and dogfood (Phase 6's S5, nested tag paths, is deferred by design, not owed).
+**Phase 7 (language prerequisites for the stdlib) is in progress**: every slice is done
+and merged except **S7c** (the `Show`/`Write` printing pair — brief probe-verified,
+decisions settled, spec ready for implementation) and **S7d** (retiring the intrinsic
+`.`); 3u (trait objects) is parked for want of a consumer; see
+[P7](./P7-language-prereqs.md) for the full slice breakdown. Per-phase completion history
 (what shipped in which slice,
 defects found and fixed in review) lives in each phase's own file and its
 `docs/roadmap/P{N}/` briefs/specs, not here.
@@ -55,8 +48,8 @@ lines. Each phase file is self-contained: exit criteria, dogfood, slice breakdow
 | **P3** | [The linear spine](./P3-linear-spine.md) | `[XL]`  ✅ done — the point of the language |
 | **P4** | [Minimal polymorphism + quotations](./P4-polymorphism-quotations.md) | `[L]`  ✅ done |
 | **P5** | [Errors as values](./P5-errors-as-values.md) | `[S]`  ✅ done |
-| **P6** | [Term-level enum elimination](./P6-enum-elimination.md) | `[L]` — in progress (Slice 3) |
-| **P7** | [Language prerequisites for the stdlib](./P7-language-prereqs.md) | `[L]` — in progress (Slices 1-2, 3a-3d, 3f-3g, 3i, 8) |
+| **P6** | [Term-level enum elimination](./P6-enum-elimination.md) | `[L]`  ✅ done (S5 deferred by design) |
+| **P7** | [Language prerequisites for the stdlib](./P7-language-prereqs.md) | `[L]` — in progress (S7c spec ready, S7d next; S3u parked) |
 | **P7b** | [Higher-kinded types](./P7b-higher-kinded-types.md) | `[L]` — type-class abstraction over type constructors |
 | **P8** | [Packages and modules](./P8-packages-modules.md) | `[L]` |
 | **P9** | [The stdlib layers](./P9-stdlib-layers.md) | `[L]` |

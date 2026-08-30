@@ -123,7 +123,9 @@ from the scrutinee slot, which is what makes two instantiations independent. See
 still fires with unchanged wording (the mode-mismatch check included, since it is the one
 consumer of the annotation's parse-time input slot).
 
-**P6.S4 — Phase 6 Slice 4 — migration.** Every clause-dispatch site moves to the eliminator, and
+**P6.S4 — Phase 6 Slice 4 — migration.** `[ done ]` Landed in `8ba0477`: the eliminator is
+the only enum-elimination mechanism, every clause-dispatch site moved, and
+`examples/vm.sth`'s `Op` dispatch reads through `Op?`. Every clause-dispatch site moves to the eliminator, and
 `WordBody::Clauses`/`parse_clauses` are deleted, including the `Bool` print word declared
 in `src/ast.rs` and the generic-enum elimination witnesses in
 `tests/phase5_generic_enum_elimination.rs`. Deleting the clause path also retires
