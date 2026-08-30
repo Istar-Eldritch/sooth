@@ -1,0 +1,131 @@
+\ core::show -- a fixed in-memory render buffer, a `Show['T]` trait that
+\ formats a value into it, and a `Write['S]` trait that flushes it to a
+\ sink. Buffer indirection (S7c R1): a value has no address to hand a
+\ variadic sink (scalars have none, `cannot borrow the scalar local`), and
+\ `str` cannot be constructed from computed data (only a literal or
+\ `static:` produces one), so a value formats its digits into `StrBuf`
+\ instead, and a separate `Write` impl (declared in the sink's own module,
+\ per the orphan rule) flushes the whole buffer in one call.
+\
+\ This module stays `no_std`: no `extern:`, no dependency on `hosted`. The
+\ actual `write(2)` sink lands in `hosted::libc` (Phase 2).
+
+import: intrinsics * ;
+import: self::bool | Bool if | ;
+import: self::cmp | lt gt gte | ;
+import: self::combinators | times times-helper | ;
+
+export: StrBuf Show Write render flush ;
+
+type: StrBuf data array[u8 64] len usize ;
+
+trait: Show['T]
+  : show ( 'T &!StrBuf -- ) ;
+;
+
+trait: Write['S]
+  : write ( &!'S &!StrBuf -- ) ;
+;
+
+\ Appends one byte at the buffer's current `len`, clamped to capacity
+\ (R11): a write past the last byte is discarded and `len` never exceeds
+\ 64. `len` is the store index (append semantics; a fresh buffer starts at
+\ `0`).
+: append-byte ( &!StrBuf u8 -- )
+  | buf b |
+  buf &!len @ | idx |
+  idx 64 >usize lt ~[
+    buf &!data idx &!> b !
+    buf &!len 1 +!
+  ] ~[ ] if ;
+
+\ Restoring (shift-subtract) division of a `u64` bit pattern by ten (D1):
+\ integer `div` is float-only, so this walks all 64 bits from the top,
+\ building the quotient one bit at a time while the running remainder
+\ never exceeds the divisor. Returns `( quotient remainder )`.
+: divmod10 ( u64 -- u64 u64 )
+  | n |
+  0 >u64 0 >u64
+  64 ~[
+    | i |
+    | r | | q |
+    63 i sub | bitpos |
+    n bitpos shr 1 >u64 and | bit |
+    r 1 shl bit or | r2 |
+    r2 10 >u64 gte ~[
+      r2 10 >u64 sub
+      1 >u64 bitpos shl q or
+      swap
+    ] ~[
+      q r2
+    ] if
+  ] times ;
+
+\ Appends the decimal digits of a `u64` magnitude, most significant first,
+\ via the restoring-division helper: recurse on the quotient while it is
+\ still nonzero, then append the remainder -- the base case (`q = 0`)
+\ appends a lone `0` for a zero magnitude instead of no digits at all.
+: append-digits ( &!StrBuf u64 -- )
+  | buf n |
+  n divmod10 | r | | q |
+  q 0 >u64 gt ~[ buf q append-digits ] ~[ ] if
+  buf r >u8 48 >u8 add append-byte ;
+
+\ Sign handling (Ruling 6): capture the sign, take the magnitude as the
+\ `u64` bit pattern -- for a negative value, `>u64 not 1 >u64 add` (two's
+\ complement negation over the reinterpreted bit pattern), exact even for
+\ `i64::MIN`, whose magnitude does not fit back into an `i64` -- then
+\ render the magnitude and prepend `-`.
+impl: Show for i64
+  : show
+    | n buf |
+    n 0 lt ~[
+      buf 45 >u8 append-byte
+      n >u64 not 1 >u64 add
+    ] ~[
+      n >u64
+    ] if
+    | mag |
+    buf mag append-digits ;
+;
+
+impl: Show for usize
+  : show
+    | n buf |
+    buf n >u64 append-digits ;
+;
+
+impl: Show for isize
+  : show
+    | n buf |
+    n 0 lt ~[
+      buf 45 >u8 append-byte
+      n >u64 not 1 >u64 add
+    ] ~[
+      n >u64
+    ] if
+    | mag |
+    buf mag append-digits ;
+;
+
+impl: Show for Bool
+  : show
+    | b buf |
+    b ~[
+      buf 116 >u8 append-byte
+      buf 114 >u8 append-byte
+      buf 117 >u8 append-byte
+      buf 101 >u8 append-byte
+    ] ~[
+      buf 102 >u8 append-byte
+      buf 97 >u8 append-byte
+      buf 108 >u8 append-byte
+      buf 115 >u8 append-byte
+      buf 101 >u8 append-byte
+    ] if ;
+;
+
+\ Bounded consumer words (Ruling 8): a member name is not importable, so a
+\ program reaches `show`/`write` only through one of these.
+: render['T: Show] ( 'T &!StrBuf -- ) show ;
+: flush['S: Write] ( &!'S &!StrBuf -- ) write ;

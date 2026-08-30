@@ -5,4 +5,4 @@
 \ on the typed surface instead of one per module.
 package: core ;
 layer: core ;
-module: bool cmp prelude combinators option result ;
+module: bool cmp prelude combinators option result show ;
