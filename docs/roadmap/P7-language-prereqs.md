@@ -1104,7 +1104,7 @@ should include an indexing demo using S6b's explicit-length-argument syntax (e.g
 S6b's own golden deliberately avoids indexing (reads `len` back instead) precisely because this
 slice doesn't exist yet. Needs a brief before it becomes a real slice.
 
-**P7.S7 -- A testing vocabulary, and what it exposed about printing's layer.** `[ planned ]`
+**P7.S7 -- A testing vocabulary, and what it exposed about printing's layer.** `[ in progress ]`
 Split into four subslices during briefing: the vocabulary itself needed a `hosted` home
 that didn't exist yet (`.` prints through libc unconditionally, a hosted-layer dependency
 the compiler currently hides as a builtin), and reporting more than a bare label on
@@ -1129,8 +1129,12 @@ Sequenced so nothing but the last subslice touches the compiler:
   [slice7c-probes](./P7/slice7c-probes.md).
 - **S7d** -- retires the compiler-intrinsic `.` in favor of an ordinary `hosted::show` word
   over S7c's traits; every printing program migrates to an explicit `depends: hosted`/
-  `import:`, no compatibility shim. Detail:
-  [slice7d-dot-hosted-brief](./P7/slice7d-dot-hosted-brief.md).
+  `import:`, no compatibility shim. Probed and re-ruled 260830: the landing shape is
+  per-type concrete dots (the generic form is blocked by a poly-borrow wart), Bool prints
+  lowercase, floats ride an in-slice user-extern f64-ABI fix. Detail:
+  [slice7d-dot-hosted-brief](./P7/slice7d-dot-hosted-brief.md) (260830 addendum supersedes
+  R1-R3), [slice7d-census](./P7/slice7d-census.md),
+  [slice7d-probes](./P7/slice7d-probes.md).
 
 **P7.S8 -- Nested inline-combinator splice-uid collision.** `[ done ]` A spliced trait
 member body lowers under **that member's own** check-time uid namespace: the member's seed

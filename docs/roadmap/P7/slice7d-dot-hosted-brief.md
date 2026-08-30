@@ -66,6 +66,65 @@ gradually.
    (R2).
 4. `cargo fmt --check && cargo clippy -- -D warnings && cargo test` is green.
 
+## Addendum — probe/recon round for S7d (260830): rulings revised
+
+Run 260830 in this worktree: one read-only census ([slice7d-census.md](./slice7d-census.md)) and one disposable compile-probe round ([slice7d-probes.md](./slice7d-probes.md) — the `.` intrinsic deleted in-place, candidate `hosted::show` shapes iterated, all edits reverted). The findings revise R1–R3; the rulings below supersede them where they conflict.
+
+### R1′ — the landing shape is per-type concrete dots, not the generic word
+
+R1's `: . ['T: Show] ( 'T -- )` **parses and registers but its body is unwriteable today** (probe P2): (a) a local-borrowed `&!StrBuf` does not unify with a poly callee's declared `&!StrBuf` — `parser.rs:4117` (Slice 13 R-A4) folds a fully-concrete `&!T` slot to `PolyType::Concrete(Type::Ref(…))` while local borrows produce native `PolyType::Ref`, so `poly_cross_match`'s Ref arm sees a look-alike mismatch (`render` expected `&!StrBuf`, found `&!StrBuf`); (b) field accessors (`&!len`, `&!data`) and `+!` are located errors in generic bodies (`poly_unsupported_accessor_error`). Even in mono bodies, the read-modify-write append over one locally-built StrBuf hits borrow-alias records (P2e/P2h).
+
+What the probes proved instead (P3): **several same-arity concrete `: . ( T -- )` candidates in ONE module are legal, and a caller importing that one module dispatches per-site on the bare call** (P3f: `42 . / -7 . / "hi" . / True . / 100000 >usize .` all resolve). A generic and a concrete candidate cannot mix in one module (`a name cannot mix a generic and a concrete candidate`), and two modules both exporting `.` collide for an importer. **Ruling: `hosted::show` lands one concrete dot per printable type** (each body: fresh `StrBuf`, `render`, `flush` through `Stdout`, then `"\n"` via the str path — byte-identical to today's baked-in newline, and it dodges the in-buffer append friction), with internal delegation through distinctly-named private helpers (intra-module bare cross-overload calls don't resolve, P3e). The generic dot is a recorded follow-up, not a blocker: it needs the declared-ref unfold at `parser.rs:4117` (or normalization at the match sites) and a ruling on poly-body accessors — both pre-existing poly-body limitations, P7.S3-family, filed as their own item. Verification duty for the implementer: grep the corpus for printing inside poly bodies (census found none — `expect-eq` never prints values, combinator splices check against the caller's concrete stack); if one exists, it forces the checker fix into this slice.
+
+### R2′ — the delete list, confirmed and extended
+
+All of the 260829 addendum's list, plus:
+
+- **`src/resolve.rs`'s operator-name predicate is a fourth deletion site the original R2 missed** (probe P3f): with `.` still listed in `is_operator_dispatch_name`, a selectively imported `hosted::show` `.` stays unrewritten expecting builtin dispatch and every bare call is `unknown word '.'`. With it dropped, the P3f import shape works.
+- `.` stays in `BUILTIN_WORDS` (self-tail-call detection and the S3r R4 trait-member-name rejection still want it), exactly like the six surface comparisons: excluded from `is_name_dispatched_builtin`, kept in the list.
+- `core::bool`'s overload is **deleted, not migrated** — layering forces it (probe P4a: post-retirement its body's inner str `.` cannot resolve from the core layer). Its `import: intrinsics i | branch tag drop . | ;` (line 4) and `export: … . ;` (line 6) are trimmed.
+- Unit tests on the deleted surface die with it: `src/check/builtins.rs:561`, `src/check/operators.rs:508,840,844,1002,1013,1041,1048,1055`, and the diagnostic pin `tests/phase7_slice3i.rs:157`.
+
+### R3′ — migration mechanics, verified
+
+The working import shape (P3f, bonus probe): `import: hosted::show | . | ;` + bare calls, per-site dispatch across the concrete candidates. Migration details the census pins down:
+
+- Two selective intrinsics imports name `.` (`lib/hosted/testing.sth:7`, `lib/core/bool.sth:4`) and one export list (`bool.sth:6`); a stale `import: intrinsics | . | ;` is **silently ignored** and the failure surfaces as a bare `unknown word '.'` at the call site with no hint (probe P5) — the lines must be fixed, and the diagnostic gap goes to the cross-cutting diagnostics track, not this slice.
+- `tests/common/mod.rs`'s `fixture_imports`/`bool_imports` (line 193) are migration surface: post-retirement every printing fixture imports `hosted::show`, the bool-ness heuristic collapses (bools print through the same `.`), and the one-hop-rule doc comment (118-123, 162-165) dies. `tests/fixtures/sooth.pkg` needs `depends: hosted` (fixtures are already `layer: hosted`); `examples/sooth.pkg` needs nothing.
+- ~715 test-side print sites across 68 files, `SPY_DEF` in 9 files, 34 `corpus_stdout` + 14 `fill_corpus` goldens (regenerable) and 34 `qbe_baseline` .ssa snapshots (regenerable, and they pin the deleted `$fmt` data rows).
+- Docs: README (4 sites) and the book's printing chapters migrate in-slice; the book's pre-existing staleness (REPL alive, `else`/`end`, the nonexistent `examples/print-if-positive.sth`) is corrected or annotated only where the print rewrite touches it. `docs/roadmap/P8/dogfood/` no longer compiles — annotate, don't migrate.
+
+### R4′ — Bool prints lowercase; the capitalization change is accepted
+
+With `core::bool`'s overload deleted, `True .` goes through `Show for Bool` → `true\n` (probe P4b) vs today's `True\n`. Accepted deliberately: `docs/book/numbers.md:239-256` already documents lowercase `true`/`false` — the *library overload* was the deviation, and S7c's `Show for Bool` already committed to the lowercase spelling. Goldens update accordingly; the ~76 bool print sites ride the harness rewrite.
+
+### R5′ — newline contract: byte-compatibility, spelled as a second write
+
+Numeric and Bool dots append the newline; str and cstr dots print exact bytes with none — reproducing today's per-type behaviour (`%ld\n` vs `%.*s`) so all 48 goldens and `expect`'s TAP spellings migrate without output changes (the driver's `ok --`/`not ok --` prefix parse is the only output contract, `src/driver/toolchain.rs:139-151`). Implementation note from P2e/P2h: the newline is spelled as a second `write(2)` of `"\n"` through the str path, **not** an in-buffer append (borrow-alias friction blocks the read-modify-write append over one locally-built StrBuf; a `core::show` append helper could revisit this later). The cstr dot keeps today's `%s` terminator-bound semantics via a `strlen` extern (already demonstrated as a user extern in `examples/strings.sth`). All paths are `write(2)`, so the buffered-stdio interleaving hazard is gone by construction (probe P9: strict call-order interleaving).
+
+### R6′ — `Show` impls widen to the integer tower
+
+S7c's impl set (i64, usize, isize, Bool) leaves eight printable types without a Show path, six with live corpus sites. **Ruling: `core::show` gains `impl: Show for` u8, u16, u32, u64, i8, i16, i32** — trivial widenings onto the existing `append-digits` path (probe P7 verified u8/i8/u64 byte-exact). Gotcha recorded: the i8 sign test must widen first (`n >i64 0 lt`; a bare `n 0 lt` resolves the literal ambiguously and errors). str/cstr stay out of `Show` (D3 stands) — they are concrete dots only. All dots delegate through `render`, so each new impl needs its matching dot.
+
+### R7′ — floats: fix the user-extern f64 ABI in-slice, print via hosted `snprintf`
+
+Probe P8: the pure-user-land shape compiles and runs — `extern: g-fmt ( &!array[u8 64] usize cstr f64 -- i32 ) "snprintf"` — but **the f64 argument arrives as 0** (snprintf returned 2, wrote `"0\n"`). `Instr::Print`'s float arm passes `d` args to variadic `printf` correctly, so the ABI is expressible in QBE and this is a diagnosable compiler gap in user-extern call lowering, not a language limit. (A libm control failed to *link* — libm isn't linked for user programs — but `snprintf` is libc and links fine, so the float path needs no libm story.) **Ruling: S7d includes the user-extern f64-argument ABI fix** (with `Instr::Print`'s correct `d`-form as the reference and a regression test), then floats print through hosted concrete dots over `snprintf` with `%g\n` — byte-identical to today's `$ffmt`. This is a pre-existing backend bug any user extern taking f64 would hit; it is in-scope because without it the intrinsic retirement silently drops a documented, dogfooded capability (`mean.sth` exists to exercise float printing; `numbers.md` documents `%g`). **Fallback if the fix balloons**: descope f32/f64 dots to a named compile error (`no overload of '.' accepts these operands`, probe P6), record the ABI bug and the pure-Sooth `%g` alternative as follow-ups, and migrate the four float-printing corpus sites to the descope.
+
+### Exit (revised)
+
+1. The delete list of R2′ is gone from the compiler: builtin rows, the `check_operator` `.` arm, `is_name_dispatched_builtin`'s and `resolve.rs` `is_operator_dispatch_name`'s `.` entries, `Instr::Print`'s user-facing arms, the `$fmt`/`$ufmt`/`$ffmt`/`$sfmt`/`$strfmt` data, `printable_types`; `.` stays in `BUILTIN_WORDS` only. `core::bool`'s overload is deleted.
+2. `hosted::show` provides one concrete `.` per printable type (integers via `Show` impls per R6′, `str`/`cstr` via the write(2)/strlen paths per R5′, floats per R7′), registered in `lib/hosted/sooth.pkg`; bare calls resolve per-site after one selective import (P3f shape).
+3. Every example, golden, harness fixture, and doc site that prints imports `hosted::show` explicitly (census §2–§4, §8); `sooth test` output is byte-identical except the accepted Bool lowercase change (R4′); goldens regenerated (`REGEN_CORPUS_STDOUT=1`, fill_corpus, qbe_baseline).
+4. The prelude note (R2) is rewritten — the one-hop paragraph dies; the harness's one-hop comment and the leap/array_ctor comment copies go with it.
+5. A unit test covers the user-extern f64-arg ABI fix (R7′); the corpus has no printing inside poly bodies (verified, or the generic-dot checker fix is pulled into the slice — R1′).
+6. `cargo fmt --check && cargo clippy -- -D warnings && cargo test` is green.
+
+### Explicitly deferred (recorded, not owed by S7d)
+
+- The generic `: . ['T: Show] ( 'T -- )`: the `parser.rs:4117` declared-ref fold and poly-body accessor/`+!` support — P7.S3-family poly-borrow work, its own item (R1′).
+- Diagnostics: the silently-ignored stale `import: intrinsics | . |`, the hintless `unknown word '.'`, and the `no overload of '.'` message naming no fix (P5/P6) — cross-cutting diagnostics track, beside S8's unsatisfied-`Ord` attribution.
+- README's user word named `show` colliding with the trait member name (census §8) — rename or footnote at the implementer's judgement; not a compiler concern.
+
 ## Addendum — probe/recon round for S7c (260829)
 
 Facts S7d's spec will need, from the S7c probe round
