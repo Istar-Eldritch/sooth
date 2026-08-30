@@ -4,6 +4,11 @@
 \ With no user-level manifest either, this file would be an implicit anonymous
 \ package: `intrinsics` and its own siblings only, and the two lines below
 \ would be located errors naming the missing manifest.
+\ No longer compiles as-is post-P7.S7d: `.` is retired off the compiler and
+\ onto `hosted::show`, so this file would also need
+\ `import: hosted::show | . | ;`. Left un-migrated on purpose -- this is
+\ speculative P8 scaffolding (`core::text` doesn't exist yet), not a
+\ compiling program.
 import: intrinsics * ;
 import: core::bool b | if | ;
 import: core::text t | upper? | ;

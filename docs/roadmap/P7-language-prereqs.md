@@ -872,7 +872,7 @@ on the construction site rather than the type (**P7.S3v**); trait objects (**P7.
 default member bodies and supertraits, still unforced. Sequence after **P7.S3s**, which is the
 first slice to give the impl registry a real multi-`impl:` consumer in `core`.
 
-**P7.S4b -- Bounds on impl variables.** S4 shipped generic `impl:` targets but left
+**P7.S4b -- Bounds on impl variables.** `[ done ]` S4 shipped generic `impl:` targets but left
 bounds on an impl's own type variables out of scope: a generic impl's member word carries
 `PolySig { bounds: vec![], .. }`, so a body that calls a trait member on an impl variable
 (e.g. `impl: Show for ['T N]` whose `show` iterates and calls `show` on each element,
@@ -1136,8 +1136,9 @@ should include an indexing demo using S6b's explicit-length-argument syntax (e.g
 S6b's own golden deliberately avoids indexing (reads `len` back instead) precisely because this
 slice doesn't exist yet. Needs a brief before it becomes a real slice.
 
-**P7.S7 -- A testing vocabulary, and what it exposed about printing's layer.** `[ in progress ]`
-Split into four subslices during briefing: the vocabulary itself needed a `hosted` home
+**P7.S7 -- A testing vocabulary, and what it exposed about printing's layer.** `[ done ]`
+All four subslices landed, retiring the intrinsic `.` onto `hosted::show` (S7d). Split
+into four subslices during briefing: the vocabulary itself needed a `hosted` home
 that didn't exist yet (`.` prints through libc unconditionally, a hosted-layer dependency
 the compiler currently hides as a builtin), and reporting more than a bare label on
 failure wants a `Show` trait, whose naive one-impl-per-type shape collides with the
@@ -1159,14 +1160,41 @@ Sequenced so nothing but the last subslice touches the compiler:
   whole-buffer flush; `Show for str` descoped to a `cstr` path in S7d). Detail:
   [slice7c-spec](./P7/slice7c-spec.md), [slice7c-show-brief](./P7/slice7c-show-brief.md),
   [slice7c-probes](./P7/slice7c-probes.md).
-- **S7d** -- retires the compiler-intrinsic `.` in favor of an ordinary `hosted::show` word
-  over S7c's traits; every printing program migrates to an explicit `depends: hosted`/
-  `import:`, no compatibility shim. Probed and re-ruled 260830: the landing shape is
-  per-type concrete dots (the generic form is blocked by a poly-borrow wart), Bool prints
-  lowercase, floats ride an in-slice user-extern f64-ABI fix. Detail:
-  [slice7d-dot-hosted-brief](./P7/slice7d-dot-hosted-brief.md) (260830 addendum supersedes
-  R1-R3), [slice7d-census](./P7/slice7d-census.md),
-  [slice7d-probes](./P7/slice7d-probes.md).
+- **S7d** `[ done ]` -- retired the compiler-intrinsic `.` onto an ordinary `hosted::show`
+  word over S7c's traits; every printing program now migrates to an explicit
+  `depends: hosted` / `import: hosted::show | . | ;`, no compatibility shim. Landing shape
+  (260830 re-ruling, R1'-R13/R16-R18): 15 concrete dots in `lib/hosted/show.sth` -- 11
+  `Show`-backed (the integer tower + `Bool`, over `core::show`'s 11 impls) plus 4
+  non-`Show` dots that ride direct externs (`str` writes all bytes exactly via the
+  `write` extern, `cstr` is strlen-bound via a `sys-strlen` extern, `f64`/`f32` render
+  via `%g` through the `snprintf` extern); the generic `: . ['T: Show] ( 'T -- )` parses
+  but its body is unwriteable -- see the parked follow-up below. `Bool` prints lowercase
+  `true`/`false`; a `str` dot writes all `len` bytes including an interior NUL (unlike
+  C's `%s`), a `cstr` dot stays terminator-bound; a user `extern:`'s `f64` argument now
+  reaches its C callee (the ABI fix that unblocked the float dots). R17a also reordered
+  trace-mixed output: `SOOTH_TRACE_ALLOC` lines ride buffered stdio, flushed at exit, while
+  dots go out via unbuffered `write(2)` immediately, so a program interleaving trace and
+  printed output can see the two streams land in a different order than before (31
+  golden call sites migrated as intended-to-change). Detail:
+  [slice7d-dot-hosted-brief](./P7/slice7d-dot-hosted-brief.md)
+  (260830 addendum supersedes R1-R3), [slice7d-census](./P7/slice7d-census.md),
+  [slice7d-probes](./P7/slice7d-probes.md), [slice7d-spec](./P7/slice7d-spec.md).
+
+  Follow-up ledger, not carried forward as their own slices yet:
+  - The generic Show-backed dot (collapsing the 11 `Show`-backed concrete dots into one
+    `: . ['T: Show] ( 'T -- )`; the 4 non-`Show` dots can't be absorbed): parked as
+    **P7.S3w** (see that entry), not duplicated here.
+  - Diagnostics left as-is by this slice (P5/P6 territory): a stale
+    `import: intrinsics | . | ;` is silently ignored rather than flagged, `unknown word
+    '.'` carries no hint pointing at `hosted::show`, and "no overload of `.`" for an
+    unprintable type names no fix.
+  - The `%al`/variadic-marker spelling: `Instr::Call`'s extern-call emission
+    (`src/backend/qbe.rs`, the comment on the `CallKind::Extern` arm) marks every extern
+    argument variadic unconditionally, which is unobservable on amd64_sysv/arm64/rv64 but
+    wrong on `arm64_apple`, whose ABI passes variadic arguments on the stack while fixed
+    ones go in registers -- a leading `...` there would spill every extern argument,
+    including to a non-variadic callee like `strlen`. No target selection exists yet
+    (`src/driver/toolchain.rs` invokes `qbe` with no `-t`), so this is dormant until one is added.
 
 **P7.S8 -- Nested inline-combinator splice-uid collision.** `[ done ]` A spliced trait
 member body lowers under **that member's own** check-time uid namespace: the member's seed

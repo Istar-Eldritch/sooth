@@ -25,6 +25,8 @@ computes the greatest common divisor of two numbers using Euclid's
 algorithm:
 
 ```sooth
+import: hosted::show | . | ;
+
 : gcd ( i64 i64 -- i64 )
   | a b |
   b 0 eq if

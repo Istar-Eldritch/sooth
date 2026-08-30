@@ -20,6 +20,9 @@ argument, and returned. `call` runs it, consuming whatever inputs its
 body expects off the stack:
 
 ```sooth
+import: intrinsics * ;
+import: hosted::show | . | ;
+
 : main ( -- )
   5 [ 1 add ] call . ;    \ prints 6
 ```
@@ -29,6 +32,9 @@ nested effect: `( i64 [ i64 -- i64 ] -- i64 )` takes an `i64` and a
 quotation from `i64` to `i64`.
 
 ```sooth
+import: intrinsics * ;
+import: hosted::show | . | ;
+
 : apply ( [ i64 -- i64 ] i64 -- i64 ) | n | | f | n f call ;
 
 : main ( -- )
@@ -41,6 +47,9 @@ quotation `[ 1 add ]` is passed to it as a runtime value — a
 store. You can build a whole call chain this way:
 
 ```sooth
+import: intrinsics * ;
+import: hosted::show | . | ;
+
 : apply2 ( [ i64 -- i64 ] i64 -- i64 ) apply ;
 
 : run ( [ -- i64 ] -- i64 ) call ;
@@ -109,6 +118,9 @@ the whole word must be spliced into its caller.
 Concretely:
 
 ```sooth
+import: intrinsics * ;
+import: hosted::show | . | ;
+
 : twice inline ( i64 ~[ i64 -- i64 ] -- i64 )
   | f | f call f call ;
 
@@ -164,6 +176,8 @@ and is called immediately, in the same body, is fine — the checker
 can see the single use:
 
 ```sooth
+import: intrinsics * ;
+
 : main ( -- )
   7 Fd | f |
   [ f drop ] call ;    \ fine: called once, right here
@@ -213,6 +227,8 @@ storage does not survive the return
 for a closure that owns what it captures:
 
 ```sooth
+import: intrinsics * ;
+
 : mk ( -- owning [ -- ] )
   7 Fd | f |
   [ f drop ] ;
@@ -244,6 +260,9 @@ splicing, it's just an ordinary local reference in the same frame. A
 boundary and no D3 restriction:
 
 ```sooth
+import: intrinsics * ;
+import: core::prelude * ;
+
 : main ( -- )
   7 Fd | f | True ~[ f drop ] ~[ f drop ] if ;    \ prints 7
 ```
@@ -260,6 +279,8 @@ take a `~[ ]` body and splice it into a loop shape. `times`, from the
 standard library, runs its quotation a fixed number of times:
 
 ```sooth
+import: intrinsics * ;
+import: hosted::show | . | ;
 import: core::combinators c | times | ;
 
 : main ( -- )

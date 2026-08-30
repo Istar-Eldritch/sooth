@@ -237,9 +237,13 @@ true
 
 ## Printing
 
-The `.` word prints any scalar. It picks the format from the type:
-signed integers print as signed decimal, unsigned integers as unsigned
-decimal, floats with `%g`, and `bool` as `true` or `false`:
+`.` (from `hosted::show`, imported explicitly in the samples throughout the book) prints
+any scalar. It picks the format from the type: signed integers print as
+signed decimal, unsigned integers as unsigned decimal, floats with `%g`,
+and `bool` as `true` or `false`. A `str` prints all of its bytes exactly --
+including an embedded NUL, which a `str` can hold like any other byte and
+which `.` writes rather than treats as a terminator (that terminator-bound
+reading belongs to `cstr`, a separate dot):
 
 ```text
 > 42 .
