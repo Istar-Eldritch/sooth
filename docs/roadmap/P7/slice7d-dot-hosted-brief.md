@@ -17,8 +17,10 @@ can slip without stalling the testing vocabulary that motivated the whole split.
 
 ### R1 — `.` becomes `hosted::show`'s word, not a new compiler primitive
 
-`. ( 'T:Show -- )` is an ordinary `hosted` word: `&Stdout show` under the hood, `'T`
-resolved through `Show` (S7c) the same way any other trait member call resolves.
+`. ( 'T:Show -- )` is an ordinary `hosted` word, two steps under the hood: `show` the
+value into a fresh `StrBuf` (`'T` resolved through `Show` (S7c) the same way any other
+trait member call resolves), then flush the buffer through `Write` (`&!Stdout` receiver;
+S7c's `Write for Stdout` and the `sys-write` extern live in `hosted::libc`).
 Every existing call site (`42 .`, `core::bool`'s `.` overload, the QBE emitter's own
 diagnostic/trace paths at `qbe.rs:892-1283` that currently call `printf` directly)
 either goes through the new word or, for the compiler's own trap/OOM/bounds
@@ -81,8 +83,10 @@ delegates to the `str` row), `printable_types` itself,
   change the per-type newline behaviour (`expect`'s `"\n" .` spellings
   depend on it).
 - **Do not implement the sink on the `str` `Print` arm** — S7c's sinks bind
-  to `write(2)` at the `extern:` boundary instead (`extern: write ( i32
-  &array[u8 64] usize -- isize ) "write"`), because a `str` value can only
+  to `write(2)` at the `extern:` boundary instead (`extern: sys-write ( i32
+  &!array[u8 64] usize -- isize ) "write"` — the binding is named `sys-write` because the
+  `Write` member `write` shadows a same-named extern inside the impl, and the array mode
+  is mutable because the buffer arrives as `&!StrBuf`), because a `str` value can only
   ever be a literal or a static and has no extern ABI at all.
 - **Output ordering becomes observable.** `.` rides buffered stdio;
   `write(2)` does not. After retirement all printing is syscall-ordered — a

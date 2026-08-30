@@ -30,7 +30,7 @@ is the mechanism.
 1. **No multi-variable traits.** `trait: Show['T 'S]` is a hard parse error
    (`multi_variable_trait_error`, src/parser.rs:2687-2689, S3e R16), enforced
    twice: on the header bracket and again on a member effect introducing a
-   second variable (src/parser.rs:2843-2845). Dispatch grounds exactly one
+   second variable (src/parser.rs:2849; a third site at :2722). Dispatch grounds exactly one
    variable — `substitute_member_var` maps *every* `PolyType::Var(_)` onto the
    single chosen var (src/check/poly.rs:1075-1086) — and there is no
    partially-ground trait dispatch anywhere. Sink-genericity through a second
@@ -44,11 +44,13 @@ is the mechanism.
    a slice's `len` sees the whole array, with no partial-fill notion (P6b).
    "Formatting logic that produces `str` chunks" is therefore unwritable for
    anything computed — the original R1's chunk model is dead.
-3. **There is no integer division or multiplication.** `div` has float rows
+3. **There is no integer division primitive.** `div` has float rows
    only (`div_requires_float_error`, src/check/operators.rs:219-229); the int
    tower is `mod`/`and`/`or`/`xor`/`not`/`shl`/`shr`/`max`
-   (src/check/builtins.rs:188-196). A base-10 itoa is not directly
-   expressible today — see R4/D1. No itoa helper exists anywhere in the
+   (src/check/builtins.rs:188-196). Integer `mul` exists for every numeric
+   type (the `add`/`sub`/`mul` arm, src/check/operators.rs:203-217), but a
+   multiplication is not a division primitive, so a base-10 itoa has no direct
+   route today — see R4/D1. No itoa helper exists anywhere in the
    corpus.
 4. **Scalars cannot be borrowed.** A `&i64` operand is unnameable:
    ``cannot borrow the scalar local `n` of type `i64` … a scalar has no
@@ -59,9 +61,13 @@ is the mechanism.
 5. **`str` never crosses `extern:`.** The FFI boundary admits
    `Int/Float/Usize/Isize/Ref/Cstr/Bool` only (src/check/declarations.rs:93-101);
    a `str` parameter or return is a located error whose own text says to use
-   `cstr` (probes P6a/P6a2). The proven sink binding against real
-   `write(2)` is `extern: write ( i32 &array[u8 N] usize -- isize ) "write"`
-   (probe P6c; in-tree precedent `examples/resources.sth`'s `read`). `cstr`
+   `cstr` (probes P6a/P6a2). The sink binding against real
+   `write(2)` is `extern: sys-write ( i32 &!array[u8 N] usize -- isize ) "write"` —
+   named `sys-write` because a `Write` member named `write` shadows a same-named extern
+   inside the impl (src/ast.rs:1688-1700), and `&!array` because the buffer arrives as a
+   `&!StrBuf`, whose only admissible field projection is mutable (in-tree precedent
+   `examples/resources.sth:4`'s `read`; probe P6c's shared spelling was proven from an
+   owned local, not a `&!` field projection). `cstr`
    works for literals only (the emitter NUL-terminates literals,
    src/backend/qbe.rs:841). `puts` is wrong three ways: it needs NUL
    termination, it appends a newline, and it rides stdio buffering.
@@ -104,14 +110,17 @@ type: StrBuf  data array[u8 64]  len usize ;
 
 trait: Show['T]
   : show ( 'T &!StrBuf -- ) ;      \ by-value receiver (fact 4); ONE variable
+;
 
 impl: Show for i64                 \ decimal digits into buf — D1 decides how
 impl: Show for usize
 impl: Show for isize
-impl: Show for bool                \ "true" / "false"
+impl: Show for Bool                \ "true" / "false" (Bool is core::bool's enum; the surface
+                                   \ name `bool` does not exist — it is rejected outright)
 
 trait: Write['S]
   : write ( &!'S &!StrBuf -- ) ;   \ whole-buffer flush (D2)
+;
 ```
 
 `Show` impls format into `StrBuf` and never name an I/O target, so exactly one
@@ -125,8 +134,9 @@ single-variable traits a value reaches a sink by going *through* `StrBuf`, and
 one sink type per `Write` impl (fact 6).
 
 D2 settled on the whole-buffer flush (one `write(2)` per flush, not one per
-digit); byte-at-a-time `write ( &!'S u8 -- )` is the probe-proven fallback (P7
-ran exactly that shape end to end) if the flush member hits a checker wall at
+digit); byte-at-a-time `write ( &!'S u8 -- )` is the named fallback (probe-log
+P7 recorded the outcome — `prints 88 twice` — not the member-signature source, so
+re-probe before relying on it) if the flush member hits a checker wall at
 impl time.
 
 ## R2 (revised) — hosted::libc's sink is `write(2)`, not `puts`
@@ -134,14 +144,17 @@ impl time.
 ```sooth
 \ hosted::libc
 type: Stdout ;
-extern: write ( i32 &array[u8 64] usize -- isize ) "write" ;
+extern: sys-write ( i32 &!array[u8 64] usize -- isize ) "write" ;
 ```
 
 The array-length `N` in the extern signature must match `StrBuf`'s declared
-capacity — the impl body passes `&!buf &data` (the interior `&array[u8 64]`)
-and the live `len`. Whether a provenance-carrying `&!data` ref satisfies the
-extern boundary's `Ref(..)` admission is a small spec-time probe (P6c proved
-the plain `&buf` shape; `is_extern_boundary_scalar` admits `Type::Ref(..)` in
+capacity — the impl body reads the live `len` through `&!len @` and passes
+`&!data` (the interior mutable `&!array[u8 64]`), not `&data`: a shared
+projection off a `&!StrBuf` receiver is a mode error. This whole-buffer shape
+is the spec's *required* design — the review round compiled it end to end in
+this tree — and the spec's Phase 2 entry checks confirm it at impl time
+(P6c proved the plain `&buf` shape from an owned local, not a `&!` field
+projection; `is_extern_boundary_scalar` admits `Type::Ref(..)` in
 any mode at declaration level, per P6c2). `cstr` remains the literal-only
 alternative (P6d/P6d2). See fact 9 for the buffering caveat and fact 5 for why
 `puts` is out.
@@ -167,8 +180,10 @@ extraction, and fact 3 says the primitives do not exist. Options:
   small compiler change, but the S7d brief calls S7d "the only one that
   touches the compiler"; taking (a) needs an explicit sequencing exception.
 - **(b)** Pure-Sooth restoring division in the `Show for i64` impl via
-  `shl`/`shr`/sub/comparisons (no `mul` exists, so no magic-number trick) —
-  library-only, bounded (~64 iterations), no new compiler surface.
+  `shl`/`shr`/sub/comparisons — library-only, bounded (~64 iterations), no new
+  compiler surface. (`mul` exists — src/check/operators.rs:203-217 — but no
+  reciprocal/magic-number division trick is pursued; D1 stays restoring
+  division.)
 - **(c)** Descope integer `Show` — kills S7b's motivating consumer
   (`expect-eq` reporting actual/expected integers) and is not recommended.
 
@@ -192,7 +207,9 @@ motivated S7b. Aggregate receivers can come later with aggregate targets.
 - Derived/automatic `Show` for user structs/enums; hand-written scalar impls
   only.
 - A growable/heap-backed buffer — needs the allocator (P9). `StrBuf` is fixed
-  capacity with D3 governing overflow behaviour.
+  capacity; overflow behaviour is the spec's clamp requirement (R11: writes past
+  capacity are discarded, `len` never exceeds capacity) — not D3, which is the `str`
+  descoping.
 - `Slice[u8]` as a member-parameter or extern-boundary chunk type — not a
   legal member-parameter shape (`member_shape_is_supported`) and not extern
   boundary-admissible.
@@ -206,8 +223,10 @@ motivated S7b. Aggregate receivers can come later with aggregate targets.
   option (a) would add integer `div` rows to `builtin_table` plus per-width
   QBE lowering and tests — real compiler surface for a formatting helper.
   Sign handling: capture the sign, take the magnitude as the u64 bit pattern
-  (for negatives `not 1 +`, exact for every `i64` including `MIN`, whose
-  two's-complement pattern *is* its magnitude), render the magnitude,
+  (for negatives `>u64 not 1 add` — `>u64` is the bit-preserving reinterpret
+  that makes the magnitude exact for every `i64` including `MIN`, whose
+  two's-complement pattern *is* its magnitude; the word is `add`, not `+`,
+  which is retired), render the magnitude,
   prepend `-`.
 - **D2 — `Write` member: whole-buffer flush, `write ( &!'S &!StrBuf -- )`.**
   One `write(2)` per flush rather than one syscall per digit through the
@@ -228,7 +247,7 @@ motivated S7b. Aggregate receivers can come later with aggregate targets.
 
 1. `core::show` (no_std, no `extern:`) declares `StrBuf`, `Show['T]` with a
    by-value receiver, and `Write['S]` (D2's whole-buffer flush); `Show` is
-   implemented once each for `i64`, `usize`, `isize` and `bool`, every impl
+   implemented once each for `i64`, `usize`, `isize` and `Bool`, every impl
    inside `core::show` (orphan: scalar targets, fact 7). `str` is descoped
    per D3.
 2. `hosted::libc` declares `type: Stdout` and its `Write` impl over the real
