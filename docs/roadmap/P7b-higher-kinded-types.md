@@ -86,6 +86,12 @@ the `Kind` enum and `: Kind` annotation syntax that **P7.S6a** introduces — S6
 **Exit:** a type variable may have a higher kind; `'F['T]` type-checks and monomorphizes to
 a concrete type; kind-incorrect application is a located error; a signature may mention
 `'F['T]` where `'F` is a type variable of kind `* -> *`.
+Scoped against the tree 260830 (probe round + paper recon): see
+[slice1-brief](./P7b/slice1-brief.md) — design rulings R1-R8, witnesses, and the golden
+list — and [slice1-probes](./P7b/slice1-probes.md) for the verbatim compile-probe log.
+Headline: applied-target impl dispatch already works (`impl: Functor for Option[i64]`),
+which narrows S2 to the constructor-abstract target; S1's parse work is the prerequisite
+for the whole trait surface.
 
 **P7b.S2 — Constructor-keyed dispatch and higher-kinded trait declarations.**
 The trait machinery. The impl registry keys on `(TraitId, Constructor)` for HKT traits. A
