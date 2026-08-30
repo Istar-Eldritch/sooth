@@ -328,7 +328,8 @@ pub(super) fn contains_reference(
 /// has no name of its own to cite.
 pub(super) fn stored_reference_output_error(name: &str, ty: Type, location: &str) -> String {
     format!(
-        "error: a reference cannot be stored: `{name}` declares the output `{ty}`{location}\n  a `&T`/`&!T` borrows a local of the callee's own frame, which is gone by the time the caller reads it; take the reference as an input instead"
+        "error: a reference cannot be stored: {} declares the output `{ty}`{location}\n  a `&T`/`&!T` borrows a local of the callee's own frame, which is gone by the time the caller reads it; take the reference as an input instead",
+        crate::resolve::render_word(name)
     )
 }
 

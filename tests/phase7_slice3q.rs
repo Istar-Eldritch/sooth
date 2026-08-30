@@ -138,7 +138,7 @@ fn a_wildcard_intrinsics_import_does_not_leak_through_a_hub() {
     );
     assert_eq!(
         build_error(&entry),
-        "error: error: `add` is an intrinsic and is not imported in `main` (line 2, col 19)\n  add `import: intrinsics * ;` (or `import: intrinsics | add ... | ;`) to this file"
+        "error: `add` is an intrinsic and is not imported in `main` (line 2, col 19)\n  add `import: intrinsics * ;` (or `import: intrinsics | add ... | ;`) to this file"
     );
 }
 
@@ -155,7 +155,7 @@ fn a_hub_without_an_intrinsics_import_cannot_export_one() {
     );
     assert_eq!(
         build_error(&entry),
-        "error: error: `drop` in `export:` names nothing declared or imported in this module (line 1, col 9)"
+        "error: `drop` in `export:` names nothing declared or imported in this module (line 1, col 9)"
     );
 }
 
@@ -172,7 +172,7 @@ fn a_qualified_hub_import_is_not_a_route() {
     );
     assert_eq!(
         build_error(&entry),
-        "error: error: unknown word `hub::drop` in `main` (line 2)"
+        "error: unknown word `hub::drop` in `main` (line 2)"
     );
 }
 
@@ -249,7 +249,7 @@ fn a_source_declaring_an_intrinsic_name_still_collides_with_a_local() {
     );
     assert_eq!(
         build_error(&entry),
-        "error: error: selective import of `dup` from module `h` (line 1, col 25) collides with a local definition of `dup`"
+        "error: selective import of `dup` from module `h` (line 1, col 25) collides with a local definition of `dup`"
     );
 }
 
@@ -335,7 +335,7 @@ fn two_hubs_re_exporting_one_ordinary_word_still_collide() {
     );
     assert_eq!(
         build_error(&entry),
-        "error: error: selective import of `lw` from module `b` (line 3, col 25) collides with the selective import of `lw` from module `a`"
+        "error: selective import of `lw` from module `b` (line 3, col 25) collides with the selective import of `lw` from module `a`"
     );
 }
 
@@ -430,6 +430,6 @@ fn a_hub_re_exporting_a_real_word_still_collides_with_a_local_of_the_same_name()
     );
     assert_eq!(
         build_error(&entry),
-        "error: error: selective import of `dup` from module `h` (line 2, col 25) collides with a local definition of `dup`"
+        "error: selective import of `dup` from module `h` (line 2, col 25) collides with a local definition of `dup`"
     );
 }

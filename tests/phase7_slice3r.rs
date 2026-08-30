@@ -505,7 +505,7 @@ fn impl_body_wrong_effect_names_readable_member() {
     let err = build_error(&entry);
     assert_eq!(
         err,
-        "error: error: stack effect mismatch in `cmp` (member of trait `Order` for `Point`) (line 6)\n  body leaves 0 values, but ( … ) declares 1 outputs\n  note: declared ( &Point &Point -- Ordering )\n"
+        "error: stack effect mismatch in `cmp` (member of trait `Order` for `Point`) (line 6)\n  body leaves 0 values, but ( … ) declares 1 outputs\n  note: declared ( &Point &Point -- Ordering )\n"
     );
 }
 
@@ -536,7 +536,7 @@ fn impl_body_wrong_effect_is_rejected_in_body() {
     let err = build_error(&entry);
     assert_eq!(
         err,
-        "error: error: stack effect mismatch in `cmp` (member of trait `Order` for `Point`) (line 10)\n  body leaves 0 values, but ( … ) declares 1 outputs\n  note: declared ( &Point &Point -- Ordering )\n"
+        "error: stack effect mismatch in `cmp` (member of trait `Order` for `Point`) (line 10)\n  body leaves 0 values, but ( … ) declares 1 outputs\n  note: declared ( &Point &Point -- Ordering )\n"
     );
 }
 
@@ -560,7 +560,7 @@ fn impl_body_wrong_effect_type_names_readable_member() {
     let err = build_error(&entry);
     assert_eq!(
         err,
-        "error: error: type mismatch in `cmp` (member of trait `Order` for `Point`) (line 6)\n  body leaves `i64` where the declaration requires `Ordering`\n  note: declared ( &Point &Point -- Ordering )\n"
+        "error: type mismatch in `cmp` (member of trait `Order` for `Point`) (line 6)\n  body leaves `i64` where the declaration requires `Ordering`\n  note: declared ( &Point &Point -- Ordering )\n"
     );
 }
 
@@ -585,7 +585,7 @@ fn impl_body_underflow_names_readable_member() {
     let err = build_error(&entry);
     assert_eq!(
         err,
-        "error: error: stack effect mismatch in `get` (member of trait `Getter` for `Point`) (line 5)\n  `add` needs 2 values, but the stack holds 0\n  note: declared ( &Point -- i64 )\n"
+        "error: stack effect mismatch in `get` (member of trait `Getter` for `Point`) (line 5)\n  `add` needs 2 values, but the stack holds 0\n  note: declared ( &Point -- i64 )\n"
     );
     // Survives a re-blessing of the wording above: the raw synthesized
     // spelling is unforgeable (`;` is a lexer delimiter), so its appearance in
@@ -612,7 +612,7 @@ fn impl_body_unknown_word_names_readable_member() {
     let err = build_error(&entry);
     assert_eq!(
         err,
-        "error: error: unknown word `bogus` in `get` (member of trait `Getter` for `Point`) (line 5)\n"
+        "error: unknown word `bogus` in `get` (member of trait `Getter` for `Point`) (line 5)\n"
     );
     assert!(!err.contains("get;Getter"), "{err}");
 }
@@ -636,7 +636,7 @@ fn impl_body_ungated_intrinsic_names_readable_member() {
     let err = build_error(&entry);
     assert_eq!(
         err,
-        "error: error: `add` is an intrinsic and is not imported in `get` (member of trait `Getter` for `Point`) (line 4, col 22)\n  add `import: intrinsics * ;` (or `import: intrinsics | add ... | ;`) to this file\n"
+        "error: `add` is an intrinsic and is not imported in `get` (member of trait `Getter` for `Point`) (line 4, col 22)\n  add `import: intrinsics * ;` (or `import: intrinsics | add ... | ;`) to this file\n"
     );
     assert!(!err.contains("get;Getter"), "{err}");
 }

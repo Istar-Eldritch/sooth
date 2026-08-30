@@ -22,6 +22,9 @@ use super::*;
 /// R14: the symbol's *shape* is checked in the parser, but nothing checks
 /// that it *exists* — that needs a symbol table the compiler has no access
 /// to, so a misspelled symbol is a `cc` linker error, not a diagnostic.
+/// Decl names arrive mangled (`resolve` rewrites every declared name in
+/// place), so every diagnostic here renders the name through `render_word` --
+/// the user wrote `puts`, never `puts__m0`.
 pub(super) fn check_extern_decls(
     externs: &[ExternDecl],
     words: &[WordDef],
@@ -57,8 +60,10 @@ pub(super) fn check_extern_decls(
 /// already registered as a builtin, a user `:` word, or another `extern:`.
 fn extern_redeclaration_error(decl: &ExternDecl) -> String {
     format!(
-        "error: `extern: {}` redeclares an existing word (line {}, col {})",
-        decl.name, decl.span.line, decl.span.col
+        "error: extern: {} redeclares an existing word (line {}, col {})",
+        crate::resolve::render_word(&decl.name),
+        decl.span.line,
+        decl.span.col
     )
 }
 
@@ -69,8 +74,8 @@ fn extern_redeclaration_error(decl: &ExternDecl) -> String {
 /// which points at the wrong term entirely.
 fn extern_multi_output_error(decl: &ExternDecl) -> String {
     format!(
-        "error: `extern: {}` declares {} outputs (line {}, col {})\n  no C function returns more than one value; declare at most one output",
-        decl.name,
+        "error: extern: {} declares {} outputs (line {}, col {})\n  no C function returns more than one value; declare at most one output",
+        crate::resolve::render_word(&decl.name),
         decl.effect.outputs.len(),
         decl.span.line,
         decl.span.col
@@ -141,8 +146,10 @@ fn check_extern_boundary_types(decl: &ExternDecl, enums: &[EnumDecl]) -> Result<
 /// literal being the only constructor — so the rejection names it.
 fn extern_str_input_error(decl: &ExternDecl) -> String {
     format!(
-        "error: `extern: {}` declares the input `str` (line {}, col {})\n  a `str` is a pointer and a length, which matches no C parameter; declare `cstr` and convert with `cstr` at the call site",
-        decl.name, decl.span.line, decl.span.col
+        "error: extern: {} declares the input `str` (line {}, col {})\n  a `str` is a pointer and a length, which matches no C parameter; declare `cstr` and convert with `cstr` at the call site",
+        crate::resolve::render_word(&decl.name),
+        decl.span.line,
+        decl.span.col
     )
 }
 
@@ -154,8 +161,11 @@ fn extern_str_input_error(decl: &ExternDecl) -> String {
 /// *output* through the ordinary no-stored-reference ban (R5).
 fn extern_slice_input_error(decl: &ExternDecl, ty: Type) -> String {
     format!(
-        "error: `extern: {}` declares the input `{}` (line {}, col {})\n  a slice is a pointer and a length, which matches no C parameter; declare `&T` and pass the length as a separate `usize`",
-        decl.name, ty, decl.span.line, decl.span.col
+        "error: extern: {} declares the input `{}` (line {}, col {})\n  a slice is a pointer and a length, which matches no C parameter; declare `&T` and pass the length as a separate `usize`",
+        crate::resolve::render_word(&decl.name),
+        ty,
+        decl.span.line,
+        decl.span.col
     )
 }
 
@@ -164,22 +174,30 @@ fn extern_slice_input_error(decl: &ExternDecl, ty: Type) -> String {
 /// length either, so there is nothing to build one from.
 fn extern_str_output_error(decl: &ExternDecl) -> String {
     format!(
-        "error: `extern: {}` cannot return a `str` (line {}, col {})\n  a `str` may point at static data only, and C supplies no length; declare `cstr`",
-        decl.name, decl.span.line, decl.span.col
+        "error: extern: {} cannot return a `str` (line {}, col {})\n  a `str` may point at static data only, and C supplies no length; declare `cstr`",
+        crate::resolve::render_word(&decl.name),
+        decl.span.line,
+        decl.span.col
     )
 }
 
 fn extern_owned_aggregate_error(decl: &ExternDecl, ty: Type, position: &str) -> String {
     format!(
-        "error: `extern: {}` declares the {position} `{}`, an owned aggregate (line {}, col {})\n  ownership across the C boundary has no answer and no client; only the numeric tower, `&T`/`&!T`, and `cstr` may cross",
-        decl.name, ty, decl.span.line, decl.span.col
+        "error: extern: {} declares the {position} `{}`, an owned aggregate (line {}, col {})\n  ownership across the C boundary has no answer and no client; only the numeric tower, `&T`/`&!T`, and `cstr` may cross",
+        crate::resolve::render_word(&decl.name),
+        ty,
+        decl.span.line,
+        decl.span.col
     )
 }
 
 fn extern_owned_pointer_output_error(decl: &ExternDecl, ty: Type) -> String {
     format!(
-        "error: `extern: {}` cannot return the owned pointer `{}` (line {}, col {})\n  it would forge ownership of memory the allocator did not hand out",
-        decl.name, ty, decl.span.line, decl.span.col
+        "error: extern: {} cannot return the owned pointer `{}` (line {}, col {})\n  it would forge ownership of memory the allocator did not hand out",
+        crate::resolve::render_word(&decl.name),
+        ty,
+        decl.span.line,
+        decl.span.col
     )
 }
 
@@ -984,7 +1002,7 @@ fn check_no_stored_references(
         for (field, ty) in &decl.fields {
             if contains_reference(*ty, structs, enums, arrays) {
                 return Err(stored_reference_error(
-                    &format!("field `{field}` of type `{}`", decl.name),
+                    &format!("field `{field}` of type `{}`", decl.name_static),
                     *ty,
                     Some(decl.span),
                 ));
@@ -1000,7 +1018,7 @@ fn check_no_stored_references(
                             "payload {} of variant `{}` of type `{}`",
                             super::variant_field_desc(field, idx),
                             variant.name,
-                            decl.name
+                            decl.name_static
                         ),
                         *ty,
                         Some(variant.span),
@@ -1649,8 +1667,8 @@ fn node_name<'a>(
     arrays: &'a [ArrayDecl],
 ) -> &'a str {
     match node {
-        TypeNode::Struct(i) => structs[i].name.as_str(),
-        TypeNode::Enum(i) => enums[i].name.as_str(),
+        TypeNode::Struct(i) => structs[i].name_static,
+        TypeNode::Enum(i) => enums[i].name_static,
         TypeNode::Array(i) => arrays[i].name_static,
     }
 }
@@ -2018,7 +2036,7 @@ mod tests {
         };
         assert_eq!(
             check_extern_boundary_types(&decl, &[]).unwrap_err(),
-            "error: `extern: consume` declares the input `Slice[i64]` (line 3, col 1)\n  a slice is a pointer and a length, which matches no C parameter; declare `&T` and pass the length as a separate `usize`"
+            "error: extern: `consume` declares the input `Slice[i64]` (line 3, col 1)\n  a slice is a pointer and a length, which matches no C parameter; declare `&T` and pass the length as a separate `usize`"
         );
         // The reference it views crosses fine, which is what the message
         // directs the reader to.
@@ -2713,6 +2731,33 @@ mod tests {
         assert!(check_duplicate_word_names(&[word("drop", 0), word("drop", 0)]).is_ok());
     }
     #[test]
+    fn extern_error_names_the_surface_word_not_the_mangled_decl() {
+        // `resolve` mangles every declared name in place (`puts` ->
+        // `puts__m0`) before the checker runs; the diagnostic must name the
+        // word the user wrote (`render_word`), never the resolved symbol.
+        let decl = ExternDecl {
+            name: "puts__m0".to_string(),
+            symbol: "puts".to_string(),
+            effect: StackEffect {
+                inputs: vec![TypedSlot {
+                    name: None,
+                    ty: Type::Str,
+                }],
+                outputs: Vec::new(),
+            },
+            span: Span {
+                line: 1,
+                col: 1,
+                module: 0,
+            },
+            module: 0,
+        };
+        let err = check_extern_boundary_types(&decl, &[]).unwrap_err();
+        assert!(err.contains("extern: `puts` "), "unexpected message: {err}");
+        assert!(!err.contains("__m0"), "unexpected message: {err}");
+    }
+
+    #[test]
     fn check_extern_redeclaring_a_word_is_error() {
         // Criterion 5/R1: an `extern:` naming an already-registered word (a
         // user `:` word here) is a located error.
@@ -3094,7 +3139,7 @@ mod tests {
         let src = "extern: two ( i64 -- i64 i64 ) \"two\" ;";
         let err = check_src(src).unwrap_err();
         assert!(
-            err.contains("`extern: two` declares 2 outputs")
+            err.contains("extern: `two` declares 2 outputs")
                 && err.contains("no C function returns more than one value"),
             "unexpected message: {err}"
         );

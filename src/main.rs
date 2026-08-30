@@ -72,6 +72,15 @@ fn test_paths_or_usage(args: &[String]) -> Vec<PathBuf> {
     parse_test_paths(args).unwrap_or_else(|()| usage())
 }
 
+/// Most diagnostic producers -- checker formatters, driver and package errors
+/// -- embed their own `error: ` prefix in the strings they return (hundreds
+/// of sites, and the tests that assert on their text); parse errors do not.
+/// The CLI boundary is the one place that can normalize, so it strips a
+/// single embedded prefix and the caller prints exactly one.
+fn single_error_prefix(e: &str) -> &str {
+    e.strip_prefix("error: ").unwrap_or(e)
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let result = match args.get(1).map(String::as_str) {
@@ -105,7 +114,7 @@ fn main() {
         }
     };
     if let Err(e) = result {
-        eprintln!("error: {e}");
+        eprintln!("error: {}", single_error_prefix(&e));
         exit(1);
     }
 }
@@ -116,6 +125,24 @@ mod tests {
 
     fn args(strs: &[&str]) -> Vec<String> {
         strs.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn checker_error_with_embedded_prefix_prints_exactly_one() {
+        let printed = format!(
+            "error: {}",
+            single_error_prefix("error: unknown word `x` in `f` (line 1)")
+        );
+        assert_eq!(printed, "error: unknown word `x` in `f` (line 1)");
+    }
+
+    #[test]
+    fn parse_error_without_prefix_gains_exactly_one() {
+        let printed = format!(
+            "error: {}",
+            single_error_prefix("parse error: expected `:` at line 1, col 1")
+        );
+        assert_eq!(printed, "error: parse error: expected `:` at line 1, col 1");
     }
 
     #[test]
