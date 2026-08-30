@@ -1,3 +1,25 @@
 \ `libc`: raw extern bindings to host C functions.
+import: intrinsics * ;
+import: core::show | Write | ;
+
 extern: exit ( i32 -- ) "exit" ;
-export: exit ;
+extern: sys-write ( i32 &!array[u8 64] usize -- isize ) "write" ;
+
+export: exit Stdout ;
+
+\ A stateless sink over fd 1: `write(2)` (S7c R2/R5). The binding is named
+\ `sys-write`, not `write` -- an impl body binds its own member name ahead
+\ of module scope, so a `Write` member named `write` would shadow a
+\ same-named extern inside the very impl that must call it.
+type: Stdout ;
+
+\ `len` must be read and bound before the `&!data` projection is taken:
+\ taking `&!data` first makes the later `&!len @` fail with `cannot
+\ reborrow ... while a reference derived from it is live` (S7c R5).
+impl: Write for Stdout
+  : write
+    | sink buf |
+    sink drop
+    buf &!len @ | n |
+    1 >i32 buf &!data n sys-write drop ;
+;

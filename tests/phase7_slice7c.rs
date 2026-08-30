@@ -196,3 +196,62 @@ fn show_overflow_clamps_len_at_capacity() {
         "4 * 20 = 80 magnitude+sign bytes clamp to the 64-byte capacity"
     );
 }
+
+/// A `hosted`-layer manifest: `hosted::libc`'s `Stdout` sink depends on
+/// `core::show`, so the Phase 2 dogfood needs both layers on the
+/// dependency path.
+fn hosted_manifest() -> String {
+    format!(
+        "package: s7c ;\nlayer: hosted ;\ndepends: core path \"{0}/lib/core\" ;\ndepends: hosted path \"{0}/lib/hosted\" ;\n",
+        checkout()
+    )
+}
+
+fn build_and_run_hosted(t: &Tree, main: &str) -> String {
+    t.write("sooth.pkg", &hosted_manifest());
+    let entry = t.write("main.sth", main);
+    let binary = driver::build(&entry).expect("the fixture should build");
+    let output = std::process::Command::new(&binary)
+        .output()
+        .expect("the binary should run");
+    std::fs::remove_file(&binary).ok();
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).expect("stdout should be utf8")
+}
+
+/// P7.S7c Phase 2 dogfood (R7): renders `Show` at two instantiations (`i64`
+/// and `Bool`), flushes each through `Stdout`'s `write(2)` sink, and pins
+/// the exact flushed bytes. Ownership is explicit: each buffer and the sink
+/// are constructed, used, and dropped (the linear spine made visible). Only
+/// one output channel (`write(2)`) appears, so there is no `.`-vs-write(2)
+/// interleaving to assert (R9).
+#[test]
+fn stdout_flush_renders_two_instantiations() {
+    let t = Tree::new("stdout-flush");
+    let stdout = build_and_run_hosted(
+        &t,
+        "import: intrinsics * ;\n\
+         import: core::prelude * ;\n\
+         import: core::show | StrBuf render flush | ;\n\
+         import: hosted::libc | Stdout | ;\n\
+         : main ( -- )\n\
+         0 >u8 64 fill 0 >usize StrBuf | n |\n\
+         42 &!n render\n\
+         Stdout | s1 |\n\
+         &!s1 &!n flush\n\
+         s1 drop n drop\n\
+         0 >u8 64 fill 0 >usize StrBuf | b |\n\
+         True &!b render\n\
+         Stdout | s2 |\n\
+         &!s2 &!b flush\n\
+         s2 drop b drop ;\n",
+    );
+    assert_eq!(
+        stdout, "42true",
+        "42's digits flush first, then Bool's true, both via write(2)"
+    );
+}
