@@ -962,14 +962,21 @@ pub(super) fn poly_term(
                 scope.locals.insert(name.clone(), pt);
             }
         }
-        TermKind::Call(name, type_args) => {
+        TermKind::Call(name, type_args, len_args) => {
             // P7.S3t (R1/R3): a call inside a polymorphic word's own body is
             // checked symbolically -- there is no `Subst` here to seed, and
             // reaching one would be the multi-hop forwarding case R7 leaves
             // out of the slice. Rejected rather than dropped: a dropped list
-            // links whatever the symbolic path resolved instead.
-            if !type_args.is_empty() {
-                return Err(type_arguments_in_poly_body_error(ctx, span, name));
+            // links whatever the symbolic path resolved instead. P7.S6b (R2a):
+            // an explicit length list is rejected the same way.
+            if !type_args.is_empty() || !len_args.is_empty() {
+                return Err(type_arguments_in_poly_body_error(
+                    ctx,
+                    span,
+                    name,
+                    !type_args.is_empty(),
+                    !len_args.is_empty(),
+                ));
             }
             return poly_call_term(
                 name,
@@ -5405,6 +5412,7 @@ pub(super) fn poly_sig_unifies(
             refs,
             &mut subst,
             &[],
+            &[],
         )
         .is_ok()
     })
@@ -5485,6 +5493,7 @@ pub(super) fn poly_sig_could_match(
             cells,
             refs,
             &mut subst,
+            &[],
             &[],
         )
         .is_ok()
@@ -5601,6 +5610,7 @@ pub(super) fn check_poly_call(
     name: &str,
     span: Span,
     type_args: &[Type],
+    len_args: &[Len],
     stack: &mut Vec<Slot>,
     ctx: &Ctx,
     env: &HashMap<String, Vec<Overload>>,
@@ -5660,6 +5670,35 @@ pub(super) fn check_poly_call(
             seeded.push(v as u32);
         }
     }
+    // P7.S6b (R3): the length twin of the type-argument seeding above. R2b:
+    // this slice's parser only ever mints `Len::Concrete` for an explicit
+    // call-site argument (an integer token); a `Len::Var` reaching here would
+    // mean a route this slice does not build exists, an internal-consistency
+    // bug rather than a user-facing diagnostic.
+    let mut seeded_len: Vec<u32> = Vec::new();
+    if !len_args.is_empty() {
+        if len_args.len() != sig.len_var_names.len() {
+            return Err(length_instantiation_arity_error(
+                span,
+                name,
+                &sig,
+                len_args.len(),
+            ));
+        }
+        for (v, ln) in len_args.iter().enumerate() {
+            match ln {
+                Len::Concrete(count) => {
+                    subst.len.push((v as u32, *count));
+                    seeded_len.push(v as u32);
+                }
+                Len::Var(_) => unreachable!(
+                    "R2b: this slice's parser never produces Len::Var at a call-site instantiation"
+                ),
+            }
+        }
+    }
+    // P7.S6b (R4): `seeded_len` threads into `unify_poly_input`'s `Len::Var`
+    // conflict routing below, the length twin of `seeded` above.
     // P7.S3f (R2): the positions materialized against a ground declared
     // `Type::Quotation` input at this call site, threaded onto the recorded
     // `CallInst` so lowering can materialize the caller's phantom argument
@@ -5704,6 +5743,7 @@ pub(super) fn check_poly_call(
             refs,
             &mut subst,
             &seeded,
+            &seeded_len,
         )?;
     }
     for i in deferred_literals {
@@ -5729,6 +5769,7 @@ pub(super) fn check_poly_call(
             refs,
             &mut subst,
             &seeded,
+            &seeded_len,
         )?;
     }
     // Pass 2: materialize each declared quotation input, now that `subst`
@@ -5789,6 +5830,7 @@ pub(super) fn check_poly_call(
             refs,
             &mut subst,
             &seeded,
+            &seeded_len,
         )?;
     }
     // P7.S3t (R5): restore `Subst`'s documented "kept sorted, the mangled
@@ -5801,9 +5843,11 @@ pub(super) fn check_poly_call(
     // divergence R6 makes reachable by allowing a redundant instantiation.
     // `len` reorders the same way -- pass 1 skips the quotation input of
     // `( [ array['T 'N] -- ] array['U 'M] array['T 'N] -- )`, so `'M` (id 1) binds before
-    // `'N` (id 0) -- but not *divergently*: R4 gives it no seed path, so its
-    // order is a function of the callee's signature and every minting path
-    // agrees. Sorted anyway because `Subst`'s derived `Eq`, which
+    // `'N` (id 0). P7.S6b gives it a seed path too (`len_args`/`seeded_len`
+    // above), so divergence is now reachable in principle -- an inferred call
+    // and an explicitly-instantiated call at the same theta could push `'N`
+    // and `'M` in different orders. The sort below is what actually keeps
+    // both paths agreeing, since `Subst`'s derived `Eq`, which
     // specializations dedup on, compares vectors positionally.
     subst.ty.sort_by_key(|(v, _)| *v);
     subst.len.sort_by_key(|(v, _)| *v);
@@ -6593,7 +6637,7 @@ fn enqueue_new(
 /// Only `Quotation` nests terms; every other `TermKind` is a leaf.
 fn body_calls_a_poly_word(body: &[Term], words: &[WordDef]) -> bool {
     body.iter().any(|term| match &term.kind {
-        TermKind::Call(name, _) => words.iter().any(|w| w.poly.is_some() && &w.name == name),
+        TermKind::Call(name, _, _) => words.iter().any(|w| w.poly.is_some() && &w.name == name),
         TermKind::Quotation(inner, _, _) => body_calls_a_poly_word(inner, words),
         _ => false,
     })
@@ -7973,6 +8017,7 @@ pub(super) fn unify_poly_input(
     refs: &[RefDecl],
     subst: &mut Subst,
     seeded: &[u32],
+    seeded_len: &[u32],
 ) -> Result<(), String> {
     match pty {
         // P7 slice 3b: `pty` is the callee's *declared* input, which a
@@ -8011,7 +8056,7 @@ pub(super) fn unify_poly_input(
             };
             let (elem_ty, count) = (arrays[id.index()].element, arrays[id.index()].count);
             unify_poly_input(
-                sig, elem, elem_ty, name, span, ctx, arrays, cells, refs, subst, seeded,
+                sig, elem, elem_ty, name, span, ctx, arrays, cells, refs, subst, seeded, seeded_len,
             )?;
             match len {
                 Len::Concrete(k) => {
@@ -8022,14 +8067,13 @@ pub(super) fn unify_poly_input(
                 Len::Var(ln) => {
                     if let Some(prev) = subst.len_of(*ln) {
                         if prev != count {
-                            return Err(poly_len_conflict_error(
-                                ctx,
-                                span,
-                                name,
-                                &sig.len_var_names[*ln as usize],
-                                prev,
-                                count,
-                            ));
+                            let var = &sig.len_var_names[*ln as usize];
+                            return Err(match seeded_len.contains(ln) {
+                                true => explicit_len_instantiation_conflict_error(
+                                    ctx, span, name, var, prev, count,
+                                ),
+                                false => poly_len_conflict_error(ctx, span, name, var, prev, count),
+                            });
                         }
                     } else {
                         subst.len.push((*ln, count));
@@ -8074,12 +8118,12 @@ pub(super) fn unify_poly_input(
             }
             for (p, c) in ins.iter().zip(&eff.inputs) {
                 unify_poly_input(
-                    sig, p, *c, name, span, ctx, arrays, cells, refs, subst, seeded,
+                    sig, p, *c, name, span, ctx, arrays, cells, refs, subst, seeded, seeded_len,
                 )?;
             }
             for (p, c) in outs.iter().zip(&eff.outputs) {
                 unify_poly_input(
-                    sig, p, *c, name, span, ctx, arrays, cells, refs, subst, seeded,
+                    sig, p, *c, name, span, ctx, arrays, cells, refs, subst, seeded, seeded_len,
                 )?;
             }
         }
@@ -8117,7 +8161,7 @@ pub(super) fn unify_poly_input(
                 cells,
                 refs,
                 subst,
-                seeded,
+                seeded, seeded_len,
             )?;
         }
         // P7.S3n (R3): the cell twin of the `Ref` arm -- a declared `^`-slot
@@ -8145,7 +8189,7 @@ pub(super) fn unify_poly_input(
                 cells,
                 refs,
                 subst,
-                seeded,
+                seeded, seeded_len,
             )?;
         }
         // P7 slice 3a phase 2 (R2): a concrete `Type::Struct`/`Type::Enum`
@@ -8213,7 +8257,7 @@ pub(super) fn unify_poly_input(
             drop(generics);
             for (arg_pty, arg_ty) in args.iter().zip(found_args.iter()) {
                 unify_poly_input(
-                    sig, arg_pty, *arg_ty, name, span, ctx, arrays, cells, refs, subst, seeded,
+                    sig, arg_pty, *arg_ty, name, span, ctx, arrays, cells, refs, subst, seeded, seeded_len,
                 )?;
             }
             for (len, found_len) in len_args.iter().zip(found_lens.iter()) {
@@ -8230,14 +8274,15 @@ pub(super) fn unify_poly_input(
                     Len::Var(ln) => {
                         if let Some(prev) = subst.len_of(*ln) {
                             if prev != found_len {
-                                return Err(poly_len_conflict_error(
-                                    ctx,
-                                    span,
-                                    name,
-                                    &sig.len_var_names[*ln as usize],
-                                    prev,
-                                    found_len,
-                                ));
+                                let var = &sig.len_var_names[*ln as usize];
+                                return Err(match seeded_len.contains(ln) {
+                                    true => explicit_len_instantiation_conflict_error(
+                                        ctx, span, name, var, prev, found_len,
+                                    ),
+                                    false => poly_len_conflict_error(
+                                        ctx, span, name, var, prev, found_len,
+                                    ),
+                                });
                             }
                         } else {
                             subst.len.push((*ln, found_len));
@@ -9386,6 +9431,26 @@ pub(super) fn explicit_instantiation_conflict_error(
         )
 }
 
+/// P7.S6b (R5): `explicit_instantiation_conflict_error`'s length-typed
+/// sibling -- a length conflict compares two `u32`s, not two `Type`s, and
+/// `u32`'s `Display` renders identically, so a thin sibling is simpler than
+/// generalizing the existing function over a trait.
+pub(super) fn explicit_len_instantiation_conflict_error(
+    ctx: &Ctx,
+    span: Span,
+    callee: &str,
+    var: &str,
+    instantiated: u32,
+    operand: u32,
+) -> String {
+    let callee = crate::resolve::demangle_call(callee);
+    let line = span.line;
+    format!(
+            "error: `{callee}` in {name} (line {line}) was instantiated at length `{var}` = `{instantiated}` but its operand is `{operand}`",
+            name = ctx.rendered_word()
+        )
+}
+
 /// P7.S3t (R4): an explicit type-argument list whose length is not the
 /// callee's declared type-variable count. Exact, never a prefix: a partial
 /// list would make position `i`'s meaning depend on which variables the
@@ -9415,12 +9480,43 @@ pub(super) fn instantiation_arity_error(
         1 => "",
         _ => "s",
     };
-    let note = match sig.len_var_names.is_empty() && sig.row_var_names.is_empty() {
+    let note = match sig.row_var_names.is_empty() {
         true => String::new(),
-        false => "\n  note: a length (`'N`) or row (`..s`) variable is not named by an explicit instantiation; only type variables are".to_string(),
+        false => "\n  note: a row (`..s`) variable is not named by an explicit instantiation; only type and length variables are".to_string(),
     };
     format!(
         "error: `{callee}` (line {}) declares {declared} but was given {given} type argument{plural}{note}",
+        span.line
+    )
+}
+
+/// P7.S6b (R3): the length twin of `instantiation_arity_error`, mirroring
+/// S6a's `generic_arity_error` two-count shape.
+pub(super) fn length_instantiation_arity_error(
+    span: Span,
+    callee: &str,
+    sig: &PolySig,
+    given: usize,
+) -> String {
+    let callee = crate::resolve::demangle_call(callee);
+    let declared = match sig.len_var_names.len() {
+        0 => "no length variables".to_string(),
+        1 => format!("1 length variable (`{}`)", sig.len_var_names[0]),
+        n => format!(
+            "{n} length variables ({})",
+            sig.len_var_names
+                .iter()
+                .map(|v| format!("`{v}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    };
+    let plural = match given {
+        1 => "",
+        _ => "s",
+    };
+    format!(
+        "error: `{callee}` (line {}) declares {declared} but was given {given} length argument{plural}",
         span.line
     )
 }
@@ -10790,6 +10886,7 @@ mod tests {
             &refs,
             &mut subst,
             &[],
+            &[],
         )
         .expect("a concrete Buffer[u8 256] slot must bind 'N");
         assert_eq!(subst.ty_of(0), Some(Type::U32));
@@ -10867,11 +10964,115 @@ mod tests {
             &refs,
             &mut subst,
             &[],
+            &[],
         )
         .unwrap_err();
         assert!(
             err.contains("'N"),
             "a length conflict must name the conflicting length variable: {err}"
+        );
+    }
+
+    /// P7.S6b (R4/R5): a length mismatch seeded from an explicit call-site
+    /// length argument (`sum[i64 4]`) routes to the caller-context message,
+    /// not the generic "conflicting bindings" one -- the `Array` arm's own
+    /// `Len::Var` twin of `unify_poly_input_finding_a_seeded_variable_names_the_instantiation`
+    /// above.
+    #[test]
+    fn unify_poly_input_array_seeded_len_conflict_names_the_instantiation() {
+        let sig = PolySig {
+            row_in: None,
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            row_out: None,
+            bounds: Vec::new(),
+            ty_var_names: Vec::new(),
+            len_var_names: vec!["'N".to_string()],
+            row_var_names: Vec::new(),
+        };
+        let pty = PolyType::Array(Box::new(PolyType::Concrete(Type::I64)), Len::Var(0));
+        let arrays = vec![ArrayDecl {
+            element: Type::I64,
+            count: 8,
+            name_static: "array",
+        }];
+        let cells: [OwnedCellDecl; 0] = [];
+        let refs: [RefDecl; 0] = [];
+        let slot_ty = Type::Array(ArrayId::from_index(0), "array");
+        let word = probe_word();
+        let ctx = probe_ctx(&word);
+        let mut subst = Subst::default();
+        subst.len.push((0, 4));
+        let err = unify_poly_input(
+            &sig,
+            &pty,
+            slot_ty,
+            "sum",
+            Span::default(),
+            &ctx,
+            &arrays,
+            &cells,
+            &refs,
+            &mut subst,
+            &[],
+            &[0],
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            "error: `sum` in `probe` (line 0) was instantiated at length `'N` = `4` but its operand is `8`"
+        );
+    }
+
+    /// The routing negative (spec test notes): the *same* mismatch, with
+    /// `'N` bound by ordinary inference rather than an explicit call-site
+    /// argument (an empty `seeded_len`), must keep reporting
+    /// `poly_len_conflict_error` unchanged -- guards against a placebo
+    /// routing that always fires the explicit message regardless of
+    /// seeding.
+    #[test]
+    fn unify_poly_input_array_inferred_len_conflict_is_unrouted() {
+        let sig = PolySig {
+            row_in: None,
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            row_out: None,
+            bounds: Vec::new(),
+            ty_var_names: Vec::new(),
+            len_var_names: vec!["'N".to_string()],
+            row_var_names: Vec::new(),
+        };
+        let pty = PolyType::Array(Box::new(PolyType::Concrete(Type::I64)), Len::Var(0));
+        let arrays = vec![ArrayDecl {
+            element: Type::I64,
+            count: 8,
+            name_static: "array",
+        }];
+        let cells: [OwnedCellDecl; 0] = [];
+        let refs: [RefDecl; 0] = [];
+        let slot_ty = Type::Array(ArrayId::from_index(0), "array");
+        let word = probe_word();
+        let ctx = probe_ctx(&word);
+        let mut subst = Subst::default();
+        subst.len.push((0, 4));
+        let err = unify_poly_input(
+            &sig,
+            &pty,
+            slot_ty,
+            "sum",
+            Span::default(),
+            &ctx,
+            &arrays,
+            &cells,
+            &refs,
+            &mut subst,
+            &[],
+            &[],
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            "error: `sum` in `probe` (line 0) resolved length `'N` to both `4` and `8`"
         );
     }
 
@@ -11270,7 +11471,7 @@ mod tests {
             span: Span::default(),
         };
         let swap = Term {
-            kind: TermKind::Call("swap".to_string(), Vec::new()),
+            kind: TermKind::Call("swap".to_string(), Vec::new(), Vec::new()),
             span: Span::default(),
         };
         let mut stack = Vec::new();
@@ -11415,7 +11616,7 @@ mod tests {
         }];
         if consume {
             body.push(Term {
-                kind: TermKind::Call(local.to_string(), Vec::new()),
+                kind: TermKind::Call(local.to_string(), Vec::new(), Vec::new()),
                 span: Span::default(),
             });
         }
@@ -11915,20 +12116,105 @@ mod tests {
             "error: `pairwise` (line 2) declares 2 type variables (`'T`, `'U`) but was given 1 type argument"
         );
     }
-    /// P7.S3t (R4): a length variable is not addressable by the list, so a
-    /// callee whose only variable is one declares *no* type variables. Said
-    /// outright, since `alen[i64]` is the natural thing to try.
+    /// P7.S6b: a *type*-argument slot is not addressable against a length
+    /// variable -- `alen[i64]` supplies a type argument, but `alen` declares
+    /// no type variables (only a length one), so it is still an arity error
+    /// on the type side, unrelated to explicit length instantiation (which
+    /// this slice makes reachable via `alen[4]`, not `alen[i64]`).
     #[test]
-    fn an_instantiation_of_a_length_variable_is_rejected() {
+    fn a_type_argument_cannot_bind_a_length_variable() {
         let err = check_src(
             ": alen ( array[i64 'N] -- array[i64 'N] usize ) len ;\n\
              : main ( -- ) 5 4 fill alen[i64] . drop ;",
         )
-        .expect_err("a length variable cannot be given explicitly");
+        .expect_err("a length variable cannot be bound via a type-argument slot");
         assert_eq!(
             err,
-            "error: `alen` (line 2) declares no type variables but was given 1 type argument\n  note: a length (`'N`) or row (`..s`) variable is not named by an explicit instantiation; only type variables are"
+            "error: `alen` (line 2) declares no type variables but was given 1 type argument"
         );
+    }
+    /// P7.S6b (R3): an explicit length argument binds `'N`, unified against a
+    /// concrete operand's own count -- the accept path for `sum[i64 4]`.
+    /// Non-`inline`, and reads `len` back rather than indexing (phase 4's
+    /// rationale applies identically here: an `inline` fixture would never
+    /// reach `check_poly_call` at all).
+    #[test]
+    fn an_explicit_length_argument_checks_clean_against_a_matching_operand() {
+        check_src(
+            ": sum['T 'N: Len] ( array['T 'N] -- usize ) len swap drop ;\n\
+             : main ( -- ) 0 4 fill sum[i64 4] drop ;",
+        )
+        .expect("the explicit length agrees with the operand's own count");
+    }
+    /// P7.S6b (R3): a wrong explicit length *count* (not a disagreeing
+    /// operand) is the arity error, distinct from R4's conflict routing.
+    #[test]
+    fn a_wrong_explicit_length_argument_count_is_the_arity_error() {
+        let err = check_src(
+            ": pair['T 'N: Len 'M: Len] ( array['T 'N] array['T 'M] -- usize ) drop len swap drop ;\n\
+             : main ( -- ) 0 4 fill 0 4 fill pair[i64 4] drop ;",
+        )
+        .expect_err("one length argument given, two declared");
+        assert_eq!(
+            err,
+            "error: `pair` (line 2) declares 2 length variables (`'N`, `'M`) but was given 1 length argument"
+        );
+    }
+    /// P7.S6b (R2a): the poly-body guard (`type_arguments_in_poly_body_error`)
+    /// widens to length arguments too -- a call inside a polymorphic word's
+    /// own body has no `Subst` to seed, so an explicit length list there is
+    /// rejected outright, not silently dropped.
+    #[test]
+    fn an_explicit_length_argument_inside_a_poly_body_is_rejected() {
+        let err = check_src(
+            ": sum['T 'N: Len] ( array['T 'N] -- usize ) len swap drop ;\n\
+             : wrapper['T 'N: Len] ( array['T 'N] -- usize ) sum[i64 4] ;\n\
+             : main ( -- ) 0 4 fill wrapper[i64 4] drop ;",
+        )
+        .expect_err("an explicit instantiation inside a poly body is rejected");
+        assert_eq!(
+            err,
+            "error: `sum` in `wrapper` (line 2) cannot be explicitly instantiated inside a polymorphic word's own body\n  note: instantiate the enclosing word at its own call site instead; forwarding a type or length argument through a polymorphic body is not supported"
+        );
+    }
+    /// P7.S6b (R2a): the non-poly dispatch route's `no_type_arguments_error`
+    /// guard widens identically -- a concrete (non-polymorphic) callee given
+    /// an explicit length argument is rejected, not silently dropped.
+    #[test]
+    fn an_explicit_length_argument_on_a_non_poly_callee_is_rejected() {
+        let err = check_src(": addup ( i64 i64 -- i64 ) drop ;\n: main ( -- ) 1 2 addup[4] drop ;")
+            .expect_err("a concrete word takes no explicit length argument");
+        assert_eq!(
+            err,
+            "error: `addup` (line 2) takes no length arguments; only a call to a polymorphic word may be explicitly instantiated"
+        );
+    }
+    /// P7.S6b: type and length arguments seed independently -- a callee
+    /// declaring both `'T` and `'N: Len` may be called with only the length
+    /// sublist (`sum[4]`), leaving `'T` to ordinary inference off the
+    /// operand. Each list's arity is checked only when that list is
+    /// non-empty, so a length-only call is not an arity error.
+    #[test]
+    fn a_length_only_explicit_argument_leaves_the_type_variable_to_inference() {
+        check_src(
+            ": sum['T 'N: Len] ( array['T 'N] -- usize ) len swap drop ;\n\
+             : main ( -- ) 0 4 fill sum[4] drop ;",
+        )
+        .expect("the length argument seeds 'N; 'T is inferred as i64 from the operand");
+    }
+    /// P7.S6b: the call-site instantiation list is always type-sublist-then-
+    /// length-sublist (a lexical convention, not a declaration-order mirror).
+    /// Declaring the length variable *before* the type variable in the
+    /// header (`'N: Len 'T`, the reverse of every other test's `'T 'N: Len`)
+    /// must still check identically -- `ty_var_names`/`len_var_names` are
+    /// collected per-kind, independent of interleaving in the declaration.
+    #[test]
+    fn a_length_variable_declared_before_the_type_variable_still_checks() {
+        check_src(
+            ": sum['N: Len 'T] ( array['T 'N] -- usize ) len swap drop ;\n\
+             : main ( -- ) 0 4 fill sum[i64 4] drop ;",
+        )
+        .expect("declaration order of 'N vs 'T does not affect call-site checking");
     }
     /// P7.S3t (R5): the redirect itself, at `unify_poly_input`. One prior
     /// binding, one disagreeing operand, two messages -- the seeded one names
@@ -11966,6 +12252,7 @@ mod tests {
                 &refs,
                 &mut subst,
                 seeded,
+                &[],
             )
             .expect_err("a disagreeing operand is a conflict either way")
         };
@@ -13407,6 +13694,7 @@ mod tests {
             &refs,
             &mut subst,
             &[],
+            &[],
         )
         .expect("`[ 'T -- ]` should unify against `[ i64 -- ]`");
         assert_eq!(subst.ty_of(0), Some(Type::I64), "`'T` should bind to `i64`");
@@ -13423,6 +13711,7 @@ mod tests {
             &cells,
             &refs,
             &mut subst2,
+            &[],
             &[],
         )
         .expect_err("an arity mismatch must be a located type mismatch");
@@ -13455,6 +13744,7 @@ mod tests {
             &cells,
             &refs,
             &mut subst3,
+            &[],
             &[],
         )
         .expect_err("a non-quotation slot must be a located type mismatch");
@@ -13730,7 +14020,7 @@ mod tests {
         let mut overloads = HashMap::new();
         let stack = poly_term(
             &Term {
-                kind: TermKind::Call("len".to_string(), Vec::new()),
+                kind: TermKind::Call("len".to_string(), Vec::new(), Vec::new()),
                 span: Span::default(),
             },
             vec![PolySlot::new(PolyType::Concrete(shared))],
@@ -14016,6 +14306,7 @@ mod tests {
             &refs,
             &mut subst,
             &[],
+            &[],
         )
         .expect("`&array['T 4]` should unify against `&array[i64 4]`");
         assert_eq!(subst.ty_of(0), Some(Type::I64), "`'T` should bind to `i64`");
@@ -14032,6 +14323,7 @@ mod tests {
             &cells,
             &refs,
             &mut subst2,
+            &[],
             &[],
         )
         .expect_err("a mutability mismatch must be a located type mismatch");
@@ -14056,6 +14348,7 @@ mod tests {
             &cells,
             &refs,
             &mut subst3,
+            &[],
             &[],
         )
         .expect_err("a non-reference slot must be a located type mismatch");
@@ -14434,11 +14727,11 @@ mod tests {
         let full_quot = scope.intern_quotation(PolyQuotLit {
             body: vec![
                 Term {
-                    kind: TermKind::Call("Full>".to_string(), Vec::new()),
+                    kind: TermKind::Call("Full>".to_string(), Vec::new(), Vec::new()),
                     span: Span::default(),
                 },
                 Term {
-                    kind: TermKind::Call("drop".to_string(), Vec::new()),
+                    kind: TermKind::Call("drop".to_string(), Vec::new(), Vec::new()),
                     span: Span::default(),
                 },
             ],
@@ -14456,7 +14749,7 @@ mod tests {
         });
         let empty_quot = scope.intern_quotation(PolyQuotLit {
             body: vec![Term {
-                kind: TermKind::Call("Empty>".to_string(), Vec::new()),
+                kind: TermKind::Call("Empty>".to_string(), Vec::new(), Vec::new()),
                 span: Span::default(),
             }],
             span: Span::default(),

@@ -1031,35 +1031,71 @@ against a concrete caller. `cargo fmt --check && cargo clippy -- -D warnings && 
 is green. The `Kind` enum has `Star` and `Len` variants; the `: Len` annotation syntax is
 live at `type:`, `trait:`, and `:` binding sites.
 
-**P7.S6b -- Explicit length arguments at call sites.** `[ done ]` Spec condensed
-post-implementation in `eb742b1`; `parse_type_arguments` parses length literals
-(`Len::Concrete` via `parse_array_count`) and `check_poly_call` seeds `subst.len` from
-them. The instantiation-side
-companion to S6a. Today, `check_poly_call` seeds `subst.ty` from explicit type arguments
-(`sum[i64]`, `src/check/poly.rs:4662`) but has no path to seed `subst.len`. A caller wanting
-`sum[i64 4]` has no syntax for the `4`.
+**P7.S6b -- Explicit length arguments at word call sites.** `[ done ]` The
+instantiation-side companion to S6a. A word signature can already declare a length variable
+(`sum['T 'N: Len] ( array['T 'N] -- 'T )`, parseable since S6a) and a caller can already bind
+it by inference, but there is no syntax to bind it explicitly: `sum[i64 4]` does not parse.
+The length-argument carrier is `Vec<Len>`, not a bare `Vec<u32>`: foreclosing a length
+*variable* (not just a literal) from ever being spellable at a call site would be a narrower,
+one-way commitment made silently, since `Len::Var` already exists. `sum[i64 'N]` itself is not
+reachable this slice regardless of the carrier type: any explicit instantiation list on a call
+inside a polymorphic word's own body is already rejected outright by a pre-existing guard
+(`type_arguments_in_poly_body_error`, P7.S3t), and a concrete body has no length variable to
+name. `Vec<Len>` keeps the door open without pretending this slice opens it.
 
-**What changes.** `parse_type_arguments` (`src/parser.rs:5006`) currently parses only types
-inside `[...]`. It extends to accept a mix: positions `0..ty_arity` are type arguments (as
-today), positions `ty_arity..ty_arity+len_arity` are length literals (parsed as `u32`, the
-same `1..=u32::MAX` range check `parse_array_count` uses at `src/parser.rs:4295`). The callee's
-`PolySig` already carries `ty_var_names` and `len_var_names`, so the arity split is known at
-the call site. `check_poly_call` (`src/check/poly.rs:4662`) extends its seeding loop: after
-seeding `subst.ty` for type variables, it seeds `subst.len` for length variables. The
-`seeded` vector (`src/check/poly.rs:4661`) extends to cover length variables — the
-conflict-check logic in `unify_poly_input`'s `Len::Var` arm (`src/check/poly.rs:6563`) is
-already identical in shape to the `Var` arm's conflict check.
+The call-site parser (`parse_explicit_type_args`, `src/parser.rs:6315`) is a different,
+simpler function than the one that already handles a mixed type/length bracket for `type:`
+header instantiation (`parse_type_arguments`, `src/parser.rs:5584`, done in S6a): it has no
+`PolySig` available at parse time, so the type/length split cannot happen positionally the way
+the header path does; a length literal is disambiguated lexically (a bare integer token) and
+validated for arity at check time in `check_poly_call`. Widening `TermKind::Call`
+(`src/ast.rs:2948`) to carry the length list also touches two allow-guards that already reject
+a non-empty explicit type-argument list in the wrong context (`src/check/terms.rs:183`,
+`src/check/poly.rs:965`): extending only the AST field without extending those guards would
+silently drop an explicit length rather than reject it, the same "miscompile, not a
+diagnostic" hazard those guards exist to prevent.
 
 **What already works.** Inferred length binding (no explicit args) already works:
 `unify_poly_input` binds `'N` from the concrete array's count when an `array[i64 4]` fills an
-`array['T 'N]` parameter. The `Subst` type already carries `len: Vec<(u32, u32)>`
-(`src/ast.rs:2033`). The standalone combinator check already substitutes a concrete length
-for each `'N` (`src/check/poly.rs:395`).
+`array['T 'N]` parameter. `Subst` already carries `len: Vec<(u32, u32)>` (`src/ast.rs:2261`).
+`PolySig` already carries `len_var_names: Vec<String>` alongside `ty_var_names`
+(`src/ast.rs:2235`). What's missing is the seeding step in `check_poly_call` and the routing of
+`unify_poly_input`'s two `Len::Var` conflict arms (`src/check/poly.rs:8022`, `:8230`) through a
+seeded-length set, mirroring the `PolyType::Var` arm's existing `seeded.contains(v)` routing
+(`:7987`): today both `Len::Var` arms always raise the generic `poly_len_conflict_error`,
+never the caller-context `explicit_len_instantiation_conflict_error`.
 
-**Exit:** a caller can write `sum[i64 4]` to explicitly bind both `'T = i64` and `'N = 4`, and
-a conflicting operand produces the same "explicit instantiation conflict" diagnostic a
-conflicting type argument already produces. `cargo fmt --check && cargo clippy -- -D warnings
-&& cargo test` is green.
+**Exit:** a caller can write `sum[i64 4]` to explicitly bind both `'T = i64` and `'N = 4`
+against a word declared `sum['T 'N: Len] ( array['T 'N] -- usize )`, and a conflicting operand,
+type or length, produces the routed `explicit_instantiation_conflict_error`/
+`explicit_len_instantiation_conflict_error`, not the generic
+`poly_var_conflict_error`/`poly_len_conflict_error`. The exit-criterion example reads the
+length back (`len`) rather than indexing: review found `inline` and explicit instantiation are
+mutually exclusive today (an `inline` word is a combinator, and
+`poly_call_takes_type_args`/`src/check/terms.rs:1156` categorically excludes every combinator
+from explicit instantiation, mutation-tested load-bearing), so indexing stays out of this
+slice entirely and moves to S6c's own future exit criterion instead. `cargo fmt --check &&
+cargo clippy -- -D warnings && cargo test` is green. Detail:
+[slice6b-brief](./P7/slice6b-brief.md), [slice6b-spec](./P7/slice6b-spec.md).
+
+**P7.S6c -- Runtime bounds-checked indexing of a generic-length array in a non-inline poly
+body.** `[ unscoped, needs discovery ]` Not a small guard removal: probed and confirmed a real
+cross-layer change, not scheduled or briefed yet. `poly_generic_length_index_error`
+(`src/check/poly.rs:9312`, call site `:4941`) rejects `&>` on `array['T 'N]` inside a
+non-inline poly body because the body is checked once, generically, before `'N` is ever
+concrete: statically proving `i < 'N` needs a dependent bound, which DESIGN.md rules out
+("Dependent types: never"). The workaround, `inline` (the body re-splices and re-checks per
+call site, where `'N` is concrete), is the pattern every combinator in `lib/core/combinators.sth`
+already relies on. Lifting it for a non-inline body means a runtime bounds check, not a static
+proof, and touches three layers: the checker (stop rejecting `Len::Var` there), lowering
+(thread the runtime length value through the monomorphization substitution instead of a
+compile-time `u32`), and the QBE backend (emit an actual trap call before the address
+computation; the trap infrastructure, `emit_oob_trap`, `src/backend/qbe.rs:898`, already
+exists and is unused on this path). Decided: once this slice lands, its own exit criterion
+should include an indexing demo using S6b's explicit-length-argument syntax (e.g. a non-inline
+`sum['T 'N: Len] ( array['T 'N] -- 'T )` that actually sums by index, called as `sum[i64 4]`) --
+S6b's own golden deliberately avoids indexing (reads `len` back instead) precisely because this
+slice doesn't exist yet. Needs a brief before it becomes a real slice.
 
 **P7.S7 -- A testing vocabulary, and what it exposed about printing's layer.** `[ planned ]`
 Split into four subslices during briefing: the vocabulary itself needed a `hosted` home

@@ -653,8 +653,8 @@ fn rewrite_member_self_calls(
                 TermKind::Bind(names) if names.iter().any(|n| n == member) => {
                     return Err(impl_member_binder_shadows_itself_error(member, term.span));
                 }
-                TermKind::Call(name, type_args) if name == member => {
-                    TermKind::Call(synth.to_string(), type_args.clone())
+                TermKind::Call(name, type_args, len_args) if name == member => {
+                    TermKind::Call(synth.to_string(), type_args.clone(), len_args.clone())
                 }
                 TermKind::Quotation(inner, is_inline, annot) => TermKind::Quotation(
                     rewrite_member_self_calls(inner, member, synth)?,
@@ -1986,6 +1986,28 @@ fn instantiation_ty_var_error(var: &str, span: Span) -> String {
     format!(
         "error: `{var}` (line {}, col {}) is a type variable; an explicit instantiation takes concrete types\n  note: forwarding a caller's type variable through an explicit instantiation is not supported",
         span.line, span.col
+    )
+}
+
+/// P7.S6b (R1): once an explicit instantiation list has seen a length
+/// argument (a bare integer token), the call-site grammar fixes "types
+/// first, then lengths" as its own convention -- a type token appearing
+/// after an integer token has nowhere left to go.
+fn instantiation_type_after_len_error(word: &str, span: Span, tok: &Token, tspan: Span) -> String {
+    format!(
+        "error: expected a length argument or `]` in the explicit instantiation of `{word}` at line {}, col {}, found {} at line {}, col {} (type arguments must come before length arguments)",
+        span.line, span.col, describe_token(tok), tspan.line, tspan.col
+    )
+}
+
+/// P7.S6b (R1b): a length argument out of `1..=u32::MAX` at a word call
+/// site. Mirrors `parse_array_count`'s range check but named after the call
+/// (`sum[i64 0]`), not after an array type (`array[sum 0]`), since the two
+/// constructs read differently even though the numeric rule is identical.
+fn instantiation_len_range_error(word: &str, span: Span, n: i64, arg_span: Span) -> String {
+    format!(
+        "error: `{word}[...]` at line {}, col {} instantiates a length argument {n} at line {}, col {} out of range (requires 1 <= N <= {})",
+        span.line, span.col, arg_span.line, arg_span.col, u32::MAX
     )
 }
 
@@ -6312,14 +6334,18 @@ impl<'t> Parser<'t> {
     /// checks against a type constructor's known arity, and a call site's
     /// arity is a property of the callee's `PolySig`, which the parser does
     /// not have (R4 checks it in the checker).
-    fn parse_explicit_type_args(&mut self, word: &str, span: Span) -> Result<Vec<Type>, String> {
+    fn parse_explicit_type_args(
+        &mut self,
+        word: &str,
+        span: Span,
+    ) -> Result<(Vec<Type>, Vec<Len>), String> {
         let glued = matches!(
             self.peek(),
             Some((Token::LBracket, b))
                 if b.line == span.line && b.col == span.col + word.chars().count() as u32
         );
         if !glued {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), Vec::new()));
         }
         self.pos += 1;
         // R7 (review fix): a variable anywhere in the list -- top-level or
@@ -6331,24 +6357,64 @@ impl<'t> Parser<'t> {
         if let Some((var, vspan)) = self.instantiation_list_ty_var() {
             return Err(instantiation_ty_var_error(&var, vspan));
         }
-        let mut args: Vec<Type> = Vec::new();
+        let mut ty_args: Vec<Type> = Vec::new();
+        let mut len_args: Vec<Len> = Vec::new();
+        // P7.S6b (R1): a bare decimal integer token is never a type
+        // expression (types are word-shaped: `i64`, `Box[...]`), so the
+        // token stream itself decides where the type sublist ends and the
+        // length sublist begins. Once an integer token is seen, a type
+        // token after it is a parse error rather than an implicit switch
+        // back.
+        let mut in_len_mode = false;
         loop {
-            match self.peek() {
+            match self.peek().cloned() {
                 Some((Token::RBracket, _)) => {
                     self.pos += 1;
                     break;
                 }
                 None => return Err(unterminated_instantiation_error(word, span)),
-                _ => args.push(self.parse_type_expr().map_err(|e| match args.is_empty() {
-                    true => format!("{e}{}", instantiation_element_note()),
-                    false => e,
-                })?),
+                Some((Token::Int(_), _)) => {
+                    in_len_mode = true;
+                    len_args.push(self.parse_call_len_arg(word, span)?);
+                }
+                Some((tok, tspan)) if in_len_mode => {
+                    return Err(instantiation_type_after_len_error(word, span, &tok, tspan));
+                }
+                _ => {
+                    let first = ty_args.is_empty() && len_args.is_empty();
+                    ty_args.push(self.parse_type_expr().map_err(|e| match first {
+                        true => format!("{e}{}", instantiation_element_note()),
+                        false => e,
+                    })?);
+                }
             }
         }
-        if args.is_empty() {
+        // R1a: the empty-list guard widens to "both sublists empty" so
+        // `sum[4]` (no explicit type, one explicit length) parses; `sum[]`
+        // (both empty) still errors.
+        if ty_args.is_empty() && len_args.is_empty() {
             return Err(empty_instantiation_error(word, span));
         }
-        Ok(args)
+        Ok((ty_args, len_args))
+    }
+
+    /// P7.S6b (R1b): a length argument at a word call site, `sum[i64 4]`.
+    /// Mirrors `parse_array_count`'s `1..=u32::MAX` range check but with a
+    /// call-site-shaped message -- reusing `parse_array_count`'s own message
+    /// would misdescribe the construct as an array type (`sum[i64 0]` is not
+    /// `array[sum 0]`).
+    fn parse_call_len_arg(&mut self, word: &str, span: Span) -> Result<Len, String> {
+        match self.peek().cloned() {
+            Some((Token::Int(n), _)) if (1..=i64::from(u32::MAX)).contains(&n) => {
+                self.pos += 1;
+                Ok(Len::Concrete(n as u32))
+            }
+            Some((Token::Int(n), nspan)) => {
+                self.pos += 1;
+                Err(instantiation_len_range_error(word, span, n, nspan))
+            }
+            _ => unreachable!("parse_call_len_arg called only when an int token is peeked"),
+        }
     }
 
     /// The first type-variable token within the coming instantiation list, at
@@ -6418,9 +6484,9 @@ impl<'t> Parser<'t> {
                 span.line, span.col
             )),
             Token::Word(w) => {
-                let type_args = self.parse_explicit_type_args(&w, span)?;
+                let (type_args, len_args) = self.parse_explicit_type_args(&w, span)?;
                 Ok(Term {
-                    kind: TermKind::Call(w, type_args),
+                    kind: TermKind::Call(w, type_args, len_args),
                     span,
                 })
             }
@@ -6802,14 +6868,14 @@ mod tests {
         // | a b | b 0 = [ a ] [ b a b mod gcd ] if
         assert_eq!(gcd_body.len(), 7);
         assert!(matches!(&gcd_body[0].kind, TermKind::Bind(_)));
-        assert!(matches!(&gcd_body[1].kind, TermKind::Call(w, _) if w == "b"));
+        assert!(matches!(&gcd_body[1].kind, TermKind::Call(w, _, _) if w == "b"));
         assert!(matches!(&gcd_body[2].kind, TermKind::IntLit(0)));
-        assert!(matches!(&gcd_body[3].kind, TermKind::Call(w, _) if w == "eq"));
+        assert!(matches!(&gcd_body[3].kind, TermKind::Call(w, _, _) if w == "eq"));
         match &gcd_body[4].kind {
             TermKind::Quotation(then_branch, is_inline, _) => {
                 assert_eq!(then_branch.len(), 1);
                 assert!(is_inline, "gcd.sth writes `if`'s arms `~[ ... ]` (R-C3)");
-                assert!(matches!(&then_branch[0].kind, TermKind::Call(w, _) if w == "a"));
+                assert!(matches!(&then_branch[0].kind, TermKind::Call(w, _, _) if w == "a"));
             }
             other => panic!("expected the `then` quotation, got {other:?}"),
         }
@@ -6820,7 +6886,7 @@ mod tests {
             }
             other => panic!("expected the `else` quotation, got {other:?}"),
         }
-        assert!(matches!(&gcd_body[6].kind, TermKind::Call(w, _) if w == "if"));
+        assert!(matches!(&gcd_body[6].kind, TermKind::Call(w, _, _) if w == "if"));
 
         let main = &module.words[1];
         assert_eq!(main.name, "main");
@@ -6846,7 +6912,7 @@ mod tests {
             TermKind::Bind(names) => assert_eq!(names, &["a"]),
             other => panic!("expected Bind, got {other:?}"),
         }
-        assert!(matches!(&body[2].kind, TermKind::Call(w, _) if w == "a"));
+        assert!(matches!(&body[2].kind, TermKind::Call(w, _, _) if w == "a"));
     }
 
     #[test]
@@ -6887,8 +6953,8 @@ mod tests {
     fn parse_true_false_construct_bool_variants() {
         let module = parse_src_with_bool(": w ( -- Bool Bool ) True False ;").unwrap();
         let body = terms_body(&module.words[0]);
-        assert!(matches!(&body[0].kind, TermKind::Call(w, _) if w == "True"));
-        assert!(matches!(&body[1].kind, TermKind::Call(w, _) if w == "False"));
+        assert!(matches!(&body[0].kind, TermKind::Call(w, _, _) if w == "True"));
+        assert!(matches!(&body[1].kind, TermKind::Call(w, _, _) if w == "False"));
     }
 
     /// Slice 10c (E-P3-2): the `if`/`else`/`end` grammar is gone. `else`/`end`
@@ -6914,14 +6980,14 @@ mod tests {
         let body = terms_body(&module.words[0]);
         assert_eq!(body.len(), 3);
         match &body[0].kind {
-            TermKind::Call(name, args) => {
+            TermKind::Call(name, args, _) => {
                 assert_eq!(name, "foo");
                 assert_eq!(args, &vec![Type::I64]);
             }
             other => panic!("expected an instantiated Call, got {other:?}"),
         }
         match &body[1].kind {
-            TermKind::Call(name, args) => {
+            TermKind::Call(name, args, _) => {
                 assert_eq!(name, "foo");
                 assert!(args.is_empty(), "a spaced bracket instantiates nothing");
             }
@@ -6929,7 +6995,7 @@ mod tests {
         }
         match &body[2].kind {
             TermKind::Quotation(terms, _, _) => {
-                assert!(matches!(&terms[0].kind, TermKind::Call(w, _) if w == "i64"));
+                assert!(matches!(&terms[0].kind, TermKind::Call(w, _, _) if w == "i64"));
             }
             other => panic!("expected a Quotation, got {other:?}"),
         }
@@ -6941,7 +7007,7 @@ mod tests {
     fn an_instantiation_reads_several_type_arguments() {
         let module = parse_src(": w ( -- ) foo[i64 f64 i64] ;").unwrap();
         match &terms_body(&module.words[0])[0].kind {
-            TermKind::Call(_, args) => {
+            TermKind::Call(_, args, _) => {
                 assert_eq!(args, &vec![Type::I64, Type::F64, Type::I64]);
             }
             other => panic!("expected an instantiated Call, got {other:?}"),
@@ -6968,6 +7034,107 @@ mod tests {
         assert!(
             err.contains("`foo[]` at line 1, col 12 instantiates nothing"),
             "unexpected message: {err}"
+        );
+    }
+
+    /// P7.S6b (R1): a call-site length variable, `sum[i64 4]`, records one
+    /// type argument and one length argument.
+    #[test]
+    fn a_call_site_instantiation_reads_a_type_and_a_length() {
+        let module = parse_src(": w ( -- ) sum[i64 4] ;").unwrap();
+        match &terms_body(&module.words[0])[0].kind {
+            TermKind::Call(name, ty_args, len_args) => {
+                assert_eq!(name, "sum");
+                assert_eq!(ty_args, &vec![Type::I64]);
+                assert_eq!(len_args, &vec![Len::Concrete(4)]);
+            }
+            other => panic!("expected an instantiated Call, got {other:?}"),
+        }
+    }
+
+    /// P7.S6b (R1): `sum[i64]` (no length argument) must stay a pure
+    /// type-arg call -- the empty-length path is byte-identical downstream,
+    /// so a parser regression here is easy to miss.
+    #[test]
+    fn a_call_site_instantiation_with_only_a_type_has_no_length() {
+        let module = parse_src(": w ( -- ) sum[i64] ;").unwrap();
+        match &terms_body(&module.words[0])[0].kind {
+            TermKind::Call(name, ty_args, len_args) => {
+                assert_eq!(name, "sum");
+                assert_eq!(ty_args, &vec![Type::I64]);
+                assert!(len_args.is_empty());
+            }
+            other => panic!("expected an instantiated Call, got {other:?}"),
+        }
+    }
+
+    /// P7.S6b (R1a): `sum[4]` -- a bare length argument, no explicit type --
+    /// parses; the empty-list guard only fires when both sublists are empty.
+    #[test]
+    fn a_call_site_instantiation_with_only_a_length_has_no_type() {
+        let module = parse_src(": w ( -- ) sum[4] ;").unwrap();
+        match &terms_body(&module.words[0])[0].kind {
+            TermKind::Call(name, ty_args, len_args) => {
+                assert_eq!(name, "sum");
+                assert!(ty_args.is_empty());
+                assert_eq!(len_args, &vec![Len::Concrete(4)]);
+            }
+            other => panic!("expected an instantiated Call, got {other:?}"),
+        }
+    }
+
+    /// P7.S6b (R1a): widening the empty-list guard to "both sublists empty"
+    /// must not also widen away the genuinely-empty case -- `sum[]` still
+    /// errors exactly as it did before length arguments existed.
+    #[test]
+    fn an_empty_instantiation_with_a_length_variable_declared_is_still_rejected() {
+        let err = parse_src(": w ( -- ) sum[] ;").unwrap_err();
+        assert!(
+            err.contains("`sum[]` at line 1, col 12 instantiates nothing"),
+            "unexpected message: {err}"
+        );
+    }
+
+    /// P7.S6b (R1): a type token after a length token has nowhere to go --
+    /// the call-site grammar fixes "types first, then lengths" as its own
+    /// convention, independent of how the callee declared its own bracket.
+    #[test]
+    fn a_type_token_after_a_length_token_is_a_parse_error() {
+        let err = parse_src(": w ( -- ) sum[4 i64] ;").unwrap_err();
+        assert!(
+            err.contains("expected a length argument or `]`"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("sum"), "unexpected message: {err}");
+    }
+
+    /// P7.S6b (R1b): a length argument out of `1..=u32::MAX` gets the
+    /// call-site-shaped range error, not `parse_array_count`'s array-type
+    /// message.
+    #[test]
+    fn a_call_site_length_argument_out_of_range_is_a_located_error() {
+        let too_low = parse_src(": w ( -- ) sum[i64 0] ;").unwrap_err();
+        assert!(
+            too_low.contains("sum[...]") && too_low.contains("length argument 0"),
+            "unexpected message: {too_low}"
+        );
+        assert!(
+            !too_low.contains("array type"),
+            "unexpected message: {too_low}"
+        );
+
+        let too_high = parse_src(&format!(
+            ": w ( -- ) sum[i64 {}] ;",
+            u64::from(u32::MAX) + 1
+        ))
+        .unwrap_err();
+        assert!(
+            too_high.contains("sum[...]") && too_high.contains("out of range"),
+            "unexpected message: {too_high}"
+        );
+        assert!(
+            !too_high.contains("array type"),
+            "unexpected message: {too_high}"
         );
     }
 
@@ -6998,7 +7165,7 @@ mod tests {
                 assert_eq!(terms.len(), 2);
                 assert!(!is_inline, "an ordinary `[ ... ]` literal");
                 assert!(matches!(terms[0].kind, TermKind::IntLit(1)));
-                assert!(matches!(&terms[1].kind, TermKind::Call(ref w, _) if w == "add"));
+                assert!(matches!(&terms[1].kind, TermKind::Call(ref w, _, _) if w == "add"));
             }
             other => panic!("expected Quotation, got {other:?}"),
         }
@@ -7032,7 +7199,7 @@ mod tests {
                 assert_eq!(terms.len(), 2);
                 assert!(is_inline, "a `~[ ... ]` literal");
                 assert!(matches!(terms[0].kind, TermKind::IntLit(1)));
-                assert!(matches!(&terms[1].kind, TermKind::Call(ref w, _) if w == "add"));
+                assert!(matches!(&terms[1].kind, TermKind::Call(ref w, _, _) if w == "add"));
             }
             other => panic!("expected Quotation, got {other:?}"),
         }
@@ -7506,7 +7673,7 @@ mod tests {
     fn ge_is_not_read_as_a_type_conversion() {
         let module = parse_src_with_bool(": w ( i64 i64 -- Bool ) >= ;").unwrap();
         let body = terms_body(&module.words[0]);
-        assert!(matches!(&body[0].kind, TermKind::Call(w, _) if w == ">="));
+        assert!(matches!(&body[0].kind, TermKind::Call(w, _, _) if w == ">="));
         let err = crate::check::check(
             &mut parse_src_with_bool(": w ( i64 i64 -- Bool ) >= ;\n: main ( -- ) 1 2 w drop ;")
                 .unwrap(),
@@ -7529,7 +7696,7 @@ mod tests {
         let module = parse_src(": w ( i64 -- i64 ) if ;").unwrap();
         let body = terms_body(&module.words[0]);
         assert_eq!(body.len(), 1);
-        assert!(matches!(&body[0].kind, TermKind::Call(w, _) if w == "if"));
+        assert!(matches!(&body[0].kind, TermKind::Call(w, _, _) if w == "if"));
     }
 
     /// Migrated off the retired bare-line path (R5b): a bare term
@@ -7542,7 +7709,7 @@ mod tests {
         let body = terms_body(&module.words[0]);
         assert_eq!(body.len(), 3);
         assert!(matches!(body[0].kind, TermKind::IntLit(2)));
-        assert!(matches!(&body[2].kind, TermKind::Call(w, _) if w == "add"));
+        assert!(matches!(&body[2].kind, TermKind::Call(w, _, _) if w == "add"));
     }
 
     /// Migrated off the retired bare-line path (R5b): a float literal
@@ -10030,7 +10197,7 @@ mod tests {
         let calls: Vec<&str> = inner
             .iter()
             .filter_map(|t| match &t.kind {
-                TermKind::Call(n, _) => Some(n.as_str()),
+                TermKind::Call(n, _, _) => Some(n.as_str()),
                 _ => None,
             })
             .collect();

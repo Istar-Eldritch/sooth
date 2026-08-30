@@ -1364,9 +1364,21 @@ fn unknown_word_error(ctx: &Ctx, span: Span, name: &str) -> String {
 /// not a polymorphic-word call. Every route other than the polymorphic one
 /// would have to drop the list, and a dropped instantiation links the wrong
 /// specialization rather than reporting anything, so each rejects instead.
-fn no_type_arguments_error(span: Span, name: &str) -> String {
+/// P7.S6b: the list may carry length arguments instead of (or alongside)
+/// type arguments, so the wording names only the kinds actually supplied.
+fn no_type_arguments_error(
+    span: Span,
+    name: &str,
+    has_type_args: bool,
+    has_len_args: bool,
+) -> String {
+    let kind = match (has_type_args, has_len_args) {
+        (_, false) => "type arguments",
+        (false, true) => "length arguments",
+        (true, true) => "type or length arguments",
+    };
     format!(
-        "error: `{}` (line {}) takes no type arguments; only a call to a polymorphic word may be explicitly instantiated",
+        "error: `{}` (line {}) takes no {kind}; only a call to a polymorphic word may be explicitly instantiated",
         crate::resolve::demangle_call(name),
         span.line
     )
@@ -1376,10 +1388,23 @@ fn no_type_arguments_error(span: Span, name: &str) -> String {
 /// polymorphic word's own body. That path checks symbolically and has no
 /// substitution to seed, so the list is rejected rather than dropped; naming
 /// the enclosing word matters because the remedy is at the *caller* of it.
-fn type_arguments_in_poly_body_error(ctx: &Ctx, span: Span, name: &str) -> String {
+/// P7.S6b: as with `no_type_arguments_error`, the note names only the
+/// argument kinds actually supplied at the call site.
+fn type_arguments_in_poly_body_error(
+    ctx: &Ctx,
+    span: Span,
+    name: &str,
+    has_type_args: bool,
+    has_len_args: bool,
+) -> String {
     let enclosing = format!(" in {}", ctx.rendered_word());
+    let kind = match (has_type_args, has_len_args) {
+        (_, false) => "type argument",
+        (false, true) => "length argument",
+        (true, true) => "type or length argument",
+    };
     format!(
-        "error: `{}`{enclosing} (line {}) cannot be explicitly instantiated inside a polymorphic word's own body\n  note: instantiate the enclosing word at its own call site instead; forwarding a type argument through a polymorphic body is not supported",
+        "error: `{}`{enclosing} (line {}) cannot be explicitly instantiated inside a polymorphic word's own body\n  note: instantiate the enclosing word at its own call site instead; forwarding a {kind} through a polymorphic body is not supported",
         crate::resolve::demangle_call(name),
         span.line
     )

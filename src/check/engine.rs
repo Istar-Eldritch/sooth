@@ -607,7 +607,7 @@ pub(super) fn capture_names_into(
             TermKind::Bind(names) => {
                 shadowed.extend(names.iter().cloned());
             }
-            TermKind::Call(name, _) => {
+            TermKind::Call(name, _, _) => {
                 let local = call_local(name);
                 if !shadowed.contains(local) {
                     out.insert(local.to_string());
@@ -684,7 +684,7 @@ impl Liveness {
                         last_use.insert(name.clone(), i);
                     }
                 }
-                TermKind::Call(name, _) => {
+                TermKind::Call(name, _, _) => {
                     let local = call_local(name);
                     if bound.contains(local) {
                         last_use.insert(local.to_string(), i);
@@ -736,7 +736,7 @@ impl Liveness {
     ) {
         for term in terms {
             match &term.kind {
-                TermKind::Call(name, _) => {
+                TermKind::Call(name, _, _) => {
                     let local = call_local(name);
                     if bound.contains(local) {
                         let entry = last_use.entry(local.to_string()).or_insert(at);
@@ -773,7 +773,7 @@ impl Liveness {
 /// (`rebound_local_error`), so there is no shadowing case to exclude here.
 pub(super) fn references(terms: &[Term], name: &str) -> bool {
     terms.iter().any(|term| match &term.kind {
-        TermKind::Call(n, _) => call_local(n) == name,
+        TermKind::Call(n, _, _) => call_local(n) == name,
         TermKind::Quotation(inner, _, _) => references(inner, name),
         _ => false,
     })

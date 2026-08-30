@@ -68,7 +68,7 @@ fn free_locals_into(terms: &[Term], shadowed: &mut HashSet<String>, out: &mut Ha
     for term in terms {
         match &term.kind {
             TermKind::Bind(names) => shadowed.extend(names.iter().cloned()),
-            TermKind::Call(name, _) => {
+            TermKind::Call(name, _, _) => {
                 let local = name
                     .strip_prefix("&!")
                     .or_else(|| name.strip_prefix('&'))
