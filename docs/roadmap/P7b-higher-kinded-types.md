@@ -89,6 +89,9 @@ a concrete type; kind-incorrect application is a located error; a signature may 
 Scoped against the tree 260830 (probe round + paper recon): see
 [slice1-brief](./P7b/slice1-brief.md) — design rulings R1-R8, witnesses, and the golden
 list — and [slice1-probes](./P7b/slice1-probes.md) for the verbatim compile-probe log.
+The spec driving implementation is [slice1-spec](./P7b/slice1-spec.md) for the full
+design (revised 260830 after a three-reviewer round; constructor representation
+`Type::CtorImage(GenericId)`).
 Headline: applied-target impl dispatch already works (`impl: Functor for Option[i64]`),
 which narrows S2 to the constructor-abstract target; S1's parse work is the prerequisite
 for the whole trait surface.

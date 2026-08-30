@@ -52,7 +52,7 @@ Structural facts every S1 change must respect:
   `require_top_depth_arrow` (`:4509`). The interception template to copy is
   `parse_poly_generic_application` (`:3673`) — which today explicitly *skips*
   `'`-led words, exactly the gate S1 removes. Secondary site: generic struct fields
-  (`parse_generic_field_shape` `:5793`, whose variable arm has no bracket continuation;
+  (`parse_generic_field_shape` `:5766`, whose variable arm has no bracket continuation;
   the sibling `&`-glued and `^`-glued application arms do).
 - **Grounding is a two-sided contract.** Check-side `apply_subst`
   (`src/check/poly.rs:8347`) is the write side: it grounds `PolyType → Type` through a
@@ -81,10 +81,14 @@ grammar accepts Len domains from day one; S1's goldens cover Star domains only.
 map at `finish` (`:1500`). Keep collection there: each mention records a kind
 *requirement* with its span (bare type slot → `Star`; application head →
 `Arrow(domains, result)`; application argument → `Star`; count position → `Len`), and
-kind unification runs as deferred validation at signature end — the established precedent
-is `validate_pending_quotation_rows` (`src/parser.rs:1458`, invoked from
-`parse_poly_effect` `:3413`). First mention binds; later mentions check; conflicts are
-located errors carrying both spans. Parser-side is right because mention spans — which
+kind validation runs on two clocks: usage-vs-usage conflicts at signature end (the
+`validate_pending_quotation_rows` precedent, `src/parser.rs:1458`, invoked from
+`parse_poly_effect` `:3423`), and annotation-vs-usage conflicts at attach time in
+`attach_bracket_bounds` (`src/parser.rs:2520`) — the annotation side table attaches only
+after `parse_poly_effect` returns (`src/parser.rs:2384-2392`), so signature-end
+validation cannot see annotations; header-field mentions (no `PolyBuilder` exists
+there) collect into a per-decl side table validated at decl end. First mention binds;
+later mentions check; conflicts are located errors carrying both spans. Parser-side is right because mention spans — which
 every new diagnostic needs — exist only there, and X1 kind conflicts are already
 parser-side. But the resolved kinds must then be **published**: `PolySig` gains
 `ty_kinds: Vec<Kind>` parallel to `ty_var_names`, and `GenericStructDecl`/
@@ -95,32 +99,48 @@ parser-side. But the resolved kinds must then be **published**: `PolySig` gains
 **R3 — New `PolyType` variant `App { head: u32 /* var */, args: Vec<PolyType> }`** (or the
 `Generic`-head-enum reshaping; the dedicated variant keeps `Generic`'s registry-index
 invariant intact and is the lower-risk shape). With it comes the S12 R3.3 forced-arm
-inventory (~22 sites): the grounding pair (`apply_subst` / `subst_polytype`), the
-unification collectors (`collect_positions` `:7349`, `collect_concrete_positions` `:7459`,
-`generic_args_of` `:7655`), copy/escape predicates, `poly_type_str` (`:9586`), and the ~9
-`unreachable!` variant guards (`src/parser.rs:384/490/2077/2135`, `src/ir/driver.rs:651`,
-`src/check/declarations.rs:681`, `src/check/audits.rs:376/432/477`, `src/ast.rs:1964`,
-`src/repl.rs:317`). No `_ =>` arms (S12's R3.3 discipline).
+inventory (census corrected by the round-1 review): the grounding pair (`apply_subst` /
+`subst_polytype`), the unification collectors (`collect_positions` `:7349`,
+`poly_type_mentions_caller_var` `:2759`, `poly_mentions_len_var` `:2779`), the impl-target matcher (`match_impl_target_rec`
+`:7165`), the escaping check in `poly_walk_arms` (`:3851`), `poly_op_on_variable_error`
+(`:8680`), `poly_type_str` (`:9586`), and the 10 `unreachable!` variant guards
+(`src/parser.rs:384/490/2077/2135`, `src/ir/driver.rs:651`,
+`src/check/declarations.rs:681`, `src/check/audits.rs:376/432/477`, `src/ast.rs:1964`) —
+plus the wildcard-armed sites App can silently reach (`generic_args_of` `:7655`,
+`generic_len_args_of` `:7667`,
+`quotation_parts` `:7675`, `collect_paired_positions` `:7693`, `substitute_member_var`
+`:1084`, `poly_bind_construction_arg` `:4546`, `substitute_generic_field` `ast.rs:844`,
+`substitute_generic_variant_field` `ast.rs:2229`), which the compiler cannot force and
+which must get explicit arms. (`collect_concrete_positions` `:7459` matches on `Type`,
+not `PolyType`; the earlier `src/repl.rs:317` entry was phantom — the file was deleted in
+`5b8e68c`.) No `_ =>` arms (S12's R3.3 discipline).
 
 **R4 — The `[` router: top-depth `--` lookahead decides quotation vs application.** In
-`parse_poly_slot`'s `'` arm, on a following `[`, run the `require_top_depth_arrow` bracket
-scan (`src/parser.rs:4509`) as a *router*: top-depth `--` present → quotation slot
-(today's behavior, byte-unchanged); absent → type application. The route is total because
-an application's arguments are type expressions and never contain a top-depth `--` (a
-quotation *argument* `'F[[ i64 -- i64 ]]` keeps its `--` at depth 2). Bare-`[` type
+`parse_poly_slot`'s `'` arm, on a following `[`, run a boolean top-depth-`--` scan (a new
+helper — `require_top_depth_arrow` (`src/parser.rs:4509`) returns `Result<(), String>`
+and *errors* on absence, so it cannot serve as a router predicate): top-depth `--`
+present → quotation slot (today's behavior, byte-unchanged); absent → type application.
+The route is total because an application's arguments are type expressions only — S1
+fences a quotation-shaped argument inside an application (`'F[[ i64 -- i64 ]]`) as a
+parse error. Bare-`[` type
 positions that start a slot (no preceding type) are untouched — P7.S6 R4's
 quotation-unconditional rule survives. A golden pins the Functor-map shape
 `'F['T] [ 'T -- 'U ] -- 'F['U]` where both readings coexist in one effect.
 
-**R5 — Constructor images in `Subst` vs ground-before-symbol-derivation.** `Subst`
-(`src/ast.rs:2270`) holds only `ty` and `len` maps; binding `'F` to a constructor needs a
-third map or an early grounding. **Symbol hazard**: the mangled callee symbol derives from
-`(callee, θ)` in vector order (`src/check/poly.rs:8001`), so two call sites binding `'F`
-to *different* constructors must mint different symbols — S12's last-write-wins defect
-class one abstraction level up. Either the ctor image joins the symbol derivation, or the
-App grounds to the concrete `Generic` monomorph *before* symbol derivation so the mangler
-never sees an App. Must be ruled explicitly and unit-tested with a two-constructor dedup
-case.
+**R5 — Constructor-image representation and the symbol hazard.** A bare constructor has no
+grounded `Type` today (`Type::Struct` is a monomorph id), and `Subst`
+(`src/ast.rs:2270`) holds only `ty` and `len` maps — so binding `'F` to a constructor
+needs a representation before any ordering question. **Ruled 260830 (user-approved): the
+grounded `Type` enum gains `Type::CtorImage(GenericId)`**; unification binds
+`'F := CtorImage(g)` in the *existing* `ty` map (no third map), the image flows into
+`struct_keys` args so distinct constructor arguments instantiate distinctly, and grounding
+substitutes the application's arguments through the constructor's parameters to mint the
+concrete `Generic` monomorph *before* symbol derivation. **Symbol hazard**: the mangled
+callee symbol derives from `(callee, θ)` in vector order (`src/check/poly.rs:8001`); the
+mangler folds `subst.ty` as today, where distinct constructor bindings appear as distinct
+`CtorImage` names — so two call sites binding `'F` to different constructors mint
+different symbols. Must be unit-tested with a two-constructor dedup case; the
+pre-existing same-name-across-modules collision stays report-only.
 
 **R6 — Annotation grammar and the glued-colon hazard.** `:` is not a lexer delimiter;
 `'T:Len` fully-glued lexes as one word (S7c probe P2 surprise), and k3b shows
@@ -130,7 +150,7 @@ case.
 capabilities) and `parse_header_bracket` (`src/parser.rs:5666`, where
 `header_bracket_unknown_kind_error` `:1727` says "the only spellable kind is `Len`").
 Kind/bound coexistence in one bracket (`'T: Copy 'F: * -> *`) must be designed against
-that single site; `Len` is reserved (`reject_reserved_name` `:278`), so kinds can never
+that single site; `Len` is reserved (`reject_reserved_name` `:244`), so kinds can never
 be shadowed by trait names — `*` and `->` need the same protection or a grammar shape
 that cannot collide.
 
@@ -149,6 +169,9 @@ advice — house style per `header_bracket_unknown_kind_error`, `var_kind_confli
 - header-field twin of the first
 - use-site constructor argument of the wrong kind (`Wrap[Nat i64]` where `'F: * -> *` and
   `Nat` is `*`) — one more message in the same family.
+
+(Round-1 review added two family members: g, a constructor image used as a type; h, an
+application unsatisfiable against an explicit annotation — see S1-15.)
 
 Optionally re-point k3d's mislabeled case (`: Len` var used as a type) at the real
 kind-mismatch diagnostic.
@@ -273,8 +296,8 @@ S1 fences off (R8i); (e) deciding the body-quotation `'F['U]` question (R8ii).
 
 M (parser-heavy but checker/IR work rides existing grounding rails). Files touched:
 `src/parser.rs` (R4 router, R6 annotations, field-shape continuation, use-site ctor args),
-`src/ast.rs` (Kind promotion + Arrow, `PolyType::App`, `PolySig::ty_kinds`, Subst ruling),
-`src/check/poly.rs` (`apply_subst`/`unify_poly_input` App arms, kind publication
-consumers), `src/check/audits.rs` (forced arms), `src/ir/driver.rs` (`subst_polytype`
-lookup arm), `src/repl.rs` (remap arm). The checker split signals do not fire: the App
+`src/ast.rs` (Kind promotion + Arrow, `PolyType::App`, `Type::CtorImage`,
+`PolySig::ty_kinds`, Subst ruling, field-substitution App arms), `src/check/poly.rs`
+(`apply_subst`/`unify_poly_input` App arms, kind publication consumers),
+`src/check/audits.rs` (forced arms), `src/ir/driver.rs` (`subst_polytype` lookup arm). The checker split signals do not fire: the App
 arms land inside existing responsibilities (grounding, unification), not on a new axis.
