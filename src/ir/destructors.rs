@@ -15,11 +15,13 @@ use super::*;
 /// `drop_level_fields` through it), so substituting the body here is the whole
 /// of dispatch: no call site resolves a `drop` overload by name.
 ///
+#[allow(clippy::too_many_arguments)]
 pub fn synthesize_aggregate_destructors(
     env: &HashMap<String, Arity>,
     resolve: Resolver,
     regs: Registries,
     overrides: &DropOverrides,
+    builtin_overloads: &HashMap<Span, String>,
     resolved_fields: &HashMap<Span, (StructId, usize)>,
     resolved_variant_fields: &HashMap<Span, (EnumId, usize, usize)>,
     combinators: &crate::check::CombinatorIndex,
@@ -52,6 +54,7 @@ pub fn synthesize_aggregate_destructors(
                 env,
                 resolve,
                 regs,
+                builtin_overloads,
                 resolved_fields,
                 resolved_variant_fields,
                 combinators,
@@ -351,6 +354,7 @@ fn synthesize_struct_destructor_override(
     env: &HashMap<String, Arity>,
     resolve: Resolver,
     regs: Registries,
+    builtin_overloads: &HashMap<Span, String>,
     resolved_fields: &HashMap<Span, (StructId, usize)>,
     resolved_variant_fields: &HashMap<Span, (EnumId, usize, usize)>,
     combinators: &crate::check::CombinatorIndex,
@@ -368,7 +372,10 @@ fn synthesize_struct_destructor_override(
         resolve,
         regs,
         empty_instantiations(),
-        empty_builtin_overloads(),
+        // P7.S7d: the override body's own overloaded call sites resolve here
+        // -- a `drop` overload that prints picks one of `hosted::show`'s
+        // same-named dots per site, and only this record says which.
+        builtin_overloads,
         empty_trait_calls(),
         empty_poly_calls(),
         empty_enum_words(),
@@ -534,8 +541,8 @@ mod tests {
         // `drop`, the second colliding with the first), and each instead fills
         // its own struct's destructor symbol with its own body.
         let module = lower_src(
-            "type: A x i64 ; type: B y i64 ; \
-             : drop ( A -- ) | a | a A> . ; : drop ( B -- ) | b | b B> drop ; \
+            "extern: sys-close ( i64 -- i64 ) \"close\" ; type: A x i64 ; type: B y i64 ; \
+             : drop ( A -- ) | a | a A> sys-close drop ; : drop ( B -- ) | b | b B> drop ; \
              : main ( -- ) 1 A drop 2 B drop ;",
         );
         assert!(
@@ -545,10 +552,11 @@ mod tests {
         );
         let a = func(&module, &struct_drop_symbol(StructId::from_index(0)));
         let b = func(&module, &struct_drop_symbol(StructId::from_index(1)));
-        // `A`'s body prints its field, `B`'s discards it: two distinct bodies
-        // under two distinct symbols, not one shared or one clobbered.
-        assert_eq!(count(a, |i| matches!(i, Instr::Print(_))), 1);
-        assert_eq!(count(b, |i| matches!(i, Instr::Print(_))), 0);
+        // `A`'s body hands its field to an extern, `B`'s discards it: two
+        // distinct bodies under two distinct symbols, not one shared or one
+        // clobbered.
+        assert_eq!(call_symbols(a), vec!["close"]);
+        assert!(call_symbols(b).is_empty(), "`B`'s body calls nothing");
     }
 
     #[test]
@@ -565,7 +573,7 @@ mod tests {
         let file = struct_drop_symbol(StructId::from_index(0));
         assert_eq!(call_symbols(func(&ir_module, "main")), vec![file.as_str()]);
         let dtor = func(&ir_module, &file);
-        assert_eq!(count(dtor, |i| matches!(i, Instr::Print(_))), 1);
+        assert_eq!(call_symbols(dtor), vec!["close"]);
     }
 
     #[test]
@@ -577,10 +585,11 @@ mod tests {
         let module = lower_src(&format!("{FILE_RESOURCE} : main ( -- ) 1 File drop ;"));
         let file = struct_drop_symbol(StructId::from_index(0));
         assert_eq!(call_symbols(func(&module, "main")), vec![file.as_str()]);
-        // The destructor is the user's body (one `.` of the field), not the
-        // generic glue (which for an all-`Copy` struct emits nothing at all).
+        // The destructor is the user's body (one extern call on the field),
+        // not the generic glue (which for an all-`Copy` struct emits nothing
+        // at all).
         let dtor = func(&module, &file);
-        assert_eq!(count(dtor, |i| matches!(i, Instr::Print(_))), 1);
+        assert_eq!(call_symbols(dtor), vec!["close"]);
     }
 
     #[test]
@@ -608,8 +617,8 @@ mod tests {
         // Criterion 13/R7 (ordinary composition): an enclosing struct's
         // per-field disposal calls each linear field's destructor rather than
         // inlining its fields, so a resource field is disposed through the
-        // user's body with no new mechanism -- `Holder`'s glue prints nothing
-        // itself, it calls `File`'s destructor, which prints.
+        // user's body with no new mechanism -- `Holder`'s glue has no effect
+        // of its own, it calls `File`'s destructor, which does.
         let module = lower_src(&format!(
             "{FILE_RESOURCE} type: Holder h File n i64 ; \
              : main ( -- ) 1 File 2 Holder drop ;"
@@ -617,7 +626,6 @@ mod tests {
         let file = struct_drop_symbol(StructId::from_index(0));
         let holder = func(&module, &struct_drop_symbol(StructId::from_index(1)));
         assert_eq!(call_symbols(holder), vec![file.as_str()]);
-        assert_eq!(count(holder, |i| matches!(i, Instr::Print(_))), 0);
     }
 
     #[test]
@@ -661,7 +669,7 @@ mod tests {
         // This is the check that is red when the gate is missing.
         let ir = lower_src(
             "type: Res n i64 ;\n\
-             : drop ( Res -- ) | r | r Res> 5000 add . ;\n\
+             : drop ( Res -- ) | r | r Res> 5000 add drop ;\n\
              : mkres ( i64 -- Res ) | n | n Res ;\n\
              type: List | Nil | Cons v Res next ^List ;\n\
              : w ( -- ) ;",
@@ -766,12 +774,41 @@ mod tests {
     }
 
     #[test]
+    fn synthesized_cell_destructor_frees_before_dropping_a_linear_scalar_payload() {
+        // R8's IR-level witness for `tests/phase0.rs`'s
+        // `owned_linear_payload_frees_before_dropping_payload` golden: that
+        // golden's transcript can no longer show the free-before-drop order
+        // itself (the drop-override's DOT write and the alloc/free trace
+        // ride different, independently-buffered output streams), so this
+        // asserts the order the compiler actually emits, on the IR.
+        let ir = lower_src(&format!("{SPY_DEF}: w ( -- ) 7 Spy ^ drop ;"));
+        let dtor = ir
+            .funcs
+            .iter()
+            .find(|f| f.name == "sooth_cell_drop_0")
+            .expect("a destructor was synthesized for the cell");
+        let calls: Vec<&String> = instrs(dtor)
+            .iter()
+            .filter_map(|i| match i {
+                Instr::Call(None, sym, _, _) => Some(sym),
+                _ => None,
+            })
+            .collect();
+        let spy_drop = struct_drop_symbol(StructId::from_index(0));
+        assert_eq!(
+            calls,
+            vec![FREE_SYMBOL, spy_drop.as_str()],
+            "the cell frees, then the payload's own destructor runs"
+        );
+    }
+
+    #[test]
     fn synthesized_cell_destructor_frees_before_dropping_a_linear_aggregate_payload() {
-        // An aggregate payload is copied out of the cell (a Blit), then
-        // the block is freed, and only then does the copy's own drop
-        // glue run. The `^Spy` golden covers the scalar payload at
-        // runtime; this pins the aggregate path, where the copy-out must
-        // still complete before anything else touches the block or the copy.
+        // R8's IR-level witness for `tests/phase0.rs`'s
+        // `owned_aggregate_payload_frees_before_dropping_fields` golden, for
+        // the same reason as the scalar case above. An aggregate payload is
+        // copied out of the cell (a Blit), then the block is freed, and only
+        // then does the copy's own drop glue run.
         let ir = lower_src(&format!(
             "{SPY_DEF}type: Holds a Spy b i64 ; : w ( -- ) 1 Spy 2 Holds ^ drop ;"
         ));

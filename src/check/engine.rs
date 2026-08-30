@@ -1488,14 +1488,14 @@ mod tests {
     /// `File`, whose only field is an `i64`, with a `drop` overload: the shape
     /// every R3/R4 test turns on, since the structural fold alone would call
     /// it `Copy`.
-    const FILE_RESOURCE: &str = "type: File fd i64 ; : drop ( File -- ) | f | f File> . ;";
+    const FILE_RESOURCE: &str = "type: File fd i64 ; : drop ( File -- ) | f | f File> drop ;";
     /// The Phase 3 Slice 1 linear-mechanics stand-in, retired as a compiler
     /// primitive in Slice 8c: an ordinary one-field struct with a `drop`
     /// overload, so it is linear for the same reason any resource is (R3),
     /// not by any compiler-known bit. Always the first struct in a source
     /// string that uses it, so every other struct's `StructId` shifts up by
     /// one relative to a spy-free program.
-    const SPY_DEF: &str = "type: Spy tag i64 ;\n: drop ( Spy -- )  | s | \"drop \" . s Spy> . ;\n";
+    const SPY_DEF: &str = "type: Spy tag i64 ;\n: drop ( Spy -- )  | s | s Spy> drop ;\n";
     /// U12 (R13): an `array[i64 8]` array shape declared in two files interns into
     /// the one shared registry the driver assembles across the closure,
     /// deduping to a single `ArrayId` rather than one per file.
@@ -1823,8 +1823,7 @@ mod tests {
     fn operator_dispatch_resolves_the_exact_row_type() {
         // Guards that resolution yields the right stack-effect type: a
         // homogeneous op over `u8` yields `u8`, a comparison yields the
-        // 32-bit flag,
-        // `.` yields nothing. Note these all resolve identically through the
+        // 32-bit flag. Note these both resolve identically through the
         // numeric fallback too, so this does *not* prove the table pass is
         // used; `check_not_on_literal_count_is_not_a_literal_for_fill` is the
         // guard that the exact-match table row actually drives dispatch.
@@ -1840,7 +1839,6 @@ mod tests {
         // per-numeric-type rows now; `lt` is a `lib/` word over it and resolves
         // through the word environment this fixture does not build.
         assert_eq!(infer("5 >u8 3 >u8 ult").unwrap(), vec![Type::U32]);
-        assert_eq!(infer("5 .").unwrap(), Vec::<Type>::new());
     }
     #[test]
     fn check_parameter_named_after_variant_is_error() {
@@ -1861,7 +1859,7 @@ mod tests {
     }
     #[test]
     fn check_unconsumed_linear_local_is_error() {
-        let err = check_src(&format!("{SPY_DEF}: w ( Spy -- )\n  | s |\n  1 . ;")).unwrap_err();
+        let err = check_src(&format!("{SPY_DEF}: w ( Spy -- )\n  | s |\n  1 drop ;")).unwrap_err();
         assert!(err.contains("never consumed"), "unexpected message: {err}");
         assert!(err.contains("`Spy`"), "unexpected message: {err}");
         assert!(
@@ -2120,7 +2118,7 @@ mod tests {
                    from 1 add to f my-times\n\
                    ] ~[\n\
                    ] if ;\n\
-                   : main ( -- ) 0 0 5 ~[ add ] my-times . ;\n";
+                   : main ( -- ) 0 0 5 ~[ add ] my-times drop ;\n";
         check_src(src)
             .expect("my-times checks: the back-edge produces the ground declared outputs");
     }
@@ -2151,8 +2149,8 @@ mod tests {
         // The term list, as the body of a one-word module: `releasable_into`
         // reads terms, not a `Ctx`, so the walk this fixture stands in for is
         // any block of any body.
-        let tokens =
-            lex(": probe ( -- ) a drop True ~[ 1 . ] ~[ ] if ;\n").expect("lexing should succeed");
+        let tokens = lex(": probe ( -- ) a drop True ~[ 1 drop ] ~[ ] if ;\n")
+            .expect("lexing should succeed");
         let module = crate::parser::parse(&tokens).expect("parsing should succeed");
         let terms = &module.words[0].body;
         let at = terms

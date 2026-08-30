@@ -2,6 +2,7 @@
 \ local, indexes it through the shared array-element accessor, and fetches
 \ the element -- all still generic, monomorphized at `i64` by this call.
 import: intrinsics * ;
+import: hosted::show | . | ;
 
 : first['T: Copy] ( array['T 4] -- 'T ) | a | &a 0 &> @ ;
 : main ( -- )

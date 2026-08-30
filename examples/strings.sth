@@ -1,4 +1,5 @@
 import: intrinsics * ;
+import: hosted::show | . | ;
 
 extern: strlen ( cstr -- usize ) "strlen" ;
 extern: puts   ( cstr -- i64 )   "puts" ;

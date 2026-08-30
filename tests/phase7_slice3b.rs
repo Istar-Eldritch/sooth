@@ -144,7 +144,7 @@ fn poly_body_tagged_arm_not_adjacent_to_its_eliminator_is_error() {
          : main ( -- ) ;\n"
     );
     for src in [&poly, &concrete] {
-        let err = check_err(src);
+        let err = check_err(&common::silent_prints(src));
         assert!(
             err.contains(
                 "an eliminator-arm tag, but it is not consumed by a call to a generated eliminator"
@@ -165,7 +165,7 @@ fn poly_body_orphan_tagged_quotation_is_error() {
          : bad ['T: Copy] ( 'T -- 'T ) ~[ ( Rect ) drop ] drop ;\n\
          : main ( -- ) 1 bad . ;\n"
     );
-    let err = check_err(&src);
+    let err = check_err(&common::silent_prints(&src));
     assert!(
         err.contains("annotated `( Rect )`, an eliminator-arm tag")
             && err.contains("not consumed by a call to a generated eliminator"),
@@ -187,7 +187,7 @@ fn poly_eliminator_arm_output_type_disagreement_is_error() {
            Shape? drop ;\n\
          : main ( -- ) ;\n"
     );
-    let err = check_err(&src);
+    let err = check_err(&common::silent_prints(&src));
     assert!(
         err.contains("the arms of `Shape?` in `bad`")
             && err.contains("an earlier one leaves `'T`, this one leaves `i64`"),
@@ -208,7 +208,7 @@ fn poly_eliminator_arm_depth_mismatch_reuses_the_branch_shape_diagnostic() {
            Shape? ;\n\
          : main ( -- ) ;\n"
     );
-    let err = check_err(&src);
+    let err = check_err(&common::silent_prints(&src));
     assert!(
         err.contains("the quotations passed to `Shape?` leave different stack shapes")
             && err.contains("an earlier one leaves `'T`, this one leaves `'T i64`"),
@@ -242,7 +242,7 @@ fn poly_eliminator_reference_scrutinee_is_located_error() {
          : main ( -- ) ;\n"
     );
     for src in [&declared, &borrowed] {
-        let err = check_err(src);
+        let err = check_err(&common::silent_prints(src));
         assert!(
             err.contains("eliminates a reference, which is not yet supported in a generic body"),
             "{err}"
@@ -303,7 +303,7 @@ fn poly_eliminator_cross_arm_borrow_mutability_disagreement_is_error() {
            Shape? ;\n\
          : main ( -- ) ;\n"
     );
-    let err = check_err(&src);
+    let err = check_err(&common::silent_prints(&src));
     assert!(
         err.contains("borrow `x` differently") && err.contains("`&!x`") && err.contains("`&x`"),
         "{err}"
@@ -326,7 +326,7 @@ fn poly_eliminator_arm_binds_and_leaks_a_linear_local_is_error() {
            Shape? ;\n\
          : main ( -- ) ;\n"
     );
-    let err = check_err(&src);
+    let err = check_err(&common::silent_prints(&src));
     assert!(
         err.contains("the local `z` of type `Spy`")
             && err.contains("is never consumed")
@@ -369,7 +369,7 @@ fn poly_eliminator_non_exhaustive_missing_arm_names_the_variant() {
          : bad ( 'T Shape -- 'T ) ~[ ( Rect ) Rect> drop drop ] Shape? ;\n\
          : main ( -- ) ;\n"
     );
-    let err = check_err(&src);
+    let err = check_err(&common::silent_prints(&src));
     assert!(
         err.contains("non-exhaustive call to `Shape?`")
             && err.contains("missing variant `Circle` of enum `Shape`"),
@@ -387,7 +387,7 @@ fn poly_eliminator_duplicate_arm_is_error() {
            Shape? ;\n\
          : main ( -- ) ;\n"
     );
-    let err = check_err(&src);
+    let err = check_err(&common::silent_prints(&src));
     assert!(
         err.contains("duplicate arm for variant `Rect` of enum `Shape`"),
         "{err}"
@@ -404,7 +404,7 @@ fn poly_eliminator_untagged_arm_is_error() {
            Shape? ;\n\
          : main ( -- ) ;\n"
     );
-    let err = check_err(&src);
+    let err = check_err(&common::silent_prints(&src));
     assert!(
         err.contains("an arm of `Shape?` requires a variant tag"),
         "{err}"
@@ -428,7 +428,7 @@ fn poly_eliminator_bound_quotation_as_scrutinee_is_an_untagged_arm() {
            Shape? ;\n\
          : main ( -- ) 1 bad . ;\n"
     );
-    let err = check_err(&src);
+    let err = check_err(&common::silent_prints(&src));
     assert!(
         err.contains("an arm of `Shape?` requires a variant tag"),
         "{err}"
@@ -442,7 +442,7 @@ fn poly_eliminator_bound_quotation_as_scrutinee_is_an_untagged_arm() {
 fn poly_body_materialized_quotation_is_located_error() {
     let src = ": bad ['T: Copy] ( 'T -- 'T ) ~[ dup ] swap ;\n\
                : main ( -- ) 1 bad . ;\n";
-    let err = check_err(src);
+    let err = check_err(&common::silent_prints(src));
     assert!(
         err.contains("a quotation in the polymorphic body of `bad`")
             && err.contains("is not consumed there"),
@@ -482,7 +482,7 @@ fn poly_body_quotation_as_data_operand_is_located_error() {
     let ctor = check_err(
         "type: P a i64 ;\n\
          : bad ['T: Copy] ( 'T -- 'T ) ~[ dup ] P swap drop ;\n\
-         : main ( -- ) 1 bad . ;\n",
+         : main ( -- ) 1 bad drop ;\n",
     );
     assert!(
         ctor.contains("`P` is not permitted on a quotation literal in `bad`"),
@@ -490,7 +490,7 @@ fn poly_body_quotation_as_data_operand_is_located_error() {
     );
     let arith = check_err(
         ": bad ['T: Copy] ( 'T -- 'T ) 1 ~[ dup ] add drop ;\n\
-         : main ( -- ) 1 bad . ;\n",
+         : main ( -- ) 1 bad drop ;\n",
     );
     assert!(
         arith.contains("`add` is not permitted on a quotation literal in `bad`"),
@@ -503,7 +503,7 @@ fn poly_body_quotation_as_data_operand_is_located_error() {
     // underflowing a stack that is not actually short.
     let deep = check_err(
         ": bad ['T: Copy] ( 'T -- 'T ) 1 ~[ dup ] swap add drop ;\n\
-         : main ( -- ) 1 bad . ;\n",
+         : main ( -- ) 1 bad drop ;\n",
     );
     assert!(
         deep.contains("`add` is not permitted on a quotation literal in `bad`"),
@@ -525,7 +525,7 @@ fn poly_body_quotation_as_data_operand_is_located_error() {
 fn poly_body_branch_on_a_quotation_is_located_error() {
     let err = check_err(
         ": bad ['T: Copy] ( 'T -- 'T ) ~[ dup ] branch ;\n\
-         : main ( -- ) 1 bad . ;\n",
+         : main ( -- ) 1 bad drop ;\n",
     );
     assert!(
         err.contains("`branch` on a quotation in the polymorphic body of `bad`")
@@ -548,7 +548,7 @@ fn poly_eliminator_abstract_scrutinee_is_located_error() {
            Shape? ;\n\
          : main ( -- ) ;\n"
     );
-    let err = check_err(&src);
+    let err = check_err(&common::silent_prints(&src));
     assert!(
         err.contains("eliminates `'T`, which is not a concrete enum")
             && err.contains("enum-kind bound"),
@@ -570,7 +570,7 @@ fn poly_eliminator_ordinary_bracket_arm_is_error() {
            Shape? ;\n\
          : main ( -- ) ;\n"
     );
-    let err = check_err(&src);
+    let err = check_err(&common::silent_prints(&src));
     assert!(
         err.contains("but `Shape?` declares parameter") && err.contains("as inline `~[ ... ]`"),
         "{err}"

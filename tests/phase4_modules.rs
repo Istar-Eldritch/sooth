@@ -23,6 +23,17 @@ impl Closure {
         Closure(dir)
     }
 
+    /// A `Closure` whose directory is a real package, so a *non-entry* file
+    /// can print: `--manifest` covers the entry only (a transitively imported
+    /// file re-derives its own package), and P7.S7d made printing an
+    /// `import: hosted::show` away. Members import each other by module name,
+    /// since a quoted-path import inside a package is rejected.
+    fn packaged(tag: &str) -> Closure {
+        let c = Closure::new(tag);
+        std::fs::write(c.0.join("sooth.pkg"), common::fixture_package(tag)).unwrap();
+        c
+    }
+
     fn write(&self, name: &str, contents: &str) -> PathBuf {
         let path = self.0.join(name);
         if let Some(parent) = path.parent() {
@@ -503,7 +514,7 @@ fn imported_linear_type_dropped_without_importing_it_is_error() {
     let c = Closure::new("imported-linear-drop-ungated");
     c.write(
         "lib.sth",
-        "type: Res n i64 ;\n: mk ( -- Res ) 7 Res ;\n: drop ( Res -- ) | r | r Res> . ;\nexport: mk Res ;\n",
+        "type: Res n i64 ;\n: mk ( -- Res ) 7 Res ;\n: drop ( Res -- ) | r | r Res> drop ;\nexport: mk Res ;\n",
     );
     let entry = c.write(
         "main.sth",
@@ -528,14 +539,14 @@ fn imported_linear_type_dropped_without_importing_it_is_error() {
 fn imported_linear_type_dropped_after_selective_import_ok() {
     // Slice 8b, R6 (positive companion): importing `Res` by name makes its
     // override visible, so a bare `drop` runs `lib`'s destructor (prints `7`).
-    let c = Closure::new("imported-linear-drop-selective");
+    let c = Closure::packaged("imported-linear-drop-selective");
     c.write(
         "lib.sth",
         "type: Res n i64 ;\n: mk ( -- Res ) 7 Res ;\n: drop ( Res -- ) | r | r Res> . ;\nexport: mk Res ;\n",
     );
     let entry = c.write(
         "main.sth",
-        "import: \"lib.sth\" lib | Res | ;\n: main ( -- ) lib::mk drop ;\n",
+        "import: self::lib lib | Res | ;\n: main ( -- ) lib::mk drop ;\n",
     );
     let (stdout, code) = build_and_run(&entry);
     assert_eq!(stdout, "7\n", "the module's own destructor observably ran");
@@ -548,7 +559,7 @@ fn imported_resource_qualified_only_non_disposal_uses_compile() {
     // import, naming the type in an effect, holding a value, forwarding it to
     // another word, and `&`-reading a field all still compile -- the value is
     // disposed in `lib`, which declares `Res`.
-    let c = Closure::new("imported-linear-nondisposal");
+    let c = Closure::packaged("imported-linear-nondisposal");
     c.write(
         "lib.sth",
         concat!(
@@ -563,7 +574,7 @@ fn imported_resource_qualified_only_non_disposal_uses_compile() {
     let entry = c.write(
         "main.sth",
         concat!(
-            "import: \"lib.sth\" lib ;\n",
+            "import: self::lib lib ;\n",
             ": hold ( -- lib::Res ) lib::mk ;\n",
             ": main ( -- ) hold | r | &r lib::peek . r lib::sink ;\n",
         ),
@@ -583,7 +594,7 @@ fn library_combinator_disposing_its_own_resource_compiles_under_qualified_only_i
     // `Res` and its `drop` override), rejecting code that never names `Res`
     // at all. `main` imports `lib` qualified-only -- no `Res`, no `drop` --
     // since disposing the resource is entirely `with`'s own affair.
-    let c = Closure::new("library-combinator-self-dispose");
+    let c = Closure::packaged("library-combinator-self-dispose");
     c.write(
         "lib.sth",
         concat!(
@@ -596,7 +607,7 @@ fn library_combinator_disposing_its_own_resource_compiles_under_qualified_only_i
     );
     let entry = c.write(
         "main.sth",
-        "import: \"lib.sth\" lib ;\n: main ( -- ) [ 1 add ] lib::with . ;\n",
+        "import: self::lib lib ;\n: main ( -- ) [ 1 add ] lib::with . ;\n",
     );
     let (stdout, code) = build_and_run(&entry);
     assert_eq!(

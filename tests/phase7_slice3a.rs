@@ -144,7 +144,7 @@ fn poly_word_constructs_a_monomorph_no_other_site_materializes() {
     let (binary, stdout, code) = build_and_run(prog.path());
     std::fs::remove_file(&binary).ok();
     assert_eq!(code, 0);
-    assert_eq!(stdout, "True\n");
+    assert_eq!(stdout, "true\n");
 }
 
 /// T-nontail: a poly body constructs a generic value and then moves a
@@ -165,7 +165,7 @@ fn poly_body_constructor_off_tail_position_unifies_at_exit() {
     let (binary, stdout, code) = build_and_run(prog.path());
     std::fs::remove_file(&binary).ok();
     assert_eq!(code, 0);
-    assert_eq!(stdout, "True\n");
+    assert_eq!(stdout, "true\n");
 }
 
 /// T4 (R5.1): a generic applied to a type variable at nesting depth > 1

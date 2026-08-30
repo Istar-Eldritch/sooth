@@ -153,7 +153,8 @@ fn trapping_entry(t: &Tree, rel: &str) -> PathBuf {
     t.write(
         rel,
         "import: core::prelude * ;\n\
-         import: intrinsics | fill slice >usize &> @ . | ;\n\
+         import: intrinsics | fill slice >usize &> @ | ;\n\
+         import: hosted::show | . | ;\n\
          : main ( -- )\n\
          7 4 fill | buf |\n\
          &buf slice | s |\n\
@@ -254,7 +255,7 @@ fn driver_test_forwards_a_trapping_childs_stderr() {
     assert_ne!(code, 0);
     assert_eq!(
         diagnostics,
-        "sooth: array index out of range (line 6)\n  index 9 is out of bounds for length 4\n"
+        "sooth: array index out of range (line 7)\n  index 9 is out of bounds for length 4\n"
     );
     assert!(
         !report.contains("out of range"),

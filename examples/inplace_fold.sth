@@ -15,6 +15,7 @@
 \ no aliasing rule fires for the linear case.
 
 import: intrinsics * ;
+import: hosted::show | . | ;
 
 import: core::combinators c | times | ;
 

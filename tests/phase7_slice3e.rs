@@ -14,10 +14,16 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+mod common;
+
 /// A scratch tree of `.sth` files outside any package, so imports resolve by
-/// quoted path and no manifest is involved. Removed on drop. Files are
-/// written verbatim (no `common::fixture_source` auto-import injection):
-/// none of these fixtures need `core`/`intrinsics`.
+/// quoted path rather than a package-member path. Removed on drop. `write`
+/// routes each file through `common::printing_import` (not the fuller
+/// `common::fixture_source`), so a fixture that prints always gets the
+/// `hosted::show` import it needs; none of these fixtures need
+/// `core`/`intrinsics` beyond that. A fixture can therefore never be
+/// observed missing its print import here -- if a scenario needs to probe a
+/// *missing*-import diagnostic, it must write the file some other way.
 struct Tree(PathBuf);
 
 impl Tree {
@@ -35,7 +41,11 @@ impl Tree {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).unwrap();
         }
-        std::fs::write(&path, contents).unwrap();
+        std::fs::write(
+            &path,
+            format!("{contents}{}", common::printing_import(contents)),
+        )
+        .unwrap();
         path
     }
 }
@@ -87,26 +97,29 @@ fn build_and_run(entry: &Path) -> String {
     String::from_utf8_lossy(&run.stdout).into_owned()
 }
 
-/// A scratch tree with a `sooth.pkg` naming this repo's own `lib/` as `core`,
-/// so a fixture can `import: core::prelude`/`core::bool` (P7.S3e's `sort`
-/// golden needs `if`/`lt`/`gt`/`Bool` for its comparator).
+/// A scratch tree with a `sooth.pkg` naming this repo's own `lib/` as `core`
+/// and `hosted`, so a fixture can `import: core::prelude`/`core::bool`
+/// (P7.S3e's `sort` golden needs `if`/`lt`/`gt`/`Bool` for its comparator)
+/// and `hosted::show` (P7.S7d put `.` there).
 fn tree_with_core(tag: &str) -> Tree {
     let t = Tree::new(tag);
     t.write(
         "sooth.pkg",
         &format!(
-            "package: {tag} ;\nlayer: hosted ;\ndepends: core path \"{}/lib/core\" ;\n",
-            env!("CARGO_MANIFEST_DIR")
+            "package: {tag} ;\nlayer: hosted ;\ndepends: core path \"{root}/lib/core\" ;\ndepends: hosted path \"{root}/lib/hosted\" ;\n",
+            root = env!("CARGO_MANIFEST_DIR")
         ),
     );
     t
 }
 
-/// A single-file scratch program, for a golden that needs no import closure.
-/// `intrinsics` is imported unconditionally: every fixture in this file uses
-/// `drop`, and this is not itself the subject under test.
+/// A single-file scratch program, for a golden that needs no import closure of
+/// its own. `intrinsics` is imported unconditionally: every fixture in this
+/// file uses `drop`, and this is not itself the subject under test. The tree
+/// still carries a manifest, since a fixture that prints reaches
+/// `hosted::show` (P7.S7d).
 fn single_file(tag: &str, src: &str) -> (Tree, PathBuf) {
-    let t = Tree::new(tag);
+    let t = tree_with_core(tag);
     let entry = t.write("main.sth", &format!("import: intrinsics * ;\n{src}"));
     (t, entry)
 }

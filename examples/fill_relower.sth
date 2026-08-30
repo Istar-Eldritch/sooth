@@ -5,6 +5,7 @@
 \ first time since `fill` never opened a loop before).
 
 import: intrinsics * ;
+import: hosted::show | . | ;
 import: core::prelude * ;
 
 type: Pair a i64 b i64 ;

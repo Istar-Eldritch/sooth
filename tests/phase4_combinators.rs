@@ -236,7 +236,7 @@ fn quotation_type_is_rejected_at_every_audited_position() {
         },
     ];
     for Row { src, position } in rows {
-        let err = check_error(src);
+        let err = check_error(&common::silent_prints(src));
         assert!(
             err.contains("a quotation type") && err.contains(position),
             "audited position `{position}` should be a located quotation-type rejection, got: {err}"
@@ -304,7 +304,7 @@ fn literal_effect_mismatch_against_parameter_is_error() {
     // `[ i64 -- i64 ]`; the error names the word, both effects.
     let err = check_error(
         ": apply ( i64 [ i64 -- i64 ] -- i64 ) call ;\n\
-         : main ( -- ) 3 [ 1 add . ] apply . ;\n",
+         : main ( -- ) 3 [ 1 add drop ] apply drop ;\n",
     );
     assert!(
         err.contains("`apply`") && err.contains("[ i64 -- i64 ]") && err.contains("[ i64 -- ]"),
@@ -328,7 +328,7 @@ fn quotation_literal_capturing_linear_local_is_error() {
          : apply ( i64 [ i64 -- i64 ] -- i64 ) call ;\n\
          : main ( -- ) 7 Spy | s | 3 [ s drop 0 add ] apply . ;\n"
     );
-    let err = check_error(&src);
+    let err = check_error(&common::silent_prints(&src));
     assert!(
         err.contains("`s`") && err.contains("consumes the enclosing local") && err.contains("(D3)"),
         "capturing a linear local should be R12's located D3 rejection naming `s`, got: {err}"
@@ -343,7 +343,7 @@ fn quotation_literal_borrowing_enclosing_place_is_error() {
     let src = "type: V x i64 y i64 ;\n\
                : apply ( [ -- &V ] -- ) call drop ;\n\
                : main ( -- ) 1 2 V | v | [ &v ] apply ;\n";
-    let err = check_error(src);
+    let err = check_error(&common::silent_prints(src));
     assert!(
         err.contains("`v`") && err.contains("borrows the enclosing place") && err.contains("(D3)"),
         "borrowing an enclosing place should be a located D3 rejection naming `v`, got: {err}"
@@ -382,7 +382,7 @@ fn quotation_against_non_quotation_parameter_is_error() {
     // runtime quotation value has existed since 7a/7b.
     let err = check_error(
         ": f ( i64 -- i64 ) ;\n\
-         : main ( -- ) [ 1 add ] f . ;\n",
+         : main ( -- ) [ 1 add ] f drop ;\n",
     );
     assert!(
         err.contains("a quotation cannot be passed to `f`"),
@@ -401,7 +401,7 @@ fn reject_quotation_argument_wording_at_concrete_boundary() {
     // 7" parenthetical is retired, and the rest of the message is unchanged.
     let err = check_error(
         ": f ( i64 -- i64 ) ;\n\
-         : main ( -- ) [ 1 add ] f . ;\n",
+         : main ( -- ) [ 1 add ] f drop ;\n",
     );
     assert_eq!(
         err,
@@ -456,7 +456,7 @@ fn stale_phase6_diagnostics_are_reworded() {
         ),
     ];
     for (src, phrase) in checked_rows {
-        let err = check_error(src);
+        let err = check_error(&common::silent_prints(src));
         assert!(
             err.contains(phrase),
             "row `{src}` should still produce its phrase `{phrase}`, got: {err}"
@@ -486,7 +486,7 @@ fn recursive_quotation_taking_word_is_located_error() {
     // `self_tail_combinator_edge_is_allowed`.)
     let err = check_error(
         ": loopy inline ( i64 [ i64 -- i64 ] -- i64 ) loopy drop ;\n\
-         : main ( -- ) 3 [ 1 add ] loopy . ;\n",
+         : main ( -- ) 3 [ 1 add ] loopy drop ;\n",
     );
     assert!(
         err.contains("`loopy`") && err.contains("recursive"),
@@ -501,7 +501,7 @@ fn quotation_taking_word_cycle_names_members() {
     let err = check_error(
         ": a inline ( i64 [ i64 -- i64 ] -- i64 ) [ 1 add ] b 1 add ;\n\
          : b inline ( i64 [ i64 -- i64 ] -- i64 ) [ 1 add ] a 1 add ;\n\
-         : main ( -- ) 3 [ 1 add ] a . ;\n",
+         : main ( -- ) 3 [ 1 add ] a drop ;\n",
     );
     assert!(
         err.contains("`a`") && err.contains("`b`") && err.contains("recursive"),
@@ -586,7 +586,7 @@ fn each_checks_standalone() {
         "/lib/core/combinators.sth"
     ))
     .expect("the combinator library should be readable");
-    check_ok(&lib);
+    check_ok(&common::silent_prints(&lib));
 }
 
 // -- criterion 9b: `map`/`fold` check compositionally ------------------------
@@ -817,7 +817,7 @@ fn two_poly_combinators_declaring_the_same_signature_is_a_duplicate_error() {
     let err = check_error(
         ": apply ( 'T [ 'T -- 'T ] -- 'T ) call ;\n\
          : apply ( 'T [ 'T -- 'T ] -- 'T ) call call ;\n\
-         : main ( -- ) 5 [ 2 mul ] apply . ;\n",
+         : main ( -- ) 5 [ 2 mul ] apply drop ;\n",
     );
     assert!(
         err.contains("duplicate overload") && err.contains("apply"),
@@ -913,7 +913,7 @@ fn while_body_linear_local_across_back_edge_is_error() {
            | p | p call ~[ 3 Spy | leak | p while ] ~[ ] if ;\n\
          : main ( -- ) 0 [ dup 5 lt ~[ 1 add True ] ~[ False ] if ] while . ;\n"
     );
-    let err = check_error(&src);
+    let err = check_error(&common::silent_prints(&src));
     assert!(
         err.contains("`Spy`")
             && err.contains("`while`")
@@ -1214,7 +1214,7 @@ fn poly_combinator_consuming_local_is_error() {
          count ~[ | i | &arr i >usize &> @ f call s drop ] times\n\
          arr drop ;\n"
     );
-    let err = check_error(&src);
+    let err = check_error(&common::silent_prints(&src));
     assert!(
         err.contains("`bad`")
             && err.contains("consumes the enclosing local `s`, which is linear"),
@@ -1236,7 +1236,7 @@ fn poly_combinator_borrow_across_loop_is_error() {
          count ~[ | i | &arr i >usize &> @ f call &v ] times\n\
          arr drop v drop ;\n"
     );
-    let err = check_error(&src);
+    let err = check_error(&common::silent_prints(&src));
     assert!(
         err.contains("`bad`") && err.contains("borrows the enclosing place `v`"),
         "a borrow crossing the back-edge in a poly `times` body should be located at the def site naming `bad`, got: {err}"
@@ -1268,7 +1268,7 @@ fn poly_combinator_literal_borrowing_enclosing_place_is_error() {
                   0 [ | x | x drop &b &v ] applyr\n\
                   b drop ;\n";
     for (label, src) in [("mono", mono), ("poly", poly)] {
-        let err = check_error(src);
+        let err = check_error(&common::silent_prints(src));
         assert!(
             err.contains("`applyr`")
                 && err.contains("borrows the enclosing place `b`")
@@ -1308,7 +1308,7 @@ fn literal_created_borrow_across_loop_is_error_at_splice_site() {
          0 4 fill [ | x | &b &v ] refout\n\
          b drop ;\n"
     );
-    let err = check_error(&src);
+    let err = check_error(&common::silent_prints(&src));
     assert!(
         err.contains("`refout`")
             && err.contains("borrows the enclosing place `b`")
@@ -1875,7 +1875,7 @@ fn check_splice_collision_same_type_dedup_is_ok() {
 \
                : main ( -- ) 1 c drop 2 c drop ;
 ";
-    check_ok(&src);
+    check_ok(&common::silent_prints(src));
 }
 
 /// The hoisted parameter must leave a real loop behind, not recursion: 1M
@@ -2052,7 +2052,7 @@ fn bound_dispatch_in_materialized_quotation_is_rejected() {
 \
          : main ( -- ) 1 2 foo ;
 ";
-    let err = check_error(src);
+    let err = check_error(&common::silent_prints(src));
     assert!(
         err.contains("bound dispatch in materialized quotations is unsupported"),
         "should reject bound dispatch in a materialized quotation, got: {err}"
@@ -2083,7 +2083,7 @@ fn materialized_quotation_without_bare_member_is_not_rejected() {
 \
          : main ( -- ) 1 2 foo ;
 ";
-    check_ok(src);
+    check_ok(&common::silent_prints(src));
 }
 
 /// A splice-derived CallInst with out_arity >= 2 (a combinator calling a poly

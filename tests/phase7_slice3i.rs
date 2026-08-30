@@ -115,13 +115,12 @@ fn bool_in_an_effect_without_importing_core_bool_is_an_unknown_type() {
 /// a hub's `export:` list resolves in an effect signature the same way it
 /// already did in term position, closing the gap this golden used to pin the
 /// other side of (`git log` on this test's prior body has the pre-fix
-/// diagnostic). The `.` overload stays the one thing that still cannot cross
-/// a hub: an operator overload's candidate lookup considers the calling
-/// module and the module it selectively imported the name from, one hop, so
-/// a hub in between still hides the declaring module -- an orthogonal
-/// mechanism, not narrowed by this fix.
+/// diagnostic). P7.S7d deleted this golden's third half: the bool `.`
+/// overload was the one name that could not cross the hub, and there is no
+/// bool `.` overload any more -- printing is `hosted::show`'s dot, imported
+/// directly like any other capability.
 #[test]
-fn the_prelude_hub_carries_the_constructors_and_the_type_name_but_not_the_print_overload() {
+fn the_prelude_hub_carries_the_constructors_and_the_type_name() {
     let t = Tree::new("g1-hub");
     let ok = t.write_raw(
         "ctors.sth",
@@ -144,32 +143,21 @@ fn the_prelude_hub_carries_the_constructors_and_the_type_name_but_not_the_print_
         "the type name re-exports into an effect signature too: {}",
         String::from_utf8_lossy(&named_build.stderr)
     );
-
-    // The `.` overload is the one thing that still does not cross the hub:
-    // it resolves against its declaring module, not a re-exporting hub, so
-    // the type name working above does not mean printing does.
-    let print_entry = t.write_raw(
-        "print.sth",
-        "import: intrinsics * ;\nimport: core::prelude * ;\n: main ( -- ) True . ;\n",
-    );
-    let print_err = build_error(&print_entry);
-    assert!(
-        print_err.contains("`.` requires a printable scalar, found `Bool`"),
-        "unexpected diagnostic: {print_err}"
-    );
 }
 
 // -- G2: with the import, everything boolean works --------------------------
 
-/// G2: one `import: core::bool ;` line brings the type, both constructors, the
-/// typed branch and the `.` overload, and the program runs.
+/// G2: one `import: core::bool ;` line brings the type, both constructors and
+/// the typed branch, and the program runs. Printing is a second import since
+/// P7.S7d (`hosted::show`'s `Bool` dot, which spells the variants lowercase).
 #[test]
 fn importing_core_bool_gives_the_type_constructors_branch_and_print() {
     let t = Tree::new("g2");
     let entry = t.write_raw(
         "main.sth",
         "import: intrinsics * ;\n\
-         import: core::bool b | Bool False True if unless . | ;\n\
+         import: core::bool b | Bool False True if unless | ;\n\
+         import: hosted::show | . | ;\n\
          : flip ( Bool -- Bool )\n\
            ~[ False ] ~[ True ] if ;\n\
          : main ( -- )\n\
@@ -178,7 +166,7 @@ fn importing_core_bool_gives_the_type_constructors_branch_and_print() {
            True flip .\n\
            False ~[ 1 ] ~[ 2 ] unless . ;\n",
     );
-    assert_eq!(build_and_run(&entry), "True\nFalse\nFalse\n1\n");
+    assert_eq!(build_and_run(&entry), "true\nfalse\nfalse\n1\n");
 }
 
 // -- G3 (R1): a boolean static requires the import too ----------------------
@@ -209,13 +197,14 @@ fn boolean_static_with_the_import_holds_its_initializer() {
     let entry = t.write_raw(
         "main.sth",
         "import: intrinsics * ;\n\
-         import: core::bool b | Bool False True if . | ;\n\
+         import: core::bool b | Bool False True if | ;\n\
+         import: hosted::show | . | ;\n\
          static: FLAG Bool = True ;\n\
          : main ( -- )\n\
            &!FLAG @ .\n\
            &!FLAG @ ~[ 10 ] ~[ 20 ] if . ;\n",
     );
-    assert_eq!(build_and_run(&entry), "True\n10\n");
+    assert_eq!(build_and_run(&entry), "true\n10\n");
 }
 
 /// R1's shape half: `Bool` resolves through the registry now, so a module can

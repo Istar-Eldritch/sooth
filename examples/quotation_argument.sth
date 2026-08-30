@@ -6,6 +6,7 @@
 \ `inline` over a `~[ ... ]` parameter (see `lib/core/combinators.sth`).
 
 import: intrinsics * ;
+import: hosted::show | . | ;
 
 : apply ( [ i64 -- i64 ] i64 -- i64 ) | n | | f | n f call ;
 

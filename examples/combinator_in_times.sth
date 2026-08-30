@@ -8,6 +8,7 @@
 \ rejected before this slice lifted the limit.
 
 import: intrinsics * ;
+import: hosted::show | . | ;
 
 import: core::combinators c ;
 

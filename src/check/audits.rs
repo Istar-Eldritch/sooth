@@ -875,7 +875,7 @@ mod tests {
         // reported (the module checks fine), and the registry carries one
         // entry per struct.
         let src = "type: A x i64 ; type: B y i64 ; \
-                   : drop ( A -- ) | a | a A> . ; : drop ( B -- ) | b | b B> . ; \
+                   : drop ( A -- ) | a | a A> drop ; : drop ( B -- ) | b | b B> drop ; \
                    : main ( -- ) 1 A drop 2 B drop ;";
         check_src(src).unwrap();
 

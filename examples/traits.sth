@@ -14,6 +14,7 @@
 \ each declaring an enum variant of the same bare name are not otherwise
 \ distinguished at a call site inside either one.
 import: intrinsics * ;
+import: hosted::show | . | ;
 import: core::prelude | if Bool lt gt | ;
 
 type: Rank

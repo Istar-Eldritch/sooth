@@ -46,6 +46,11 @@ fn parse_error(src: &str) -> String {
 /// string it is prepended to shifts up by 2.
 const SPY_DEF: &str = "type: Spy tag i64 ;\n: drop ( Spy -- )  | s | \"drop \" . s Spy> . ;\n";
 
+/// `SPY_DEF` for the in-process check paths, whose `parse_with_core` seed is
+/// `core`-only: `.` is `hosted::show`'s word now (P7.S7d) and cannot resolve
+/// there. Same line count, so located diagnostics still line up.
+const SPY_DEF_SILENT: &str = "type: Spy tag i64 ;\n: drop ( Spy -- )  | s | s Spy> drop ;\n";
+
 #[test]
 fn mid_body_binding_consumes_from_the_stack() {
     // Criterion 1: `| a b |` pops two values where it appears, leaving the `1`
@@ -146,7 +151,7 @@ fn unconsumed_linear_local_errors_at_block_end() {
     // that literal's own `]`, not the deleted `else`/`end` keywords.
     // `SPY_DEF` is two lines, so `w`'s own line 3 lands on line 5.
     let at_then = check_error(&format!(
-        "{SPY_DEF}: w ( Bool -- )\n  ~[ 7 Spy | s | 0 .\n  ] ~[ 0 . ] if ;\n\
+        "{SPY_DEF_SILENT}: w ( Bool -- )\n  ~[ 7 Spy | s | 0 drop\n  ] ~[ 0 drop ] if ;\n\
 : main ( -- ) True w ;\n"
     ));
     assert!(
@@ -159,11 +164,11 @@ fn unconsumed_linear_local_errors_at_block_end() {
     );
 
     let at_else = check_error(&format!(
-        "{SPY_DEF}: w ( Bool -- )\n  ~[ 0 . ] ~[\n  7 Spy | s | 0 .\n  ] if ;\n\
+        "{SPY_DEF_SILENT}: w ( Bool -- )\n  ~[ 0 drop ] ~[\n  7 Spy | s | 0 drop\n  ] if ;\n\
 : main ( -- ) True w ;\n"
     ));
     assert!(
-        at_else.contains("scope ends at the `branch arm` on line 4, col 12"),
+        at_else.contains("scope ends at the `branch arm` on line 4, col 15"),
         "unexpected message: {at_else}"
     );
 }
@@ -178,7 +183,7 @@ fn linear_local_bound_in_arm_and_moved_on_one_nested_path_is_error() {
     // `SPY_DEF` is two lines, so the outer arm opening on `w`'s own line 2
     // lands on line 4.
     let err = check_error(&format!(
-        "{SPY_DEF}: w ( Bool Bool -- )\n  ~[\n    7 Spy | s |\n    ~[ s drop ] ~[ 1 . ] if\n  ] ~[ drop 0 . ] if ;\n: main ( -- ) True True w ;\n"
+        "{SPY_DEF_SILENT}: w ( Bool Bool -- )\n  ~[\n    7 Spy | s |\n    ~[ s drop ] ~[ 1 drop ] if\n  ] ~[ drop 0 drop ] if ;\n: main ( -- ) True True w ;\n"
     ));
     assert!(
         err.contains("is not consumed on every path"),

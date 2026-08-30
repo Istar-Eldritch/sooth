@@ -73,7 +73,7 @@ fn escaping_closure_over_a_bool_local_admits_and_snapshots_it() {
         ": mk ( Bool -- [ -- Bool ] ) | b | [ b ] ;\n\
          : main ( -- ) True mk call . False mk call . ;\n",
     );
-    assert_eq!(build_and_run(prog.path()), "True\nFalse\n");
+    assert_eq!(build_and_run(prog.path()), "true\nfalse\n");
 }
 
 /// The second `check_capture_admission` call site (`check_branch_join`), which
@@ -93,7 +93,7 @@ fn branch_join_of_two_bool_capturing_arms_admits() {
            False False True pick call .\n\
          ;\n",
     );
-    assert_eq!(build_and_run(prog.path()), "False\nTrue\n");
+    assert_eq!(build_and_run(prog.path()), "false\ntrue\n");
 }
 
 /// The narrowing's guard on the enum side: `Item` is `Copy` (its one payload
@@ -564,7 +564,7 @@ fn stored_at_offset(block: &str, offset: u32) -> String {
 fn an_owning_closure_allocates_its_env_and_the_body_frees_it() {
     let il = emit_il(
         "type: Spy tag i64 ;\n\
-         : drop ( Spy -- ) Spy> . ;\n\
+         : drop ( Spy -- ) Spy> drop ;\n\
          : mk ( Spy -- owning [ -- ] ) | s | [ s drop ] ;\n\
          : main ( -- ) 7 Spy mk call ;\n",
     );
@@ -621,7 +621,7 @@ fn an_owning_parameter_inherited_by_an_impl_member_lowers_to_the_quotation_aggre
 fn a_plain_quotation_still_carries_a_null_disposer_slot() {
     let il = emit_il(
         ": mk ( i64 -- [ -- i64 ] ) | n | [ n ] ;\n\
-         : main ( -- ) 5 mk call . ;\n",
+         : main ( -- ) 5 mk call drop ;\n",
     );
     assert!(
         il.contains("type :Q0 = { l, l, l }"),

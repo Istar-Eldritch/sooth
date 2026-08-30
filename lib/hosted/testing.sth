@@ -2,9 +2,9 @@
 \ its checks against. Each assertion prints exactly one `ok -- <label>` or
 \ `not ok -- <label>` line (numberless TAP at line granularity); nothing here
 \ threads state across assertions or asserts an ordering. Printing is
-\ inescapably an OS-facing capability, so this lives in `hosted`, not `core`,
-\ even though `.` remains a compiler intrinsic callable from any layer today.
-import: intrinsics | . | ;
+\ inescapably an OS-facing capability, so this lives in `hosted`, not `core`:
+\ its `.` is the sibling `hosted::show`'s str dot.
+import: self::show | . | ;
 import: core::bool | Bool if | ;
 import: core::cmp | Ord eq | ;
 

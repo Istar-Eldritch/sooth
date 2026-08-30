@@ -9,6 +9,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use sooth::driver;
 
+mod common;
+
 /// A scratch single-file program, removed on drop (`tests/phase7_slice3b.rs`'s
 /// own pattern).
 struct Scratch(PathBuf);
@@ -21,7 +23,7 @@ impl Scratch {
             std::env::temp_dir().join(format!("sooth-p7s3d-{}-{tag}-{seq}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("prog.sth");
-        std::fs::write(&path, contents).unwrap();
+        std::fs::write(&path, common::fixture_source("prog.sth", contents)).unwrap();
         Scratch(path)
     }
 
@@ -39,7 +41,8 @@ impl Drop for Scratch {
 }
 
 fn build_and_run(src: &Path) -> (PathBuf, String, i32) {
-    let binary = driver::build(src).expect("program should build");
+    let binary = driver::build_with_manifest(src, common::manifest_for(src).as_deref())
+        .expect("program should build");
     let output = std::process::Command::new(&binary)
         .output()
         .expect("binary should run");
@@ -70,9 +73,11 @@ fn check_ok(src: &str) {
 /// carried rigidly rather than coincidentally matching.
 #[test]
 fn c1_call_on_literal_splices_body_in_place() {
+    // P7.S7d: the fixture used to carry its own `Bool` and its own
+    // `: . ( Bool -- )` overload, because printing a bool needed one. Both are
+    // the harness's job now -- `core::prelude`'s `Bool` and `hosted::show`'s
+    // dot -- so the fixture is just the splice under test.
     let src = "import: intrinsics * ;\n\
-               type: Bool | False | True ;\n\
-               : . ( Bool -- ) ~[ ( False ) drop \"False\\n\" . ] ~[ ( True ) drop \"True\\n\" . ] Bool? ;\n\
                : bump ['T: Copy] ( 'T -- 'T 'T )\n\
                | x | [ x x ] call\n\
                ;\n\
@@ -85,7 +90,7 @@ fn c1_call_on_literal_splices_body_in_place() {
     std::fs::remove_file(&binary).ok();
     assert_eq!(code, 0);
     assert_eq!(
-        stdout, "5\n5\nTrue\nTrue\n",
+        stdout, "5\n5\ntrue\ntrue\n",
         "each instantiation must carry `x x` through the splice independently"
     );
 }
@@ -113,8 +118,6 @@ fn c1_call_on_non_literal_operand_is_accepted() {
 #[test]
 fn c2_literal_grounds_against_concrete_quotation_param() {
     let src = "import: intrinsics * ;\n\
-             type: Bool | False | True ;\n\
-             : . ( Bool -- ) ~[ ( False ) drop \"False\\n\" . ] ~[ ( True ) drop \"True\\n\" . ] Bool? ;\n\
              : run1 ( [ i64 -- i64 ] i64 -- i64 )\n\
                swap call\n\
              ;\n\
@@ -130,7 +133,7 @@ fn c2_literal_grounds_against_concrete_quotation_param() {
     std::fs::remove_file(&binary).ok();
     assert_eq!(code, 0);
     assert_eq!(
-        stdout, "3\n5\n3\nTrue\n",
+        stdout, "3\n5\n3\ntrue\n",
         "each instantiation must ground and apply the literal independently"
     );
 }

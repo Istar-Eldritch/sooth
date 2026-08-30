@@ -26,7 +26,11 @@ impl Scratch {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("sooth.pkg"), common::fixture_package("p7s3f")).unwrap();
         let path = dir.join("prog.sth");
-        std::fs::write(&path, contents).unwrap();
+        std::fs::write(
+            &path,
+            format!("{contents}{}", common::printing_import(contents)),
+        )
+        .unwrap();
         Scratch(path)
     }
 
@@ -76,7 +80,7 @@ fn argument_boundary_materializes_ground_quotation_param() {
     std::fs::remove_file(&binary).ok();
     assert_eq!(code, 0);
     assert_eq!(
-        stdout, "7\nTrue\n",
+        stdout, "7\ntrue\n",
         "each instantiation of `'T` must carry the materialized quotation argument independently"
     );
 }
@@ -101,7 +105,7 @@ fn body_boundary_calls_ground_quotation_param() {
     std::fs::remove_file(&binary).ok();
     assert_eq!(code, 0);
     assert_eq!(
-        stdout, "2\n9\n2\nTrue\n",
+        stdout, "2\n9\n2\ntrue\n",
         "the called quotation must run in each instantiation, beside the untouched `'T`"
     );
 }
@@ -126,7 +130,7 @@ fn argument_and_body_boundary_together() {
     std::fs::remove_file(&binary).ok();
     assert_eq!(code, 0);
     assert_eq!(
-        stdout, "7\n9\n7\nTrue\n",
+        stdout, "7\n9\n7\ntrue\n",
         "a two-input declared effect must pop both operands at the body boundary"
     );
 }
@@ -152,7 +156,7 @@ fn body_boundary_pops_declared_inputs_deepest_first() {
     std::fs::remove_file(&binary).ok();
     assert_eq!(code, 0);
     assert_eq!(
-        stdout, "1\nTrue\n9\n",
+        stdout, "1\ntrue\n9\n",
         "the deepest operand must satisfy the first declared input, at check time and at run time"
     );
 }
@@ -190,7 +194,7 @@ fn body_boundary_calls_an_abstract_quotation_param() {
     std::fs::remove_file(&binary).ok();
     assert_eq!(code, 0);
     assert_eq!(
-        stdout, "5\nTrue\n",
+        stdout, "5\ntrue\n",
         "each instantiation of `'T` must call its own forwarded quotation independently"
     );
 }
@@ -217,7 +221,7 @@ fn headline_apply_accepts_a_literal_quotation_argument() {
     std::fs::remove_file(&binary).ok();
     assert_eq!(code, 0);
     assert_eq!(
-        stdout, "5\nTrue\n",
+        stdout, "5\ntrue\n",
         "two instantiations of `'T` rule out a coincidental single-shape match"
     );
 }
@@ -241,7 +245,7 @@ fn headline_apply_accepts_a_literal_quotation_argument_declared_first() {
     std::fs::remove_file(&binary).ok();
     assert_eq!(code, 0);
     assert_eq!(
-        stdout, "5\nTrue\n",
+        stdout, "5\ntrue\n",
         "grounding must not depend on the quotation slot following its binding input"
     );
 }

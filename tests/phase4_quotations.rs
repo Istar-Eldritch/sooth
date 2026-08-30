@@ -62,7 +62,7 @@ fn times_def_hand_copy_is_pinned_to_the_library() {
 /// that a `call` resolved to a runtime dispatch through a materialized value,
 /// not a compile-time body splice.
 fn emits_call_indirect(src: &str) -> bool {
-    count_call_indirect(src) > 0
+    count_call_indirect(&common::silent_prints(src)) > 0
 }
 
 /// The total number of indirect calls in the lowered module: `times` over an
@@ -101,7 +101,7 @@ fn materialized_quot_params(src: &str) -> Vec<IrType> {
 /// multi-capture materialization stack-allocates an env bundle (R16), distinct
 /// from the one-word inline env a single capture keeps.
 fn alloc_sizes(src: &str, func: &str) -> Vec<u32> {
-    let tokens = lexer::lex(src).expect("lexing should succeed");
+    let tokens = lexer::lex(&common::silent_prints(src)).expect("lexing should succeed");
     let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
     check::check(&mut module).expect("check should succeed");
     let ir = sooth::ir::lower(&module).expect("lower should succeed");
@@ -129,7 +129,7 @@ fn quotation_stored_in_struct_field_compiles_and_calls() {
     assert_eq!(stdout, "5\n");
     assert_eq!(code, 0);
     assert!(
-        emits_call_indirect(src),
+        emits_call_indirect(&common::silent_prints(&src)),
         "the store/getter path must lower `call` to an indirect call"
     );
 }
@@ -153,7 +153,7 @@ fn quotation_in_array_element_indirect_calls() {
     assert_eq!(stdout, "5\n6\n");
     assert_eq!(code, 0);
     assert!(
-        emits_call_indirect(src),
+        emits_call_indirect(&common::silent_prints(&src)),
         "reading an element back and calling it must be an indirect call"
     );
 }
@@ -168,7 +168,7 @@ fn quotation_returned_from_word_indirect_calls() {
     assert_eq!(stdout, "5\n");
     assert_eq!(code, 0);
     assert!(
-        emits_call_indirect(src),
+        emits_call_indirect(&common::silent_prints(&src)),
         "a returned quotation is erased at the call site, so `call` is indirect"
     );
 }
@@ -235,7 +235,7 @@ fn capturing_bool_scalar_snapshots_into_env() {
     let src = "type: BoolHolder q [ -- Bool ] ;\n\
                : main ( -- ) True | x | [ x ] BoolHolder BoolHolder> call . ;\n";
     let (stdout, code) = run_src("qcapbool", src);
-    assert_eq!(stdout, "True\n");
+    assert_eq!(stdout, "true\n");
     assert_eq!(code, 0);
 }
 
@@ -298,7 +298,7 @@ fn escaping_closure_over_param_ref_compiles_and_runs() {
     // The materialized closure is erased at `call`, so dispatch through it is
     // an indirect call, not a compile-time splice.
     assert_eq!(
-        count_call_indirect(src),
+        count_call_indirect(&common::silent_prints(&src)),
         1,
         "call through the captured closure is an indirect call"
     );
@@ -318,7 +318,7 @@ fn materialized_single_capture_builds_inline_env() {
     let src = ": make-b ( &array[i64 4] -- [ i64 -- i64 ] ) | r | [ r 0 >usize &> @ add ] ;\n\
                : main ( -- ) 5 4 fill | a | &a make-b 4 swap call . ;\n";
     assert_eq!(
-        materialized_quot_params(src),
+        materialized_quot_params(&common::silent_prints(&src)),
         vec![
             IrType::Int {
                 bits: 64,
@@ -340,7 +340,7 @@ fn escaping_closure_over_frame_local_is_past_owning_frame() {
     // past-owning-frame error (R15/R24), asserted whole.
     let err = check_error(
         ": make-a ( -- [ i64 -- i64 ] ) 5 4 fill | arr | [ &arr 0 >usize &> @ add ] ;\n\
-         : main ( -- ) make-a 4 swap call . ;\n",
+         : main ( -- ) make-a 4 swap call drop ;\n",
     );
     assert_eq!(
         err,
@@ -359,7 +359,7 @@ fn escaping_closure_over_frame_local_borrow_is_past_owning_frame() {
     // arm. Rejected the same way, naming `r`.
     let err = check_error(
         ": make-a2 ( -- [ i64 -- i64 ] ) 5 4 fill | arr | &arr | r | [ r 0 >usize &> @ add ] ;\n\
-         : main ( -- ) make-a2 4 swap call . ;\n",
+         : main ( -- ) make-a2 4 swap call drop ;\n",
     );
     assert_eq!(
         err,
@@ -385,7 +385,7 @@ fn frame_capture_escaping_via_store_through_param_ref_is_past_owning_frame() {
          5 4 fill | arr |\n\
          &arr | r |\n\
          0 >usize &!> [ r 0 >usize &> @ add ] ! ;\n\
-         : main ( -- ) seed 2 fill | tbl | &!tbl install &tbl 0 &> @ 4 swap call . tbl drop ;\n",
+         : main ( -- ) seed 2 fill | tbl | &!tbl install &tbl 0 &> @ 4 swap call drop tbl drop ;\n",
     );
     assert_eq!(
         err,
@@ -402,7 +402,7 @@ fn capturing_quotation_typed_name_is_rejected_deferred() {
     // (R15 case 4), so it is deferred at every boundary rather than admitted.
     let err = check_error(
         ": wrap ( -- [ i64 -- i64 ] ) [ 1 add ] | q | [ q call ] ;\n\
-         : main ( -- ) wrap 4 swap call . ;\n",
+         : main ( -- ) wrap 4 swap call drop ;\n",
     );
     assert_eq!(
         err,
@@ -418,7 +418,7 @@ fn multi_capture_escaping_closure_is_rejected_deferred() {
     // which needs a heap env (R18), deferred.
     let err = check_error(
         ": mk ( -- [ i64 -- i64 ] ) 10 | x | 20 | y | [ x y add add ] ;\n\
-         : main ( -- ) mk 4 swap call . ;\n",
+         : main ( -- ) mk 4 swap call drop ;\n",
     );
     assert_eq!(
         err,
@@ -438,7 +438,7 @@ fn capturing_literal_spliced_still_works() {
     assert_eq!(stdout, "14\n");
     assert_eq!(code, 0);
     assert!(
-        !emits_call_indirect(src),
+        !emits_call_indirect(&common::silent_prints(&src)),
         "a spliced literal must not lower to an indirect call"
     );
 }
@@ -459,7 +459,7 @@ fn capturing_literal_spliced_through_combinator_stays_splice() {
     assert_eq!(stdout, "60\n");
     assert_eq!(code, 0);
     assert!(
-        !emits_call_indirect(src),
+        !emits_call_indirect(&common::silent_prints(&src)),
         "a capturing literal driven by a combinator is spliced, never indirect-called"
     );
 }
@@ -479,7 +479,7 @@ fn two_differing_quotation_arms_materialize_and_call() {
     assert_eq!(stdout, "5\n6\n");
     assert_eq!(code, 0);
     assert!(
-        emits_call_indirect(src),
+        emits_call_indirect(&common::silent_prints(&src)),
         "a materialized branch-join quotation is indirect-called"
     );
 }
@@ -496,7 +496,7 @@ fn same_quotation_both_arms_still_splices() {
     assert_eq!(stdout, "6\n");
     assert_eq!(code, 0);
     assert!(
-        !emits_call_indirect(src),
+        !emits_call_indirect(&common::silent_prints(&src)),
         "the same literal in both arms is spliced, never indirect-called"
     );
 }
@@ -543,7 +543,7 @@ fn loop_over_erased_quotation_emits_one_indirect_call() {
     assert_eq!(stdout, "10\n");
     assert_eq!(code, 0);
     assert_eq!(
-        count_call_indirect(src),
+        count_call_indirect(&common::silent_prints(&src)),
         1,
         "an erased-quotation loop has exactly one indirect call, in the body"
     );
@@ -573,7 +573,7 @@ fn dispatch_table_of_capturing_closures_runs() {
     assert_eq!(stdout, "7\n8\n");
     assert_eq!(code, 0);
     assert!(
-        emits_call_indirect(src),
+        emits_call_indirect(&common::silent_prints(&src)),
         "a dispatch through an erased capturing closure is an indirect call"
     );
 }
@@ -598,7 +598,7 @@ fn struct_stored_closure_observes_later_mutation() {
     assert_eq!(stdout, "9\n");
     assert_eq!(code, 0);
     assert!(
-        emits_call_indirect(src),
+        emits_call_indirect(&common::silent_prints(&src)),
         "a fetch-and-call through the stored closure is an indirect call"
     );
 }
@@ -618,7 +618,7 @@ fn captured_reference_read_past_last_use_is_error() {
          &!arr | r |\n\
          [ r 0 >usize &!> @ ] Holder | h |\n\
          &!arr 0 >usize &!> 9 !\n\
-         h Holder> call .\n\
+         h Holder> call drop\n\
          arr drop ;\n",
     );
     assert_eq!(
@@ -634,7 +634,7 @@ fn captured_reference_read_past_last_use_is_error() {
          &!arr | r |\n\
          [ r 0 >usize &!> @ ] | h |\n\
          &!arr 0 >usize &!> 9 !\n\
-         h call .\n\
+         h call drop\n\
          arr drop ;\n",
     );
     assert!(
@@ -678,7 +678,7 @@ fn materialized_multi_capture_builds_stack_bundle() {
     assert_eq!(stdout, "30\n");
     assert_eq!(code, 0);
     assert_eq!(
-        materialized_quot_params(two),
+        materialized_quot_params(&common::silent_prints(two)),
         vec![IrType::Ptr],
         "the two-capture body still takes one trailing Ptr env param (the bundle pointer)"
     );
@@ -710,7 +710,7 @@ fn frame_capture_escaping_via_struct_is_past_owning_frame() {
          0 2 fill | arr |\n\
          &arr | r |\n\
          [ r 0 >usize &> @ ] Holder ;\n\
-         : main ( -- ) make Holder> call . ;\n",
+         : main ( -- ) make Holder> call drop ;\n",
     );
     assert_eq!(
         err,
@@ -745,7 +745,7 @@ fn frame_capture_escaping_via_struct_carrier_stored_through_param_ref_is_past_ow
          : main ( -- )\n\
          [ 7 ] Holder | box |\n\
          &!box install\n\
-         box Holder> call . ;\n",
+         box Holder> call drop ;\n",
     );
     assert_eq!(
         err,
@@ -770,7 +770,7 @@ fn frame_capture_escaping_via_struct_field_getter_return_is_past_owning_frame() 
          arr drop\n\
          q ;\n\
          : clobber ( -- ) 987654 8 fill | z | &z 0 >usize &> @ drop z drop ;\n\
-         : main ( -- ) make | q | clobber q call . ;\n",
+         : main ( -- ) make | q | clobber q call drop ;\n",
     );
     assert_eq!(
         err,
@@ -798,7 +798,7 @@ fn frame_capture_escaping_via_heap_cell_return_is_past_owning_frame() {
          : main ( -- )\n\
          make | c |\n\
          clobber\n\
-         c ^> Holder> call . ;\n",
+         c ^> Holder> call drop ;\n",
     );
     assert_eq!(
         err,
@@ -878,7 +878,7 @@ fn outer_rooted_bundle_escaping_via_carrier_is_rejected_deferred() {
          : main ( -- )\n\
          10 2 fill | a |\n\
          20 2 fill | b |\n\
-         &a &b make Holder> call .\n\
+         &a &b make Holder> call drop\n\
          a drop b drop ;\n",
     );
     assert_eq!(
@@ -901,7 +901,7 @@ fn scalar_and_ref_bundle_escaping_via_carrier_is_rejected_deferred() {
          [ ra 0 >usize &> @ n add ] Holder ;\n\
          : main ( -- )\n\
          10 3 fill | a |\n\
-         &a 5 make Holder> call .\n\
+         &a 5 make Holder> call drop\n\
          a drop ;\n",
     );
     assert_eq!(
@@ -926,7 +926,7 @@ fn scalar_only_bundle_escaping_via_carrier_is_rejected_deferred() {
          10 | x |\n\
          20 | y |\n\
          [ x y add ] Holder ;\n\
-         : main ( -- ) make Holder> call . ;\n",
+         : main ( -- ) make Holder> call drop ;\n",
     );
     assert_eq!(
         err,
@@ -954,7 +954,7 @@ fn join_of_two_capturing_arms_unions_capture_sets() {
     assert_eq!(stdout, "10\n");
     assert_eq!(code, 0);
     assert!(
-        emits_call_indirect(src),
+        emits_call_indirect(&common::silent_prints(&src)),
         "the merged branch-join closure is indirect-called"
     );
 }
@@ -1033,7 +1033,7 @@ fn vm_table_dispatch_matches_eliminator_version() {
 
     let src = std::fs::read_to_string("examples/vm_table.sth").expect("read vm_table.sth");
     assert!(
-        emits_call_indirect(&src),
+        emits_call_indirect(&common::silent_prints(&src)),
         "the table dispatch path must emit at least one indirect call"
     );
 
@@ -1106,7 +1106,7 @@ fn capturing_dispatch_matches_spliced_version() {
     let src = std::fs::read_to_string("examples/capturing_dispatch.sth")
         .expect("read capturing_dispatch.sth");
     assert_eq!(
-        count_call_indirect(&src),
+        count_call_indirect(&common::silent_prints(&src)),
         3,
         "each of the three table-stored closures dispatches through its own indirect call"
     );

@@ -38,7 +38,7 @@ fn run(name: &str, src: &str) -> String {
 fn ordinary_literal_at_an_inline_parameter_is_located_error() {
     let err = check_error(
         ": takes-tilde inline ( ~[ i64 -- i64 ] -- i64 ) | f | 5 f call ;\n\
-         : main ( -- ) [ 1 add ] takes-tilde . ;\n",
+         : main ( -- ) [ 1 add ] takes-tilde drop ;\n",
     );
     assert_eq!(
         err,
@@ -54,7 +54,7 @@ fn ordinary_literal_at_an_inline_parameter_is_located_error() {
 fn inline_literal_at_an_ordinary_parameter_is_located_error() {
     let err = check_error(
         ": takes-ordinary ( [ i64 -- i64 ] -- i64 ) | f | 5 f call ;\n\
-         : main ( -- ) ~[ 1 add ] takes-ordinary . ;\n",
+         : main ( -- ) ~[ 1 add ] takes-ordinary drop ;\n",
     );
     assert_eq!(
         err,
@@ -71,7 +71,7 @@ fn inline_literal_at_an_ordinary_parameter_is_located_error() {
 fn inline_literal_at_a_word_output_is_located_error() {
     let err = check_error(
         ": mk ( -- [ i64 -- i64 ] ) ~[ 1 add ] ;\n\
-         : main ( -- ) 5 mk call . ;\n",
+         : main ( -- ) 5 mk call drop ;\n",
     );
     assert_eq!(
         err,
@@ -89,7 +89,7 @@ fn inline_literal_at_an_array_store_is_located_error() {
          : main ( -- )\n\
          seed 2 fill | tbl |\n\
          &!tbl 0 >usize &!> ~[ 1 ] !\n\
-         &tbl 0 &> @ call .\n\
+         &tbl 0 &> @ call drop\n\
          tbl drop ;\n",
     );
     assert_eq!(

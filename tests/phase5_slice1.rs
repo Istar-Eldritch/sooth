@@ -143,7 +143,7 @@ fn two_generic_instantiations_share_a_surface_name_and_dispatch_correctly() {
         "type: Box['T] val 'T ;\ntype: WrapI x Box[i64] ;\ntype: WrapB y Box[Bool] ;\n\
          : main ( -- )\n  7 Box &val @ . drop\n  True Box &val @ . drop\n;\n",
     );
-    assert_eq!(stdout, "7\nTrue\n");
+    assert_eq!(stdout, "7\ntrue\n");
     assert_eq!(code, 0);
 }
 

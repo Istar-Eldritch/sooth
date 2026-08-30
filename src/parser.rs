@@ -6836,7 +6836,7 @@ mod tests {
     /// primitive in Slice 8c: an ordinary one-field struct with a `drop`
     /// overload, so it is linear for the same reason any resource is, not by
     /// any compiler-known bit.
-    const SPY_DEF: &str = "type: Spy tag i64 ;\n: drop ( Spy -- )  | s | \"drop \" . s Spy> . ;\n";
+    const SPY_DEF: &str = "type: Spy tag i64 ;\n: drop ( Spy -- )  | s | s Spy> drop ;\n";
 
     /// The terms of a word body.
     fn terms_body(word: &WordDef) -> &[Term] {
@@ -9807,7 +9807,7 @@ mod tests {
     fn redefining_an_access_word_is_error() {
         for name in ["@", "!", "+!"] {
             for src in [
-                format!(": {name} ( i64 -- ) . ;"),
+                format!(": {name} ( i64 -- ) drop ;"),
                 format!("static: {name} i64 ;"),
             ] {
                 let err = parse_src(&src).unwrap_err();

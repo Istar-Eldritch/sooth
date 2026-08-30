@@ -1,4 +1,5 @@
 import: intrinsics * ;
+import: hosted::show | . | ;
 import: core::prelude * ;
 
 type: Buf  data ^array[u8 64]  len usize ;

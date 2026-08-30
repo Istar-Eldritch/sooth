@@ -1845,7 +1845,7 @@ pub(super) fn poly_call_term(
     // below instead of erroring outright. An exact match still wins here
     // (R2, same priority as any other env candidate), but the call site is
     // recorded for lowering (R7): the literal name would otherwise hit the
-    // builtin's own hardcoded `Instr::Bin`/`Instr::Cmp`/`Instr::Print` arm.
+    // builtin's own hardcoded `Instr::Bin`/`Instr::Cmp` arm.
     // R1/R2: resolve among this name's candidates by exact operand match; a
     // lone candidate is the ordinary case and is used as-is, matching the
     // single-signature behaviour this path had before overloading.
@@ -11544,7 +11544,7 @@ mod tests {
                    ~[ ( Rect )   Rect> mul drop ]\n\
                    ~[ ( Circle ) Circle> dup mul 3 mul drop ]\n\
                    Shape? ;\n\
-                 : main ( -- ) 1 5 Circle pick . ;\n"
+                 : main ( -- ) 1 5 Circle pick drop ;\n"
             ))
             .is_ok(),
             "arms are matched by annotation tag, in any written order"
@@ -11771,7 +11771,7 @@ mod tests {
         // below that window makes this body fail again.
         let body = "over over gt ~[ drop ] ~[ swap drop ] unless";
         check_src(&format!(
-            ": mymin ['T: Copy Ord] ( 'T 'T -- 'T ) {body} ;\n: main ( -- ) 2 9 mymin . ;\n"
+            ": mymin ['T: Copy Ord] ( 'T 'T -- 'T ) {body} ;\n: main ( -- ) 2 9 mymin drop ;\n"
         ))
         .expect("`unless` reaches the dispatch");
         // The accept alone would also be satisfied by an implementation that
@@ -12051,7 +12051,7 @@ mod tests {
     fn a_seeded_and_an_inferred_call_at_one_type_mint_one_symbol() {
         let module = checked_module(
             ": r ( [ 'T -- ] 'U 'T -- 'U ) drop swap drop ;\n\
-             : main ( -- ) [ drop ] 2.5 7 r . [ drop ] 2.5 7 r[i64 f64] . ;",
+             : main ( -- ) [ drop ] 2.5 7 r drop [ drop ] 2.5 7 r[i64 f64] drop ;",
         );
         let insts: Vec<&CallInst> = module
             .instantiations
@@ -12102,7 +12102,7 @@ mod tests {
     /// signature's variables rather than just counting them.
     #[test]
     fn a_wrong_arity_instantiation_is_rejected() {
-        let too_many = check_src(": id ( 'T -- 'T ) ;\n: main ( -- ) 7 id[i64 f64] . ;")
+        let too_many = check_src(": id ( 'T -- 'T ) ;\n: main ( -- ) 7 id[i64 f64] drop ;")
             .expect_err("one declared variable, two given");
         assert_eq!(
             too_many,
@@ -12125,7 +12125,7 @@ mod tests {
     fn a_type_argument_cannot_bind_a_length_variable() {
         let err = check_src(
             ": alen ( array[i64 'N] -- array[i64 'N] usize ) len ;\n\
-             : main ( -- ) 5 4 fill alen[i64] . drop ;",
+             : main ( -- ) 5 4 fill alen[i64] drop drop ;",
         )
         .expect_err("a length variable cannot be bound via a type-argument slot");
         assert_eq!(
@@ -12330,7 +12330,7 @@ mod tests {
         // instantiates at `array[i64 4]` and `array[i64 8]`.
         check_src(
             ": alen ( array[i64 'N] -- array[i64 'N] usize ) len ;\n\
-             : main ( -- ) 5 4 fill alen . drop 5 8 fill alen . drop ;",
+             : main ( -- ) 5 4 fill alen drop drop 5 8 fill alen drop drop ;",
         )
         .unwrap();
     }
@@ -12341,7 +12341,7 @@ mod tests {
         // instantiation has four concrete outputs, so it interns a bundle.
         let module = checked_module(
             ": dup2 ['a: Copy 'b: Copy] ( ..s 'a 'b -- ..s 'a 'b 'a 'b ) over over ;\n\
-             : main ( -- ) 1 2 dup2 . . . . ;",
+             : main ( -- ) 1 2 dup2 drop drop drop drop ;",
         );
         assert_eq!(module.instantiations.len(), 1);
         let inst = module.instantiations.values().next().unwrap();
@@ -12727,7 +12727,7 @@ mod tests {
         check_src(&format!(
             "{SPY}: iszero ( i64 -- Bool ) 0 eq ;\n\
              : loopg ['T: Copy] ( Spy 'T i64 -- Spy 'T )\n\
-               dup iszero ~[ drop ] ~[ dup . 1 sub loopg ] if ;\n\
+               dup iszero ~[ drop ] ~[ dup drop 1 sub loopg ] if ;\n\
              : main ( -- ) ;\n"
         ))
         .expect("a linear value forwarded into the window stays legal");
@@ -14937,7 +14937,7 @@ mod tests {
         // is False at the representation the backend emits even though the
         // type system still refuses the borrow.
         let err = check_src(
-            ": ap ( 'T [ 'T -- 'T ] -- 'T ) | x f | f &f drop x swap call ;\n: main ( -- ) 3 [ 1 add ] ap . ;\n",
+            ": ap ( 'T [ 'T -- 'T ] -- 'T ) | x f | f &f drop x swap call ;\n: main ( -- ) 3 [ 1 add ] ap drop ;\n",
         )
         .unwrap_err();
         assert_eq!(
@@ -15485,8 +15485,8 @@ mod tests {
     fn projection_on_generic_receiver_body_is_error() {
         let err = check_src(
             "type: Point x i64 y i64 ;\n\
-             : peek ( 'T -- 'T ) 3 4 Point &x @ . drop ;\n\
-             : main ( -- ) 7 peek . ;",
+             : peek ( 'T -- 'T ) 3 4 Point &x @ drop drop ;\n\
+             : main ( -- ) 7 peek drop ;",
         )
         .unwrap_err();
         assert!(
@@ -15802,7 +15802,7 @@ mod tests {
         let err = check_src(
             ": twice ( [ i64 -- i64 ] i64 -- i64 ) swap | q | q call q call ;\n\
              : ap ['T: Copy] ( 'T ^i64 -- 'T i64 ) | x c | x [ c drop 1 add ] 2 twice ;\n\
-             : main ( -- ) 5 7 ^ ap . . ;\n",
+             : main ( -- ) 5 7 ^ ap drop drop ;\n",
         )
         .expect_err("a grounded literal consuming an enclosing linear local must be rejected");
         assert!(
@@ -15822,7 +15822,7 @@ mod tests {
         check_src(
             ": twice ( [ i64 -- i64 ] i64 -- i64 ) swap | q | q call q call ;\n\
              : ap ['T: Copy] ( 'T i64 -- 'T i64 ) | x c | x [ c add ] 2 twice ;\n\
-             : main ( -- ) 5 7 ap . . ;\n",
+             : main ( -- ) 5 7 ap drop drop ;\n",
         )
         .expect("a grounded literal may read an enclosing `Copy` local by value");
     }
@@ -15837,7 +15837,7 @@ mod tests {
         check_src(
             ": twice ( [ i64 -- i64 ] i64 -- i64 ) swap | q | q call q call ;\n\
              : ap ['T: Copy] ( 'T ^i64 -- 'T i64 ) | x c | c drop x [ 1 add ] 2 twice ;\n\
-             : main ( -- ) 5 7 ^ ap . . ;\n",
+             : main ( -- ) 5 7 ^ ap drop drop ;\n",
         )
         .expect("a local consumed before the literal is not captured by it");
     }

@@ -1,4 +1,5 @@
 import: intrinsics * ;
+import: hosted::show | . | ;
 
 extern: open     ( cstr i64 -- i64 )              "open" ;
 extern: read     ( i64 &!array[u8 64] usize -- isize ) "read" ;

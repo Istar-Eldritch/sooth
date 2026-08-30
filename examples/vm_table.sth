@@ -12,6 +12,7 @@
 \ so no handler needs to know whether it is straight-line or a branch.
 
 import: intrinsics * ;
+import: hosted::show | . | ;
 import: core::prelude * ;
 
 type: Op

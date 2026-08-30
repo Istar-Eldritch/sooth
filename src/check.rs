@@ -3274,6 +3274,7 @@ fn check_shuffle(
 mod tests {
     use super::*;
     use crate::lexer::lex;
+    use crate::test_support::check_example;
 
     fn check_src(src: &str) -> Result<(), String> {
         let tokens = lex(src).unwrap();
@@ -3561,17 +3562,17 @@ mod tests {
     /// `File`, whose only field is an `i64`, with a `drop` overload: the shape
     /// every R3/R4 test turns on, since the structural fold alone would call
     /// it `Copy`.
-    const FILE_RESOURCE: &str = "type: File fd i64 ; : drop ( File -- ) | f | f File> . ;";
+    const FILE_RESOURCE: &str = "type: File fd i64 ; : drop ( File -- ) | f | f File> drop ;";
     /// The Phase 3 Slice 1 linear-mechanics stand-in, retired as a compiler
     /// primitive in Slice 8c: an ordinary one-field struct with a `drop`
     /// overload, so it is linear for the same reason any resource is (R3),
     /// not by any compiler-known bit. Always the first struct in a source
     /// string that uses it, so every other struct's `StructId` shifts up by
     /// one relative to a spy-free program.
-    const SPY_DEF: &str = "type: Spy tag i64 ;\n: drop ( Spy -- )  | s | \"drop \" . s Spy> . ;\n";
+    const SPY_DEF: &str = "type: Spy tag i64 ;\n: drop ( Spy -- )  | s | s Spy> drop ;\n";
     #[test]
     fn destructure_of_drop_overloaded_type_is_error() {
-        let err = check_src(&format!("{FD_DEF}: main ( -- ) 7 Fd Fd> . ;\n")).unwrap_err();
+        let err = check_src(&format!("{FD_DEF}: main ( -- ) 7 Fd Fd> drop ;\n")).unwrap_err();
         assert_eq!(
             err,
             "error: cannot destructure `Fd` in `main` (line 3): it defines `drop`, so moving its fields out would skip its destructor\n  note: dispose it with `drop`, or read a field through a borrow (`&`) instead of moving it out"
@@ -3673,7 +3674,7 @@ mod tests {
     #[test]
     fn check_annotation_disagrees_with_shape_changing_parameter_is_error() {
         let src = ": sc inline ( ..i i64 ~[ ..i i64 -- ..o i64 ] -- ..o i64 ) | f | f call ;\n\
-             : w ( -- ) 5 ~[ ( Bool -- Bool ) dup drop ] sc . ;\n";
+             : w ( -- ) 5 ~[ ( Bool -- Bool ) dup drop ] sc drop ;\n";
         let err = check_src(src).unwrap_err();
         assert_eq!(
             err,
@@ -3690,7 +3691,7 @@ mod tests {
     #[test]
     fn check_annotation_extending_shape_changing_parameter_row_ok() {
         let sc = ": sc inline ( ..i ~[ ..i -- ..o ] -- ..o ) | f | f call ;\n";
-        check_src(&format!("{sc}: w ( -- ) ~[ ( -- i64 ) 5 ] sc . ;\n")).unwrap();
+        check_src(&format!("{sc}: w ( -- ) ~[ ( -- i64 ) 5 ] sc drop ;\n")).unwrap();
         check_src(&format!("{sc}: w ( -- ) 7 ~[ ( i64 -- ) drop ] sc ;\n")).unwrap();
     }
 
@@ -3768,18 +3769,15 @@ mod tests {
     }
     #[test]
     fn check_gcd_is_ok() {
-        let src = std::fs::read_to_string("examples/gcd.sth").unwrap();
-        check_src(&src).unwrap();
+        check_example("examples/gcd.sth").unwrap();
     }
     #[test]
     fn check_factorial_is_ok() {
-        let src = std::fs::read_to_string("examples/factorial.sth").unwrap();
-        check_src(&src).unwrap();
+        check_example("examples/factorial.sth").unwrap();
     }
     #[test]
     fn check_lerp_is_ok() {
-        let src = std::fs::read_to_string("examples/lerp.sth").unwrap();
-        check_src(&src).unwrap();
+        check_example("examples/lerp.sth").unwrap();
     }
     #[test]
     fn str_and_cstr_are_copy_and_storable() {
@@ -4292,7 +4290,7 @@ mod tests {
     #[test]
     fn check_linear_local_moved_in_one_arm_then_used_is_error() {
         let err = check_src(&format!(
-            "{SPY_DEF}: w ( Spy Bool -- )\n  | s c |\n  c ~[ s drop ] ~[ 1 . ] if\n  s drop ;"
+            "{SPY_DEF}: w ( Spy Bool -- )\n  | s c |\n  c ~[ s drop ] ~[ 1 drop ] if\n  s drop ;"
         ))
         .unwrap_err();
         assert!(err.contains("use after move"), "unexpected message: {err}");
@@ -4301,7 +4299,7 @@ mod tests {
     #[test]
     fn check_linear_local_moved_in_one_arm_and_dropped_nowhere_is_error() {
         let err = check_src(&format!(
-            "{SPY_DEF}: w ( Spy Bool -- )\n  | s c |\n  c ~[ s drop ] ~[ 1 . ] if ;"
+            "{SPY_DEF}: w ( Spy Bool -- )\n  | s c |\n  c ~[ s drop ] ~[ 1 drop ] if ;"
         ))
         .unwrap_err();
         assert!(
@@ -4337,7 +4335,7 @@ mod tests {
     }
     #[test]
     fn check_copy_self_tail_call_is_unaffected_by_the_linear_guard() {
-        check_src(&std::fs::read_to_string("examples/countdown.sth").unwrap()).unwrap();
+        check_example("examples/countdown.sth").unwrap();
     }
     /// Slice 10a (R12): the self-call's arguments are checked against the
     /// *ground* declared inputs, with a located diagnostic. The witness must
@@ -4401,7 +4399,7 @@ mod tests {
     fn resolved_fields_records_one_entry_per_call_site() {
         let tokens = lex("type: A n i64 ;\n\
                           type: B tag i64 n u32 ;\n\
-                          : main ( -- ) 1 A &n @ . drop 2 7 >u32 B &n @ . drop ;")
+                          : main ( -- ) 1 A &n @ drop drop 2 7 >u32 B &n @ drop drop ;")
         .unwrap();
         let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
         check(&mut module).expect("both projections resolve");
@@ -4444,7 +4442,7 @@ mod tests {
         check_src(&format!(
             "{SHAPE_DECL}\
              : area ( Shape -- i64 ) ~[ ( Circle ) Circle> ] ~[ ( Rect ) Rect> mul ] Shape? ;\n\
-             : main ( -- ) 3 Circle area . ;\n"
+             : main ( -- ) 3 Circle area drop ;\n"
         ))
         .expect("an exhaustive owning-mode eliminator call type-checks");
     }
@@ -4454,7 +4452,7 @@ mod tests {
         let err = check_src(&format!(
             "{SHAPE_DECL}\
              : area ( Shape -- i64 ) ~[ ( Circle ) Circle> ] Shape? ;\n\
-             : main ( -- ) 3 Circle area . ;\n"
+             : main ( -- ) 3 Circle area drop ;\n"
         ))
         .unwrap_err();
         assert!(
@@ -4469,7 +4467,7 @@ mod tests {
         let err = check_src(&format!(
             "{SHAPE_DECL}\
              : area ( Shape -- i64 ) ~[ ( Circle ) Circle> ] ~[ ( Circle ) Circle> ] Shape? ;\n\
-             : main ( -- ) 3 Circle area . ;\n"
+             : main ( -- ) 3 Circle area drop ;\n"
         ))
         .unwrap_err();
         assert!(
@@ -4488,7 +4486,7 @@ mod tests {
             "{SHAPE_DECL}\
              type: Other | Squircle s i64 ;\n\
              : area ( Shape -- i64 ) ~[ ( Circle ) Circle> ] ~[ ( Squircle ) Squircle> ] Shape? ;\n\
-             : main ( -- ) 3 Circle area . ;\n"
+             : main ( -- ) 3 Circle area drop ;\n"
         ))
         .unwrap_err();
         assert!(
@@ -4502,7 +4500,7 @@ mod tests {
         let err = check_src(&format!(
             "{SHAPE_DECL}\
              : area ( Shape -- i64 ) ~[ ( Circle ) Circle> ] ~[ ( Rect ) Rect> lt ] Shape? ;\n\
-             : main ( -- ) 3 Circle area . ;\n"
+             : main ( -- ) 3 Circle area drop ;\n"
         ))
         .unwrap_err();
         assert!(
@@ -4530,7 +4528,7 @@ mod tests {
         let err = check_src(&format!(
             "{SHAPE_DECL}\
              : area ( Shape -- Bool ) ~[ ( Rect ) Rect> lt ] ~[ ( Circle ) Circle> ] Shape? ;\n\
-             : main ( -- ) 3 Circle area . ;\n"
+             : main ( -- ) 3 Circle area drop ;\n"
         ))
         .unwrap_err();
         assert!(
@@ -4573,7 +4571,7 @@ mod tests {
         let err = check_src(&format!(
             "{ABC_DECL}\
              : f ( Abc -- Bool ) ~[ ( B ) B> 0 lt ] ~[ ( C ) C> ] ~[ ( A ) A> ] Abc? ;\n\
-             : main ( -- ) 3 A f . ;\n"
+             : main ( -- ) 3 A f drop ;\n"
         ))
         .unwrap_err();
         assert!(
@@ -4592,7 +4590,7 @@ mod tests {
         let err = check_src(&format!(
             "{ABC_DECL}\
              : f ( Abc -- i64 ) ~[ ( A ) A> ] ~[ ( B ) B> ] Abc? ;\n\
-             : main ( -- ) 3 A f . ;\n"
+             : main ( -- ) 3 A f drop ;\n"
         ))
         .unwrap_err();
         assert!(
@@ -4639,7 +4637,7 @@ mod tests {
         let err = check_src(&format!(
             "{SHAPE_DECL}\
              : f ( Shape -- i64 ) ~[ 1 ] ~[ ( Rect ) Rect> mul ] Shape? ;\n\
-             : main ( -- ) 3 Circle f . ;\n"
+             : main ( -- ) 3 Circle f drop ;\n"
         ))
         .unwrap_err();
         assert!(
@@ -4656,7 +4654,7 @@ mod tests {
         check_src(&format!(
             "{SHAPE_DECL}\
              : first ( &Shape -- i64 ) ~[ ( &Circle ) &r @ ] ~[ ( &Rect ) &w @ ] Shape? ;\n\
-             : main ( -- ) 3 Circle | s | &s first . s drop ;\n"
+             : main ( -- ) 3 Circle | s | &s first drop s drop ;\n"
         ))
         .expect("a `&Shape` scrutinee types every arm as a reference to its variant");
         check_src(&format!(
@@ -4676,7 +4674,7 @@ mod tests {
         let err = check_src(&format!(
             "{SHAPE_DECL}\
              : first ( &Shape -- i64 ) ~[ ( Circle ) Circle> ] ~[ ( &Rect ) &w @ ] Shape? ;\n\
-             : main ( -- ) 3 Circle | s | &s first . s drop ;\n"
+             : main ( -- ) 3 Circle | s | &s first drop s drop ;\n"
         ))
         .unwrap_err();
         assert!(
@@ -4708,7 +4706,7 @@ mod tests {
         let err = check_src(&format!(
             "{SHAPE_DECL}\
              : area ( Shape -- i64 ) ~[ ( Circle ) Circle> ] ~[ ( Rect i64 -- i64 ) &w @ swap &h @ swap drop mul ] Shape? ;\n\
-             : main ( -- ) 3 Circle area . ;\n"
+             : main ( -- ) 3 Circle area drop ;\n"
         ))
         .unwrap_err();
         assert!(
@@ -4732,7 +4730,7 @@ mod tests {
         let src = format!(
             "{SHAPE_DECL}\
              : first ( &Shape -- i64 ) ~[ ( Circle ) Circle> ] ~[ ( &Rect ) &w @ ] Shape? ;\n\
-             : main ( -- ) 3 Circle | s | &s first . s drop ;\n"
+             : main ( -- ) 3 Circle | s | &s first drop s drop ;\n"
         );
         let tokens = crate::lexer::lex(&src).unwrap();
         let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
@@ -4746,7 +4744,7 @@ mod tests {
         let src = format!(
             "{SHAPE_DECL}\
              : area ( Shape -- i64 ) [ ( Circle ) Circle> ] ~[ ( Rect ) Rect> mul ] Shape? ;\n\
-             : main ( -- ) 3 Circle area . ;\n"
+             : main ( -- ) 3 Circle area drop ;\n"
         );
         let tokens = crate::lexer::lex(&src).unwrap();
         let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
@@ -4769,7 +4767,7 @@ mod tests {
         let src = format!(
             "{SHAPE_DECL}\
              : area ( Shape -- i64 ) ~[ ( Circle ) Circle> ] Shape? ;\n\
-             : main ( -- ) 3 Circle area . ;\n"
+             : main ( -- ) 3 Circle area drop ;\n"
         );
         let tokens = crate::lexer::lex(&src).unwrap();
         let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
@@ -4826,7 +4824,7 @@ mod tests {
     #[test]
     fn check_eliminator_call_escaped_variant_would_bypass_the_dup_linearity_gate() {
         const DECL: &str = "type: R n i64 ;\n\
-             : drop ( R -- ) | h | h R> . ;\n\
+             : drop ( R -- ) | h | h R> drop ;\n\
              type: W | One a R ;\n";
         let escaped = check_src(&format!(
             "{DECL}\
@@ -4853,7 +4851,7 @@ mod tests {
         let err = check_src(&format!(
             "{SHAPE_DECL}\
              : f ( i64 -- i64 ) ~[ ( Circle ) Circle> ] ~[ ( Rect ) Rect> mul ] Shape? ;\n\
-             : main ( -- ) 3 f . ;\n"
+             : main ( -- ) 3 f drop ;\n"
         ))
         .unwrap_err();
         assert!(
@@ -4875,7 +4873,7 @@ mod tests {
         let err = check_src(&format!(
             "{SHAPE_DECL}{ABC_DECL}\
              : f ( Abc -- i64 ) ~[ ( Circle ) Circle> ] ~[ ( Rect ) Rect> mul ] Shape? ;\n\
-             : main ( -- ) 3 A f . ;\n"
+             : main ( -- ) 3 A f drop ;\n"
         ))
         .unwrap_err();
         assert!(
@@ -4894,7 +4892,7 @@ mod tests {
         let err = check_src(&format!(
             "{FILE_RESOURCE}\n{SHAPE_DECL}\
              : main ( -- ) 1 File | f | 3 Circle\n\
-             \x20 ~[ ( Circle ) Circle> . f drop ] ~[ ( Rect ) Rect> . . ] Shape? f drop ;\n"
+             \x20 ~[ ( Circle ) Circle> drop f drop ] ~[ ( Rect ) Rect> drop drop ] Shape? f drop ;\n"
         ))
         .unwrap_err();
         assert!(
@@ -4918,7 +4916,7 @@ mod tests {
              : touch ( &!P -- ) &!x 1 +! ;\n\
              : main ( -- ) 1 P | p | 3 Circle\n\
              \x20 ~[ ( Circle ) Circle> drop &!p ] ~[ ( Rect ) Rect> drop drop &!p ] Shape?\n\
-             \x20 &!p touch touch p P> . ;\n"
+             \x20 &!p touch touch p P> drop ;\n"
         ))
         .unwrap_err();
         assert!(
@@ -4960,7 +4958,7 @@ mod tests {
         let err = check_src(&format!(
             "{SHAPE_DECL}\
              : Shape? ( i64 -- i64 ) 1 add ;\n\
-             : main ( -- ) 5 Shape? . ;\n"
+             : main ( -- ) 5 Shape? drop ;\n"
         ))
         .unwrap_err();
         assert!(
@@ -5000,7 +4998,7 @@ mod tests {
         let err = check_src(&format!(
             "{SHAPE_DECL}\
              : area ( Shape -- i64 ) ~[ ( Circle ) Circle> ] 4 drop ~[ ( Rect ) Rect> mul ] Shape? ;\n\
-             : main ( -- ) 3 Circle area . ;\n"
+             : main ( -- ) 3 Circle area drop ;\n"
         ))
         .unwrap_err();
         assert!(
@@ -5016,7 +5014,7 @@ mod tests {
         check_src(&format!(
             "{SHAPE_DECL}\
              : area ( Shape -- i64 ) ~[ ( Circle ) Circle> ] ~[ ( Rect ) Rect> mul ] Shape? ;\n\
-             : main ( -- ) 3 Circle area . ;\n"
+             : main ( -- ) 3 Circle area drop ;\n"
         ))
         .expect("a correctly-formed eliminator call is not flagged as an arm outside a call");
     }
@@ -5071,7 +5069,7 @@ mod tests {
         check_src(&format!(
             "{FILE_RESOURCE}\n{SHAPE_DECL}\
              : main ( -- ) 1 File | f | 3 Circle\n\
-             \x20 ~[ ( Circle ) Circle> . f drop ] ~[ ( Rect ) Rect> . . f drop ] Shape? ;\n"
+             \x20 ~[ ( Circle ) Circle> drop f drop ] ~[ ( Rect ) Rect> drop drop f drop ] Shape? ;\n"
         ))
         .expect("each arm may consume the same outer local: only one arm runs");
     }

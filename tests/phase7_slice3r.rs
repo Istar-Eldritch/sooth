@@ -45,7 +45,7 @@ impl Tree {
 
     fn entry(&self, src: &str) -> PathBuf {
         let path = self.0.join("main.sth");
-        std::fs::write(&path, src).unwrap();
+        std::fs::write(&path, format!("{src}{}", common::printing_import(src))).unwrap();
         path
     }
 }

@@ -10,11 +10,8 @@
 \ the `0 >i8 10 fill`/`False 4 fill` probes' own byte-granular slots.
 
 import: intrinsics * ;
+import: hosted::show | . | ;
 import: core::prelude * ;
-\ A bool is printed with `.` below, and an operator overload does not follow
-\ the prelude hub's re-export (one hop only): it comes from the declaring
-\ module. `Bool` itself comes through `core::prelude`'s own re-export.
-import: core::bool b | . | ;
 
 import: core::combinators c | times | ;
 

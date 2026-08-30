@@ -201,7 +201,7 @@ fn forwarding_inline_quotation_into_an_ordinary_declared_parameter_is_error() {
     let err = check_error(
         ": takes_ordinary inline ( [ i64 -- i64 ] -- i64 ) | f | 5 f call ;\n\
          : outer inline ( ~[ i64 -- i64 ] -- i64 ) | g | g takes_ordinary ;\n\
-         : main ( -- ) ~[ 1 add ] outer . ;\n",
+         : main ( -- ) ~[ 1 add ] outer drop ;\n",
     );
     assert!(
         err.contains("`takes_ordinary`")
@@ -218,7 +218,7 @@ fn forwarding_ordinary_quotation_into_an_inline_declared_parameter_is_error() {
     let err = check_error(
         ": takes_tilde inline ( ~[ i64 -- i64 ] -- i64 ) | f | 5 f call ;\n\
          : outer inline ( [ i64 -- i64 ] -- i64 ) | g | g takes_tilde ;\n\
-         : main ( -- ) [ 1 add ] outer . ;\n",
+         : main ( -- ) [ 1 add ] outer drop ;\n",
     );
     assert!(
         err.contains("`takes_tilde`")
@@ -258,7 +258,7 @@ fn variable_bearing_inline_quotation_still_mismatches_ordinary() {
     let err = check_error(
         ": takes_ordinary inline ( 'T [ 'T -- 'T ] -- 'T ) call ;\n\
          : outer inline ( 'T ~[ 'T -- 'T ] -- 'T ) | g | g takes_ordinary ;\n\
-         : main ( -- ) 3 ~[ 2 mul ] outer . ;\n",
+         : main ( -- ) 3 ~[ 2 mul ] outer drop ;\n",
     );
     assert!(
         err.contains("`takes_ordinary`") && err.contains('~'),
@@ -314,7 +314,7 @@ fn row_grounding_mismatch_strips_the_caller_region() {
     // parameter is declared `~`), `[ i64 -- i64 i64 ]` actual -- never the
     // caller's stack. `[ dup ]` leaves an extra `i64`.
     let src = format!("{APPLY_WITH}: main ( -- ) 10 5 ~[ dup ] apply-with . . ;\n");
-    let err = check_error(&src);
+    let err = check_error(&common::silent_prints(&src));
     assert!(
         err.contains("the quotation passed to `apply-with` was declared `~[ i64 -- ]` but its body has effect `[ i64 -- i64 i64 ]`"),
         "the grounding mismatch must render the row-stripped effect, got: {err}"

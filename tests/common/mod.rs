@@ -50,8 +50,8 @@ const CORE_WORDS: [&str; 8] = ["if", "unless", "eq", "lt", "gt", "lte", "gte", "
 #[allow(dead_code)]
 pub fn fixture_package(name: &str) -> String {
     format!(
-        "package: {name} ;\nlayer: hosted ;\ndepends: core path \"{}/lib/core\" ;\n",
-        env!("CARGO_MANIFEST_DIR")
+        "package: {name} ;\nlayer: hosted ;\ndepends: core path \"{root}/lib/core\" ;\ndepends: hosted path \"{root}/lib/hosted\" ;\n",
+        root = env!("CARGO_MANIFEST_DIR")
     )
 }
 
@@ -115,12 +115,11 @@ fn fixture_imports(src: &str) -> String {
     // `Bool`/`False`/`True` from there; adding the same names again through
     // `core::prelude` would double-bind them, so this route defers to that
     // one rather than colliding with it. `False`/`True` are bundled as a pair
-    // (mirroring `bool_imports`' own pairing below) rather than filtered
-    // independently: a fixture spelling one constructor in an eliminator arm
-    // conventionally spells both. A substring check on `src`, not a token
-    // check on `tokens`: this splitter is whitespace-only, so a bracket-
-    // adjacent generic argument (`Res[i64 Bool]`) tokenizes as `Bool]`, never
-    // a bare `Bool` token.
+    // rather than filtered independently: a fixture spelling one constructor
+    // in an eliminator arm conventionally spells both. A substring check on
+    // `src`, not a token check on `tokens`: this splitter is whitespace-only,
+    // so a bracket-adjacent generic argument (`Res[i64 Bool]`) tokenizes as
+    // `Bool]`, never a bare `Bool` token.
     if !src.contains("import: core::bool") {
         if !declared.contains(&"Bool") && src.contains("Bool") {
             wanted.push("Bool");
@@ -145,46 +144,67 @@ fn fixture_imports(src: &str) -> String {
             wanted.join(" ")
         ));
     }
-    out.push_str(&bool_imports(src, &tokens, &declared));
+    out.push_str(&printing_import(src));
     out
 }
 
-/// P7 slice 3i (P7.S3e-follow narrowed this to just the `.` overload):
-/// the `core::bool` names a fixture's text implies that still cannot cross
-/// `core::prelude`'s hub.
+/// P7.S7d (R11): `.` is `hosted::show`'s vocabulary, not a compiler
+/// intrinsic, so a fixture that prints needs the import like any other
+/// capability.
 ///
-/// `core::prelude` now re-exports `Bool`/`False`/`True` too (`fixture_imports`
-/// routes those through its own `core::prelude` line), but the `.` overload
-/// still cannot: an operator overload's candidate lookup considers the
-/// calling module and the module it selectively imported the name from, one
-/// hop, so a hub in between hides the declaring module. A fixture that prints
-/// a bool still has to reach `core::bool` directly for `.`.
-fn bool_imports(src: &str, tokens: &[&str], declared: &[&str]) -> String {
-    // A fixture that already names `import: core::bool` itself, or declares
-    // its own `.`, gets nothing added -- the in-process shape, and the
-    // subject of the "no import, no `.`" goldens.
-    if src.contains("import: core::bool") || declared.contains(&".") {
+/// The presence guard is mandatory, not incidental. `Scratch::write` routes
+/// through `fixture_source`, so a fixture that hand-writes the same import
+/// would get a second binding of `.` and trip `duplicate_qualifier_error`.
+/// A fixture declaring its own `.` gets nothing added either: an own-module
+/// declaration shadows an import for bare calls, and binding both is a hard
+/// collision.
+///
+/// A second, subtler collision: the injected import is unaliased, so its
+/// default qualifier is `show` (the path's last segment). A fixture that
+/// also imports `core::show` unaliased binds that same `show` qualifier a
+/// second time and trips `duplicate_qualifier_error`, even though neither
+/// import names `.` twice -- several `tests/phase7_slice7c.rs` fixtures hit
+/// this and alias their `core::show` import to `cshow` to route around it.
+#[allow(dead_code)]
+pub fn printing_import(src: &str) -> String {
+    let tokens: Vec<&str> = src.split_whitespace().collect();
+    let declares_own_dot = tokens
+        .windows(2)
+        .any(|w| matches!(w[0], ":" | "static:" | "type:") && w[1] == ".");
+    if !tokens.contains(&".") || declares_own_dot || src.contains("import: hosted::show") {
         return String::new();
     }
-    // A bool can reach `.` without any bool name appearing in the text --
-    // `2 3 lt .` prints one and spells neither the type nor a constructor --
-    // so a produced-a-bool word counts as evidence too, alongside a fixture
-    // that spells `Bool`/`True`/`False` directly (those now resolve via
-    // `fixture_imports`' own `core::prelude` line, but the `.` overload still
-    // needs `core::bool` regardless -- it is the one name that still cannot
-    // cross the hub).
-    let produces_bool = [
-        "eq", "lt", "gt", "lte", "gte", "ne", "and", "or", "xor", "not",
-    ]
-    .iter()
-    .any(|w| tokens.contains(w))
-        || src.contains("Bool")
-        || src.contains("True")
-        || src.contains("False");
-    match tokens.contains(&".") && produces_bool {
-        true => "import: core::bool corebool | . | ;\n".to_string(),
-        false => String::new(),
-    }
+    "import: hosted::show | . | ;\n".to_string()
+}
+
+/// `src` with its dots replaced by `drop`, for a fixture that a test feeds to
+/// *both* a driver build and an in-process `parse_with_core` check.
+///
+/// P7.S7d retired `.` onto `hosted::show`, and the in-process seed is
+/// `core`-only, so the printing source cannot check there. A dot and a `drop`
+/// consume the same one operand and produce nothing, so a structural assertion
+/// (instruction counts, capture sets, layouts) reads the same program either
+/// way; only the transcript differs, and that half is the driver build's.
+/// Line structure is preserved, so a located diagnostic still points at the
+/// line the printing source would have.
+#[allow(dead_code)]
+pub fn silent_prints(src: &str) -> String {
+    src.lines()
+        .map(|line| {
+            line.split(' ')
+                .map(|t| match t {
+                    "." => "drop",
+                    other => other,
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        + match src.ends_with('\n') {
+            true => "\n",
+            false => "",
+        }
 }
 
 /// Write a fixture source to `path`, with `fixture_imports` appended.

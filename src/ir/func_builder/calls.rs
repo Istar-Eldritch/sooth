@@ -636,10 +636,6 @@ impl<'a> FuncBuilder<'a> {
                 let v = self.emit_select(cmp, |_| lhs, |_| rhs);
                 self.stack.push(v);
             }
-            "." => {
-                let v = self.stack.pop().expect("print: value");
-                self.push_instr(Instr::Print(v));
-            }
             // Slice 10c (R-P3-1): `branch` is the machine-level two-way
             // conditional. Its arms arrive as quotation operands rather than
             // embedded term lists, but once resolved the lowering is the
@@ -1029,7 +1025,7 @@ mod tests {
         // Criterion 6b (R13): `[ add ] call` fuses in place, so lowered `main`
         // contains no `Instr::Call`; the phantom quotation never becomes a
         // runtime code value.
-        let module = lower_src(": main ( -- ) 1 2 [ add ] call . ;");
+        let module = lower_src(": main ( -- ) 1 2 [ add ] call drop ;");
         let main = func(&module, "main");
         assert_eq!(count(main, is_call_instr), 0);
         assert_eq!(
@@ -1095,7 +1091,7 @@ mod tests {
     fn lower_max_emits_a_compare_and_select_no_call() {
         // R12: `max` lowers inline to `Cmp(Gt)` plus a `Phi`-joined select, no
         // `Instr::Call` and no monomorphization.
-        let ir = lower_src(": main ( -- ) 3 5 max . ;");
+        let ir = lower_src(": main ( -- ) 3 5 max drop ;");
         let main = ir.funcs.iter().find(|f| f.name == "main").unwrap();
         assert_eq!(
             count(main, |i| matches!(i, Instr::Cmp(_, CmpOp::Gt, ..))),
@@ -1110,7 +1106,7 @@ mod tests {
         // R13: `max-total` orders by the bit-pattern rule, so the emitted
         // `Cmp`s are all over the unsigned integer key, never `Instr::Cmp`
         // with a float operand.
-        let ir = lower_src(": main ( -- ) 1.5 2.5 max-total . ;");
+        let ir = lower_src(": main ( -- ) 1.5 2.5 max-total drop ;");
         let main = ir.funcs.iter().find(|f| f.name == "main").unwrap();
         let float_cmps = instrs(main)
             .iter()
@@ -1288,36 +1284,6 @@ mod tests {
             )),
             "no conversion and no memory access"
         );
-    }
-
-    #[test]
-    fn lower_print_emits_print_instr() {
-        let ir = lower_src(": w ( i64 -- ) . ;");
-        let w = &ir.funcs[0];
-        assert!(instrs(w).iter().any(|i| matches!(i, Instr::Print(_))));
-        let last = w.blocks.last().unwrap();
-        assert!(matches!(last.term, Terminator::Ret(None)));
-    }
-
-    #[test]
-    fn lower_print_on_str_and_float_emits_same_print_instr() {
-        // `.` lowers to one `Print` regardless of operand type: the IR stays
-        // neutral and the backend dispatches on the value's own `IrType`.
-        //
-        // A `bool` is deliberately not one of the two (P7 slice 3i R3): it is
-        // not in the builtin printable set at all, so it reaches
-        // `core::bool`'s `.` overload as an ordinary call, never an
-        // `Instr::Print` -- which is what makes the backend's boolean print
-        // arm dead. `str` and `f64` are the two operand *classes* the neutral
-        // lowering has to cover.
-        let str_ir = lower_src(": w ( str -- ) . ;");
-        assert!(instrs(&str_ir.funcs[0])
-            .iter()
-            .any(|i| matches!(i, Instr::Print(_))));
-        let float_ir = lower_src(": w ( f64 -- ) . ;");
-        assert!(instrs(&float_ir.funcs[0])
-            .iter()
-            .any(|i| matches!(i, Instr::Print(_))));
     }
 
     #[test]
@@ -1794,7 +1760,7 @@ mod tests {
         // would leave an `Instr::Call apply` in `main`.
         let ir = lower_src(
             ": apply inline ( i64 [ i64 -- i64 ] -- i64 ) call ;\n\
-             : main ( -- ) 3 [ 1 add ] apply . ;\n",
+             : main ( -- ) 3 [ 1 add ] apply drop ;\n",
         );
         assert!(
             ir.funcs.iter().all(|f| f.name != "apply"),
@@ -1830,7 +1796,7 @@ mod tests {
         let ir = lower_src(
             ": inner inline ( i64 [ i64 -- ] -- ) call ;\n\
              : outer inline ( i64 [ i64 -- ] -- ) inner ;\n\
-             : main ( -- ) 7 [ 1 add . ] outer ;\n",
+             : main ( -- ) 7 [ 1 add drop ] outer ;\n",
         );
         assert!(
             ir.funcs
@@ -1878,7 +1844,7 @@ mod tests {
              | f | len >i64 | count | | arr |\n\
              count ~[ | i | &arr i >usize &> @ f call ] times\n\
              arr drop ;\n\
-             : main ( -- ) 0 4 fill [ . ] each ;\n"
+             : main ( -- ) 0 4 fill [ drop ] each ;\n"
         ));
         assert!(
             ir.funcs
@@ -1972,7 +1938,7 @@ mod tests {
         // is asserting about *this* splice's block graph.
         let ir = lower_src(
             ": while inline ( 'a [ 'a -- 'a Bool ] -- 'a ) | p | p call ~[ p while ] ~[ ] if ;\n\
-             : main ( -- ) 0 [ dup 5 ult [ True ] [ False ] branch ~[ 1 add True ] ~[ False ] if ] while . ;\n",
+             : main ( -- ) 0 [ dup 5 ult [ True ] [ False ] branch ~[ 1 add True ] ~[ False ] if ] while drop ;\n",
         );
         assert!(
             ir.funcs.iter().all(|f| f.name != "while"),
@@ -2017,7 +1983,7 @@ mod tests {
                : dbl | x | x x add ;\n\
              ;\n\
              : apply_dbl inline ['T: Doubler] ( 'T -- 'T ) dbl ;\n\
-             : main ( -- ) 5 apply_dbl . ;\n",
+             : main ( -- ) 5 apply_dbl drop ;\n",
         );
         // `apply_dbl` and `dbl` are both inline, so neither mints an IrFunc.
         assert!(
@@ -2058,7 +2024,7 @@ mod tests {
                : dbl | x | x x add ;\n\
              ;\n\
              : apply2 inline ['T: Doubler] ( 'T -- 'T ) dbl dbl ;\n\
-             : main ( -- ) 5 apply2 . ;\n",
+             : main ( -- ) 5 apply2 drop ;\n",
         );
         let main = func(&ir, "main");
         // Two doublings -> two `add` instructions, no calls to `dbl`.
@@ -2090,7 +2056,7 @@ mod tests {
                : dbl | x | x x add ;\n\
              ;\n\
              : apply_dbl ['T: Doubler] ( 'T -- 'T ) dbl ;\n\
-             : main ( -- ) 5 apply_dbl . ;\n",
+             : main ( -- ) 5 apply_dbl drop ;\n",
         );
         // `apply_dbl` is NOT inline, so it mints an IrFunc; `dbl` IS inline,
         // so it does not.
@@ -2138,7 +2104,7 @@ mod tests {
 \
              Ordering? ;
 \
-             : main ( -- ) 1 2 my_lt . ;
+             : main ( -- ) 1 2 my_lt drop ;
 ",
         );
         // `cmp` is inline, so no IrFunc is minted for any `cmp.Ord.*` body.
@@ -2318,7 +2284,7 @@ mod tests {
              \x20\x20 x y ra ;\n\
              ;\n\
              : main ( -- )\n\
-             \x20 1 2 ra . ;\n";
+             \x20 1 2 ra drop ;\n";
         let tokens = crate::lexer::lex(src).unwrap();
         let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
         crate::check::check(&mut module).unwrap();

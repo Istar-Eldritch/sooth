@@ -97,7 +97,7 @@ fn self_recursive_poly_word_runs_to_base_case() {
          ;\n",
     );
     let (stdout, code) = build_and_run(scratch.path());
-    assert_eq!(stdout, "3\n2\n1\n5\n2\n1\nTrue\n");
+    assert_eq!(stdout, "3\n2\n1\n5\n2\n1\ntrue\n");
     assert_eq!(code, 0);
 }
 

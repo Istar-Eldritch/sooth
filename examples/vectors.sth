@@ -4,6 +4,7 @@
 \ setter, all through user-defined words.
 
 import: intrinsics * ;
+import: hosted::show | . | ;
 
 type: Vec2 x i64 y i64 ;
 type: Segment from Vec2 to Vec2 ;

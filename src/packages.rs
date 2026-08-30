@@ -819,7 +819,9 @@ mod tests {
     }
 
     /// `lib/` is not itself a package (only `lib/core/` is), and the real, committed
-    /// `lib/core/sooth.pkg` parses.
+    /// `lib/core/sooth.pkg` parses, and parses as `layer: core` -- asserted on the
+    /// parsed `PackageLayer`, not on the manifest text, mirroring the hosted twin
+    /// below (S7c's R8 guard).
     #[test]
     fn lib_holds_no_manifest_and_lib_core_manifest_parses() {
         let lib_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("lib");
@@ -830,7 +832,9 @@ mod tests {
         let manifest_path = lib_dir.join("core/sooth.pkg");
         let src =
             std::fs::read_to_string(&manifest_path).expect("lib/core/sooth.pkg should be readable");
-        manifest::parse_manifest(&src, &manifest_path).expect("lib/core/sooth.pkg should parse");
+        let manifest = manifest::parse_manifest(&src, &manifest_path)
+            .expect("lib/core/sooth.pkg should parse");
+        assert_eq!(manifest.layer, PackageLayer::Core);
     }
 
     /// The real, committed `lib/hosted/sooth.pkg` parses, and parses as `layer: hosted`

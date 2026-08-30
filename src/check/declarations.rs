@@ -2274,14 +2274,14 @@ mod tests {
     /// `File`, whose only field is an `i64`, with a `drop` overload: the shape
     /// every R3/R4 test turns on, since the structural fold alone would call
     /// it `Copy`.
-    const FILE_RESOURCE: &str = "type: File fd i64 ; : drop ( File -- ) | f | f File> . ;";
+    const FILE_RESOURCE: &str = "type: File fd i64 ; : drop ( File -- ) | f | f File> drop ;";
     /// The Phase 3 Slice 1 linear-mechanics stand-in, retired as a compiler
     /// primitive in Slice 8c: an ordinary one-field struct with a `drop`
     /// overload, so it is linear for the same reason any resource is (R3),
     /// not by any compiler-known bit. Always the first struct in a source
     /// string that uses it, so every other struct's `StructId` shifts up by
     /// one relative to a spy-free program.
-    const SPY_DEF: &str = "type: Spy tag i64 ;\n: drop ( Spy -- )  | s | \"drop \" . s Spy> . ;\n";
+    const SPY_DEF: &str = "type: Spy tag i64 ;\n: drop ( Spy -- )  | s | s Spy> drop ;\n";
     fn struct_ty(module: &Module, name: &str) -> Type {
         let idx = module
             .structs
@@ -3006,7 +3006,7 @@ mod tests {
     fn check_extern_shadowing_a_builtin_does_not_change_its_meaning() {
         // R1's reason for existing: before the gate, this compiled, and `dup`
         // at the call site still meant the builtin with no diagnostic at all.
-        let src = "extern: dup ( i64 -- i64 ) \"mydup\" ;\n: main ( -- ) 1 dup . . ;";
+        let src = "extern: dup ( i64 -- i64 ) \"mydup\" ;\n: main ( -- ) 1 dup drop drop ;";
         let err = check_src(src).unwrap_err();
         assert!(err.contains("redeclares"), "unexpected message: {err}");
     }
@@ -3016,13 +3016,14 @@ mod tests {
         // type checks apply to a foreign call unchanged. Parsing it is not
         // enough, so assert the effect is actually consulted.
         let ok =
-            "extern: strlen ( cstr -- usize ) \"strlen\" ;\n: main ( -- ) \"hi\" cstr strlen . ;";
+            "extern: strlen ( cstr -- usize ) \"strlen\" ;\n: main ( -- ) \"hi\" cstr strlen drop ;";
         check_src(ok).unwrap();
-        let underflow = "extern: strlen ( cstr -- usize ) \"strlen\" ;\n: main ( -- ) strlen . ;";
+        let underflow =
+            "extern: strlen ( cstr -- usize ) \"strlen\" ;\n: main ( -- ) strlen drop ;";
         let err = check_src(underflow).unwrap_err();
         assert!(err.contains("strlen"), "unexpected message: {err}");
         let wrong_type =
-            "extern: strlen ( cstr -- usize ) \"strlen\" ;\n: main ( -- ) True strlen . ;";
+            "extern: strlen ( cstr -- usize ) \"strlen\" ;\n: main ( -- ) True strlen drop ;";
         let err = check_src(wrong_type).unwrap_err();
         assert!(err.contains("strlen"), "unexpected message: {err}");
     }
@@ -3351,14 +3352,14 @@ mod tests {
         // until the whole module is parsed).  The synthesized array destructor
         // (Phase 4) disposes each linear element, so this now compiles.
         check_src(&format!(
-            "{SPY_DEF}type: Bag xs array[Spy 2] ; : main ( -- ) 0 . ;"
+            "{SPY_DEF}type: Bag xs array[Spy 2] ; : main ( -- ) 0 drop ;"
         ))
         .unwrap();
     }
     #[test]
     fn linear_array_element_in_word_signature_is_ok() {
         check_src(&format!(
-            "{SPY_DEF}: w ( array[Spy 2] -- ) | a | a drop ; : main ( -- ) 0 . ;"
+            "{SPY_DEF}: w ( array[Spy 2] -- ) | a | a drop ; : main ( -- ) 0 drop ;"
         ))
         .unwrap();
     }
@@ -3368,20 +3369,20 @@ mod tests {
         // transitively; the array destructor calls `emit_drop` on each
         // element, which dispatches to `Holds`'s struct destructor.
         check_src(&format!(
-            "{SPY_DEF}type: Holds s Spy ; type: Arr a array[Holds 2] ; : main ( -- ) 0 . ;"
+            "{SPY_DEF}type: Holds s Spy ; type: Arr a array[Holds 2] ; : main ( -- ) 0 drop ;"
         ))
         .unwrap();
     }
     #[test]
     fn linear_array_element_indirect_via_linear_struct_in_signature_is_ok() {
         check_src(&format!(
-            "{SPY_DEF}type: Holds s Spy ; : w ( array[Holds 2] -- ) | a | a drop ; : main ( -- ) 0 . ;"
+            "{SPY_DEF}type: Holds s Spy ; : w ( array[Holds 2] -- ) | a | a drop ; : main ( -- ) 0 drop ;"
         ))
         .unwrap();
     }
     #[test]
     fn copy_array_element_is_ok() {
-        check_src("type: V xs array[i64 4] ; : main ( -- ) 0 . ;").unwrap();
+        check_src("type: V xs array[i64 4] ; : main ( -- ) 0 drop ;").unwrap();
     }
     /// P7 slice 3c (R1.2 phase 3 review fix): unlike `array_of_owned_is_error`,
     /// this element reaches `module.slices` through the *type spelling*
@@ -3390,7 +3391,8 @@ mod tests {
     /// exit notes missed.
     #[test]
     fn check_slice_element_gate_owned_element_is_error() {
-        let err = check_src(": w ( Slice[^i64] -- usize ) len ; : main ( -- ) 0 . ;").unwrap_err();
+        let err =
+            check_src(": w ( Slice[^i64] -- usize ) len ; : main ( -- ) 0 drop ;").unwrap_err();
         assert!(
             err.contains("linear slice elements are not supported yet"),
             "unexpected message: {err}"
@@ -3400,7 +3402,7 @@ mod tests {
     #[test]
     fn check_slice_element_gate_reference_element_is_error() {
         for elem in ["&i64", "&!i64"] {
-            let src = format!(": w ( Slice[{elem}] -- usize ) len ; : main ( -- ) 0 . ;");
+            let src = format!(": w ( Slice[{elem}] -- usize ) len ; : main ( -- ) 0 drop ;");
             let err = check_src(&src).unwrap_err();
             assert!(
                 err.contains("a reference cannot be stored"),
@@ -3410,8 +3412,8 @@ mod tests {
     }
     #[test]
     fn check_slice_element_gate_nested_slice_element_is_error() {
-        let err =
-            check_src(": w ( Slice[Slice[i64]] -- usize ) len ; : main ( -- ) 0 . ;").unwrap_err();
+        let err = check_src(": w ( Slice[Slice[i64]] -- usize ) len ; : main ( -- ) 0 drop ;")
+            .unwrap_err();
         assert!(
             err.contains("a reference cannot be stored"),
             "unexpected message: {err}"
@@ -3419,20 +3421,20 @@ mod tests {
     }
     #[test]
     fn check_slice_element_gate_copy_element_is_ok() {
-        check_src(": w ( Slice[i64] -- usize ) len ; : main ( -- ) 0 . ;").unwrap();
+        check_src(": w ( Slice[i64] -- usize ) len ; : main ( -- ) 0 drop ;").unwrap();
     }
     #[test]
     fn array_of_owned_is_ok() {
         // An array of owning cells: the array destructor (Phase 4) calls
         // `emit_drop` on each `^i64`, which dispatches to the cell destructor.
-        check_src(": w ( array[^i64 4] -- ) drop ; : main ( -- ) 0 . ;").unwrap();
+        check_src(": w ( array[^i64 4] -- ) drop ; : main ( -- ) 0 drop ;").unwrap();
     }
     #[test]
     fn owned_of_linear_array_is_ok() {
         // An owning cell wrapping a linear array: the cell destructor drops
         // the payload (the array), which dispatches to the array destructor.
         check_src(&format!(
-            "{SPY_DEF}: w ( ^array[Spy 2] -- ) drop ; : main ( -- ) 0 . ;"
+            "{SPY_DEF}: w ( ^array[Spy 2] -- ) drop ; : main ( -- ) 0 drop ;"
         ))
         .unwrap();
     }
@@ -3440,14 +3442,15 @@ mod tests {
     fn nested_array_of_owned_is_ok() {
         // A cell wrapping an array of cells: the cell destructor drops the
         // array, whose destructor drops each `^i64` cell.
-        check_src(": w ( ^array[^i64 4] -- ) drop ; : main ( -- ) 0 . ;").unwrap();
+        check_src(": w ( ^array[^i64 4] -- ) drop ; : main ( -- ) 0 drop ;").unwrap();
     }
     #[test]
     fn array_of_struct_holding_owned_is_ok() {
         // An array whose element only holds a cell transitively: the array
         // destructor disposes each `Holds`, whose struct destructor disposes
         // the `^i64` field.
-        check_src("type: Holds c ^i64 ; type: Arr a array[Holds 2] ; : main ( -- ) 0 . ;").unwrap();
+        check_src("type: Holds c ^i64 ; type: Arr a array[Holds 2] ; : main ( -- ) 0 drop ;")
+            .unwrap();
     }
     #[test]
     fn check_struct_and_enum_duplicate_name_across_registries_is_error() {
@@ -3483,14 +3486,6 @@ mod tests {
         assert!(err.contains("Vec2"), "unexpected message: {err}");
         assert!(err.contains("`i64`"), "unexpected message: {err}");
         assert!(err.contains("`Bool`"), "unexpected message: {err}");
-    }
-    #[test]
-    fn check_struct_print_is_error() {
-        // X6: `.` on a struct reaches `print_requires_printable`, naming it.
-        let src = "type: Vec2 x i64 y i64 ; : main ( -- ) 1 2 Vec2 . ;";
-        let err = check_src(src).unwrap_err();
-        assert!(err.contains("printable"), "unexpected message: {err}");
-        assert!(err.contains("`Vec2`"), "unexpected message: {err}");
     }
     #[test]
     fn check_struct_equality_operator_is_error() {
@@ -3614,13 +3609,6 @@ mod tests {
              : main ( -- Vec2 Shape ) 1 2 Vec2 3.0 Circle ;",
         )
         .unwrap();
-    }
-    #[test]
-    fn check_enum_print_is_error() {
-        // X10/M2: `.` on an enum reaches the printable guard, naming the enum.
-        let err = check_src("type: Shape | Circle r f64 ; : w ( Shape -- ) . ;").unwrap_err();
-        assert!(err.contains("printable"), "unexpected message: {err}");
-        assert!(err.contains("Shape"), "unexpected message: {err}");
     }
     #[test]
     fn check_enum_equality_operator_is_error() {

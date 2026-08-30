@@ -4,6 +4,7 @@
 \ stays constant-stack no matter how long the tail is.
 
 import: intrinsics * ;
+import: hosted::show | . | ;
 import: core::prelude * ;
 
 type: List | Nil | Cons v i64 next ^List ;

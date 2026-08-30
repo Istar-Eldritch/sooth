@@ -1,4 +1,5 @@
 import: intrinsics * ;
+import: hosted::show | . | ;
 import: core::prelude * ;
 
 : sum-to ( i64 i64 -- i64 )

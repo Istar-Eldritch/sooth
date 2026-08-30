@@ -25,7 +25,11 @@ impl Scratch {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("sooth.pkg"), common::fixture_package("p7s3m")).unwrap();
         let path = dir.join("prog.sth");
-        std::fs::write(&path, contents).unwrap();
+        std::fs::write(
+            &path,
+            format!("{contents}{}", common::printing_import(contents)),
+        )
+        .unwrap();
         Scratch(path)
     }
 
@@ -138,7 +142,7 @@ fn polymorphic_call_it_pushes_both_quotation_outputs() {
     std::fs::remove_file(&binary).ok();
     assert_eq!(code, 0);
     assert_eq!(
-        stdout, "6\n9\n6\nTrue\n",
+        stdout, "6\n9\n6\ntrue\n",
         "the quotation's two outputs must reach the stack at each instantiation of `'T`"
     );
 }

@@ -2169,14 +2169,14 @@ mod tests {
             ": main ( -- )\n  0 4 fill | buf |\n  &buf slice | s |\n  \
              s 0 >usize 2 >usize subslice | a |\n  \
              s 2 >usize 2 >usize subslice | b |\n  \
-             a len . b len .\n  buf drop\n;\n",
+             a len drop b len drop\n  buf drop\n;\n",
         )
         .expect("two live shared sub-views of one buffer conflict with nothing");
         let err = check_src(
             ": main ( -- )\n  0 4 fill | buf |\n  &!buf slice | s |\n  \
              s 0 >usize 2 >usize subslice | a |\n  \
              s 2 >usize 2 >usize subslice | b |\n  \
-             a len . b len .\n  buf drop\n;\n",
+             a len drop b len drop\n  buf drop\n;\n",
         )
         .unwrap_err();
         assert!(
@@ -2198,12 +2198,12 @@ mod tests {
     /// an edge case, it is the case the whole slice rests on.
     #[test]
     fn check_branch_accepts_a_literal_and_a_forwarded_quotation_operand() {
-        check_src(": w ( i64 i64 -- i64 ) ueq [ 1 ] [ 2 ] branch ;\n: main ( -- ) 1 2 w . ;\n")
+        check_src(": w ( i64 i64 -- i64 ) ueq [ 1 ] [ 2 ] branch ;\n: main ( -- ) 1 2 w drop ;\n")
             .expect("two quotation literals splice at the call site");
         check_src(
             ": myif inline ( ..a Bool ~[ ..a -- ..b ] ~[ ..a -- ..b ] -- ..b )\n  \
              | e | | t | | c | c tag t e branch ;\n\
-             : main ( -- ) 1 2 eq ~[ 7 ] ~[ 8 ] myif . ;\n",
+             : main ( -- ) 1 2 eq ~[ 7 ] ~[ 8 ] myif drop ;\n",
         )
         .expect("`myif`'s own definition forwards its abstract `~` parameters into `branch`");
     }
@@ -2231,7 +2231,7 @@ mod tests {
         .expect("the mismatched literal arm goes unchecked at `w`'s own definition");
         let err = check_src(
             ": w inline ( u32 ~[ -- i64 ] -- i64 ) | t | t [ 999 888 ] branch ;\n\
-             : main ( -- ) 1 2 ueq ~[ 5 ] w . ;\n",
+             : main ( -- ) 1 2 ueq ~[ 5 ] w drop ;\n",
         )
         .unwrap_err();
         assert!(

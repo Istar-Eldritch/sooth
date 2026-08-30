@@ -423,6 +423,7 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
         &resolve,
         regs,
         &overrides,
+        &module.builtin_overloads,
         &module.resolved_fields,
         &module.resolved_variant_fields,
         &combinator_bodies,
@@ -708,7 +709,7 @@ mod tests {
         // A word ahead of the `impl:` block, so the member is not `words[0]`
         // and its seed is a value a constant-`0` formula could not produce.
         let src = format!(
-            ": leading ( -- ) ;\n{POINT_ORD}: main ( -- ) 3 Point 7 Point lt ~[ 1 ] ~[ 0 ] if . ;\n"
+            ": leading ( -- ) ;\n{POINT_ORD}: main ( -- ) 3 Point 7 Point lt ~[ 1 ] ~[ 0 ] if drop ;\n"
         );
         let tokens = lex(&src).unwrap();
         let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
@@ -761,7 +762,7 @@ mod tests {
                  a b lt ~[ Less ] ~[ Equal ] if ;\n\
              ;\n\
              : main ( -- )\n\
-               1 Wrap 2 Wrap lt ~[ 1 ] ~[ 0 ] if . ;\n";
+               1 Wrap 2 Wrap lt ~[ 1 ] ~[ 0 ] if drop ;\n";
         let tokens = lex(src).unwrap();
         let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
         check(&mut module).unwrap();
@@ -790,7 +791,7 @@ mod tests {
         let module = lower_src(&format!(
             ": leading ( -- ) ;\n{POINT_ORD}\
              : w ( -- i64 ) 3 Point 7 Point lt ~[ 1 ] ~[ 0 ] if ;\n\
-             : main ( -- ) w . ;\n"
+             : main ( -- ) w drop ;\n"
         ));
         let w = func(&module, "w");
         assert!(
@@ -869,7 +870,7 @@ mod tests {
             let src = format!(
                 "{branch}: sum-to ( i64 i64 -- i64 )\n\
                  | n | | acc | n 0 eq ~[ acc ] ~[ acc n add n 1 sub sum-to ] {callee} ;\n\
-                 : main ( -- ) 0 10 sum-to . ;\n"
+                 : main ( -- ) 0 10 sum-to drop ;\n"
             );
             let tokens = lex(&src).unwrap();
             let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
@@ -906,7 +907,7 @@ mod tests {
         let src = ": iszero ( i64 -- Bool ) 0 eq ;\n\
              : loopg ['T: Copy] ( 'T i64 -- 'T )\n\
                dup iszero ~[ drop ] ~[ 1 sub loopg dup drop ] if ;\n\
-             : main ( -- ) 5 3 loopg . True 3 loopg drop ;\n";
+             : main ( -- ) 5 3 loopg drop True 3 loopg drop ;\n";
         let tokens = lex(src).unwrap();
         let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
         check(&mut module).unwrap();
@@ -966,7 +967,7 @@ mod tests {
         let src = ": iszero ( i64 -- Bool ) 0 eq ;\n\
              : loopg ['T: Copy] ( 'T i64 -- 'T )\n\
                dup iszero ~[ drop ] ~[ 1 sub loopg ] if ;\n\
-             : main ( -- ) 5 3 loopg . True 3 loopg drop ;\n";
+             : main ( -- ) 5 3 loopg drop True 3 loopg drop ;\n";
         let tokens = lex(src).unwrap();
         let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
         check(&mut module).unwrap();
@@ -1025,7 +1026,7 @@ mod tests {
         let src = ": iszero ( i64 -- Bool ) 0 eq ;\n\
              : loopg ['T: Copy] ( 'T i64 -- 'T )\n\
                dup iszero ~[ drop ] ~[ 1 sub loopg 0 loopg ] if ;\n\
-             : main ( -- ) 5 3 loopg . True 3 loopg drop ;\n";
+             : main ( -- ) 5 3 loopg drop True 3 loopg drop ;\n";
         let tokens = lex(src).unwrap();
         let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
         check(&mut module).unwrap();
@@ -1205,8 +1206,8 @@ mod tests {
                : get | q | q &n @ ;\n\
              ;\n\
              : getval ['T: Getter] ( &'T -- i64 ) get ;\n\
-             : main ( -- ) 7 Pt |p| &p getval . p drop\n\
-                           9 Qt |q| &q getval . q drop ;\n",
+             : main ( -- ) 7 Pt |p| &p getval drop p drop\n\
+                           9 Qt |q| &q getval drop q drop ;\n",
         );
         assert_eq!(
             call_symbols(func(&m, "sooth_mono_getval__m0__t0_Pt")),
@@ -1236,7 +1237,7 @@ mod tests {
                : get | a b | a b max ;\n\
              ;\n\
              : getval ['T: Getter] ( &'T &'T -- i64 ) get ;\n\
-             : main ( -- ) 7 Pt |p| &p &p getval . p drop ;\n",
+             : main ( -- ) 7 Pt |p| &p &p getval drop p drop ;\n",
         );
         assert_eq!(
             call_symbols(func(&m, "sooth_mono_getval__m0__t0_Pt")),

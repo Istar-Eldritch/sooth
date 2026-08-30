@@ -111,7 +111,10 @@ fn flag_resolves_entry_outside_its_package_tree() {
     t.write("dep/lib.sth", ": lw ( -- i64 ) 7 ;\nexport: lw ;\n");
     let manifest = t.write(
         "flag/sooth.pkg",
-        r#"package: flagpkg ; layer: hosted ; depends: dep path "../dep" ;"#,
+        &format!(
+            "package: flagpkg ; layer: hosted ; depends: dep path \"../dep\" ; depends: hosted path \"{}/lib/hosted\" ;",
+            env!("CARGO_MANIFEST_DIR")
+        ),
     );
     let entry = t.write(
         "scratch/main.sth",
@@ -138,7 +141,10 @@ fn flag_overrides_ancestor_manifest_silently() {
     t.write("dep/lib.sth", ": lw ( -- i64 ) 9 ;\nexport: lw ;\n");
     let manifest = t.write(
         "q/sooth.pkg",
-        r#"package: q ; layer: hosted ; depends: dep path "../dep" ;"#,
+        &format!(
+            "package: q ; layer: hosted ; depends: dep path \"../dep\" ; depends: hosted path \"{}/lib/hosted\" ;",
+            env!("CARGO_MANIFEST_DIR")
+        ),
     );
     let entry = t.write(
         "p/main.sth",
@@ -164,7 +170,10 @@ fn flag_wires_through_the_run_subcommand() {
     t.write("dep/lib.sth", ": lw ( -- i64 ) 3 ;\nexport: lw ;\n");
     let manifest = t.write(
         "flag/sooth.pkg",
-        r#"package: flagpkg ; layer: hosted ; depends: dep path "../dep" ;"#,
+        &format!(
+            "package: flagpkg ; layer: hosted ; depends: dep path \"../dep\" ; depends: hosted path \"{}/lib/hosted\" ;",
+            env!("CARGO_MANIFEST_DIR")
+        ),
     );
     let entry = t.write(
         "scratch/main.sth",
@@ -203,7 +212,10 @@ fn user_level_manifest_resolves_scratch_file() {
     t.write("dep/lib.sth", ": lw ( -- i64 ) 5 ;\nexport: lw ;\n");
     t.write(
         "cfg/sooth/global_sooth.pkg",
-        r#"depends: dep path "../../dep" ;"#,
+        &format!(
+            "depends: dep path \"../../dep\" ; depends: hosted path \"{}/lib/hosted\" ;",
+            env!("CARGO_MANIFEST_DIR")
+        ),
     );
     let entry = t.write(
         "scratch/main.sth",

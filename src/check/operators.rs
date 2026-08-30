@@ -103,15 +103,14 @@ pub(super) fn check_operator(
             | "une"
             | "max"
             | "max-total"
-            | "."
     ) || is_conversion_name(name);
-    // The unary members (`not`, print, the `>T` conversions) read only the
+    // The unary members (`not`, the `>T` conversions) read only the
     // top; every other operator reads a pair, so its deeper operand at
     // `stack[n - 2]` is an operand of it too. Guarding the top alone lets a
     // quotation there fall through to `operand_pair_mismatch_error`, which
     // spells the `Cstr` placeholder into the message the audit exists to keep
     // hidden.
-    let is_unary = matches!(name, "not" | ".") || is_conversion_name(name);
+    let is_unary = name == "not" || is_conversion_name(name);
     if is_operator && stack.last().is_some_and(|s| s.quot.is_some()) {
         return Err(reject_quotation_operand(ctx, span, name));
     }
@@ -346,24 +345,6 @@ pub(super) fn check_operator(
             stack.truncate(n - 2);
             stack.push(Slot::computed(a.ty));
         }
-        "." => {
-            let n = stack.len();
-            if n < 1 {
-                return Err(need(".", 1, n));
-            }
-            let a = stack[n - 1];
-            // P7 slice 3c (R7): the printable set is an allowlist, and a slice
-            // stays out of it deliberately. `.` prints one value with no
-            // element loop and no separator policy; printing a view means
-            // printing N elements and choosing delimiters, which is a library
-            // word's decision, not an operator's. So a slice reaches
-            // `print_requires_printable_error` here, and the print renderer
-            // matches that with its own "not printable" arm.
-            if !a.ty.is_numeric() && !matches!(a.ty, Type::Str | Type::Cstr) {
-                return Err(print_requires_printable_error(ctx, span, a.ty));
-            }
-            stack.truncate(n - 1);
-        }
         _ => unreachable!("BUILTIN_TABLE holds only these operator names"),
     }
     Ok(OpDispatch::Builtin(std::mem::take(stack)))
@@ -452,16 +433,6 @@ fn conversion_source_error(ctx: &Ctx, span: Span, op: &str, found: Type) -> Stri
             ctx.rendered_word(), span.line, op, found, effect_str(ctx.effect()))
 }
 
-/// `.` applied to a non-printable value: every current primitive `Type` (the
-/// integer tower, the float tower, `str`/`cstr`) has a builtin row, so this is
-/// what a `bool` gets when `core::bool`'s `.` overload is not in scope
-/// (P7 slice 3i R3) -- and what a future non-printable scalar would get.
-fn print_requires_printable_error(ctx: &Ctx, span: Span, found: Type) -> String {
-    format!(
-            "error: type mismatch in {} (line {})\n  `.` requires a printable scalar, found `{}`\n  note: declared {}",
-            ctx.rendered_word(), span.line, found, effect_str(ctx.effect()))
-}
-
 /// An unknown type name in a conversion word (X6), e.g. `>i128`.
 fn conversion_unknown_type_error(ctx: &Ctx, span: Span, name: &str) -> String {
     format!(
@@ -492,38 +463,6 @@ mod tests {
         crate::resolve::resolve_modules(&mut module, true).unwrap();
         check(&mut module)
     }
-    /// The Phase 3 Slice 1 linear-mechanics stand-in, retired as a compiler
-    /// primitive in Slice 8c: an ordinary one-field struct with a `drop`
-    /// overload, so it is linear for the same reason any resource is (R3),
-    /// not by any compiler-known bit. Always the first struct in a source
-    /// string that uses it, so every other struct's `StructId` shifts up by
-    /// one relative to a spy-free program.
-    const SPY_DEF: &str = "type: Spy tag i64 ;\n: drop ( Spy -- )  | s | \"drop \" . s Spy> . ;\n";
-    /// P7 slice 3c (R7): the printability ruling. A slice is **not**
-    /// printable: `.` prints one value with no element loop and no separator
-    /// policy, so rendering a view is a library word's job. Encoded by the
-    /// allowlist, asserted here as the exact located diagnostic so the print
-    /// renderer has a decision to match.
-    #[test]
-    fn dot_printable_set_slice_decision() {
-        let mut slices = Vec::new();
-        let slice = crate::ast::intern_slice_type(&mut slices, Type::I64, false);
-        assert!(
-            !crate::check::builtins::printable_types().contains(&slice),
-            "a slice is deliberately outside the `.` allowlist"
-        );
-        let probe = crate::test_support::bare_word("probe", 0);
-        let ctx = word_ctx(&probe, &[], &[], &[], None, &CombinatorIndex::new(), None);
-        let mut stack = vec![Slot::computed(slice)];
-        let Err(err) = check_operator(".", Span::default(), &mut stack, &ctx, None) else {
-            panic!("`.` on a slice must be rejected");
-        };
-        assert_eq!(
-            err,
-            "error: type mismatch in `probe` (line 0)\n  `.` requires a printable scalar, found `Slice[i64]`\n  note: declared ( -- )"
-        );
-    }
-
     #[test]
     fn check_symbolic_plus_is_unknown_word() {
         // Operators-as-words: `+` no longer aliases `add`. Restoring `"+"` to
@@ -837,19 +776,6 @@ mod tests {
         check_src(": w ( -- usize ) 5 >usize ;").unwrap();
     }
     #[test]
-    fn check_usize_print_is_type_directed_ok() {
-        check_src(": w ( -- ) 5 >usize . ;").unwrap();
-    }
-    #[test]
-    fn check_print_on_array_is_error() {
-        // X6/R13: `.` on an array is a sharp located error naming `array[T N]`.
-        let err = check_src(": w ( -- ) 0 4 fill . ;").unwrap_err();
-        assert!(
-            err.contains("array[i64 4]"),
-            "should name the array type: {err}"
-        );
-    }
-    #[test]
     fn check_usize_mixed_with_bool_is_error() {
         // X9: `usize` mixed with a non-coercible operand (`Bool`) names both.
         let src = ": w ( -- usize ) 5 >usize True and ;";
@@ -999,34 +925,6 @@ mod tests {
         check_src(": w ( Bool i64 -- i64 Bool ) swap ;").unwrap();
     }
     #[test]
-    fn check_print_accepts_every_printable_scalar() {
-        // `.` is type-directed over the whole integer tower and both float
-        // widths, not just `i64`.
-        check_src(": w ( -- ) 5 . ;").unwrap();
-        check_src(": w ( -- ) 5 >u8 . ;").unwrap();
-        check_src(": w ( -- ) 5 >i32 . ;").unwrap();
-        check_src(": w ( -- ) -1 >u64 . ;").unwrap();
-        check_src(": w ( -- ) 3.14 . ;").unwrap();
-        check_src(": w ( -- ) 3.14 >f32 . ;").unwrap();
-    }
-    #[test]
-    fn check_print_of_a_bool_needs_the_core_bool_overload() {
-        // P7 slice 3i (R3): `Bool` is not in the builtin printable set, so the
-        // operator itself refuses it -- printing one is `core::bool`'s `.`
-        // overload, reached by 8a's overload dispatch on a builtin-row miss.
-        // `check_src_mangled` runs the resolve pass first, which is what puts
-        // the overload under the mangled key `scoped_operator_overloads` reads
-        // (a bare parse-then-check leaves it unfound, hence the bare-`check_src`
-        // rejection below).
-        let err = check_src(": w ( -- ) True . ;").unwrap_err();
-        assert!(
-            err.contains("`.` requires a printable scalar, found `Bool`"),
-            "unexpected message: {err}"
-        );
-        check_src_mangled(": w ( -- ) True . ;")
-            .expect("`core::bool`'s `.` overload prints a Bool");
-    }
-    #[test]
     fn check_not_on_literal_count_is_not_a_literal_for_fill() {
         // The retired hand-written `not` arm left its operand slot in place,
         // preserving `literal`/`int_val` (so a `not`'d literal fed to `fill`
@@ -1036,27 +934,5 @@ mod tests {
         // instead of miscounting.
         let err = check_src(": w ( -- ) 0 4 not fill drop ;").unwrap_err();
         assert!(err.contains("literal count"), "unexpected message: {err}");
-    }
-    #[test]
-    fn check_print_accepts_str_and_cstr() {
-        // `.`'s printable-scalar guard also accepts `str`/`cstr` (R9), matched
-        // by name rather than `is_numeric`/`is_bool`, since neither is numeric.
-        check_src(": w ( -- ) \"hi\" . ;").unwrap();
-        check_src(": w ( -- ) \"hi\" cstr . ;").unwrap();
-    }
-    #[test]
-    fn check_print_on_empty_stack_is_underflow_error() {
-        let src = ": w ( -- ) . ;";
-        let err = check_src(src).unwrap_err();
-        assert!(err.contains("`.`"), "unexpected message: {err}");
-        assert!(err.contains("needs 1 values"), "unexpected message: {err}");
-    }
-    #[test]
-    fn check_print_on_linear_value_is_error() {
-        // R16: `.` is a printable-scalar path, and a linear value is not one
-        // (the backend's `unreachable!` guard depends on this).
-        let err = check_src(&format!("{SPY_DEF}: w ( -- ) 7 Spy . ;")).unwrap_err();
-        assert!(err.contains("printable"), "unexpected message: {err}");
-        assert!(err.contains("`Spy`"), "unexpected message: {err}");
     }
 }

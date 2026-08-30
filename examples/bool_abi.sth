@@ -1,4 +1,5 @@
 import: intrinsics * ;
+import: hosted::show | . | ;
 import: core::prelude * ;    \ Bool comes through here, the prelude's own re-export.
 
 : pos ( i64 -- Bool )

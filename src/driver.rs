@@ -942,7 +942,7 @@ mod tests {
         );
         let entry = s.write(
             "main.sth",
-            "import: \"left.sth\" l ;\nimport: \"right.sth\" r ;\n: main ( -- ) 0 . ;\nimport: intrinsics * ;\n",
+            "import: \"left.sth\" l ;\nimport: \"right.sth\" r ;\n: main ( -- ) 0 drop ;\nimport: intrinsics * ;\n",
         );
         let closure = discover_closure(&entry).expect("closure resolves");
         assert_eq!(closure.nodes.len(), 4, "base deduped: one node per file");
@@ -965,7 +965,7 @@ mod tests {
         let s = Sandbox::new("cycle");
         s.write(
             "a.sth",
-            "import: \"b.sth\" b ;\n: main ( -- ) 0 . ;\nimport: intrinsics * ;\n",
+            "import: \"b.sth\" b ;\n: main ( -- ) 0 drop ;\nimport: intrinsics * ;\n",
         );
         s.write("b.sth", "import: \"a.sth\" a ;\n: q ( -- i64 ) 1 ;\n");
         let entry = s.0.join("a.sth");
@@ -1375,7 +1375,7 @@ mod tests {
         s.write(
             "use.sth",
             "import: \"box.sth\" b ;\n: unwrap ( b::Box[i64] -- i64 ) Box> ;\n\
-             : show ( i64 -- ) Box unwrap . ;\nexport: show ;\nimport: intrinsics * ;\n",
+             : show ( i64 -- ) Box unwrap drop ;\nexport: show ;\nimport: intrinsics * ;\n",
         );
         let entry = s.write("main.sth", entry_src);
         let closure = discover_closure(&entry).expect("closure resolves");
@@ -1435,7 +1435,7 @@ mod tests {
         let entry = s.write(
             "main.sth",
             "import: \"box.sth\" b | Box | ;\n: unwrap ( Box[i64] -- i64 ) Box> ;\n\
-             : main ( -- ) 7 Box unwrap . ;\nimport: intrinsics * ;\n",
+             : main ( -- ) 7 Box unwrap drop ;\nimport: intrinsics * ;\n",
         );
         let closure = discover_closure(&entry).expect("closure resolves");
         let mut module = assemble_module(&closure, true).expect("assembles");
@@ -1540,7 +1540,7 @@ mod tests {
         );
         let entry = s.write(
             "main.sth",
-            "import: self::a ;\nimport: self::b ;\n: main ( -- ) a::aw b::bw add . ;\nimport: intrinsics * ;\n",
+            "import: self::a ;\nimport: self::b ;\n: main ( -- ) a::aw b::bw add drop ;\nimport: intrinsics * ;\n",
         );
         let closure = discover_closure(&entry).expect("the self-anchored imports resolve");
         assert_eq!(closure.nodes.len(), 3, "b is discovered once, not twice");
@@ -1557,7 +1557,7 @@ mod tests {
         s.write("b.sth", ": bw ( -- i64 ) 2 ;\nexport: bw ;\n");
         let entry = s.write(
             "main.sth",
-            "import: self::b ;\n: main ( -- ) b::bw . ;\nimport: intrinsics * ;\n",
+            "import: self::b ;\n: main ( -- ) b::bw drop ;\nimport: intrinsics * ;\n",
         );
         let mut manifests = ManifestCache::default();
         discover_closure_configured(&entry, &ResolutionConfig::from_env(), &mut manifests)
@@ -1590,7 +1590,7 @@ mod tests {
         );
         let entry = s.write(
             "scratch/main.sth",
-            "import: dep::lib l ;\n: main ( -- ) l::lw . ;\nimport: intrinsics * ;\n",
+            "import: dep::lib l ;\n: main ( -- ) l::lw drop ;\nimport: intrinsics * ;\n",
         );
         let mut config = ResolutionConfig::from_env();
         config.manifest_override = Some(s.0.join("flag/sooth.pkg"));
@@ -1619,7 +1619,7 @@ mod tests {
         s.write("dep/lib.sth", ": lw ( -- i64 ) 7 ;\nexport: lw ;\n");
         let entry = s.write(
             "scratch/main.sth",
-            "import: dep::lib l ;\n: main ( -- ) l::lw . ;\nimport: intrinsics * ;\n",
+            "import: dep::lib l ;\n: main ( -- ) l::lw drop ;\nimport: intrinsics * ;\n",
         );
         let config = ResolutionConfig {
             manifest_override: None,
@@ -1645,7 +1645,7 @@ mod tests {
         s.write("b.sth", ": bw ( -- i64 ) 2 ;\nexport: bw ;\n");
         let entry = s.write(
             "main.sth",
-            "import: \"b.sth\" b ;\n: main ( -- ) b::bw . ;\nimport: intrinsics * ;\n",
+            "import: \"b.sth\" b ;\n: main ( -- ) b::bw drop ;\nimport: intrinsics * ;\n",
         );
         let config = ResolutionConfig {
             manifest_override: None,
@@ -1704,7 +1704,7 @@ mod tests {
         s.write("inner/leaf.sth", ": lw ( -- i64 ) 2 ;\nexport: lw ;\n");
         let entry = s.write(
             "inner/main.sth",
-            "import: self::leaf ;\n: main ( -- ) leaf::lw . ;\nimport: intrinsics * ;\n",
+            "import: self::leaf ;\n: main ( -- ) leaf::lw drop ;\nimport: intrinsics * ;\n",
         );
         let closure = discover_closure(&entry).expect("closure resolves");
         assert!(
@@ -1723,7 +1723,7 @@ mod tests {
         s.write("b.sth", ": bw ( -- i64 ) 2 ;\nexport: bw ;\n");
         let entry = s.write(
             "main.sth",
-            "import: \"b.sth\" b ;\n: main ( -- ) b::bw . ;\nimport: intrinsics * ;\n",
+            "import: \"b.sth\" b ;\n: main ( -- ) b::bw drop ;\nimport: intrinsics * ;\n",
         );
         let err = discover_err(&entry);
         assert!(
@@ -1741,7 +1741,7 @@ mod tests {
         s.write("lib.sth", ": lw ( -- i64 ) 1 ;\nexport: lw ;\n");
         let entry = s.write(
             "main.sth",
-            "import: \"lib.sth\" * ;\n: main ( -- ) lw . ;\nimport: intrinsics * ;\n",
+            "import: \"lib.sth\" * ;\n: main ( -- ) lw drop ;\nimport: intrinsics * ;\n",
         );
         let closure = discover_closure(&entry).expect("a wildcard import still resolves a target");
         let mut module =
@@ -1764,7 +1764,7 @@ mod tests {
         );
         let entry = s.write(
             "main.sth",
-            "import: \"lib.sth\" * ;\n: main ( -- ) lw . ;\nimport: intrinsics * ;\n",
+            "import: \"lib.sth\" * ;\n: main ( -- ) lw drop ;\nimport: intrinsics * ;\n",
         );
         let closure = discover_closure(&entry).expect("a wildcard import still resolves a target");
         let mut module = assemble_module(&closure, true)
@@ -1783,7 +1783,7 @@ mod tests {
         );
         let entry = s.write(
             "main.sth",
-            "import: \"lib.sth\" * ;\n: main ( -- ) hidden . ;\nimport: intrinsics * ;\n",
+            "import: \"lib.sth\" * ;\n: main ( -- ) hidden drop ;\nimport: intrinsics * ;\n",
         );
         let closure = discover_closure(&entry).expect("a wildcard import still resolves a target");
         let mut module =
@@ -1805,7 +1805,7 @@ mod tests {
         s.write("lib.sth", ": lw ( -- i64 ) 1 ;\n\n\n\n\nexport: lw ;\n");
         let entry = s.write(
             "main.sth",
-            "import: \"lib.sth\" * ;\n: lw ( -- i64 ) 2 ;\n: main ( -- ) lw . ;\nimport: intrinsics * ;\n",
+            "import: \"lib.sth\" * ;\n: lw ( -- i64 ) 2 ;\n: main ( -- ) lw drop ;\nimport: intrinsics * ;\n",
         );
         let closure = discover_closure(&entry).expect("a wildcard import still resolves a target");
         let err = assemble_module(&closure, true)
@@ -1824,7 +1824,7 @@ mod tests {
         let s = Sandbox::new("intrinsics-wildcard-build");
         let entry = s.write(
             "main.sth",
-            "import: intrinsics * ;\n: main ( -- ) 1 1 add . ;\n",
+            "import: intrinsics * ;\n: main ( -- ) 1 1 add drop ;\n",
         );
         let closure = discover_closure(&entry).expect("the reserved name needs no depends:");
         assemble_module(&closure, true).expect("intrinsics wildcard import must still build");
@@ -2010,7 +2010,7 @@ mod tests {
         s.write("bin/ascii.sth", ": bw ( -- i64 ) 2 ;\nexport: bw ;\n");
         let entry = s.write(
             "main.sth",
-            "import: self::text::ascii ;\nimport: self::bin::ascii ;\n: main ( -- ) 0 . ;\nimport: intrinsics * ;\n",
+            "import: self::text::ascii ;\nimport: self::bin::ascii ;\n: main ( -- ) 0 drop ;\nimport: intrinsics * ;\n",
         );
         let closure = discover_closure(&entry).expect("both targets resolve");
         let err = assemble_module(&closure, true).expect_err("the second binding is an error");
@@ -2033,7 +2033,7 @@ mod tests {
         s.write("inner/thing.sth", ": tw ( -- i64 ) 1 ;\nexport: tw ;\n");
         let entry = s.write(
             "main.sth",
-            "import: self::inner::thing ;\n: main ( -- ) thing::tw . ;\nimport: intrinsics * ;\n",
+            "import: self::inner::thing ;\n: main ( -- ) thing::tw drop ;\nimport: intrinsics * ;\n",
         );
         let err = discover_err(&entry);
         assert!(
@@ -2064,7 +2064,7 @@ mod tests {
         s.write("dep/inner/thing.sth", ": tw ( -- i64 ) 1 ;\nexport: tw ;\n");
         let entry = s.write(
             "app/main.sth",
-            "import: dep::inner::thing ;\n: main ( -- ) thing::tw . ;\nimport: intrinsics * ;\n",
+            "import: dep::inner::thing ;\n: main ( -- ) thing::tw drop ;\nimport: intrinsics * ;\n",
         );
         let err = discover_err(&entry);
         assert!(
@@ -2085,7 +2085,7 @@ mod tests {
         pkg(&s, "", "package: app ; layer: hosted ;");
         let entry = s.write(
             "main.sth",
-            "import: self::intrinsics ;\n: main ( -- ) 0 . ;\n",
+            "import: self::intrinsics ;\n: main ( -- ) 0 drop ;\n",
         );
         let err = discover_err(&entry);
         assert!(
@@ -2103,7 +2103,10 @@ mod tests {
     fn resolve_intrinsics_precedes_depends_lookup() {
         let s = Sandbox::new("intrinsics-reserved");
         pkg(&s, "", "package: app ; layer: hosted ;");
-        let entry = s.write("main.sth", "import: intrinsics * ;\n: main ( -- ) 0 . ;\n");
+        let entry = s.write(
+            "main.sth",
+            "import: intrinsics * ;\n: main ( -- ) 0 drop ;\n",
+        );
         let closure = discover_closure(&entry).expect("the reserved name needs no `depends:`");
         assert_eq!(closure.nodes.len(), 1, "the reserved name adds no edge");
     }
@@ -2117,7 +2120,7 @@ mod tests {
         pkg(&s, "", "package: app ; layer: hosted ;");
         let entry = s.write(
             "main.sth",
-            "import: core ;\n: main ( -- ) 0 . ;\nimport: intrinsics * ;\n",
+            "import: core ;\n: main ( -- ) 0 drop ;\nimport: intrinsics * ;\n",
         );
         let err = discover_err(&entry);
         assert!(
@@ -2144,7 +2147,7 @@ mod tests {
         s.write("secret.sth", ": sw ( -- i64 ) 1 ;\nexport: sw ;\n");
         let entry = s.write(
             "main.sth",
-            "import: self::secret ;\n: main ( -- ) secret::sw . ;\nimport: intrinsics * ;\n",
+            "import: self::secret ;\n: main ( -- ) secret::sw drop ;\nimport: intrinsics * ;\n",
         );
         let closure = discover_closure(&entry).expect("`module:` does not gate a `self::` import");
         assert_eq!(closure.nodes.len(), 2);
@@ -2160,7 +2163,7 @@ mod tests {
         s.write("42.sth", ": nw ( -- i64 ) 1 ;\nexport: nw ;\n");
         let entry = s.write(
             "main.sth",
-            "import: self::42 q ;\n: main ( -- ) 0 . ;\nimport: intrinsics * ;\n",
+            "import: self::42 q ;\n: main ( -- ) 0 drop ;\nimport: intrinsics * ;\n",
         );
         let err = discover_err(&entry);
         assert!(
@@ -2179,7 +2182,7 @@ mod tests {
         s.write("*.sth", ": sw ( -- i64 ) 1 ;\nexport: sw ;\n");
         let entry = s.write(
             "main.sth",
-            "import: self::* q ;\n: main ( -- ) 0 . ;\nimport: intrinsics * ;\n",
+            "import: self::* q ;\n: main ( -- ) 0 drop ;\nimport: intrinsics * ;\n",
         );
         let err = discover_err(&entry);
         assert!(
@@ -2199,7 +2202,7 @@ mod tests {
         s.write("sub/y.sth", ": yw ( -- i64 ) 1 ;\nexport: yw ;\n");
         let entry = s.write(
             "main.sth",
-            "import: self::sub::..::sub::y q ;\n: main ( -- ) 0 . ;\nimport: intrinsics * ;\n",
+            "import: self::sub::..::sub::y q ;\n: main ( -- ) 0 drop ;\nimport: intrinsics * ;\n",
         );
         let err = discover_err(&entry);
         assert!(
@@ -2225,7 +2228,7 @@ mod tests {
         s.write("text.sth/ascii.sth", ": tw ( -- i64 ) 1 ;\nexport: tw ;\n");
         let entry = s.write(
             "main.sth",
-            "import: self::text ;\n: main ( -- ) 0 . ;\nimport: intrinsics * ;\n",
+            "import: self::text ;\n: main ( -- ) 0 drop ;\nimport: intrinsics * ;\n",
         );
         let err = discover_err(&entry);
         assert!(
@@ -2246,7 +2249,7 @@ mod tests {
         s.write("b.sth", ": bw ( -- i64 ) 2 ;\nexport: bw ;\n");
         let entry = s.write(
             "main.sth",
-            "import: self::b ;\n: main ( -- ) b::bw . ;\nimport: intrinsics * ;\n",
+            "import: self::b ;\n: main ( -- ) b::bw drop ;\nimport: intrinsics * ;\n",
         );
         let err = discover_err(&entry);
         assert!(
@@ -2273,7 +2276,7 @@ mod tests {
         s.write("dep/cmp.sth", ": lt ( -- i64 ) 1 ;\nexport: lt ;\n");
         let entry = s.write(
             "app/main.sth",
-            "import: dep::cmp c ;\n: main ( -- ) c::lt . ;\nimport: intrinsics * ;\n",
+            "import: dep::cmp c ;\n: main ( -- ) c::lt drop ;\nimport: intrinsics * ;\n",
         );
         let err = discover_err(&entry);
         assert!(
@@ -2300,7 +2303,7 @@ mod tests {
         );
         let entry = s.write(
             "main.sth",
-            ": main ( -- ) 7 A        &n @ . drop ;\ntype: A n i64 ;\nimport: \"lib.sth\" l ;\nimport: intrinsics * ;\n",
+            ": main ( -- ) 7 A        &n @ drop drop ;\ntype: A n i64 ;\nimport: \"lib.sth\" l ;\nimport: intrinsics * ;\n",
         );
         let closure = discover_closure(&entry).expect("closure resolves");
         let mut module = assemble_module(&closure, true).expect("assembles");

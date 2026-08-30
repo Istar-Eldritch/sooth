@@ -5,6 +5,7 @@
 \ run over any array size.
 
 import: intrinsics * ;
+import: hosted::show | . | ;
 import: core::prelude * ;
 import: core::combinators c | times | ;
 

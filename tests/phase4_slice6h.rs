@@ -26,7 +26,7 @@ fn array_constructor_zero_inits_across_the_probe_suite() {
     // withbuf's index-0 zero plus f's 5; recur's tail-recursive 3 2 1 0.
     assert_eq!(
         stdout,
-        "0\n5\n0\nFalse\nFalse\nFalse\nFalse\n100\n0\n1\n2\n200\n5\n3\n2\n1\n0\n"
+        "0\n5\n0\nfalse\nfalse\nfalse\nfalse\n100\n0\n1\n2\n200\n5\n3\n2\n1\n0\n"
     );
     assert_eq!(output.status.code(), Some(0));
 }

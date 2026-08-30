@@ -1707,7 +1707,8 @@ mod tests {
     /// projection from whatever sat beneath.
     #[test]
     fn owned_receiver_projection_leaves_receiver() {
-        let ir = lower_src("type: Point x i64 y i64 ;\n: w ( -- ) 1 2 Point &x @ . &y @ . drop ;");
+        let ir =
+            lower_src("type: Point x i64 y i64 ;\n: w ( -- ) 1 2 Point &x @ drop &y @ drop drop ;");
         let w = &ir.funcs[0];
         let alloc = instrs(w)
             .iter()
@@ -1740,7 +1741,7 @@ mod tests {
         let ir = lower_src(
             "type: Stats hp i64 mp i64 ;\n\
              type: Unit tag i64 stats Stats ;\n\
-             : w ( -- ) 5 1 2 3 Stats Unit | u | &u &stats &hp @ add . u drop ;",
+             : w ( -- ) 5 1 2 3 Stats Unit | u | &u &stats &hp @ add drop u drop ;",
         );
         let w = &ir.funcs[0];
         let five = instrs(w)

@@ -416,11 +416,6 @@ pub enum Instr {
     /// 7a (a non-capturing callee has no env parameter); 7b adds the env
     /// argument here.
     CallIndirect(Option<Value>, Value, Vec<Value>),
-    /// `.`: print one value followed by a newline. Type-directed at the
-    /// backend (not here, IR stays neutral): the value's own `IrType` (looked
-    /// up via `value_types`) picks signed/unsigned decimal, `%g` float, or
-    /// `true`/`false`, the same way `Cmp`/`Shr` dispatch on operand type.
-    Print(Value),
     Phi(Value, Vec<(BlockId, Value)>),
     /// `dst: Ptr = base + bytes`. Keeps `Ptr` opaque (no native-width assumption).
     PtrOffset(Value, Value, i64),

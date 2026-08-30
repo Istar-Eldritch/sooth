@@ -12,10 +12,12 @@ fn run_and_capture_stdout(path: &str) -> (String, i32) {
     run_binary(path, false)
 }
 
-/// Compile and run with the allocation trace enabled (R10). The trace shares
-/// stdout with the program's own output, so the caller reads one transcript in
-/// program order: `alloc <size>`/`free <size>` lines interleaved with whatever
-/// the program printed.
+/// Compile and run with the allocation trace enabled (R10). Post-S7d the
+/// streams are split: the program's own prints go out via unbuffered
+/// `write(2)` immediately, while `alloc`/`free` trace lines ride buffered
+/// stdio and flush at exit — so a transcript is NOT one program-order stream
+/// (printed bytes come first; trace order is only meaningful among
+/// themselves). See `run_owned_traced_golden`'s note below.
 fn run_and_capture_traced_stdout(path: &str) -> (String, i32) {
     run_binary(path, true)
 }
@@ -893,7 +895,7 @@ fn all_six_comparisons_are_ieee_correct_for_nan_floats() {
 #[test]
 fn leap_year_dogfood_compiles_and_runs() {
     let (stdout, code) = run_and_capture_stdout("examples/leap.sth");
-    assert_eq!(stdout, "True\nFalse\nTrue\n");
+    assert_eq!(stdout, "true\nfalse\ntrue\n");
     assert_eq!(code, 0);
 }
 
@@ -976,7 +978,7 @@ fn print_bool_prints_true_or_false_not_zero_or_one() {
     let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
     std::fs::remove_file(&path).ok();
 
-    assert_eq!(stdout, "True\nFalse\n");
+    assert_eq!(stdout, "true\nfalse\n");
     assert_eq!(code, 0);
 }
 
@@ -1242,7 +1244,7 @@ fn usize_arithmetic_comparison_and_conversion_native() {
     let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
     std::fs::remove_file(&path).ok();
 
-    assert_eq!(stdout, "9\n7\nTrue\nFalse\n8\n9\n");
+    assert_eq!(stdout, "9\n7\ntrue\nfalse\n8\n9\n");
     assert_eq!(code, 0);
 }
 
@@ -1273,7 +1275,7 @@ fn isize_round_trips_arithmetic_and_conversion() {
     let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
     std::fs::remove_file(&path).ok();
 
-    assert_eq!(stdout, "9\n-7\nTrue\nFalse\nTrue\nFalse\n-4\n-1\n8\n9\n");
+    assert_eq!(stdout, "9\n-7\ntrue\nfalse\ntrue\nfalse\n-4\n-1\n8\n9\n");
     assert_eq!(code, 0);
 }
 
@@ -1868,11 +1870,17 @@ fn linear_check_error(src: &str) -> String {
 /// string it is prepended to shifts up by 2.
 const SPY_DEF: &str = "type: Spy tag i64 ;\n: drop ( Spy -- )  | s | \"drop \" . s Spy> . ;\n";
 
+/// `SPY_DEF` for the in-process check paths, whose `parse_with_core` seed is
+/// `core`-only: `.` is `hosted::show`'s word now (P7.S7d) and cannot resolve
+/// there. Same two lines, so line numbers still shift by 2; the printing
+/// witness above is what the run-goldens keep using.
+const SPY_DEF_SILENT: &str = "type: Spy tag i64 ;\n: drop ( Spy -- )  | s | s Spy> drop ;\n";
+
 #[test]
 fn dup_of_linear_value_is_error() {
     // Criterion 1: `dup` is the explicit copy and a linear value has no copy.
     let err = linear_check_error(&format!(
-        "{SPY_DEF}: main ( -- )\n  7 Spy dup drop drop ;\n"
+        "{SPY_DEF_SILENT}: main ( -- )\n  7 Spy dup drop drop ;\n"
     ));
     assert!(err.contains("cannot `dup`"), "unexpected message: {err}");
     assert!(err.contains("`Spy`"), "unexpected message: {err}");
@@ -1883,7 +1891,7 @@ fn dup_of_linear_value_is_error() {
 fn over_of_linear_value_is_error() {
     // Criterion 1b: `over` copies its second slot, so it is gated too.
     let err = linear_check_error(&format!(
-        "{SPY_DEF}: main ( -- )\n  7 Spy 1 over drop drop drop ;\n"
+        "{SPY_DEF_SILENT}: main ( -- )\n  7 Spy 1 over drop drop drop ;\n"
     ));
     assert!(err.contains("cannot `over`"), "unexpected message: {err}");
     assert!(err.contains("`Spy`"), "unexpected message: {err}");
@@ -1895,7 +1903,7 @@ fn use_after_move_of_linear_local_is_error() {
     // `SPY_DEF` is two lines, so `hold`'s own line 3 (the first `s drop`)
     // lands on line 7.
     let err = linear_check_error(&format!(
-        "{SPY_DEF}: main ( -- )\n  7 Spy hold ;\n\
+        "{SPY_DEF_SILENT}: main ( -- )\n  7 Spy hold ;\n\
 : hold ( Spy -- )\n  | s |\n  s drop\n  s drop ;\n"
     ));
     assert!(err.contains("use after move"), "unexpected message: {err}");
@@ -1920,7 +1928,7 @@ fn explicit_drop_runs_destructor_once() {
 #[test]
 fn surplus_linear_on_stack_is_error() {
     // Criterion 4a: forgetting is an error, not a silent drop.
-    let err = linear_check_error(&format!("{SPY_DEF}: main ( -- )\n  7 Spy ;\n"));
+    let err = linear_check_error(&format!("{SPY_DEF_SILENT}: main ( -- )\n  7 Spy ;\n"));
     assert!(
         err.contains("linear value left on the stack"),
         "unexpected message: {err}"
@@ -1940,7 +1948,9 @@ fn surplus_linear_on_stack_is_error() {
 fn unconsumed_linear_local_is_error() {
     // Criterion 4b: a linear local never consumed by scope end. Locals are not
     // on the final stack, so this is its own pass, not `check_outputs`.
-    let err = linear_check_error(&format!("{SPY_DEF}: hold ( Spy -- )\n  | s |\n  1 . ;\n"));
+    let err = linear_check_error(&format!(
+        "{SPY_DEF_SILENT}: hold ( Spy -- )\n  | s |\n  1 drop ;\n"
+    ));
     assert!(err.contains("never consumed"), "unexpected message: {err}");
     assert!(err.contains("`Spy`"), "unexpected message: {err}");
     assert!(
@@ -1996,7 +2006,7 @@ fn divergent_arm_use_is_error() {
     // Criterion 10b: consumed in one arm only, then referenced past the join.
     // The join yields `MaybeMoved`, so the later use is a use-after-move.
     let err = linear_check_error(&format!(
-        "{SPY_DEF}: oops ( Spy Bool -- )\n  | s c |\n  c ~[ s drop ] ~[ 1 . ] if\n  s drop ;\n"
+        "{SPY_DEF_SILENT}: oops ( Spy Bool -- )\n  | s c |\n  c ~[ s drop ] ~[ 1 drop ] if\n  s drop ;\n"
     ));
     assert!(err.contains("use after move"), "unexpected message: {err}");
     assert!(err.contains("`Spy`"), "unexpected message: {err}");
@@ -2009,7 +2019,7 @@ fn divergent_arm_unconsumed_is_error() {
     // `s` WAS consumed on the `then` arm, so the diagnostic must not claim it
     // was never touched: the bug is the `else` arm forgetting it.
     let err = linear_check_error(&format!(
-        "{SPY_DEF}: oops ( Spy Bool -- )\n  | s c |\n  c ~[ s drop ] ~[ 1 . ] if ;\n"
+        "{SPY_DEF_SILENT}: oops ( Spy Bool -- )\n  | s c |\n  c ~[ s drop ] ~[ 1 drop ] if ;\n"
     ));
     assert!(
         err.contains("not consumed on every path"),
@@ -2024,7 +2034,7 @@ fn linear_across_loop_back_edge_is_located_error() {
     // deferred (R15/D8), as a located error rather than a miscompile. `SPY_DEF`
     // is two lines, so `spin`'s own line 3 lands on line 5.
     let err = linear_check_error(&format!(
-        "{SPY_DEF}: spin ( Spy i64 -- i64 )\n  | s n |\n\
+        "{SPY_DEF_SILENT}: spin ( Spy i64 -- i64 )\n  | s n |\n\
   n 0 eq ~[ s drop 0 ] ~[ 9 Spy n 1 sub spin ] if ;\n"
     ));
     assert!(
@@ -2075,7 +2085,7 @@ fn nested_struct_is_linear_transitively() {
     // linearity propagates through a nested aggregate rather than stopping at
     // the immediate field.
     let err = linear_check_error(&format!(
-        "{SPY_DEF}type: Inner v Spy ;\ntype: Outer i Inner ;\n\
+        "{SPY_DEF_SILENT}type: Inner v Spy ;\ntype: Outer i Inner ;\n\
 : main ( -- )\n  5 Spy Inner Outer dup\n  Outer> Inner> drop\n  Outer> Inner> drop ;\n"
     ));
     assert!(err.contains("cannot `dup`"), "unexpected message: {err}");
@@ -2123,7 +2133,7 @@ fn store_over_a_linear_field_through_a_reference_is_error() {
     // with nothing to drop it), so this guard is a diagnostic assertion, not
     // a drop-count golden.
     let err = linear_check_error(&format!(
-        "{SPY_DEF}type: Pair a Spy b Spy ;\n\
+        "{SPY_DEF_SILENT}type: Pair a Spy b Spy ;\n\
 : main ( -- )\n  1 Spy 2 Spy Pair\n  &!a 9 Spy !\n  Pair> drop drop ;\n"
     ));
     assert!(
@@ -2192,7 +2202,7 @@ fn projection_read_of_linear_field_is_error() {
     // `@`, which refuses to read a linear referent, symmetric to `!`'s
     // refusal to store over one.
     let err = linear_check_error(&format!(
-        "{SPY_DEF}type: Pair a i64 b Spy ;\n: main ( -- )\n  5 3 Spy Pair\n  &b @ drop drop ;\n"
+        "{SPY_DEF_SILENT}type: Pair a i64 b Spy ;\n: main ( -- )\n  5 3 Spy Pair\n  &b @ drop drop ;\n"
     ));
     assert!(err.contains("`@`"), "unexpected message: {err}");
     assert!(err.contains("`Spy`"), "unexpected message: {err}");
@@ -2211,7 +2221,7 @@ fn dup_of_linear_enum_is_error() {
     // violation with no diagnostic). It is now rejected like any other linear
     // value, naming the enum type.
     let err = linear_check_error(&format!(
-        "{SPY_DEF}type: Box | Full v Spy | Empty ;\n\
+        "{SPY_DEF_SILENT}type: Box | Full v Spy | Empty ;\n\
 : main ( -- )\n  1 Spy Full dup drop drop ;\n"
     ));
     assert!(err.contains("cannot `dup`"), "unexpected message: {err}");
@@ -2225,19 +2235,25 @@ fn nested_enum_is_linear_transitively() {
     // struct-of-enum-of-struct-of-spy, so `dup` on the outer struct is
     // rejected naming `Wrap`, and dropping it whole runs the chain of
     // synthesized destructors (struct -> tag dispatch -> struct -> spy).
-    let src = format!(
-        "{SPY_DEF}type: Inner v Spy ;\ntype: Held | Empty | Some i Inner ;\n\
+    let decls = |spy: &str| {
+        format!(
+            "{spy}type: Inner v Spy ;\ntype: Held | Empty | Some i Inner ;\n\
 type: Wrap h Held ;\n"
-    );
+        )
+    };
     let err = linear_check_error(&format!(
-        "{src}: main ( -- )\n  5 Spy Inner Some Wrap dup drop drop ;\n"
+        "{}: main ( -- )\n  5 Spy Inner Some Wrap dup drop drop ;\n",
+        decls(SPY_DEF_SILENT)
     ));
     assert!(err.contains("cannot `dup`"), "unexpected message: {err}");
     assert!(err.contains("`Wrap`"), "unexpected message: {err}");
 
     let stdout = run_linear_golden(
         "nested-enum",
-        &format!("{src}: main ( -- )\n  5 Spy Inner Some Wrap drop ;\n"),
+        &format!(
+            "{}: main ( -- )\n  5 Spy Inner Some Wrap drop ;\n",
+            decls(SPY_DEF)
+        ),
     );
     assert_eq!(stdout, "drop 5\n");
 }
@@ -2288,8 +2304,8 @@ fn unconsumed_linear_eliminator_payload_is_error() {
     // the branch Phase 1 left unreachable (a linear variant payload needed the
     // enum linearity this phase adds).
     let err = linear_check_error(&format!(
-        "{SPY_DEF}type: Item | Empty | Full v Spy ;\n\
-: handle ( Item -- )\n  ~[ ( Empty ) drop 99 . ]\n  ~[ ( Full ) Full> | s | 1 . ]\n  Item? ;\n"
+        "{SPY_DEF_SILENT}type: Item | Empty | Full v Spy ;\n\
+: handle ( Item -- )\n  ~[ ( Empty ) drop 99 drop ]\n  ~[ ( Full ) Full> | s | 1 drop ]\n  Item? ;\n"
     ));
     assert!(err.contains("never consumed"), "unexpected message: {err}");
     assert!(err.contains("`Spy`"), "unexpected message: {err}");
@@ -2309,8 +2325,8 @@ fn duplicate_word_entry_local_is_error() {
     // the name -> type map: that would silently drop the earlier binding
     // (and any linear value in it) from all tracking, with no diagnostic.
     let err = linear_check_error(&format!(
-        "{SPY_DEF}: hold ( Spy Spy -- )\n  | s s |\n  s drop ;\n\
-: main ( -- ) 1 Spy 2 Spy hold 99 . ;\n"
+        "{SPY_DEF_SILENT}: hold ( Spy Spy -- )\n  | s s |\n  s drop ;\n\
+: main ( -- ) 1 Spy 2 Spy hold 99 drop ;\n"
     ));
     assert!(err.contains("duplicate local"), "unexpected message: {err}");
     assert!(
@@ -2328,7 +2344,7 @@ fn duplicate_eliminator_arm_local_is_error() {
     // The arm-body twin of `duplicate_word_entry_local_is_error`: the same
     // last-wins hazard exists in an arm's own `| s s |` binding path.
     let err = linear_check_error(&format!(
-        "{SPY_DEF}type: R | Two a Spy b Spy ;\n\
+        "{SPY_DEF_SILENT}type: R | Two a Spy b Spy ;\n\
 : use ( R -- ) ~[ ( Two ) Two> | s s | s drop ] R? ;\n\
 : main ( -- ) 1 Spy 2 Spy Two use ;\n"
     ));
@@ -2347,7 +2363,7 @@ fn duplicate_eliminator_arm_local_is_error() {
 fn main_declaring_linear_output_is_error() {
     // Nothing calls `main`, so a linear output would leak past the program
     // boundary unnoticed instead of being disposed.
-    let err = linear_check_error(&format!("{SPY_DEF}: main ( -- Spy ) 7 Spy ;\n"));
+    let err = linear_check_error(&format!("{SPY_DEF_SILENT}: main ( -- Spy ) 7 Spy ;\n"));
     assert!(
         err.contains("cannot declare a linear type"),
         "unexpected message: {err}"
@@ -2360,7 +2376,9 @@ fn main_declaring_linear_output_is_error() {
 fn main_declaring_linear_input_is_error() {
     // Nothing calls `main`, so a linear input arrives in an uninitialised
     // ABI register; running its destructor would be undefined behaviour.
-    let err = linear_check_error(&format!("{SPY_DEF}: main ( Spy -- ) | s | s drop ;\n"));
+    let err = linear_check_error(&format!(
+        "{SPY_DEF_SILENT}: main ( Spy -- ) | s | s drop ;\n"
+    ));
     assert!(
         err.contains("cannot declare a linear type"),
         "unexpected message: {err}"
@@ -2374,7 +2392,9 @@ fn fill_of_linear_element_is_error() {
     // P7.S5 (R10): `fill` on a linear, non-nullary-variant seed is a located
     // error naming the element type and `tabulate` as the construction path
     // for distinct linear values.
-    let err = linear_check_error(&format!("{SPY_DEF}: main ( -- )\n  0 Spy 3 fill drop ;\n"));
+    let err = linear_check_error(&format!(
+        "{SPY_DEF_SILENT}: main ( -- )\n  0 Spy 3 fill drop ;\n"
+    ));
     assert!(
         err.contains("`fill` cannot replicate a linear value"),
         "unexpected message: {err}"
@@ -2391,7 +2411,7 @@ fn fill_nullary_variant_seed_of_linear_enum_compiles() {
     // payload to replicate. The disposal half (dropping the array) is
     // Phase 4's synthesized array destructor.
     let src = format!(
-        "{SPY_DEF}type: Opt | None | Some val Spy ;\n: main ( -- )\n  None 3 fill drop ;\n"
+        "{SPY_DEF_SILENT}type: Opt | None | Some val Spy ;\n: main ( -- )\n  None 3 fill drop ;\n"
     );
     let tokens = lexer::lex(&src).expect("lexing should succeed");
     let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
@@ -2404,7 +2424,7 @@ fn fill_non_nullary_linear_seed_rejected_with_tabulate_hint() {
     // seed value is an `Opt` (linear) but `variant_idx` is `None` (the
     // constructor has inputs), so `fill` rejects with R10's diagnostic.
     let err = linear_check_error(&format!(
-        "{SPY_DEF}type: Opt | None | Some val Spy ;\n: main ( -- )\n  0 Spy Some 3 fill drop ;\n"
+        "{SPY_DEF_SILENT}type: Opt | None | Some val Spy ;\n: main ( -- )\n  0 Spy Some 3 fill drop ;\n"
     ));
     assert!(
         err.contains("`fill` cannot replicate a linear value"),
@@ -2420,7 +2440,7 @@ fn linear_array_element_in_word_signature_is_ok() {
     // The synthesized array destructor (Phase 4) disposes each element,
     // so this now compiles.
     let tokens = lexer::lex(&format!(
-        "{SPY_DEF}: w ( array[Spy 2] -- )\n  | a | a drop ;\n: main ( -- ) 0 . ;\n"
+        "{SPY_DEF_SILENT}: w ( array[Spy 2] -- )\n  | a | a drop ;\n: main ( -- ) 0 drop ;\n"
     ))
     .expect("lexing should succeed");
     let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
@@ -2432,7 +2452,7 @@ fn linear_array_element_in_struct_field_is_ok() {
     // Same boundary, reached via a `type:` field declaration instead of
     // a word signature.
     let tokens = lexer::lex(&format!(
-        "{SPY_DEF}type: Bag xs array[Spy 2] ;\n: main ( -- ) 0 . ;\n"
+        "{SPY_DEF_SILENT}type: Bag xs array[Spy 2] ;\n: main ( -- ) 0 drop ;\n"
     ))
     .expect("lexing should succeed");
     let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
@@ -2446,7 +2466,7 @@ fn linear_array_element_via_linear_struct_in_struct_field_is_ok() {
     // The array destructor calls `emit_drop` on each `Holds`, which
     // dispatches to `Holds`'s struct destructor.
     let tokens = lexer::lex(&format!(
-        "{SPY_DEF}type: Holds s Spy ;\ntype: Arr a array[Holds 2] ;\n: main ( -- ) 0 . ;\n"
+        "{SPY_DEF_SILENT}type: Holds s Spy ;\ntype: Arr a array[Holds 2] ;\n: main ( -- ) 0 drop ;\n"
     ))
     .expect("lexing should succeed");
     let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
@@ -2458,7 +2478,7 @@ fn linear_array_element_via_linear_struct_in_word_signature_is_ok() {
     // Same indirection, reached via a word signature slot instead of
     // a struct field.
     let tokens = lexer::lex(&format!(
-        "{SPY_DEF}type: Holds s Spy ;\n: w ( array[Holds 2] -- )\n  | a | a drop ;\n: main ( -- ) 0 . ;\n"
+        "{SPY_DEF_SILENT}type: Holds s Spy ;\n: w ( array[Holds 2] -- )\n  | a | a drop ;\n: main ( -- ) 0 drop ;\n"
     ))
     .expect("lexing should succeed");
     let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
@@ -2482,6 +2502,14 @@ fn run_owned_golden(tag: &str, src: &str) -> String {
 }
 
 fn run_owned_traced_golden(tag: &str, src: &str) -> String {
+    // A drop-override's DOT output writes via unbuffered `write(2)` while
+    // the alloc/free trace rides libc's buffered stdio (flushed at exit),
+    // so their relative order in the captured transcript reflects buffer
+    // sizes, not emission order (see R17a). A trace-heavier golden than any
+    // fixture here risks the reverse hazard too: enough trace lines to fill
+    // stdio's ~4 KiB buffer mid-run would force an interleaving flush,
+    // scrambling this transcript's byte content, not just its apparent
+    // order.
     let path = std::env::temp_dir().join(format!("sooth-owned-{tag}-{}.sth", std::process::id()));
     common::write_fixture(&path, src).expect("writing temp source should succeed");
     let (stdout, code) = run_and_capture_traced_stdout(path.to_str().unwrap());
@@ -2542,7 +2570,7 @@ fn owned_unwrap_returns_payload_and_frees_once() {
     // exactly one `alloc` (construct) then one `free` (unwrap) at the scalar
     // `i64` payload's 8-byte size.
     let stdout = run_owned_traced_golden("unwrap-scalar", ": main ( -- )\n  5 ^ ^> . ;\n");
-    assert_eq!(stdout, "alloc 8\nfree 8\n5\n");
+    assert_eq!(stdout, "5\nalloc 8\nfree 8\n");
 }
 
 #[test]
@@ -2551,7 +2579,7 @@ fn owned_unwrap_sub_word_scalar_is_width_exact() {
     // padded to a word; `^u8` allocates and frees exactly 1 byte, unlike the
     // 8-byte `^i64` case above.
     let stdout = run_owned_traced_golden("unwrap-u8", ": main ( -- )\n  200 >u8 ^ ^> . ;\n");
-    assert_eq!(stdout, "alloc 1\nfree 1\n200\n");
+    assert_eq!(stdout, "200\nalloc 1\nfree 1\n");
 }
 
 #[test]
@@ -2580,7 +2608,7 @@ fn owned_unwrap_aggregate_copies_out_before_free() {
 fn peek_owned_linear_payload_is_error() {
     // Criterion 7: `^|>` on a linear payload is a compile error naming the
     // payload's type (R11/R14); `^Spy` proves it via a linear payload.
-    let err = linear_check_error(&format!("{SPY_DEF}: main ( -- )\n  7 Spy ^ ^|> ;\n"));
+    let err = linear_check_error(&format!("{SPY_DEF_SILENT}: main ( -- )\n  7 Spy ^ ^|> ;\n"));
     assert!(err.contains("cannot `^|>`"), "unexpected message: {err}");
     assert!(err.contains("`Spy`"), "unexpected message: {err}");
 }
@@ -2671,33 +2699,47 @@ fn peek_owned_copy_payload_keeps_cell_live() {
         "peek-twice",
         ": main ( -- )\n  5 ^ ^|> swap ^|> rot dup . eq . drop ;\n",
     );
-    assert_eq!(stdout, "alloc 8\n5\nTrue\nfree 8\n");
+    assert_eq!(stdout, "5\ntrue\nalloc 8\nfree 8\n");
 }
 
 #[test]
 fn owned_linear_payload_frees_before_dropping_payload() {
-    // Criterion 8: `^Spy` disposal. The transcript is `free 8` *then*
-    // `drop 7`, one stdout stream so the order is real (R8: the cell frees
-    // before the payload's own destructor runs).
+    // Criterion 8: `^Spy` disposal produces one `drop` (the payload's own
+    // destructor, via the Spy override) and one `alloc`/`free` pair (the
+    // cell), each at the right operand (`drop 7`, `alloc 8`/`free 8`). This
+    // does *not* witness R8's ordering claim (cell frees before the
+    // payload's destructor runs): the `drop` line goes out via the Spy
+    // override's unbuffered `write(2)`, while the `alloc`/`free` trace lines
+    // ride libc's buffered stdio, flushed at exit -- two independently
+    // buffered streams, so their interleaving in this transcript is an
+    // artifact of buffer sizes, not a fact about emission order. R8's real
+    // witness is `synthesized_cell_destructor_frees_before_dropping_a_linear_scalar_payload`
+    // in `src/ir/destructors.rs`, which asserts the order directly on the
+    // synthesized destructor's instructions.
     let stdout = run_owned_traced_golden(
         "spy-payload",
         &format!("{SPY_DEF}: main ( -- )\n  7 Spy ^ drop ;\n"),
     );
-    assert_eq!(stdout, "alloc 8\nfree 8\ndrop 7\n");
+    assert_eq!(stdout, "drop 7\nalloc 8\nfree 8\n");
 }
 
 #[test]
 fn owned_aggregate_payload_frees_before_dropping_fields() {
-    // Criterion 6: R8 ordering for an aggregate payload (a struct with a
-    // linear field) held in a cell, the `Blit`-into-a-frame-slot arm of
-    // `load_owned_payload`, where freeing early is most likely to bite. The
-    // cell frees (`free 16`) before the copied-out struct's own destructor
-    // drops its linear field (`drop 1`).
+    // Criterion 6: an aggregate payload (a struct with a linear field) held
+    // in a cell, the `Blit`-into-a-frame-slot arm of `load_owned_payload`.
+    // Pins the transcript content (one `drop 1` for the field, one
+    // `alloc 16`/`free 16` pair for the cell), not their relative order:
+    // as in the scalar case above, `drop 1` goes out via the Spy override's
+    // unbuffered `write(2)` while the alloc/free trace rides buffered stdio
+    // flushed at exit, so the two streams' interleaving here is unobservable
+    // as an ordering claim. R8's real witness for this aggregate path is
+    // `synthesized_cell_destructor_frees_before_dropping_a_linear_aggregate_payload`
+    // in `src/ir/destructors.rs`.
     let stdout = run_owned_traced_golden(
         "aggregate-payload",
         &format!("{SPY_DEF}type: Holds a Spy b i64 ;\n: main ( -- )\n  1 Spy 2 Holds ^ drop ;\n"),
     );
-    assert_eq!(stdout, "alloc 16\nfree 16\ndrop 1\n");
+    assert_eq!(stdout, "drop 1\nalloc 16\nfree 16\n");
 }
 
 #[test]
@@ -2760,7 +2802,7 @@ fn owned_byte_buffer_peek_reads_and_frees_once() {
         "byte-buffer",
         ": main ( -- )\n  7 >u8 4 fill ^ ^|> | arr |\n  &arr 0 &> @ .\n  drop ;\n",
     );
-    assert_eq!(stdout, "alloc 4\n7\nfree 4\n");
+    assert_eq!(stdout, "7\nalloc 4\nfree 4\n");
 }
 
 #[test]
@@ -2773,7 +2815,7 @@ fn peek_aggregate_does_not_alias_cell() {
         "peek-no-alias",
         ": main ( -- )\n  9 >u8 4 fill ^ ^|> | arr |\n  drop\n  &arr 0 &> @ . ;\n",
     );
-    assert_eq!(stdout, "alloc 4\nfree 4\n9\n");
+    assert_eq!(stdout, "9\nalloc 4\nfree 4\n");
 }
 
 #[test]
@@ -2871,7 +2913,7 @@ fn recursive_list_disposes_in_expected_order() {
     );
     assert_eq!(
         stdout,
-        "alloc 32\nalloc 32\nalloc 32\n1\ndrop 1\nfree 32\ndrop 2\nfree 32\ndrop 3\nfree 32\n"
+        "1\ndrop 1\ndrop 2\ndrop 3\nalloc 32\nalloc 32\nalloc 32\nfree 32\nfree 32\nfree 32\n"
     );
 }
 
@@ -2895,7 +2937,7 @@ fn recursive_disposal_is_pre_order() {
     );
     assert_eq!(
         stdout,
-        "alloc 24\nalloc 24\nalloc 24\ndrop 1\nfree 24\ndrop 2\nfree 24\ndrop 3\nfree 24\n"
+        "drop 1\ndrop 2\ndrop 3\nalloc 24\nalloc 24\nalloc 24\nfree 24\nfree 24\nfree 24\n"
     );
 }
 
@@ -2921,8 +2963,19 @@ fn recursive_destructor_reads_node_before_overwriting_slot() {
     );
     assert_eq!(
         stdout,
-        "alloc 32\nalloc 32\nalloc 32\n\
-drop 1\ndrop 2\nfree 32\ndrop 3\ndrop 4\nfree 32\ndrop 5\ndrop 6\nfree 32\n"
+        "\
+drop 1\n\
+drop 2\n\
+drop 3\n\
+drop 4\n\
+drop 5\n\
+drop 6\n\
+alloc 32\n\
+alloc 32\n\
+alloc 32\n\
+free 32\n\
+free 32\n\
+free 32\n"
     );
 }
 
@@ -2951,9 +3004,18 @@ type: Holder c ^Payload ;\n\
     );
     assert_eq!(
         stdout,
-        "alloc 8\nfree 8\ndrop 1\n\
-alloc 8\nalloc 8\nfree 8\nfree 8\ndrop 2\n\
-alloc 16\nfree 16\ndrop 3\n"
+        "\
+drop 1\n\
+drop 2\n\
+drop 3\n\
+alloc 8\n\
+free 8\n\
+alloc 8\n\
+alloc 8\n\
+free 8\n\
+free 8\n\
+alloc 16\n\
+free 16\n"
     );
 }
 
@@ -2983,8 +3045,21 @@ type: Node | End | More good ^Node bait ^Bait tag Spy ;\n\
     );
     assert_eq!(
         stdout,
-        "alloc 32\nalloc 8\nalloc 8\nalloc 32\nalloc 8\nalloc 8\n\
-free 8\nfree 8\ndrop 2\nfree 32\nfree 8\nfree 8\ndrop 1\nfree 32\n"
+        "\
+drop 2\n\
+drop 1\n\
+alloc 32\n\
+alloc 8\n\
+alloc 8\n\
+alloc 32\n\
+alloc 8\n\
+alloc 8\n\
+free 8\n\
+free 8\n\
+free 32\n\
+free 8\n\
+free 8\n\
+free 32\n"
     );
 }
 
@@ -3006,8 +3081,19 @@ type: R2 | End2 | More2 tag Spy next ^R2 ;\n\
     );
     assert_eq!(
         stdout,
-        "alloc 24\nalloc 24\ndrop 1\nfree 24\ndrop 3\nfree 24\n\
-alloc 24\nalloc 24\ndrop 2\nfree 24\ndrop 4\nfree 24\n"
+        "\
+drop 1\n\
+drop 3\n\
+drop 2\n\
+drop 4\n\
+alloc 24\n\
+alloc 24\n\
+free 24\n\
+free 24\n\
+alloc 24\n\
+alloc 24\n\
+free 24\n\
+free 24\n"
     );
 }
 
@@ -3062,11 +3148,42 @@ fn recursive_tree_builds_and_disposes() {
     );
     assert_eq!(
         stdout,
-        "alloc 32\nalloc 32\nalloc 32\nalloc 32\nalloc 32\nalloc 32\nalloc 32\n\
-alloc 32\nalloc 32\nalloc 32\nalloc 32\nalloc 32\nalloc 32\nalloc 32\n\
-drop 1\nfree 32\ndrop 2\nfree 32\ndrop 4\nfree 32\nfree 32\nfree 32\n\
-drop 5\nfree 32\nfree 32\nfree 32\ndrop 3\nfree 32\ndrop 6\nfree 32\nfree 32\n\
-free 32\ndrop 7\nfree 32\nfree 32\n"
+        "\
+drop 1\n\
+drop 2\n\
+drop 4\n\
+drop 5\n\
+drop 3\n\
+drop 6\n\
+drop 7\n\
+alloc 32\n\
+alloc 32\n\
+alloc 32\n\
+alloc 32\n\
+alloc 32\n\
+alloc 32\n\
+alloc 32\n\
+alloc 32\n\
+alloc 32\n\
+alloc 32\n\
+alloc 32\n\
+alloc 32\n\
+alloc 32\n\
+alloc 32\n\
+free 32\n\
+free 32\n\
+free 32\n\
+free 32\n\
+free 32\n\
+free 32\n\
+free 32\n\
+free 32\n\
+free 32\n\
+free 32\n\
+free 32\n\
+free 32\n\
+free 32\n\
+free 32\n"
     );
 }
 
@@ -3092,8 +3209,22 @@ fn multi_child_destructor_loops_on_last_recursive_field() {
     );
     assert_eq!(
         stdout,
-        "alloc 32\nalloc 32\nalloc 32\nalloc 32\nalloc 32\nalloc 32\n\
-drop 1\nfree 32\ndrop 2\nfree 32\nfree 32\nfree 32\ndrop 3\nfree 32\nfree 32\n"
+        "\
+drop 1\n\
+drop 2\n\
+drop 3\n\
+alloc 32\n\
+alloc 32\n\
+alloc 32\n\
+alloc 32\n\
+alloc 32\n\
+alloc 32\n\
+free 32\n\
+free 32\n\
+free 32\n\
+free 32\n\
+free 32\n\
+free 32\n"
     );
 }
 
@@ -3152,9 +3283,25 @@ type: B | BNil | BCons tag Spy next ^A ;\n\
     );
     assert_eq!(
         stdout,
-        "alloc 24\nalloc 24\nalloc 24\nalloc 24\nalloc 24\nalloc 24\n\
-drop 1\nfree 24\ndrop 1\nfree 24\ndrop 2\nfree 24\ndrop 2\nfree 24\n\
-drop 3\nfree 24\ndrop 3\nfree 24\n"
+        "\
+drop 1\n\
+drop 1\n\
+drop 2\n\
+drop 2\n\
+drop 3\n\
+drop 3\n\
+alloc 24\n\
+alloc 24\n\
+alloc 24\n\
+alloc 24\n\
+alloc 24\n\
+alloc 24\n\
+free 24\n\
+free 24\n\
+free 24\n\
+free 24\n\
+free 24\n\
+free 24\n"
     );
 
     let deep_src = format!(
@@ -3252,8 +3399,16 @@ type: List | Nil | Cons w Wrap ;\n\
     );
     assert_eq!(
         stdout,
-        "alloc 24\nalloc 24\nalloc 24\n\
-drop 1\nfree 24\ndrop 2\nfree 24\ndrop 3\nfree 24\n"
+        "\
+drop 1\n\
+drop 2\n\
+drop 3\n\
+alloc 24\n\
+alloc 24\n\
+alloc 24\n\
+free 24\n\
+free 24\n\
+free 24\n"
     );
 }
 
@@ -3279,8 +3434,22 @@ fn double_cell_recursive_list_disposes_in_expected_order() {
     );
     assert_eq!(
         stdout,
-        "alloc 24\nalloc 8\nalloc 24\nalloc 8\nalloc 24\nalloc 8\n\
-drop 1\nfree 8\nfree 24\ndrop 2\nfree 8\nfree 24\ndrop 3\nfree 8\nfree 24\n"
+        "\
+drop 1\n\
+drop 2\n\
+drop 3\n\
+alloc 24\n\
+alloc 8\n\
+alloc 24\n\
+alloc 8\n\
+alloc 24\n\
+alloc 8\n\
+free 8\n\
+free 24\n\
+free 8\n\
+free 24\n\
+free 8\n\
+free 24\n"
     );
 }
 
@@ -3317,10 +3486,25 @@ fn mutual_recursive_chain_disposes_from_both_directions() {
     );
     assert_eq!(
         stdout,
-        "alloc 24\nalloc 24\nalloc 24\nalloc 24\nalloc 24\nalloc 24\n\
-drop 10\nfree 24\ndrop 1\nfree 24\n\
-drop 20\nfree 24\ndrop 2\nfree 24\n\
-drop 30\nfree 24\ndrop 3\nfree 24\n"
+        "\
+drop 10\n\
+drop 1\n\
+drop 20\n\
+drop 2\n\
+drop 30\n\
+drop 3\n\
+alloc 24\n\
+alloc 24\n\
+alloc 24\n\
+alloc 24\n\
+alloc 24\n\
+alloc 24\n\
+free 24\n\
+free 24\n\
+free 24\n\
+free 24\n\
+free 24\n\
+free 24\n"
     );
 
     // Rooted at `B`: an extra head node (tag 0) wrapping the same chain, so
@@ -3336,11 +3520,28 @@ drop 30\nfree 24\ndrop 3\nfree 24\n"
     );
     assert_eq!(
         stdout,
-        "alloc 24\nalloc 24\nalloc 24\nalloc 24\nalloc 24\nalloc 24\nalloc 24\n\
-drop 0\nfree 24\n\
-drop 10\nfree 24\ndrop 1\nfree 24\n\
-drop 20\nfree 24\ndrop 2\nfree 24\n\
-drop 30\nfree 24\ndrop 3\nfree 24\n"
+        "\
+drop 0\n\
+drop 10\n\
+drop 1\n\
+drop 20\n\
+drop 2\n\
+drop 30\n\
+drop 3\n\
+alloc 24\n\
+alloc 24\n\
+alloc 24\n\
+alloc 24\n\
+alloc 24\n\
+alloc 24\n\
+alloc 24\n\
+free 24\n\
+free 24\n\
+free 24\n\
+free 24\n\
+free 24\n\
+free 24\n\
+free 24\n"
     );
 }
 
@@ -3366,8 +3567,19 @@ fn multi_variant_recursive_enum_disposes_in_expected_order() {
     );
     assert_eq!(
         stdout,
-        "alloc 24\nalloc 24\nalloc 24\nalloc 24\n\
-drop 1\nfree 24\ndrop 2\nfree 24\ndrop 3\nfree 24\ndrop 4\nfree 24\n"
+        "\
+drop 1\n\
+drop 2\n\
+drop 3\n\
+drop 4\n\
+alloc 24\n\
+alloc 24\n\
+alloc 24\n\
+alloc 24\n\
+free 24\n\
+free 24\n\
+free 24\n\
+free 24\n"
     );
 }
 
@@ -3443,8 +3655,16 @@ type: B y Spy z ^A ;\n\
 : main ( -- )\n  \
   1 Spy 2 Spy 3 Spy ANil ^ B ^ ACons ^ B drop ;\n"
     );
-    let expected = "alloc 24\nalloc 16\nalloc 24\n\
-drop 1\nfree 24\ndrop 2\nfree 16\ndrop 3\nfree 24\n";
+    let expected = "\
+drop 1\n\
+drop 2\n\
+drop 3\n\
+alloc 24\n\
+alloc 16\n\
+alloc 24\n\
+free 24\n\
+free 16\n\
+free 24\n";
     assert_eq!(
         run_owned_traced_golden("mid-dispatch-base-first", &base_first),
         expected
@@ -3737,7 +3957,7 @@ fn overloads_of_a_combinator_name_are_both_reachable() {
 : apply inline ( Bool [ Bool -- Bool ] -- Bool ) call ;\n\
 : main ( -- ) 5 [ 2 mul ] apply . True [ not ] apply . ;\n";
     let (stdout, code) = run_overload_src("combinator-overload", src);
-    assert_eq!(stdout, "10\nFalse\n");
+    assert_eq!(stdout, "10\nfalse\n");
     assert_eq!(code, 0);
 }
 
@@ -3867,7 +4087,7 @@ fn overloads_of_an_ordinary_word_name_are_both_reachable() {
 : show ( Bool -- ) . ;\n\
 : main ( -- ) 42 show True show ;\n";
     let (stdout, code) = run_overload_src("user-name-overloads", src);
-    assert_eq!(stdout, "42\nTrue\n");
+    assert_eq!(stdout, "42\ntrue\n");
     assert_eq!(code, 0);
 }
 
@@ -3953,7 +4173,7 @@ fn overload_vec2_lt_dispatches_to_user_word() {
 : lt ( Vec2 Vec2 -- Bool ) | a b | &a &x @ &b &x @ add &a &y @ &b &y @ add add 0 gt ;\n\
 : main ( -- ) -3 -4 Vec2 -1 -2 Vec2 lt . ;\n";
     let (stdout, code) = run_overload_src("lt", src);
-    assert_eq!(stdout, "False\n");
+    assert_eq!(stdout, "false\n");
     assert_eq!(code, 0);
 }
 
@@ -3978,11 +4198,16 @@ fn overload_ending_in_its_own_builtin_name_calls_the_builtin_not_itself() {
 }
 
 #[test]
-fn print_overload_ending_in_its_own_builtin_name_compiles_and_prints() {
+fn print_overload_ending_in_its_own_name_compiles_and_prints() {
     // The same defect on `.`, the shape the slice's own review first hit: a
     // `Vec2` print overload naturally ends by printing its last field with
-    // the builtin `.`, which is also its own name.
-    let src = "type: Vec2 x i64 y i64 ;\n\
+    // the `i64` dot, which is also its own name. P7.S7d retired the print
+    // intrinsic, so the sibling candidate is a second *user* overload here
+    // and the hosted dots come in qualified-only -- a selective `| . |`
+    // beside a local `.` declaration is a hard collision.
+    let src = "import: hosted::show hshow ;\n\
+type: Vec2 x i64 y i64 ;\n\
+: . ( i64 -- ) hshow::. ;\n\
 : . ( Vec2 -- ) | v | &v &x @ . &v &y @ . ;\n\
 : main ( -- ) 3 4 Vec2 . ;\n";
     let (stdout, code) = run_overload_src("print-tail-self-name", src);

@@ -4,11 +4,9 @@
 \ line per module. Nothing is implicit: a program that wants none of this
 \ imports none of it.
 \
-\ One of `core::bool`'s names does not appear here. The bool `.` overload
-\ cannot: an operator overload's candidate lookup considers the calling
-\ module and the module it selectively imported the name from, one hop, so a
-\ hub in between hides the declaring module. A program that prints a `Bool`
-\ imports `core::bool` directly; everything else comes through here.
+\ Printing is not here and cannot be: `.` is `hosted::show`'s vocabulary, one
+\ concrete dot per printable type over `core::show`'s `Show` trait, and this
+\ is a `core` hub. A program that prints imports `hosted::show` directly.
 import: intrinsics | drop | ;
 import: self::bool | if unless Bool False True | ;
 import: self::cmp | Ord Ordering Less Equal Greater eq lt gt lte gte ne | ;
