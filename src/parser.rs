@@ -18,7 +18,7 @@
 use crate::ast::{
     ground_member_poly, ground_member_type, intern_array_type, is_name_dispatched_builtin,
     ArrayDecl, Bound, EnumDecl, ExternDecl, GenericTypes, GlobalEntry, GlobalMode, ImplDecl,
-    ImplTarget, Import, ImportAnchor, ImportBinding, ImportTarget, IntrinsicVisibility, Len,
+    ImplTarget, Import, ImportAnchor, ImportBinding, ImportTarget, IntrinsicVisibility, Kind, Len,
     Module, ModuleInfo, ModuleName, MutRegistries, OwnedCellDecl, PolySig, PolyType, QuotAnnot,
     RefDecl, SliceDecl, Span, StackEffect, StaticDecl, StaticInit, StructDecl, Term, TermKind,
     TraitDecl, TraitId, TraitKind, TraitMember, Type, TypedSlot, VariantDecl, VariantTag,
@@ -1278,7 +1278,13 @@ pub fn scan_exports(tokens: &[(Token, Span)]) -> Result<Vec<(String, Span)>, Str
 /// diagnostics), and the `type:` keyword's span. Registered as a placeholder
 /// by `parse_generic_typedefs`' stage (a), then handed back to stage (b) to
 /// parse that header's own field/variant list against.
-type GenericHeader = (String, Vec<(String, Span)>, Vec<(String, Span)>, Span);
+type GenericHeader = (
+    String,
+    Vec<(String, Span)>,
+    Vec<Kind>,
+    Vec<(String, Span)>,
+    Span,
+);
 
 /// A parsed polymorphic type before folding to `PolyType`: a concrete type, a
 /// type variable (already interned to its id), or an array whose element
@@ -1333,21 +1339,10 @@ enum RawLen {
     Var(u32),
 }
 
-/// P7.S6a (R1): the kind a `'`-name was bound as -- `Star` (a type
-/// variable) or `Len` (a length variable). Word signatures used a
-/// parser-private `VarKind { Ty, Len }` for exactly this distinction before
-/// this slice; `Kind` replaces it in place (`Ty` renamed `Star`, matching the
-/// implicit "no kind" `ty_var_names` already assumed) so the new `type:`/
-/// `trait:` header bracket path (`parse_header_bracket`) can share it rather
-/// than inventing a second kind type. Stays `{ Star, Len }`: no `Const`
-/// (non-length const kinds) and no `Arrow` (higher-kinded), which
-/// DESIGN.md's "dependent types: never" and P7b respectively keep out.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Kind {
-    Star,
-    Len,
-}
-
+/// `Kind` is `ast::Kind` (P7b.S1 promotion, R1): the parser no longer
+/// defines it, since a variable's kind must now travel past the parser (an
+/// `Arrow`-kinded variable is still a *type* variable, so the checker needs
+/// to see it too).
 /// Accumulates a polymorphic signature's variables as an effect is parsed
 /// left-to-right. Variable id spaces are per-signature and assigned in
 /// binding (first-mention) order; the `*_names` vectors are the id -> spelling
@@ -1359,6 +1354,11 @@ struct PolyBuilder {
     ty_index: HashMap<String, u32>,
     len_index: HashMap<String, u32>,
     kind: HashMap<String, Kind>,
+    /// P7b.S1 (R2/S1-4): each ty/len var's first-mention span, parallel to
+    /// `ty_names`/`len_names`, retained past `finish` for
+    /// `attach_bracket_bounds`'s annotation-vs-usage conflict diagnostic.
+    ty_var_spans: Vec<Span>,
+    len_var_spans: Vec<Span>,
     row_in: Option<u32>,
     row_out: Option<u32>,
     /// Slice 10a (R7): the row-name id table, shared by the top-level row
@@ -1478,6 +1478,10 @@ impl PolyBuilder {
         let id = self.ty_names.len() as u32;
         self.ty_names.push(name.to_string());
         self.ty_index.insert(name.to_string(), id);
+        // P7b.S1 (R2/S1-4): the first-mention span, retained past `finish`
+        // so `attach_bracket_bounds` can report an annotation-vs-usage
+        // conflict (S1-15.c) with both spans.
+        self.ty_var_spans.push(span);
         Ok((id, true))
     }
 
@@ -1494,6 +1498,7 @@ impl PolyBuilder {
         let id = self.len_names.len() as u32;
         self.len_names.push(name.to_string());
         self.len_index.insert(name.to_string(), id);
+        self.len_var_spans.push(span);
         Ok(id)
     }
 
@@ -1508,8 +1513,14 @@ impl PolyBuilder {
             // signature is built (so ids stay effect-derived). Nothing an
             // effect can contain declares one.
             bounds: Vec::new(),
+            // P7b.S1 (R2): a bare mention in an effect only ever establishes
+            // `Star` this slice -- an application head's `Arrow` requirement
+            // (S1-3) arrives with Phase 2's parse production.
+            ty_kinds: vec![Kind::Star; self.ty_names.len()],
             ty_var_names: self.ty_names,
+            ty_var_spans: self.ty_var_spans,
             len_var_names: self.len_names,
+            len_var_spans: self.len_var_spans,
             row_var_names: self.row_names,
         }
     }
@@ -1721,14 +1732,106 @@ fn header_var_kind_conflict_error(name: &str, decl_name: &str, span: Span) -> St
     )
 }
 
-/// P7.S6a (R2): a header-bracket kind annotation naming anything but `Len`
-/// (`'N: Foo`). No other kind is spellable this slice (see `Kind`'s own doc
-/// comment).
+/// P7.S6a (R2), widened P7b.S1 (R1/S1-9): a header-bracket kind annotation
+/// naming anything but `*`, `Len`, or an n-ary arrow of those (`'N: Foo`).
 fn header_bracket_unknown_kind_error(found: &str, span: Span) -> String {
     format!(
-        "error: unknown kind annotation `{found}` at line {}, col {} (the only spellable kind is `Len`, e.g. `'N: Len`)",
+        "error: unknown kind annotation `{found}` at line {}, col {} (a kind is `*`, `Len`, or an arrow of those, e.g. `'N: Len`, `'F: * -> *`)",
         span.line, span.col
     )
+}
+
+/// P7b.S1 (R2/R5, header-field twin of S1-15.a/e): a `type:`/`trait:`
+/// header field bare-mentioning a variable the header declared
+/// higher-kinded (`type: Box['F: * -> *] ... f 'F ...`). A bare field
+/// position is always a `Star` requirement; only Phase 2's application
+/// grammar can satisfy an `Arrow`-kinded variable.
+fn header_field_kind_conflict_error(
+    decl_name: &str,
+    name: &str,
+    span: Span,
+    declared_kind: &str,
+) -> String {
+    format!(
+        "error: `{name}` at line {}, col {} is used as a plain type in `{decl_name}`'s field but is declared kind `{declared_kind}` in its header",
+        span.line, span.col
+    )
+}
+
+/// P7b.S1 (R2/S1-4/S1-15.c): a bracket kind annotation (`'F: * -> *`)
+/// conflicting with how the signature's own effect already used the
+/// variable -- both spans, the usage mention and the annotation, per the
+/// house diagnostic style (`var_kind_conflict_error`).
+fn var_kind_annotation_conflict_error(
+    name: &str,
+    usage_span: Span,
+    usage_desc: &str,
+    annotation_span: Span,
+    annotation_kind: &str,
+) -> String {
+    format!(
+        "error: type variable `{name}` at line {}, col {} is used as {usage_desc} but is annotated `{annotation_kind}` at line {}, col {}",
+        usage_span.line, usage_span.col, annotation_span.line, annotation_span.col
+    )
+}
+
+/// P7b.S1 (R1/S1-14 precursor): render a `Kind` the way a kind expression is
+/// spelled in source (`*`, `Len`, `* -> Len -> *`).
+fn kind_str(kind: &Kind) -> String {
+    match kind {
+        Kind::Star => "*".to_string(),
+        Kind::Len => "Len".to_string(),
+        Kind::Arrow { domains, result } => {
+            let mut parts: Vec<String> = domains.iter().map(kind_str).collect();
+            parts.push(kind_str(result));
+            parts.join(" -> ")
+        }
+    }
+}
+
+/// P7b.S1 (R1/S1-2/S1-9): one atom of a kind expression -- `*` or `Len`.
+/// `unknown_kind_error` lets each of the two call sites
+/// (`parse_optional_bound_bracket`, `parse_header_bracket`) report in its own
+/// established voice (`unknown_capability_error` vs
+/// `header_bracket_unknown_kind_error`).
+fn parse_kind_atom(
+    parser: &mut Parser<'_>,
+    unknown_kind_error: impl Fn(&str, Span) -> String,
+) -> Result<Kind, String> {
+    let (w, span) = parser.expect_word_any_spanned()?;
+    if w == "*" {
+        Ok(Kind::Star)
+    } else if w == LEN_KIND_NAME {
+        Ok(Kind::Len)
+    } else {
+        Err(unknown_kind_error(&w, span))
+    }
+}
+
+/// P7b.S1 (R1/S1-2): a full kind expression -- one atom, or an n-ary arrow
+/// chain (`* -> Len -> *`) folded into `Kind::Arrow { domains, result }`
+/// (the last atom is the result; every earlier atom is a domain). Not
+/// curried (S1-1): Sooth application splits type slots from length slots at
+/// every call site, so `array` is honestly `* -> Len -> *`, a single
+/// two-domain arrow, not `* -> (Len -> *)`.
+fn parse_kind_expr(
+    parser: &mut Parser<'_>,
+    unknown_kind_error: impl Fn(&str, Span) -> String + Copy,
+) -> Result<Kind, String> {
+    let mut atoms = vec![parse_kind_atom(parser, unknown_kind_error)?];
+    while matches!(parser.peek(), Some((Token::Word(w), _)) if w == "->") {
+        parser.pos += 1;
+        atoms.push(parse_kind_atom(parser, unknown_kind_error)?);
+    }
+    if atoms.len() == 1 {
+        Ok(atoms.pop().expect("just pushed"))
+    } else {
+        let result = atoms.pop().expect("len() > 1");
+        Ok(Kind::Arrow {
+            domains: atoms,
+            result: Box::new(result),
+        })
+    }
 }
 
 /// P7.S6a (R2.1): a non-empty header bracket binding zero type variables
@@ -2442,13 +2545,13 @@ impl<'t> Parser<'t> {
     #[allow(clippy::type_complexity)]
     fn parse_optional_bound_bracket(
         &mut self,
-    ) -> Result<Option<Vec<(String, Span, Vec<Bound>, bool)>>, String> {
+    ) -> Result<Option<Vec<(String, Span, Vec<Bound>, Option<Kind>)>>, String> {
         if !matches!(self.peek(), Some((Token::LBracket, _))) {
             return Ok(None);
         }
         let bracket_span = self.peek().map(|(_, s)| *s).unwrap_or_default();
         self.pos += 1; // consume `[`
-        let mut entries: Vec<(String, Span, Vec<Bound>, bool)> = Vec::new();
+        let mut entries: Vec<(String, Span, Vec<Bound>, Option<Kind>)> = Vec::new();
         loop {
             match self.peek() {
                 Some((Token::RBracket, _)) => {
@@ -2475,15 +2578,22 @@ impl<'t> Parser<'t> {
                     if bound_follows && !glued_colon {
                         self.pos += 1;
                     }
-                    let is_len_kind = bound_follows
-                        && matches!(self.peek(), Some((Token::Word(k), _)) if k == LEN_KIND_NAME);
-                    let bounds = if is_len_kind {
-                        self.pos += 1;
-                        Vec::new()
+                    // P7b.S1 (R1/S1-9): a bound position starting with `*` or
+                    // `Len` is a *kind* annotation, not a capability bound --
+                    // routed here, before `parse_capabilities` ever sees it,
+                    // so `*`/`->` never need reserving as capability names
+                    // (they simply never reach that parser).
+                    let starts_kind = bound_follows
+                        && matches!(self.peek(), Some((Token::Word(w), _)) if w == "*" || w == LEN_KIND_NAME);
+                    let (bounds, kind) = if starts_kind {
+                        (
+                            Vec::new(),
+                            Some(parse_kind_expr(self, unknown_capability_error)?),
+                        )
                     } else if bound_follows {
-                        self.parse_capabilities(span, true)?
+                        (self.parse_capabilities(span, true)?, None)
                     } else {
-                        Vec::new()
+                        (Vec::new(), None)
                     };
                     if entries.iter().any(|(n, _, _, _)| n == &name) {
                         return Err(duplicate_generic_ty_var_error(
@@ -2492,7 +2602,7 @@ impl<'t> Parser<'t> {
                             span,
                         ));
                     }
-                    entries.push((name, span, bounds, is_len_kind));
+                    entries.push((name, span, bounds, kind));
                 }
                 Some((tok, span)) => {
                     return Err(bound_bracket_non_var_error(tok, *span));
@@ -2511,35 +2621,89 @@ impl<'t> Parser<'t> {
     /// `sig.ty_var_names`; a name that never appears in the effect is a
     /// located error (it would leave a bound on a variable with no slot).
     ///
-    /// P7.S6a (R2b): an `is_len_kind` entry is a pure validation, not a
-    /// bound -- it looks its name up in `sig.len_var_names` instead, and
-    /// pushes nothing to `sig.bounds`. A word's variable ids are already
-    /// effect-first-mention-derived, so `sig.len_var_names` needs no new
-    /// interning path here: `'N: Len` only confirms a length variable the
-    /// effect itself already bound.
+    /// P7b.S1 (R2/S1-4, widening P7.S6a's R2b): a `Some(kind)` entry is a
+    /// pure validation/annotation, never a bound. The k8 flip (S1-3): a
+    /// bare, unannotated entry (`None`) with no bounds no longer assumes
+    /// `ty_var_names` -- it resolves against whichever of `ty_var_names`/
+    /// `len_var_names` the effect actually used the name as, so an
+    /// unannotated length var (`array['T 'N]` with no `'N: Len`) is accepted
+    /// with its kind inferred from the count position, annotations becoming
+    /// optional-but-available. A `Some(kind)` entry conflicting with the
+    /// effect's own usage (S1-15.c) is a located error carrying both spans:
+    /// the usage mention (`sig.ty_var_spans`/`len_var_spans`) and the
+    /// annotation (`span`).
     fn attach_bracket_bounds(
         &self,
         sig: &mut PolySig,
-        bracket: &[(String, Span, Vec<Bound>, bool)],
+        bracket: &[(String, Span, Vec<Bound>, Option<Kind>)],
         word_name: &str,
     ) -> Result<(), String> {
-        for (name, span, bounds, is_len_kind) in bracket {
-            if *is_len_kind {
-                sig.len_var_names
-                    .iter()
-                    .any(|n| n == name)
-                    .then_some(())
-                    .ok_or_else(|| bracket_len_var_unused_error(name, *span, word_name))?;
-                continue;
-            }
-            let id = sig
-                .ty_var_names
-                .iter()
-                .position(|n| n == name)
-                .ok_or_else(|| bracket_var_unused_error(name, *span, word_name))?
-                as u32;
-            for b in bounds {
-                sig.bounds.push((id, *b));
+        for (name, span, bounds, kind) in bracket {
+            let ty_idx = sig.ty_var_names.iter().position(|n| n == name);
+            let len_idx = sig.len_var_names.iter().position(|n| n == name);
+            match kind {
+                Some(k) => match (k, ty_idx, len_idx) {
+                    (Kind::Len, _, Some(_)) => {}
+                    (Kind::Len, Some(i), None) => {
+                        return Err(var_kind_annotation_conflict_error(
+                            name,
+                            sig.ty_var_spans[i],
+                            "a plain type",
+                            *span,
+                            "Len",
+                        ));
+                    }
+                    (Kind::Len, None, None) => {
+                        return Err(bracket_len_var_unused_error(name, *span, word_name));
+                    }
+                    (Kind::Star, Some(_), None) => {}
+                    (k, Some(i), None) => {
+                        return Err(var_kind_annotation_conflict_error(
+                            name,
+                            sig.ty_var_spans[i],
+                            "a plain type",
+                            *span,
+                            &kind_str(k),
+                        ));
+                    }
+                    (k, None, Some(i)) => {
+                        return Err(var_kind_annotation_conflict_error(
+                            name,
+                            sig.len_var_spans[i],
+                            "a length",
+                            *span,
+                            &kind_str(k),
+                        ));
+                    }
+                    // P7b.S1 (R2/S1-4, Phase 1): an arrow-kind annotation on
+                    // an otherwise-unused header var is presence enough on
+                    // its own -- usage-conflict enforcement (checking the
+                    // annotation against real usage) isn't wired until
+                    // Phase 3, so this can't yet be a conflict, only a
+                    // declaration.
+                    (Kind::Arrow { .. }, None, None) => {}
+                    (_, None, None) => {
+                        return Err(bracket_var_unused_error(name, *span, word_name));
+                    }
+                    // Unreachable: `intern_ty_var`/`intern_len_var` reject a
+                    // name mentioned in both spaces before a signature can
+                    // ever reach here (`var_kind_conflict_error`, X1).
+                    (_, Some(_), Some(_)) => {
+                        return Err(bracket_var_unused_error(name, *span, word_name));
+                    }
+                },
+                None => {
+                    if let Some(i) = ty_idx {
+                        for b in bounds {
+                            sig.bounds.push((i as u32, *b));
+                        }
+                    } else if !bounds.is_empty() || len_idx.is_none() {
+                        return Err(bracket_var_unused_error(name, *span, word_name));
+                    }
+                    // `len_idx.is_some()` with no bounds: the k8 flip -- a
+                    // bare bracket entry confirming a length variable the
+                    // effect already bound, nothing to push.
+                }
             }
         }
         Ok(())
@@ -2978,6 +3142,7 @@ impl<'t> Parser<'t> {
         let pattern = self.raw_to_poly_type(raw)?;
         Ok(ImplTarget {
             pattern,
+            ty_kinds: vec![Kind::Star; builder.ty_names.len()],
             ty_var_names: builder.ty_names,
             len_var_names: builder.len_names,
             bounds: Vec::new(),
@@ -3170,8 +3335,11 @@ impl<'t> Parser<'t> {
                 outputs,
                 row_out: None,
                 bounds: target.bounds.clone(),
+                ty_kinds: target.ty_kinds.clone(),
                 ty_var_names: target.ty_var_names.clone(),
+                ty_var_spans: vec![Span::default(); target.ty_var_names.len()],
                 len_var_names: target.len_var_names.clone(),
+                len_var_spans: vec![Span::default(); target.len_var_names.len()],
                 row_var_names: Vec::new(),
             };
             Ok((
@@ -5180,17 +5348,25 @@ impl<'t> Parser<'t> {
         let (name, _) = self.expect_word_any_spanned()?;
         // `header_is_generic` gates every route here, so the `[` is present.
         let vars = self.parse_header_bracket(&name)?;
+        // P7b.S1 (R1): an `Arrow`-kinded variable is still a *type* variable
+        // (`Kind`'s own doc comment), so it joins `ty_vars`/`ty_kinds`
+        // alongside `Star`, never `len_vars`.
         let ty_vars = vars
             .iter()
-            .filter(|(_, _, k)| *k == Kind::Star)
+            .filter(|(_, _, k)| !matches!(k, Kind::Len))
             .map(|(n, s, _)| (n.clone(), *s))
+            .collect();
+        let ty_kinds = vars
+            .iter()
+            .filter(|(_, _, k)| !matches!(k, Kind::Len))
+            .map(|(_, _, k)| k.clone())
             .collect();
         let len_vars = vars
             .iter()
-            .filter(|(_, _, k)| *k == Kind::Len)
+            .filter(|(_, _, k)| matches!(k, Kind::Len))
             .map(|(n, s, _)| (n.clone(), *s))
             .collect();
-        Ok((name, ty_vars, len_vars, type_span))
+        Ok((name, ty_vars, ty_kinds, len_vars, type_span))
     }
 
     /// One generic variant's field list, mirroring `parse_variant_fields`
@@ -5308,7 +5484,8 @@ impl<'t> Parser<'t> {
                     self.skip_typedef();
                 } else {
                     let is_enum = self.current_typedef_is_enum();
-                    let (name, ty_vars, len_vars, type_span) = self.parse_generic_header()?;
+                    let (name, ty_vars, ty_kinds, len_vars, type_span) =
+                        self.parse_generic_header()?;
                     let ty_var_names = ty_vars.iter().map(|(n, _)| n.clone()).collect();
                     let len_var_names = len_vars.iter().map(|(n, _)| n.clone()).collect();
                     let idx = if is_enum {
@@ -5316,6 +5493,7 @@ impl<'t> Parser<'t> {
                             .push_enum_placeholder(crate::ast::GenericEnumDecl {
                                 name: name.clone(),
                                 ty_var_names,
+                                ty_kinds: ty_kinds.clone(),
                                 len_var_names,
                                 variants: Vec::new(),
                                 span: type_span,
@@ -5326,13 +5504,19 @@ impl<'t> Parser<'t> {
                             .push_struct_placeholder(crate::ast::GenericStructDecl {
                                 name: name.clone(),
                                 ty_var_names,
+                                ty_kinds: ty_kinds.clone(),
                                 len_var_names,
                                 fields: Vec::new(),
                                 span: type_span,
                                 module: self.module,
                             })
                     };
-                    headers.push((is_enum, idx, self.pos, (name, ty_vars, len_vars, type_span)));
+                    headers.push((
+                        is_enum,
+                        idx,
+                        self.pos,
+                        (name, ty_vars, ty_kinds, len_vars, type_span),
+                    ));
                     self.skip_typedef();
                 }
                 i = self.pos;
@@ -5340,7 +5524,7 @@ impl<'t> Parser<'t> {
             }
             i += 1;
         }
-        for (is_enum, idx, pos, (name, ty_vars, len_vars, type_span)) in headers {
+        for (is_enum, idx, pos, (name, ty_vars, _ty_kinds, len_vars, type_span)) in headers {
             self.pos = pos;
             if is_enum {
                 let variants = self
@@ -5696,11 +5880,7 @@ impl<'t> Parser<'t> {
                         self.pos += 1;
                     }
                     let kind = if colon_follows {
-                        let (kind_name, kind_span) = self.expect_word_any_spanned()?;
-                        if kind_name != LEN_KIND_NAME {
-                            return Err(header_bracket_unknown_kind_error(&kind_name, kind_span));
-                        }
-                        Kind::Len
+                        parse_kind_expr(self, header_bracket_unknown_kind_error)?
                     } else {
                         Kind::Star
                     };
@@ -5721,7 +5901,10 @@ impl<'t> Parser<'t> {
         if vars.is_empty() {
             return Err(empty_header_bracket_error(decl_name, bracket_span));
         }
-        if !vars.iter().any(|(_, _, k)| *k == Kind::Star) {
+        // P7b.S1 (R1): an `Arrow`-kinded variable is still a *type*
+        // variable (`Kind`'s own doc comment), so it satisfies this check
+        // exactly as `Star` does; only an all-`Len` bracket is rejected.
+        if !vars.iter().any(|(_, _, k)| !matches!(k, Kind::Len)) {
             return Err(header_bracket_no_type_variable_error(
                 decl_name,
                 bracket_span,
@@ -5986,7 +6169,42 @@ impl<'t> Parser<'t> {
             .position(|(n, _)| n == name)
             .ok_or_else(|| unbound_generic_ty_var_error(name, decl_name, span))?;
         used[idx] = true;
+        // P7b.S1 (R2/S1-5): a bare field mention is always a `Star`
+        // requirement -- record it against the declaration's own per-decl
+        // kind side table (the header's declared kind, published as
+        // `ty_kinds`) and reject a mismatch (the header-field twin of
+        // S1-15.a/e): the header can now declare `'F` higher-kinded
+        // (`type: Box['F: * -> *] ...`, S1-9), but a bare field position can
+        // only ever host a `Star`-kinded variable until Phase 2's
+        // application grammar lands.
+        if let Some(kind) = self.header_ty_var_kind(decl_name, idx) {
+            if *kind != Kind::Star {
+                return Err(header_field_kind_conflict_error(
+                    decl_name,
+                    name,
+                    span,
+                    &kind_str(kind),
+                ));
+            }
+        }
         Ok(idx as u32)
+    }
+
+    /// P7b.S1 (R5): the declared kind of ty-var `idx` in `decl_name`'s own
+    /// header (struct or enum, whichever this parser's `self.generics`
+    /// already has a placeholder for at `self.module` -- registered by
+    /// stage (a) of `parse_generic_typedefs` before any field parses).
+    /// `None` when the header itself cannot be found (a unit test calling
+    /// this parser with no registry), in which case the kind conflict check
+    /// is simply skipped.
+    fn header_ty_var_kind(&self, decl_name: &str, idx: usize) -> Option<&Kind> {
+        if let Some(sidx) = self.generics.find_struct(decl_name, self.module) {
+            return self.generics.structs[sidx].ty_kinds.get(idx);
+        }
+        if let Some(eidx) = self.generics.find_enum(decl_name, self.module) {
+            return self.generics.enums[eidx].ty_kinds.get(idx);
+        }
+        None
     }
 
     /// P7.S6a (R2a): the length-path twin of `resolve_field_ty_var`. Unlike a
@@ -7524,6 +7742,7 @@ mod tests {
         generics.enums.push(crate::ast::GenericEnumDecl {
             name: "Shape".to_string(),
             ty_var_names: vec!["T".to_string()],
+            ty_kinds: Vec::new(),
             len_var_names: vec![],
             variants: vec![crate::ast::GenericVariantDecl {
                 name: "Circle".to_string(),
@@ -11670,7 +11889,7 @@ mod tests {
         let vars = header_bracket_vars("['T 'N: Len]").unwrap();
         assert_eq!(
             vars.iter()
-                .map(|(n, _, k)| (n.clone(), *k))
+                .map(|(n, _, k)| (n.clone(), k.clone()))
                 .collect::<Vec<_>>(),
             vec![
                 ("'T".to_string(), Kind::Star),
@@ -11707,6 +11926,79 @@ mod tests {
     fn parse_header_bracket_length_only_is_error() {
         let err = header_bracket_vars("['N: Len]").unwrap_err();
         assert!(err.contains("no type variable"), "{err}");
+    }
+
+    // ---- P7b.S1 Phase 1: R1/R2/R5 kind-expression grammar and collection ----
+
+    #[test]
+    fn parse_header_bracket_kind_expr_annotations_parse() {
+        let vars = header_bracket_vars("['F: * -> Len -> * 'T]").unwrap();
+        assert_eq!(vars.len(), 2);
+        assert_eq!(vars[0].0, "'F");
+        assert_eq!(
+            vars[0].2,
+            Kind::Arrow {
+                domains: vec![Kind::Star, Kind::Len],
+                result: Box::new(Kind::Star),
+            }
+        );
+        assert_eq!(vars[1].0, "'T");
+        assert_eq!(vars[1].2, Kind::Star);
+    }
+
+    #[test]
+    fn parse_optional_bound_bracket_kind_and_bound_coexist() {
+        // S1-9: a kind annotation on one variable (`'N: Len`) and a
+        // capability bound on another (`'T: Copy`), in the same bracket.
+        let module = parse_src(": f['T: Copy 'N: Len] ( array['T 'N] -- ) drop ;").unwrap();
+        let sig = module.words[0].poly.as_ref().expect("poly sig present");
+        assert!(sig.has_bound(0, Bound::Copy));
+        assert_eq!(sig.len_var_names, vec!["'N".to_string()]);
+    }
+
+    #[test]
+    fn attach_bracket_bounds_annotation_conflicting_with_usage_names_both_spans() {
+        // S1-15.c: `'F` is used bare (a plain type, `Star`) but annotated a
+        // higher kind. The error must carry both the usage mention's span
+        // and the annotation's own span.
+        let err = parse_src(": bad['F: * -> * 'T] ( 'F 'T -- ) drop drop ;").unwrap_err();
+        assert!(err.contains("'F"), "{err}");
+        assert!(err.contains("used as a plain type"), "{err}");
+        assert!(err.contains("* -> *"), "{err}");
+        // The usage mention is `'F` in the effect (line 1, col 24); the
+        // annotation is in the bound bracket (line 1, col 7).
+        assert!(err.contains("line 1, col 24"), "{err}");
+        assert!(err.contains("line 1, col 7"), "{err}");
+    }
+
+    #[test]
+    fn attach_bracket_bounds_arrow_kind_unused_in_effect_is_accepted() {
+        // P7b.S1 Phase 1: `'F: * -> *` is declared but never mentioned in
+        // the effect at all. Usage-conflict enforcement lands in Phase 3;
+        // for Phase 1 the annotation alone is presence enough, so this must
+        // parse rather than raise `bracket_var_unused_error`.
+        let module = parse_src(": pass['F: * -> * 'T] ( 'T -- 'T ) ;").unwrap();
+        let sig = module.words[0].poly.as_ref().expect("poly sig present");
+        assert_eq!(sig.ty_var_names, vec!["'T".to_string()]);
+    }
+
+    #[test]
+    fn header_field_kind_collection_validated_at_decl_end() {
+        // S1-5: a header declaring `'F` higher-kinded, then a field
+        // bare-mentioning it -- a `Star`-only position -- is a located
+        // conflict naming the declaration.
+        let err = parse_src("type: Box['F: * -> * 'T] f 'F g 'T ;").unwrap_err();
+        assert!(err.contains("'F"), "{err}");
+        assert!(err.contains("Box"), "{err}");
+        assert!(err.contains("* -> *"), "{err}");
+    }
+
+    #[test]
+    fn header_field_kind_collection_accepts_a_star_kinded_var() {
+        // The non-conflict twin: a `Star`-annotated (or unannotated) header
+        // var used bare in a field is unaffected by the new side table.
+        let module = parse_src("type: Box['F: * 'T] f 'F g 'T ;").unwrap();
+        assert_eq!(module.generic_structs[0].fields.len(), 2);
     }
 
     #[test]

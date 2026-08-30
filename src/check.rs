@@ -1344,8 +1344,11 @@ pub(super) fn impl_target_str(target: &ImplTarget) -> String {
         outputs: Vec::new(),
         row_out: None,
         bounds: Vec::new(),
+        ty_kinds: target.ty_kinds.clone(),
         ty_var_names: target.ty_var_names.clone(),
+        ty_var_spans: vec![Span::default(); target.ty_var_names.len()],
         len_var_names: target.len_var_names.clone(),
+        len_var_spans: vec![Span::default(); target.len_var_names.len()],
         row_var_names: Vec::new(),
     };
     poly::poly_type_str(&target.pattern, &sig)

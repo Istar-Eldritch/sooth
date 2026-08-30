@@ -1883,8 +1883,11 @@ pub fn enum_eliminator_sigs(enums: &[EnumDecl]) -> Vec<(String, String, PolySig)
                 outputs: vec![],
                 row_out: Some(ROW_OUT),
                 bounds: vec![],
+                ty_kinds: vec![],
                 ty_var_names: vec![],
+                ty_var_spans: vec![],
                 len_var_names: vec![],
+                len_var_spans: vec![],
                 row_var_names: vec!["..a".to_string(), "..b".to_string()],
             },
         ));
@@ -2632,6 +2635,7 @@ mod tests {
         let generic_box = |module: u32| crate::ast::GenericStructDecl {
             name: "Box".to_string(),
             ty_var_names: vec!["'T".to_string()],
+            ty_kinds: vec![crate::ast::Kind::Star],
             len_var_names: vec![],
             fields: Vec::new(),
             span: crate::ast::Span::default(),
@@ -2933,8 +2937,11 @@ mod tests {
                 outputs: Vec::new(),
                 row_out: None,
                 bounds: Vec::new(),
+                ty_kinds: vec![crate::ast::Kind::Star; arity],
                 ty_var_names: (0..arity).map(|i| format!("'T{i}")).collect(),
+                ty_var_spans: vec![Span::default(); arity],
                 len_var_names: Vec::new(),
+                len_var_spans: Vec::new(),
                 row_var_names: Vec::new(),
             };
             WordDef {

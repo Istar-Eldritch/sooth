@@ -10758,7 +10758,10 @@ mod tests {
             row_out: None,
             bounds: Vec::new(),
             ty_var_names: Vec::new(),
+            ty_var_spans: Vec::new(),
+            ty_kinds: Vec::new(),
             len_var_names: Vec::new(),
+            len_var_spans: Vec::new(),
             row_var_names: Vec::new(),
         }
     }
@@ -10809,6 +10812,7 @@ mod tests {
         GenericStructDecl {
             name: "Buffer".to_string(),
             ty_var_names: vec!["'T".to_string()],
+            ty_kinds: Vec::new(),
             len_var_names: vec!["'N".to_string()],
             fields: vec![(
                 "data".to_string(),
@@ -10852,7 +10856,10 @@ mod tests {
             row_out: None,
             bounds: Vec::new(),
             ty_var_names: vec!["'T".to_string()],
+            ty_var_spans: Vec::new(),
+            ty_kinds: Vec::new(),
             len_var_names: vec!["'N".to_string()],
+            len_var_spans: Vec::new(),
             row_var_names: Vec::new(),
         };
         let pty = PolyType::Generic {
@@ -10929,7 +10936,10 @@ mod tests {
             row_out: None,
             bounds: Vec::new(),
             ty_var_names: vec!["'T".to_string()],
+            ty_var_spans: Vec::new(),
+            ty_kinds: Vec::new(),
             len_var_names: vec!["'N".to_string()],
+            len_var_spans: Vec::new(),
             row_var_names: Vec::new(),
         };
         let pty = PolyType::Generic {
@@ -10987,7 +10997,10 @@ mod tests {
             row_out: None,
             bounds: Vec::new(),
             ty_var_names: Vec::new(),
+            ty_var_spans: Vec::new(),
+            ty_kinds: Vec::new(),
             len_var_names: vec!["'N".to_string()],
+            len_var_spans: Vec::new(),
             row_var_names: Vec::new(),
         };
         let pty = PolyType::Array(Box::new(PolyType::Concrete(Type::I64)), Len::Var(0));
@@ -11039,7 +11052,10 @@ mod tests {
             row_out: None,
             bounds: Vec::new(),
             ty_var_names: Vec::new(),
+            ty_var_spans: Vec::new(),
+            ty_kinds: Vec::new(),
             len_var_names: vec!["'N".to_string()],
+            len_var_spans: Vec::new(),
             row_var_names: Vec::new(),
         };
         let pty = PolyType::Array(Box::new(PolyType::Concrete(Type::I64)), Len::Var(0));
@@ -11606,6 +11622,8 @@ mod tests {
     fn one_var_sig() -> PolySig {
         PolySig {
             ty_var_names: vec!["T".to_string()],
+            ty_var_spans: Vec::new(),
+            ty_kinds: Vec::new(),
             ..bare_sig()
         }
     }
@@ -12229,7 +12247,10 @@ mod tests {
             row_out: None,
             bounds: Vec::new(),
             ty_var_names: vec!["'T".to_string()],
+            ty_var_spans: Vec::new(),
+            ty_kinds: Vec::new(),
             len_var_names: Vec::new(),
+            len_var_spans: Vec::new(),
             row_var_names: Vec::new(),
         };
         let probe = probe_word();
@@ -13673,7 +13694,10 @@ mod tests {
             row_out: None,
             bounds: Vec::new(),
             ty_var_names: vec!["'T".to_string()],
+            ty_var_spans: Vec::new(),
+            ty_kinds: Vec::new(),
             len_var_names: Vec::new(),
+            len_var_spans: Vec::new(),
             row_var_names: Vec::new(),
         };
         let arrays: [ArrayDecl; 0] = [];
@@ -13770,7 +13794,10 @@ mod tests {
             row_out: Some(0),
             bounds: Vec::new(),
             ty_var_names: Vec::new(),
+            ty_var_spans: Vec::new(),
+            ty_kinds: Vec::new(),
             len_var_names: Vec::new(),
+            len_var_spans: Vec::new(),
             row_var_names: vec!["..s".to_string()],
         };
         let quot = PolyType::Quotation(
@@ -13793,7 +13820,10 @@ mod tests {
             row_out: None,
             bounds: Vec::new(),
             ty_var_names: vec!["'T".to_string()],
+            ty_var_spans: Vec::new(),
+            ty_kinds: Vec::new(),
             len_var_names: vec!["'N".to_string()],
+            len_var_spans: Vec::new(),
             row_var_names: Vec::new(),
         }
     }
@@ -13831,7 +13861,10 @@ mod tests {
             row_out: None,
             bounds: Vec::new(),
             ty_var_names: vec!["'T".to_string(), "'E".to_string()],
+            ty_var_spans: Vec::new(),
+            ty_kinds: Vec::new(),
             len_var_names: Vec::new(),
+            len_var_spans: Vec::new(),
             row_var_names: Vec::new(),
         };
         let result = PolyType::Generic {
@@ -13859,7 +13892,10 @@ mod tests {
             row_out: None,
             bounds: Vec::new(),
             ty_var_names: Vec::new(),
+            ty_var_spans: Vec::new(),
+            ty_kinds: Vec::new(),
             len_var_names: vec!["'N".to_string()],
+            len_var_spans: Vec::new(),
             row_var_names: Vec::new(),
         };
         let buffer = PolyType::Generic {
@@ -14410,7 +14446,10 @@ mod tests {
             row_out: None,
             bounds: Vec::new(),
             ty_var_names: vec!["'T".to_string()],
+            ty_var_spans: Vec::new(),
+            ty_kinds: Vec::new(),
             len_var_names: vec!["'N".to_string()],
+            len_var_spans: Vec::new(),
             row_var_names: Vec::new(),
         };
         let pty = PolyType::Generic {
@@ -14479,6 +14518,7 @@ mod tests {
         generics.enums.push(GenericEnumDecl {
             name: "Opt".to_string(),
             ty_var_names: vec!["'T".to_string()],
+            ty_kinds: Vec::new(),
             len_var_names: vec![],
             variants: vec![
                 GenericVariantDecl {
@@ -14602,6 +14642,7 @@ mod tests {
         generics.enums.push(GenericEnumDecl {
             name: "Buffer".to_string(),
             ty_var_names: vec!["'T".to_string()],
+            ty_kinds: Vec::new(),
             len_var_names: vec!["'N".to_string()],
             variants: vec![GenericVariantDecl {
                 name: "Full".to_string(),
@@ -14619,7 +14660,10 @@ mod tests {
             row_out: None,
             bounds: Vec::new(),
             ty_var_names: vec!["'T".to_string()],
+            ty_var_spans: Vec::new(),
+            ty_kinds: Vec::new(),
             len_var_names: vec!["'N".to_string()],
+            len_var_spans: Vec::new(),
             row_var_names: Vec::new(),
         };
         let pty = crate::ast::generic_variant_type(
@@ -14697,6 +14741,7 @@ mod tests {
         generics.enums.push(GenericEnumDecl {
             name: "Ring".to_string(),
             ty_var_names: vec!["'T".to_string()],
+            ty_kinds: Vec::new(),
             len_var_names: vec!["'N".to_string()],
             variants: vec![
                 GenericVariantDecl {
@@ -14832,6 +14877,7 @@ mod tests {
         generics.enums.push(GenericEnumDecl {
             name: "Buffer".to_string(),
             ty_var_names: vec!["'T".to_string()],
+            ty_kinds: Vec::new(),
             len_var_names: vec!["'N".to_string()],
             variants: vec![GenericVariantDecl {
                 name: "Full".to_string(),

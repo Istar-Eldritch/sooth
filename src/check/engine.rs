@@ -2189,6 +2189,7 @@ mod tests {
         let decl = crate::ast::GenericStructDecl {
             name: "Box".to_string(),
             ty_var_names: vec!["'T".to_string()],
+            ty_kinds: Vec::new(),
             len_var_names: vec![],
             fields: vec![("val".to_string(), crate::ast::PolyType::Var(0))],
             span: Span::default(),

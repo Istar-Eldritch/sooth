@@ -529,6 +529,26 @@ pub fn variant_type(enums: &[EnumDecl], id: EnumId, vi: usize) -> Type {
     Type::Variant(id, vi, enums[id.index()].variants[vi].display_static)
 }
 
+/// P7b.S1 (R1): the kind a `'`-name was bound as -- `Star` (an ordinary
+/// type variable), `Len` (a length variable), or `Arrow` (a higher-kinded
+/// variable, `* -> *`). Replaces the parser-private `enum Kind { Star, Len }`
+/// P7.S6a introduced (`Ty` renamed `Star` there already): an `Arrow`-kinded
+/// variable is still a *type* variable, so it needs to travel alongside
+/// `Star`/`Len` rather than living only in the parser. The arrow is
+/// **n-ary, not curried**: Sooth application splits type slots from length
+/// slots at every call site (`PolyType::Generic` carries parallel
+/// `args`/`len_args`), so `array` is honestly `* -> Len -> *`, not
+/// `* -> (Len -> *)`.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Kind {
+    Star,
+    Len,
+    Arrow {
+        domains: Vec<Kind>,
+        result: Box<Kind>,
+    },
+}
+
 /// Phase 5 slice 1 (R1, D5): a `type:` header that bound one or more type
 /// variables (`type: Box['T] ...`), parsed into its variable-scoped field
 /// list but not yet monomorphized -- minting a concrete `StructDecl` per
@@ -545,6 +565,10 @@ pub struct GenericStructDecl {
     /// each keeping its leading `'` (e.g. `"'T"`) -- the id space a field's
     /// `PolyType::Var` indexes into.
     pub ty_var_names: Vec<String>,
+    /// P7b.S1 (R1/R5): each header type variable's declared kind, parallel
+    /// to `ty_var_names` (`Star` unless the header annotates it, e.g.
+    /// `type: Box['F: * -> *] ...`).
+    pub ty_kinds: Vec<Kind>,
     /// P7.S6a (R3): the header's bound length-variable names, parallel to
     /// `ty_var_names` but in the separate length id space `Len::Var`
     /// indexes into.
@@ -560,6 +584,8 @@ pub struct GenericStructDecl {
 pub struct GenericEnumDecl {
     pub name: String,
     pub ty_var_names: Vec<String>,
+    /// P7b.S1 (R1/R5): see `GenericStructDecl::ty_kinds`.
+    pub ty_kinds: Vec<Kind>,
     pub len_var_names: Vec<String>,
     pub variants: Vec<GenericVariantDecl>,
     pub span: Span,
@@ -2004,6 +2030,13 @@ pub fn seed_predicate_traits() -> Vec<TraitDecl> {
 pub struct ImplTarget {
     pub pattern: PolyType,
     pub ty_var_names: Vec<String>,
+    /// P7b.S1 (R1/R5): parallel to `ty_var_names`. `parse_impl_target` has
+    /// no annotation grammar (it interns purely from usage through
+    /// `parse_poly_slot`), so every entry is `Star` this slice -- but the
+    /// vector is length-matched to `ty_var_names` rather than defaulted
+    /// away, so a later slice adding annotation support here never has to
+    /// retrofit the field.
+    pub ty_kinds: Vec<Kind>,
     pub len_var_names: Vec<String>,
     /// P7.S4b (R2): bounds declared on the impl's own type variables via a
     /// `where`-clause (`impl: Show for array['T 'N] where 'T: Show`). Each pair's
@@ -2251,7 +2284,20 @@ pub struct PolySig {
     pub row_out: Option<u32>,
     pub bounds: Vec<(u32, Bound)>,
     pub ty_var_names: Vec<String>,
+    /// P7b.S1 (R1/R5): each type variable's kind as resolved from usage,
+    /// parallel to `ty_var_names` (`Star`, the only kind a bare mention in
+    /// an effect can establish this slice -- an application head's `Arrow`
+    /// requirement arrives with Phase 2).
+    pub ty_kinds: Vec<Kind>,
+    /// P7b.S1 (R2/S1-4): each type variable's first-mention span, parallel
+    /// to `ty_var_names`. Needed by `attach_bracket_bounds`'s
+    /// annotation-vs-usage conflict diagnostic (S1-15.c), which fires after
+    /// `PolyBuilder` (where every mention span lives) has already been
+    /// consumed into this `PolySig`.
+    pub ty_var_spans: Vec<Span>,
     pub len_var_names: Vec<String>,
+    /// P7b.S1 (R2/S1-4): the length-variable twin of `ty_var_spans`.
+    pub len_var_spans: Vec<Span>,
     pub row_var_names: Vec<String>,
 }
 
@@ -3834,6 +3880,7 @@ mod tests {
         let decl = GenericStructDecl {
             name: "Box".to_string(),
             ty_var_names: vec!["'T".to_string()],
+            ty_kinds: Vec::new(),
             len_var_names: vec![],
             fields: vec![("val".to_string(), PolyType::Var(0))],
             span: Span::default(),
@@ -3863,6 +3910,7 @@ mod tests {
         GenericStructDecl {
             name: "Buffer".to_string(),
             ty_var_names: vec!["'T".to_string()],
+            ty_kinds: Vec::new(),
             len_var_names: vec!["'N".to_string()],
             fields: vec![(
                 "data".to_string(),
@@ -3938,6 +3986,7 @@ mod tests {
         let decl = GenericStructDecl {
             name: "Box".to_string(),
             ty_var_names: vec!["'T".to_string()],
+            ty_kinds: Vec::new(),
             len_var_names: vec![],
             fields: vec![("val".to_string(), PolyType::Var(0))],
             span: Span::default(),
@@ -3964,6 +4013,7 @@ mod tests {
         let decl = GenericStructDecl {
             name: "Box".to_string(),
             ty_var_names: vec!["'T".to_string()],
+            ty_kinds: Vec::new(),
             len_var_names: vec![],
             fields: vec![("val".to_string(), PolyType::Var(0))],
             span: Span::default(),
@@ -3988,6 +4038,7 @@ mod tests {
         GenericStructDecl {
             name: name.to_string(),
             ty_var_names: vec!["'T".to_string()],
+            ty_kinds: Vec::new(),
             len_var_names: vec![],
             fields: vec![("f".to_string(), field)],
             span: Span::default(),
@@ -4047,6 +4098,7 @@ mod tests {
         generics.structs.push(GenericStructDecl {
             name: "Inner".to_string(),
             ty_var_names: vec!["'T".to_string()],
+            ty_kinds: Vec::new(),
             len_var_names: vec!["'N".to_string()],
             fields: vec![(
                 "data".to_string(),
@@ -4058,6 +4110,7 @@ mod tests {
         generics.structs.push(GenericStructDecl {
             name: "Outer".to_string(),
             ty_var_names: vec!["'T".to_string()],
+            ty_kinds: Vec::new(),
             len_var_names: vec!["'N".to_string()],
             fields: vec![(
                 "inner".to_string(),
@@ -4167,6 +4220,7 @@ mod tests {
         generics.enums.push(GenericEnumDecl {
             name: "Holder".to_string(),
             ty_var_names: vec!["'T".to_string()],
+            ty_kinds: Vec::new(),
             len_var_names: vec![],
             variants: vec![GenericVariantDecl {
                 name: "Some".to_string(),
@@ -4239,6 +4293,7 @@ mod tests {
         generics.structs.push(GenericStructDecl {
             name: "A".to_string(),
             ty_var_names: vec!["'K".to_string(), "'V".to_string()],
+            ty_kinds: Vec::new(),
             len_var_names: vec![],
             fields: vec![(
                 "next".to_string(),
@@ -4301,6 +4356,7 @@ mod tests {
         let decl = GenericStructDecl {
             name: "Box".to_string(),
             ty_var_names: vec!["'T".to_string()],
+            ty_kinds: Vec::new(),
             len_var_names: vec![],
             fields: vec![("val".to_string(), PolyType::Var(0))],
             span: Span::default(),
@@ -4349,6 +4405,7 @@ mod tests {
         let decl = GenericEnumDecl {
             name: "Res".to_string(),
             ty_var_names: vec!["'T".to_string()],
+            ty_kinds: Vec::new(),
             len_var_names: vec![],
             variants: vec![GenericVariantDecl {
                 name: "Ok".to_string(),
@@ -4377,6 +4434,7 @@ mod tests {
         let decl = GenericEnumDecl {
             name: "Res".to_string(),
             ty_var_names: vec!["'T".to_string()],
+            ty_kinds: Vec::new(),
             len_var_names: vec![],
             variants: vec![GenericVariantDecl {
                 name: "Ok".to_string(),
@@ -4429,6 +4487,7 @@ mod tests {
         let decl = GenericEnumDecl {
             name: "Res".to_string(),
             ty_var_names: vec!["'T".to_string()],
+            ty_kinds: Vec::new(),
             len_var_names: vec![],
             variants: vec![GenericVariantDecl {
                 name: "Ok".to_string(),
@@ -4456,6 +4515,7 @@ mod tests {
         let decl = GenericEnumDecl {
             name: "Pair".to_string(),
             ty_var_names: vec!["'A".to_string()],
+            ty_kinds: Vec::new(),
             len_var_names: vec![],
             variants: vec![GenericVariantDecl {
                 name: "One".to_string(),
@@ -4486,6 +4546,7 @@ mod tests {
         let decl = GenericEnumDecl {
             name: "Buffer".to_string(),
             ty_var_names: vec!["'A".to_string()],
+            ty_kinds: Vec::new(),
             len_var_names: vec!["'N".to_string()],
             variants: vec![GenericVariantDecl {
                 name: "Full".to_string(),

@@ -2315,6 +2315,7 @@ mod tests {
         crate::ast::GenericEnumDecl {
             name: name.to_string(),
             ty_var_names: vec!["'T".to_string()],
+            ty_kinds: Vec::new(),
             len_var_names: vec![],
             variants: vec![crate::ast::GenericVariantDecl {
                 name: variant.to_string(),
