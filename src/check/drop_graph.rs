@@ -750,12 +750,12 @@ fn recursive_drop_overload_error(
     chain: &[usize],
 ) -> String {
     let render = |i: usize| match overloads.iter().find(|(_, &w)| w == i) {
-        Some((sid, _)) => format!("`drop ( {} -- )`", structs[sid.index()].name),
-        None => format!("`{}`", words[i].name),
+        Some((sid, _)) => format!("`drop ( {} -- )`", structs[sid.index()].name_static),
+        None => format!("{}", crate::resolve::render_word(&words[i].name)),
     };
     let mut rendered: Vec<String> = chain.iter().map(|&i| render(i)).collect();
     rendered.push(render(chain[0]));
-    let name = &structs[id.index()].name;
+    let name = structs[id.index()].name_static;
     let span = word_span(words[overloads[&id]]);
     format!(
         "error: recursive `drop` overload for `{}`: {} (line {}, col {})\n  a `drop` body cannot dispose its own receiver, directly or through any chain of calls; destructure it with `{}>` and dispose the fields instead",

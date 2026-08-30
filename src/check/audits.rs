@@ -103,7 +103,7 @@ fn duplicate_drop_overload_error(word: &WordDef, target: &StructDecl) -> String 
     let span = word_span(word);
     format!(
         "error: `{}` already defines its own `drop` (line {}, col {})",
-        target.name, span.line, span.col
+        target.name_static, span.line, span.col
     )
 }
 
@@ -135,7 +135,10 @@ pub(super) fn audit_quotation_type_positions(module: &Module) -> Result<(), Stri
         for slot in decl.effect.inputs.iter().chain(&decl.effect.outputs) {
             reject_quotation_type_position(
                 slot.ty,
-                &format!("an `extern:` boundary type of `{}`", decl.name),
+                &format!(
+                    "an `extern:` boundary type of {}",
+                    crate::resolve::render_word(&decl.name)
+                ),
             )?;
         }
     }
@@ -170,7 +173,7 @@ pub(crate) fn audit_quotation_type_registries(
             }
             reject_quotation_type_position(
                 *fty,
-                &format!("the field `{fname}` of struct `{}`", s.name),
+                &format!("the field `{fname}` of struct `{}`", s.name_static),
             )?;
         }
     }
@@ -191,7 +194,7 @@ pub(crate) fn audit_quotation_type_registries(
                     &format!(
                         "the {} of enum variant `{}::{}`",
                         super::variant_field_desc(fname, idx),
-                        e.name,
+                        e.name_static,
                         v.name
                     ),
                 )?;

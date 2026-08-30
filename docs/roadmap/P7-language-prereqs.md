@@ -258,8 +258,9 @@ it never re-resolves, preserving the "lowering never re-runs resolution" invaria
 matching bounds on one call is an ambiguity rejection unless a module-qualified name
 disambiguates (`o::t1`, the existing import-alias `::`, not a trait-name qualifier — same-
 module collisions have no escape hatch). A bound on a poly *combinator*'s own type
-variable is a located rejection, tracked separately as **P7.S3o** (a combinator's body
-calling a bounded poly word does resolve, and is tested). Consumer: the array form of
+variable was a located rejection, tracked separately as **P7.S3o** and since landed:
+dispatch reaches spliced combinator bodies, and only a *materialized* quotation still
+rejects. Consumer: the array form of
 `sort` (`'T: Copy Order`), Program 2 of `docs/roadmap/P7/slice3-dogfood.md`, runs at two
 distinct concrete instantiations. `Map['K 'V]` stays out of scope: **P7.S3n** landed the
 array-field-of-own-type-variable blocker, but `Map` still needs a struct-header length
@@ -587,37 +588,43 @@ array-field-of-own-type-variable blocker; it does **not** unblock `Map['K 'V]`, 
 still needs a struct-header length variable (`'N`) and the `Eq`/`Hash`/`Default`-style
 bounds named above.
 
-**P7.S3o -- A bound on a poly combinator's own type variable has no dispatch mechanism.**
+**P7.S3o -- A bound on a poly combinator's own type variable dispatches per splice.**
 `[ done ]` Named at P7.S3e's round-1 review (its spec's own R9/R17), out of scope there.
-`reject_user_bound_on_combinator` (`src/check/poly.rs:6129`) is a clean, located rejection, not
-a bug. Recon'd and spec'd twice; both designs (a splice-uid resolution key, then a
-source-derived `SplicePath` key) were found unsound in review. A third recon round (three
-parallel probes) corrected the brief's central latency claim, found a more fundamental
-blocker both prior rounds missed, and settled one open item -- see
-[slice3o-brief.md](./P7/slice3o-brief.md) for the full recon record and the revised open items.
-No spec currently exists for this slice. This is a **hot-path optimization**: a combinator
-calling a bare trait member (`cmp` directly, not the `gt` wrapper) cannot dispatch today, so
-the fallback is a non-inline word paying a real call frame per instantiation (the shape S3s
-chose for `mymax`/`mymax3` precisely to avoid this slice). Bare trait member calls in
-combinators will be in the hot path of many programs. The round-3 probes found the primary
-blocker is an `i64` stand-in collision: `check_poly_combinator_standalone`'s `i64` scratch
-instantiations clobber real `i64` instantiations, silently miscompiling the motivating
-program when instantiated at both `i64` and another type. Option (b) -- reject bound
-dispatch inside materialized quotations rather than prefixing the resolution key -- is
-settled as sound (the motivating program's `~[ ]` arms are spliced, never materialized). The
-transitive skip is cheap (a `Provenance` flag) but the hard part is injecting
-`poly_trait_member_call` into `check_terms_relaxed` (the splice path has zero bound-dispatch
-calls today). **P7.S3s supplied the motivating program**: a bounded `inline` comparison over a library
-`Ord`. The library's six comparisons are now `inline` (P7.S8), so the dispatch-target-diffing
-oracle this slice originally planned to build no longer has a non-inline baseline to diff
-against -- P7.S8's own oracle work found that comparison permanently unsatisfiable once the
-library inlines and dropped it, keeping a stdout-identity check with `gt`/`lt` swap controls
-on both sides instead (`tests/phase7_slice3s_oracle.rs`). This slice's own oracle strategy
-needs re-deriving against a real second variant now that `mymax`/`mymax3` are the only
-remaining non-inline comparison-adjacent surface; `examples/poly_if.sth`'s `main` calling
-both `mymax` and `mymax3` (currently only `mymax3` is called, so `mymax` mints no monomorph)
-is still a prerequisite, and still belongs in a new fixture, since `tests/corpus_stdout/
-poly_if.txt` must stay byte-identical.
+Recon'd and spec'd twice; both early designs (a splice-uid resolution key, then a
+source-derived `SplicePath` key) were found unsound in review, and a third recon round
+([slice3o-brief.md](./P7/slice3o-brief.md)) found the primary blocker: a poly combinator's
+body terms keep their original spans across every splice (`alpha_rename_locals` renames
+locals only), so two splices of one combinator at two different concrete types wrote
+`CallInst`s to the same span key -- last write wins, and the losing splice dispatched to
+the wrong monomorph, a silent miscompile pre-existing on stock main. A combinator calling
+a bare trait member (`cmp` directly, not the `gt` wrapper) now dispatches through the
+bound inside the spliced body, so the fallback to a non-inline word paying a real call
+frame per instantiation is gone; an unbounded combinator splicing a bounded one resolves
+the inner member call at the inner splice's own concrete θ (the transitive skip).
+Spec: [slice3o-spec.md](./P7/slice3o-spec.md). Landed via the `slice3o-impl` merge
+(`a640c13`) in four pieces: the span-keyed collision guarded (`507e0b7`); per-splice
+instantiation records (`e4d43a2` -- `Module::splice_records` and
+`Module::splice_trait_calls`, keyed `(splice, Span)` rather than span alone, threaded
+through `PolyCtx` alongside the transitive set, with the blanket
+`reject_user_bound_on_combinator` gate removed); per-splice trait-member dispatch,
+resolved against the splice's own θ and relayed to lowering (`4bf3ee6`); and bound
+dispatch inside a *materialized* quotation rejected (option (b), `33627f4` -- an
+`in_materialized_quot` flag around materialized body checks, the rejection naming the
+combinator). **P7.S3s supplied the motivating program**: a bounded `inline` comparison
+over a library `Ord`; the dispatch-target-diffing oracle originally planned here was
+dropped by P7.S8's own oracle work (permanently unsatisfiable once the library
+comparisons went `inline`) in favour of a stdout-identity check with `gt`/`lt` swap
+controls (`tests/phase7_slice3s_oracle.rs`). Witnesses in `tests/phase4_combinators.rs`:
+`bare_member_from_bounded_combinator_compiles_and_runs`,
+`transitive_skip_unbounded_splicing_bounded_compiles_and_runs`,
+`bound_dispatch_in_materialized_quotation_is_rejected`, and its negative control
+`materialized_quotation_without_bare_member_is_not_rejected`.
+**Exit:** a bound on a poly combinator's own type variable dispatches inside the spliced
+body; two splices at different concrete types each dispatch to their own monomorph, with
+wrong dispatch observable (the goldens print the `Ordering` discriminant) rather than
+merely rejected; an unbounded combinator splicing a bounded one resolves at the inner
+splice's θ; and bound dispatch inside a materialized quotation is a located rejection
+naming the combinator.
 
 **P7.S3p -- A trait member declaring its bound variable at any input position.** `[ done ]` A member's
 receiver may sit anywhere in its declared input list, not only last: `at ( &'T i64 -- i64 )`

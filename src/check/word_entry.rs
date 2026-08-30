@@ -173,7 +173,8 @@ pub(super) fn check_reference_free_signature(
         if !slot.ty.is_ref() && contains_reference(slot.ty, structs, enums, arrays) {
             let ty = slot.ty;
             return Err(format!(
-                "error: a reference cannot be stored: `{name}` declares the input `{ty}`, which contains a reference\n  an input may *be* a `&T`/`&!T`, but not carry one nested inside an aggregate"
+                "error: a reference cannot be stored: {} declares the input `{ty}`, which contains a reference\n  an input may *be* a `&T`/`&!T`, but not carry one nested inside an aggregate",
+                crate::resolve::render_word(name)
             ));
         }
     }
@@ -341,6 +342,13 @@ mod tests {
             }],
         };
         let err = check_reference_free_signature("mk", &out, &[], &[], &[]).unwrap_err();
+        // `resolve` mangles declared names in place; the diagnostic names the
+        // spelling the user wrote, never `mk__m0`.
+        let mangled = check_reference_free_signature("mk__m0", &out, &[], &[], &[]).unwrap_err();
+        assert!(
+            mangled.contains("`mk`") && !mangled.contains("__m0"),
+            "unexpected message: {mangled}"
+        );
         assert_eq!(
             err,
             "error: a reference cannot be stored: `mk` declares the output `Slice[i64]`\n  a `&T`/`&!T` borrows a local of the callee's own frame, which is gone by the time the caller reads it; take the reference as an input instead"

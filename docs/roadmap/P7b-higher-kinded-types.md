@@ -27,8 +27,9 @@ lifetimes and associated types removes the two soundness hazards that make speci
 and HKT hard in Rust. That makes the implementation tractable, not the design small.
 
 **Prerequisites:** P7.S4 (polymorphic impl targets — the constructor-keyed dispatch builds on
-its machinery for matching a polymorphic target against a concrete type), P7.S3o (bound on a
-poly combinator's own type variable — parked, needed for inline HKT in S3 only), and
+its machinery for matching a polymorphic target against a concrete type), P7.S3o (bound dispatch on a
+poly combinator's own type variable — landed; P7b.S3 extends its per-splice resolution to
+constructor applications), and
 P7.S6a (length parameters in `type:` headers and the `Kind` type — S6a introduces the
 `Kind` enum replacing `VarKind`, the `: Kind` annotation syntax at binding sites, and the
 `Len` kind. P7b extends this foundation with `Arrow` for higher kinds; it does not
@@ -99,7 +100,8 @@ dispatches to a separate `impl: Functor for Result` and produces `Result[bool Er
 **P7b.S3 — Inline + HKT bounds (the zero-cost splice).**
 Extends P7.S3o's bound-carrying splice to handle constructor applications in output types. An
 inline word with an HKT bound splices at the call site with zero frame cost, matching the IR
-a hand-written inline `map` would produce. Depends on P7.S3o landing first.
+a hand-written inline `map` would produce. P7.S3o has landed (bound dispatch reaches
+spliced combinator bodies), so this slice extends a working mechanism.
 **Exit:** `Functor.map` called through a bound on an inline word splices to the same IR as a
 hand-written inline `map` would produce; no call frame; no runtime dispatch.
 
