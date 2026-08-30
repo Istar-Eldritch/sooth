@@ -1,6 +1,6 @@
 # Spec: Phase 6 Slice 4 — migration off the clause path
 
-**Status:** Ready to implement
+**Status:** Implemented (landed in `8ba0477`; the clause path no longer parses)
 **Created:** 2026-08-18
 
 Pairs with [slice4-brief.md](./slice4-brief.md) (discovery). Gated on Slice 3b (done,

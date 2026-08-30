@@ -718,7 +718,10 @@ a polymorphic body may call a polymorphic word carrying a forwarded user bound w
 the numeric tower needs no user-written `impl:`; and every existing `'T: Copy Ord` program
 still behaves identically.
 
-**P7.S3s-follow -- Trait member declaration syntax, and an `inline` trait member.** `[ planned ]`
+**P7.S3s-follow -- Trait member declaration syntax, and an `inline` trait member.** `[ done ]`
+Spec: [slice3s-follow-spec.md](./P7/slice3s-follow-spec.md); the `: name ( sig ) ;` member
+form and `TraitMember.declares_inline` are in the tree (`src/parser.rs:3074`, parser tests
+at `:9726`/`:9853`), and S4b's tests were migrated onto the new syntax (`abc4d84`).
 `cmp` and the six surface comparisons are `inline` (P7.S8); bound dispatch reaches a
 spliced/materialized body, so an `inline` trait member is mechanically live for the library's
 own trait. What is missing is the declaration surface for a *user*-written trait. A trait member
@@ -1028,7 +1031,10 @@ against a concrete caller. `cargo fmt --check && cargo clippy -- -D warnings && 
 is green. The `Kind` enum has `Star` and `Len` variants; the `: Len` annotation syntax is
 live at `type:`, `trait:`, and `:` binding sites.
 
-**P7.S6b -- Explicit length arguments at call sites.** `[ planned ]` The instantiation-side
+**P7.S6b -- Explicit length arguments at call sites.** `[ done ]` Spec condensed
+post-implementation in `eb742b1`; `parse_type_arguments` parses length literals
+(`Len::Concrete` via `parse_array_count`) and `check_poly_call` seeds `subst.len` from
+them. The instantiation-side
 companion to S6a. Today, `check_poly_call` seeds `subst.ty` from explicit type arguments
 (`sum[i64]`, `src/check/poly.rs:4662`) but has no path to seed `subst.len`. A caller wanting
 `sum[i64 4]` has no syntax for the `4`.
@@ -1071,10 +1077,15 @@ Sequenced so nothing but the last subslice touches the compiler:
   dogfooded against `bool`/`cmp`/`option`/`result`/`combinators`. Detail:
   [slice7b-testing-brief](./P7/slice7b-testing-brief.md),
   [slice7b-spec](./P7/slice7b-spec.md).
-- **S7c** -- `core::show`'s `Write`/`Show` trait pair (sink-generic: one `Show` impl per type,
-  living in `core`; per-target `Write` impls carry the platform dependency), with
-  `hosted::libc` supplying the `Stdout` sink. Detail:
-  [slice7c-show-brief](./P7/slice7c-show-brief.md).
+- **S7c** -- `core::show`'s `Write`/`Show` trait pair (sink-generic via a fixed in-memory
+  render buffer, after the probe round ruled out the two-trait-variable and `str`-chunk
+  shapes; by-value receivers, `write(2)`-bound sink), with `hosted::libc` supplying the
+  `Stdout` sink. Brief probe-verified 260829 with three design blockers found and revised
+  rulings in place; decisions D1-D3 settled (pure-Sooth restoring division; whole-buffer
+  flush; `Show for str` descoped to a `cstr` path in S7d). Spec ready for implementation:
+  [slice7c-spec](./P7/slice7c-spec.md); detail:
+  [slice7c-show-brief](./P7/slice7c-show-brief.md),
+  [slice7c-probes](./P7/slice7c-probes.md).
 - **S7d** -- retires the compiler-intrinsic `.` in favor of an ordinary `hosted::show` word
   over S7c's traits; every printing program migrates to an explicit `depends: hosted`/
   `import:`, no compatibility shim. Detail:
@@ -1228,7 +1239,9 @@ each other. The split stays deferred for the reason P7.S12 gave it: both candida
 (`poly/diagnostics.rs`, `poly/eliminator.rs`) are still layer-shaped or coupling-increasing,
 and this slice's work sits inside the responsibility the file already carries.
 
-**P7.S11-follow -- The frozen call-site env.** `[ planned ]` A monomorph minted at check
+**P7.S11-follow -- The frozen call-site env.** `[ done ]` Phase 1 (infrastructure) in
+`73eb12b`, Phase 2 (check-time mint resolution and test migration) in `c8e8aa6`, merged
+to `main` in `065fb00`; spec condensed post-implementation in `ecded16`. A monomorph minted at check
 time (via `apply_subst`'s `Generic` arm, in an ordinary word or in P7.S11's standalone
 combinator check) never enters `env`, which is built once at `src/check.rs:568-576`, before
 the per-word loop. Consequence, measured by P7.S11's golden 6: an `inline` combinator

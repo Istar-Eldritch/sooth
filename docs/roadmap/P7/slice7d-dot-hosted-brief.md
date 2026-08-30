@@ -63,3 +63,38 @@ gradually.
 3. `core::bool`'s `.` overload note in `prelude.sth` is re-verified or corrected
    (R2).
 4. `cargo fmt --check && cargo clippy -- -D warnings && cargo test` is green.
+
+## Addendum — probe/recon round for S7c (260829)
+
+Facts S7d's spec will need, from the S7c probe round
+([slice7c-probes.md](./slice7c-probes.md)):
+
+- **The delete list is confirmed and larger than R2 listed.** All 14
+  `builtin_table` rows over `printable_types()` (12 numerics + `str` +
+  `cstr`; `bool` deliberately has no row — `core::bool`'s `: . ( Bool -- )`
+  overload is reached via the `builtin_overloads` exact-miss path and
+delegates to the `str` row), `printable_types` itself,
+  `BuiltinLower::Print`/`Instr::Print`'s user-facing arms, and the
+  `$fmt`/`$ufmt`/`$strfmt` data — including the **newline baked into the
+  numeric format strings** (`%ld\n`). The `str` arm prints with `%.*s`, no
+  newline. Any `hosted::show` replacement must reproduce or consciously
+  change the per-type newline behaviour (`expect`'s `"\n" .` spellings
+  depend on it).
+- **Do not implement the sink on the `str` `Print` arm** — S7c's sinks bind
+  to `write(2)` at the `extern:` boundary instead (`extern: write ( i32
+  &array[u8 64] usize -- isize ) "write"`), because a `str` value can only
+  ever be a literal or a static and has no extern ABI at all.
+- **Output ordering becomes observable.** `.` rides buffered stdio;
+  `write(2)` does not. After retirement all printing is syscall-ordered — a
+  behaviour change worth a golden (probe P6c demonstrated the interleaving
+  hazard directly).
+- **Diagnostics warts observed during the probes** (candidates for the
+  cross-cutting diagnostics track, not this slice): every compiler error
+  prints as `error: error: …` (`src/main.rs` wraps an already-prefixed
+  message), and `extern:` boundary errors display mangled names
+  (`emit__m0`).
+- **S7c descopes `Show for str` (D3, settled 260829):** every `str` is
+  literal- or static-rooted, so S7d prints strings through `cstr` at the
+  boundary rather than through `Show`. S7d's `hosted::show` dispatch is
+  therefore: `str` → the `cstr` path, everything else → `Show` + `Write`.
+  R1's "`. ( 'T:Show -- )`" needs that carve-out spelled in the S7d spec.
