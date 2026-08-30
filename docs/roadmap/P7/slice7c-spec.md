@@ -80,8 +80,7 @@ package later add `impl: Write for Uart` in its own module without touching `cor
   `append-byte` (clamped append), `divmod10` (restoring division), `append-digits`
   (MSB-first recursion, lone `0` for zero); `impl: Show for i64/usize/isize/Bool`; bounded
   `render['T: Show]` and `flush['S: Write]`. Imports `self::bool`, `self::cmp`, and
-  `self::combinators` (`times` **and** `times-helper` — every `times` caller splices its
-  body). `show` added to `lib/core/sooth.pkg`.
+  `self::combinators` (`times` only). `show` added to `lib/core/sooth.pkg`.
 - **`lib/hosted/libc.sth`** (`ae588fb`): `type: Stdout ;`, the `sys-write` extern, and
   `impl: Write for Stdout` (drop the stateless receiver, read `len` through `&!len @`
   **before** taking the `&!data` projection — the reverse order trips a reborrow error —

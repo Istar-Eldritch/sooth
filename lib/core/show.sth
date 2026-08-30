@@ -13,7 +13,7 @@
 import: intrinsics * ;
 import: self::bool | Bool if | ;
 import: self::cmp | lt gt gte | ;
-import: self::combinators | times times-helper | ;
+import: self::combinators | times | ;
 
 export: StrBuf Show Write render flush ;
 
