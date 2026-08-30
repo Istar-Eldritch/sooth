@@ -828,6 +828,38 @@ env exactly once; it can be stored in a struct field, a variant field or an owne
 disposed transitively through the container exactly once; and every S3h golden that asserted a
 rejection has been migrated to assert the new behaviour rather than deleted.
 
+**P7.S3w -- The declared-ref fold vs native poly borrows, and accessors in a poly body.** `[ parked ]`
+Discovered by S7d's probe round, not planned: the generic
+`: . ['T: Show] ( 'T -- )` parses and registers but its body cannot be written, for two
+independent poly-body gaps. First, a fully-concrete `&!T` parameter slot in a poly callee's
+signature is folded at declaration time to `PolyType::Concrete(Type::Ref(rid))`
+(`parser.rs:4117`, the Slice 13 R-A4 fold) while a local `| b |` borrow produces a native
+`PolyType::Ref`, and `poly_cross_match`'s Ref arm (`poly.rs:2621`) matches only `(Ref, Ref)` --
+so a poly body passing its local borrow to `render` fails with the look-alike pair
+`render expected &!StrBuf, found &!StrBuf`. Second, field accessors (`&!len`, `&!data`) and
+`+!` are located rejections inside generic bodies (`poly_unsupported_accessor_error`,
+`poly.rs:1680`--`:1684`, R-B6; message text `:8820`), so a poly word cannot read or append
+to a borrowed buffer it holds.
+
+Consequence today (deliberate, per S7d's brief addendum R1): `.` lands as per-type concrete
+dots in `hosted::show` -- the probe-proven shape -- which costs ~10 near-identical words,
+requires every new `Show` impl to add a matching dot, and leaves a poly body unable to print
+its own `'T` value (S7d's R18 verification duty keeps the corpus honest about this). This
+slice would fix the two checker gaps and collapse the Show-backed dots into one generic word
+(str/cstr/float dots stay concrete: str/cstr are deliberately outside `Show` -- S7c D3 -- and
+floats ride the snprintf extern); with `+!` available generically, a `core::show`
+append-newline helper could also revisit S7d's two-write newline spelling (probes P2e/P2h).
+
+Parked because the concrete dots work, the corpus has no poly-body printing (verified by
+S7d R18), and the generic dot is capability plus maintenance, not a blocker. Schedule after
+S7d lands, when the concrete-dot cost is known first-hand. Evidence:
+`docs/roadmap/P7/slice7d-probes.md` P2/P3, the S7d brief's 260830 addendum (R1), and the
+S7d spec's out-of-scope list. **Exit:** a non-inline poly word can pass a local borrow to a
+poly callee whose parameter is declared `&!T`, field accessors and `+!` work in generic
+bodies (or carry a named, located rejection with a mono escape), and `hosted::show`'s
+Show-backed concrete dots collapse into the generic `: . ['T: Show] ( 'T -- )` with
+byte-identical output and unchanged goldens.
+
 **P7.S4 -- Generic `impl:` targets, with a specificity chain.** An `impl:` target must name one
 concrete type today; this slice lets it name type variables and shape constructors over them
 (`impl: Show for ['T N]`), with the most specific match winning and an unordered candidate set

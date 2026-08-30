@@ -19,7 +19,9 @@
 `lib/core/show.sth`, `cmp.sth`, `combinators.sth`, `option.sth`, `result.sth`,
 `prelude.sth`, `libc.sth`: zero print sites (verified by per-file grep).
 
-## 2. Examples (42 of 48 print; all numeric sites rely on the baked-in `\n`)
+## 2. Examples (42 of the 49 committed examples print — 44 top-level + 5 `examples/tests/`)
+
+All numeric sites rely on the baked-in `\n`.
 
 Dominant type i64. Non-i64 sites:
 
@@ -44,6 +46,9 @@ No-print examples (7): `modules_ops.sth`, `modules_point.sth`, and all five
   `phase4_slice10b.rs`, `phase7_slice3h.rs:153`, `phase7_slice3v.rs:66`,
   `phase7_slice5_array_drop.rs:56`): `: drop ( Spy -- ) | s | "drop " . s Spy> . ;`
   — str + i64 prints inside a drop overload; every drop-order witness migrates.
+  (S7d spec: `SPY_DEF` splits — run-witness files keep the print; the
+  `parse_with_core` check-only consumers need a silent-drop variant, since
+  `CORE_SOURCES` is core-only.)
 - **Bool prints ~76 sites**, all riding the harness auto-import (§6).
 - **str/cstr prints**: `phase3_strings.rs:96,106,118,154,141-160,161-175`
   (pins no-trailing-newline, escapes, interior-NUL truncation via the cstr
@@ -58,6 +63,9 @@ No-print examples (7): `modules_ops.sth`, `modules_point.sth`, and all five
 - Per-file counts: phase0.rs 100, phase3_refs.rs 57, phase4_combinators.rs 48,
   phase4_generics.rs 46, phase4_modules.rs 45, phase7_slice12.rs 30,
   phase4_quotations.rs 28, … remaining ~35 files ≤8 each.
+- (S7d spec: manifest-less fixtures and `depends:`-core-only ad-hoc manifests that
+  print need `depends: hosted` or a vehicle swap — the spec's migration surface names
+  them; §3's per-file counts do not include them.)
 
 ## 4. Goldens
 
@@ -67,6 +75,9 @@ No-print examples (7): `modules_ops.sth`, `modules_point.sth`, and all five
 - `tests/qbe_baseline/*.ssa` — 34 emitted-IL snapshots pinning the
   `call $printf(l $fmt …)` sequences and `$fmt`/`$ufmt`/`$ffmt`/`$sfmt`/
   `$strfmt` data rows the delete list removes (regenerable, "intended to change").
+- (S7d spec: the trace-mixing goldens — the `run_owned_traced_golden` family in
+  `phase0.rs`, `run_src_traced` in `phase3_refs.rs` — reorder by design: dots go
+  out via `write(2)`, trace lines stay stdio-buffered and flush at exit.)
 
 ## 5. Type coverage vs `Show` impls
 
@@ -83,9 +94,9 @@ i32 have no corpus sites but print today.
 - `lib/hosted/testing.sth:7` — `import: intrinsics | . | ;` (the other
   selective intrinsics import naming `.`). All other intrinsics imports are
   `*`.
-- Harness auto-import: `tests/common/mod.rs:193` `bool_imports` emits
+- Harness auto-import: `tests/common/mod.rs:162` `bool_imports` emits
   `import: core::bool corebool | . | ;` whenever a fixture prints and produces
-  a bool; its doc comment (118-123, 162-165) states the one-hop rule. Both the
+  a bool; its doc comment (152-161) states the one-hop rule. Both the
   heuristic and the comment are migration surface; `tests/fixtures/sooth.pkg`
   needs `depends: hosted` (fixtures are already `layer: hosted`).
   `examples/sooth.pkg` already depends on core+hosted.
