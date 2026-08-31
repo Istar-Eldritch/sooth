@@ -1932,6 +1932,18 @@ pub const RESERVED_TRAIT_MODULE: u32 = u32::MAX;
 pub struct TraitDecl {
     pub name: String,
     pub kind: TraitKind,
+    /// P7b.S2 (S2-1): the header's single type variable's declared kind --
+    /// `Star` for a plain `trait: F['F]`, or the bracket's annotation
+    /// (`trait: Functor['F: * -> *]`). `parse_trait_decl` used to parse and
+    /// discard this; it is now published so each member's var 0 is seeded
+    /// with it (S2-1) and a member's annotation-vs-usage conflict is
+    /// detectable (S2-15.b) rather than silently ignored (F4).
+    /// (`kind` itself is taken by the `TraitKind` predicate/nominal tag.)
+    pub var_kind: Kind,
+    /// P7b.S2 (S2-1): the header type variable's own span -- the binding
+    /// site of var 0. A member's annotation-vs-usage conflict (S2-15.b)
+    /// names this as the origin span alongside the member-usage span.
+    pub var_span: Span,
     /// R1 (single-type-variable traits only): every member's signature
     /// shares one implicit type variable, id 0 in its own `PolySig`.
     pub members: Vec<TraitMember>,
@@ -1950,6 +1962,11 @@ pub struct TraitMember {
     /// every `impl:` body satisfying this member is spliced at its call sites
     /// instead of costing a call frame.
     pub declares_inline: bool,
+    /// P7b.S2 (S2-15): the member name's own span -- the located position the
+    /// per-member diagnostics (S2-15.a's no-dispatchable-input rejection and
+    /// S2-15.d's App-in-quotation-row fence) name, distinct from the trait's
+    /// `span` (the origin these reports point back to).
+    pub span: Span,
 }
 
 /// P7.S3e (R4/R8): ground a trait member's declared `PolyType` (over the
@@ -2062,6 +2079,8 @@ pub fn seed_predicate_traits() -> Vec<TraitDecl> {
     vec![TraitDecl {
         name: "Copy".to_string(),
         kind: TraitKind::Predicate(Bound::Copy),
+        var_kind: Kind::Star,
+        var_span: Span::default(),
         members: Vec::new(),
         module: RESERVED_TRAIT_MODULE,
         span: Span::default(),

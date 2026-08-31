@@ -487,9 +487,11 @@ fn a_nullary_member_dispatches_off_an_operand_grounded_variable() {
 /// R8: the surviving rejection. A receiver mentioned only *nested* inside a
 /// composite input (an array element) is still rejected -- grounding it
 /// would need structural unification through the array type, which
-/// dispatch does not attempt. Byte-identical to the pre-P7.S3t message for
-/// this shape, minus the note that used to name the (now-legal) nullary
-/// case as a separate deferral.
+/// dispatch does not attempt.
+/// P7b.S2 (S2-15.a): the message was reworded to the HKT-aware form -- the
+/// parenthetical now names the trait-var-headed expected shape, and the
+/// report is located at the *member* (col 19), not the trait header. The
+/// nested-composite note is byte-identical to the pre-S2 text.
 #[test]
 fn a_nested_receiver_member_is_still_rejected() {
     let err = build_error(
@@ -499,8 +501,8 @@ fn a_nested_receiver_member_is_still_rejected() {
     );
     assert!(
         err.contains(
-            "`sum` of `Show` (line 2, col 8) never takes `'T` (or `&'T`) directly as an input, \
-             so a call has nothing to dispatch on"
+            "`sum` of `Show` (line 2, col 19) has no input for a call to dispatch on \
+             (expected the trait's variable `'F` bare or heading an application like `'F['T]`)"
         ),
         "{err}"
     );

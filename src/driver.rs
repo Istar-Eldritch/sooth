@@ -2757,6 +2757,8 @@ mod tests {
         let base = crate::ast::TraitDecl {
             name: "Foo".to_string(),
             kind: crate::ast::TraitKind::Nominal,
+            var_kind: crate::ast::Kind::Star,
+            var_span: Span::default(),
             members: Vec::new(),
             module: 0,
             span: Span::default(),

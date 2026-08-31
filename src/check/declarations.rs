@@ -376,27 +376,83 @@ pub fn check_trait_decls(module: &Module) -> Result<(), String> {
 /// unification in `check_poly_call`), so the member is dispatchable and the
 /// gate no longer needs to shut the door before that mechanism runs.
 ///
+/// P7b.S2 (S2-2, R4): the rule is HKT-aware. A member of a higher-kinded
+/// trait (`trait: Functor['F: * -> *]`) dispatches on an **application
+/// headed by the trait var** (`'F['T]`) -- its bare `'F` mention would be a
+/// kind error (S2-15.b) and its dispatchable input is App-headed, so the
+/// old bare-only acceptance would reject every HKT member (m1). `&'F` stays
+/// dispatchable (dropping it would break every S1-style ref-member trait,
+/// `Shw`), and the same courtesy extends to `&'F['T]`: ref-ness is an
+/// addressing mode, not a type identity, so a reference to a
+/// trait-var-headed application dispatches on the same head.
+///
 /// A member that mentions the variable only *nested* inside a composite
 /// input still cannot dispatch: grounding that would need structural
 /// unification through the array type, which dispatch does not attempt.
 /// Rejected here, at `trait:` declaration time, rather than left to
 /// mis-dispatch at the call.
+/// S2-2: the dispatchable head -- the trait var bare, or heading an
+/// application. A member local's head (`'G['T]`) dispatches on nothing.
+fn dispatchable_head(t: &PolyType) -> bool {
+    matches!(t, PolyType::Var(0) | PolyType::App { head: 0, .. })
+}
+
 fn member_binds_trait_var(member: &TraitMember) -> bool {
     member.sig.inputs.is_empty()
         || member.sig.inputs.iter().any(|input| match input {
-            PolyType::Var(0) => true,
-            PolyType::Ref(referent, _) => matches!(referent.as_ref(), PolyType::Var(0)),
-            _ => false,
+            PolyType::Ref(referent, _) => dispatchable_head(referent),
+            other => dispatchable_head(other),
         })
 }
 
+/// S2-15.a (review fix): whether the member's *inputs* mention the trait var
+/// (bare, or heading an application) somewhere nested -- an array element, a
+/// deeper reference, a cell payload, or a quotation row. That is the
+/// near-miss the note in `nested_receiver_member_error` explains, so the note
+/// is appended only for it. A var at a dispatchable position (top level, or
+/// under a single `&`) never reaches the error at all, and a var mentioned
+/// only in the outputs (golden #1's `pick ( 'T -- 'F['T] )`) is not an input
+/// near-miss -- neither case wants the note.
+fn member_inputs_nest_trait_var(member: &TraitMember) -> bool {
+    fn mentions_trait_var(t: &PolyType) -> bool {
+        match t {
+            PolyType::Var(0) | PolyType::App { head: 0, .. } => true,
+            PolyType::Array(elem, _) => mentions_trait_var(elem),
+            PolyType::Ref(referent, _) => mentions_trait_var(referent),
+            PolyType::OwnedCell(inner) => mentions_trait_var(inner),
+            PolyType::Quotation(ins, outs, ..) => ins.iter().chain(outs).any(mentions_trait_var),
+            PolyType::Generic { args, .. } | PolyType::GenericVariant { args, .. } => {
+                args.iter().any(mentions_trait_var)
+            }
+            PolyType::Concrete(_) | PolyType::Var(_) | PolyType::App { .. } | PolyType::QuotLit => {
+                false
+            }
+        }
+    }
+    // By the time this runs, no input is dispatchable (the gate has already
+    // rejected the member), so any mention found here is necessarily a
+    // nested one.
+    member.sig.inputs.iter().any(mentions_trait_var)
+}
+
+/// P7b.S2 (S2-15.a): the HKT-aware replacement of m1's captured message. The
+/// member is the offending position; the parenthetical names the expected
+/// shape in the trait-var-headed form the trait's kind actually calls for.
+/// The nested-composite note rides along only when the member's inputs
+/// actually nest the trait var under a composite shape -- it is advice about
+/// that specific near-miss, not part of the spec's pinned S2-15.a text.
 fn nested_receiver_member_error(decl: &TraitDecl, member: &TraitMember) -> String {
-    format!(
-        "error: trait member `{}` of `{}` (line {}, col {}) never takes `'T` (or `&'T`) directly as \
-         an input, so a call has nothing to dispatch on\n  note: a variable nested inside a \
-         composite input (an array element, say) does not count",
-        member.name, decl.name, decl.span.line, decl.span.col
-    )
+    let mut msg = format!(
+        "error: trait member `{}` of `{}` (line {}, col {}) has no input for a call to dispatch on \
+         (expected the trait's variable `'F` bare or heading an application like `'F['T]`)",
+        member.name, decl.name, member.span.line, member.span.col
+    );
+    if member_inputs_nest_trait_var(member) {
+        msg.push_str(
+            "\n  note: a variable nested inside a composite input (an array element, say) does not count",
+        );
+    }
+    msg
 }
 
 fn duplicate_trait_error(decl: &TraitDecl, first: Span) -> String {
@@ -3736,24 +3792,75 @@ mod tests {
         trait_check_src("trait: Show['T] : fresh ( -- i64 ) ; ;").unwrap();
     }
 
+    /// P7b.S2 (S2-2): the replacement dispatchability rule -- an application
+    /// headed by the trait var is a dispatchable input (the HKT form), and
+    /// so is a reference to one (`& 'F['T]`: ref-ness is an addressing
+    /// mode, not a type identity). This is W1's trait, accepted end to end.
+    #[test]
+    fn check_trait_decls_accepts_trait_var_headed_application_inputs() {
+        trait_check_src(
+            "trait: Functor['F: * -> *] : map ( 'F['T] [ 'T -- 'U ] -- 'F['U] ) ;\n\
+             : refmap ( & 'F['T] -- ) ;\n\
+             ;",
+        )
+        .unwrap();
+    }
+
+    /// P7b.S2 (S2-2/S2-15.a): with the member single-var gate lifted (S2-1),
+    /// a member whose only inputs are member locals (or a member-local-headed
+    /// application) has nothing to dispatch on -- a located declaration-time
+    /// error naming the member, not the old single-var rejection.
+    #[test]
+    fn check_trait_decls_rejects_member_with_no_dispatchable_input() {
+        let err = trait_check_src(
+            "trait: Functor['F: * -> *] : map ( 'F['T] [ 'T -- 'U ] -- 'F['U] ) ;\n\
+             : pick ( 'T -- 'F['T] ) ;\n\
+             ;",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("`pick` of `Functor`")
+                && err.contains("has no input for a call to dispatch on"),
+            "{err}"
+        );
+        assert!(
+            !err.contains("more than one type variable"),
+            "the lifted member gate must not fire: {err}"
+        );
+        // S2-15.a review fix: the nested-composite note is conditional -- it
+        // rides along only when the inputs actually nest the trait var. Here
+        // the var appears only in the *outputs* (`'F['T]`), so no note.
+        assert!(!err.contains("note:"), "{err}");
+        // Located at the member (`pick` on line 2), not the trait header.
+        assert!(err.contains("line 2, col 3"), "member position: {err}");
+    }
+
     /// The gate is syntactic, so a receiver mentioned only *nested* inside a
     /// composite input is rejected too -- grounding it would need structural
     /// unification through the array type. The diagnostic must say so instead
     /// of claiming the signature mentions `'T` nowhere, which is false here,
     /// and must not conflate this shape with the (now-legal) nullary case.
+    /// P7b.S2 (S2-15.a): the HKT-aware text, located at the member (not the
+    /// trait), with the trait-var-headed expected shape in the parenthetical.
     #[test]
     fn check_trait_decls_rejects_a_receiver_nested_in_an_array_input() {
         let err =
             trait_check_src("trait: Show['T] : sum ( array[ 'T 4 ] -- i64 ) ; ;").unwrap_err();
         assert!(
             err.contains("`sum` of `Show`")
-                && err.contains("never takes `'T` (or `&'T`) directly as an input"),
+                && err.contains("has no input for a call to dispatch on"),
             "{err}"
+        );
+        assert!(
+            err.contains("heading an application like `'F['T]`"),
+            "the expected shape is named in the parenthetical: {err}"
         );
         assert!(
             err.contains("nested inside a composite input"),
             "the nested shape must not read as the nullary case: {err}"
         );
+        // Located at the member, not the trait header (S2-15.a's position).
+        assert!(err.contains("line 1, col 19"), "member position: {err}");
     }
 
     #[test]

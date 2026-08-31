@@ -360,40 +360,96 @@ fn invalid_c_symbol_error(symbol: &str, span: Span) -> String {
 }
 
 /// P7.S3e (R4/R8, decision 8): a trait member signature is restricted to
-/// concrete/array/reference shapes over `'T` this slice -- `ast`'s
+/// concrete/array/reference shapes over `'T` -- `ast`'s
 /// `ground_member_type`, which the body-form desugar grounds each member with
-/// against a concrete `impl:` target, handles exactly these and nothing else
-/// (a quotation or generic-application shape has no forcing consumer this
-/// phase and no grounding rule).
+/// against a concrete `impl:` target, handles exactly these and nothing else.
+///
+/// P7b.S2 (S2-3) adds the two HKT arms:
+///
+/// - `App` -- supported iff the head is the trait var (id 0); the
+///   application's arity is validated against the target ctor at grounding
+///   time (S2-7), not here (the target is unknown at member parse). An App
+///   headed by a member *local* has no dispatch story this slice.
+/// - `Quotation` -- supported iff its rows are App-free (and each row is
+///   itself a supported shape): an `App` inside a member quotation row is a
+///   located fence (S2-15.d, F10 -- declarations represent it, but `call`
+///   cannot see through one; a later slice's extension).
 fn member_shape_is_supported(t: &PolyType) -> bool {
     match t {
         PolyType::Concrete(_) | PolyType::Var(_) => true,
         PolyType::Array(elem, Len::Concrete(_)) => member_shape_is_supported(elem),
         PolyType::Array(_, Len::Var(_)) => false,
         PolyType::Ref(referent, _) => member_shape_is_supported(referent),
+        // P7b.S2 (S2-3): the HKT dispatchable shape -- only the trait's own
+        // variable may head an application in a member signature.
+        PolyType::App { head, .. } => *head == 0,
+        // P7b.S2 (S2-3): a declared quotation parameter whose rows stay
+        // App-free (and shape-supported) is representable; anything else in
+        // a row goes through the same predicate recursively.
+        PolyType::Quotation(ins, outs, ..) => {
+            ins.iter().chain(outs).all(member_shape_is_supported)
+                && !member_quotation_row_mentions_app(t)
+        }
         // P7.S3n (R3): the new owned-cell shape is deliberately *not* added
         // to the supported set -- `ground_member_type` has no cell arm, so a
         // `^'T` member would ground to nothing. A located rejection, not a
         // wildcard fall-through.
         PolyType::OwnedCell(_)
-        | PolyType::Quotation(..)
         | PolyType::Generic { .. }
         | PolyType::QuotLit
         // P7.S12 (R3.5): unconstructible outside an eliminator arm's own
         // input row, never in a trait member signature.
-        | PolyType::GenericVariant { .. }
-        // P7b.S1 (R4/S1-8): a trait member signature never mentions a
-        // higher-kinded application (parse_trait_member_effect's restricted
-        // grammar has no route to one).
-        | PolyType::App { .. } => false,
+        | PolyType::GenericVariant { .. } => false,
+        // (P7b.S2 S2-3: an application headed by anything but the trait var
+        // -- a member local, say -- is unsupported; that is the `App` arm
+        // above returning `*head == 0`, not a wildcard fall-through.)
+    }
+}
+
+/// P7b.S2 (S2-15.d/F10): whether a type application is reachable anywhere in
+/// `t` -- including `t` itself in plain position (the top-level `App` arm).
+/// `App` *in a plain slot* is the supported dispatchable shape (S2-3); an App
+/// *inside a quotation row* is the fenced one -- the rows are exactly what
+/// `call` will pop and run, and it cannot see through a type-level
+/// application. The S2-15.d dispatch therefore pairs this predicate with
+/// `poly_type_app_head` (which finds a plain-position App head but does not
+/// recurse into rows): `mentions_app && app_head.is_none()` isolates the
+/// row-nested case. Recurses through nested shapes so an App buried under an
+/// array element or a nested quotation is caught too.
+fn member_quotation_row_mentions_app(t: &PolyType) -> bool {
+    match t {
+        PolyType::App { .. } => true,
+        PolyType::Concrete(_) | PolyType::Var(_) | PolyType::QuotLit => false,
+        PolyType::Array(elem, _) => member_quotation_row_mentions_app(elem),
+        PolyType::Ref(referent, _) => member_quotation_row_mentions_app(referent),
+        PolyType::OwnedCell(inner) => member_quotation_row_mentions_app(inner),
+        PolyType::Quotation(ins, outs, ..) => ins
+            .iter()
+            .chain(outs)
+            .any(member_quotation_row_mentions_app),
+        PolyType::Generic { args, .. } | PolyType::GenericVariant { args, .. } => {
+            args.iter().any(member_quotation_row_mentions_app)
+        }
     }
 }
 
 /// P7.S3e (R4/R8): a trait member signature mentions an unsupported shape
-/// (a quotation or generic-application type) -- see `member_shape_is_supported`.
+/// (an owned cell, a generic application over a non-trait head, or a
+/// variable-length array) -- see `member_shape_is_supported`.
 fn unsupported_trait_member_shape_error(trait_name: &str, span: Span) -> String {
     format!(
-        "error: trait `{trait_name}`'s member at line {}, col {} has an unsupported signature shape (only concrete, array, and reference types over the trait's type variable are supported this slice)",
+        "error: trait `{trait_name}`'s member at line {}, col {} has an unsupported signature shape (only concrete, array, and reference types over the trait's type variable -- plus a trait-var-headed application or an App-free quotation -- are supported)",
+        span.line, span.col
+    )
+}
+
+/// P7b.S2 (S2-15.d, F10): a type application inside a member quotation row.
+/// Declarations *represent* the shape, but body-level `call` cannot see
+/// through it -- fenced at the member grammar rather than left to fail at
+/// the (later-slice) consumer.
+fn app_in_member_quotation_row_error(trait_name: &str, span: Span) -> String {
+    format!(
+        "error: trait `{trait_name}`'s member at line {}, col {} applies a type variable inside a quotation row (`'F[...]` may not appear inside `[ ... ]`)\n  note: a type application is supported only in a plain signature slot; keep quotation rows App-free",
         span.line, span.col
     )
 }
@@ -1533,6 +1589,18 @@ impl PolyBuilder {
         Ok(())
     }
 
+    /// P7b.S2 (S2-1): pre-establish a variable's kind from its *binding*
+    /// site -- the trait header's bracket annotation -- before the effect is
+    /// parsed, so `mark_ty_star`/`mark_ty_arrow` check every mention against
+    /// the declared kind instead of letting the first mention bind it (the
+    /// mechanism `attach_bracket_bounds`' annotation-vs-usage comparison
+    /// reads back for word-level bound brackets). Only ever called for a
+    /// variable whose id was just freshly interned, so the insert cannot
+    /// clobber a genuine usage-derived kind.
+    fn seed_ty_kind(&mut self, id: u32, kind: Kind) {
+        self.ty_established_kind.insert(id, kind);
+    }
+
     /// Intern a type variable, returning its id and whether this is its
     /// binding (first) occurrence. A name already seen in a count position is
     /// X1.
@@ -2190,6 +2258,14 @@ fn star_applied_like_constructor_error(name: &str, misuse: Span, binding: Span) 
 /// S1-15.b: a type variable applied at an earlier mention (kind `* -> ...`),
 /// then used bare at a later one -- located, naming both the misuse site and
 /// the binding (first application) site.
+///
+/// S2-15.b (S2-1) reuses this message verbatim for a header-annotated seed:
+/// with the header kind published, a member's bare `'F` mention reports the
+/// header annotation's span as the "binding" origin. The `(from an
+/// application of ...)` clause is then imprecise -- that span is the header's
+/// kind annotation, not an application -- but the wording is golden-frozen
+/// by P7b.S1 (`phase7b_slice1.rs` kind-error-b) and stays unchanged; a
+/// header-aware rewording would be a cross-slice golden break.
 fn arrow_var_used_bare_error(name: &str, misuse: Span, binding: Span, kind: &Kind) -> String {
     format!(
         "error: type variable `{name}` at line {}, col {} is used as a plain type but has kind `{}` (from an application of `{name}` at line {}, col {}); a higher-kinded variable never appears bare",
@@ -3181,17 +3257,17 @@ impl<'t> Parser<'t> {
         // P7.S6 (R5/R10): a `trait:` binds its single type variable in a
         // *mandatory* bracket. There is no such thing as a non-generic trait,
         // so the bracket is not optional the way a `type:`'s is.
-        let (ty_var, ty_var_span) = match self.peek() {
+        let (ty_var, ty_var_span, ty_var_kind) = match self.peek() {
             Some((Token::LBracket, _)) => {
                 let vars = self.parse_header_bracket(&name)?;
                 if vars.len() > 1 {
                     return Err(multi_variable_trait_error(&name, vars[1].1));
                 }
-                let (var, var_span, _kind) = vars
+                let (var, var_span, kind) = vars
                     .into_iter()
                     .next()
                     .expect("parse_header_bracket rejects an empty bracket");
-                (var, var_span)
+                (var, var_span, kind)
             }
             // R10: the retired postfix variable (`trait: Ord 'T`). Its own
             // error rather than the neither-form one below, which would
@@ -3272,7 +3348,13 @@ impl<'t> Parser<'t> {
                     // trait member's implicit header variable is unchanged.
                     let bound_bracket = self.parse_optional_bound_bracket()?;
                     self.expect(Token::LParen)?;
-                    let mut sig = self.parse_trait_member_effect(&ty_var, &name, member_span)?;
+                    let mut sig = self.parse_trait_member_effect(
+                        &ty_var,
+                        ty_var_span,
+                        &ty_var_kind,
+                        &name,
+                        member_span,
+                    )?;
                     if let Some(bracket) = &bound_bracket {
                         self.attach_bracket_bounds(&mut sig, bracket, &member_name)?;
                     }
@@ -3282,6 +3364,9 @@ impl<'t> Parser<'t> {
                         name: member_name,
                         sig,
                         declares_inline,
+                        // P7b.S2 (S2-15): the member's own position, for the
+                        // per-member diagnostics (S2-15.a/d).
+                        span: member_span,
                     });
                 }
                 // P7.S3s-follow: a bare word in member position is the retired
@@ -3307,6 +3392,10 @@ impl<'t> Parser<'t> {
         Ok(TraitDecl {
             name,
             kind: TraitKind::Nominal,
+            // P7b.S2 (S2-1): publish the header bracket's kind annotation and
+            // the header variable's own span instead of discarding them (F4).
+            var_kind: ty_var_kind,
+            var_span: ty_var_span,
             members,
             module: self.module,
             span: name_span,
@@ -3316,19 +3405,40 @@ impl<'t> Parser<'t> {
     /// One trait member's signature, positioned just past its opening `(`:
     /// an ordinary poly effect, except the trait's own type variable is
     /// pre-interned at id 0 (its binding occurrence is the trait header, not
-    /// here), so every `'`-mention inside the member is a *use*. A member
-    /// mentioning a second, genuinely new variable name is rejected here
-    /// (R16, single-type-variable traits only), once the whole effect --
-    /// including a use *before* the point a hypothetical second binding
-    /// would occur -- has been parsed.
+    /// here), so every `'`-mention inside the member is a *use*.
+    ///
+    /// P7b.S2 (S2-1): the header's published kind annotation and the header
+    /// variable's own span now ride along. Var 0 is interned with the header
+    /// span (so an annotation-vs-usage conflict names the header as origin,
+    /// S2-15.b) and the member builder's established-kind table is seeded
+    /// with the header kind *before* the effect parse, so `mark_ty_star`/
+    /// `mark_ty_arrow` check every mention against the declared kind instead
+    /// of letting the first mention bind it. An `'F: * -> *` header with a
+    /// bare `'F` mention in a member is now a located error naming both
+    /// spans, and a `*`-kinded header with an `'F['T]` member dies the
+    /// mirrored way (S2-15.b).
+    ///
+    /// The member single-variable gate is lifted (S2-1): a member may declare
+    /// its own local variables (`map`'s `'T`/`'U`), which intern after the
+    /// header var (the header keeps id 0 in each member's sig). The one-var
+    /// limit stays enforced on the *header bracket* itself
+    /// (`multi_variable_trait_error` in `parse_trait_decl`, unchanged).
     fn parse_trait_member_effect(
         &mut self,
         ty_var: &str,
+        ty_var_span: Span,
+        header_kind: &Kind,
         trait_name: &str,
         member_span: Span,
     ) -> Result<PolySig, String> {
         let mut builder = PolyBuilder::default();
-        builder.intern_ty_var(ty_var, member_span)?;
+        let (id, _) = builder.intern_ty_var(ty_var, ty_var_span)?;
+        // P7b.S2 (S2-1): seed var 0 with the header's declared kind before
+        // the effect parse -- `intern_ty_var` alone never touches
+        // `ty_established_kind`, which would let the member's first mention
+        // re-bind the kind and silently ignore the header annotation (F4).
+        debug_assert_eq!(id, 0, "the trait header var is each member sig's var 0");
+        builder.seed_ty_kind(id, header_kind.clone());
         let raw_in = self.parse_poly_slots(&mut builder, false, |tok| {
             matches!(tok, Token::RParen) || is_word(tok, "--")
         })?;
@@ -3345,11 +3455,24 @@ impl<'t> Parser<'t> {
             .map(|r| self.raw_to_poly_type(r))
             .collect::<Result<_, _>>()?;
         let sig = builder.finish(inputs, outputs);
-        if sig.ty_var_names.len() > 1 {
-            return Err(multi_variable_trait_error(trait_name, member_span));
-        }
         for t in sig.inputs.iter().chain(&sig.outputs) {
             if !member_shape_is_supported(t) {
+                // P7b.S2 (S2-15.d): an App inside a member quotation row is
+                // its own fence (F10 -- declarations represent it, but
+                // `call` cannot see through one), distinct from the general
+                // unsupported-shape rejection. The fence fires only when the
+                // unsupported shape actually routes through a quotation: a
+                // plain-slot App (bare or under array/`&`) headed by a member
+                // local is unsupported too, but no quotation is involved, so
+                // it takes the generic message instead. The row-mentions
+                // predicate answers "an App exists somewhere", so it is
+                // paired with `poly_type_app_head`, which finds a
+                // plain-position App head but does not recurse into
+                // quotation rows -- `None` here means the App is row-nested
+                // (a plain App was already excluded by the first conjunct).
+                if member_quotation_row_mentions_app(t) && poly_type_app_head(t).is_none() {
+                    return Err(app_in_member_quotation_row_error(trait_name, member_span));
+                }
                 return Err(unsupported_trait_member_shape_error(
                     trait_name,
                     member_span,
@@ -10764,21 +10887,53 @@ mod tests {
     }
 
     #[test]
-    fn parse_trait_decl_member_introducing_a_second_variable_is_error() {
-        let err = parse_src("trait: Rel['T] : cmp ( &'T &'U -- ) ; ;").unwrap_err();
-        assert!(err.contains("more than one type variable"), "{err}");
+    fn parse_trait_decl_member_introducing_a_local_variable_parses_with_header_var_zero() {
+        // P7b.S2 (S2-1): the member single-variable gate is lifted -- a
+        // member may declare its own locals (`'U` here), which intern after
+        // the header var, and the header var keeps id 0 in the member's sig.
+        // (Whether the member can *dispatch* is check-time rule S2-2, not a
+        // parse rejection.)
+        let module = parse_src("trait: Rel['T] : cmp ( &'T &'U -- ) ; ;").unwrap();
+        let rel = module
+            .traits
+            .iter()
+            .find(|t| t.name == "Rel")
+            .expect("the trait parsed");
+        let sig = &rel.members[0].sig;
+        assert_eq!(sig.ty_var_names, vec!["'T", "'U"]);
+        assert_eq!(
+            sig.inputs[0],
+            PolyType::Ref(Box::new(PolyType::Var(0)), false)
+        );
+        assert_eq!(
+            sig.inputs[1],
+            PolyType::Ref(Box::new(PolyType::Var(1)), false)
+        );
     }
 
     #[test]
-    fn parse_trait_decl_member_with_a_quotation_shape_is_error() {
-        // R4/R8: `ground_member_type` (ast.rs) only grounds
-        // concrete/array/reference shapes -- a *variable-bearing* quotation
-        // shape has no grounding rule and must be rejected here, not left to
-        // panic later. (A fully-concrete quotation, with no `'T` inside it,
-        // folds to `PolyType::Concrete` at parse time and needs no grounding
-        // at all -- not this case.)
-        let err = parse_src("trait: Apply['T] : run ( &'T [ 'T -- 'T ] -- ) ; ;").unwrap_err();
-        assert!(err.contains("unsupported signature shape"), "{err}");
+    fn parse_trait_decl_member_with_an_app_free_quotation_shape_parses() {
+        // P7b.S2 (S2-3): a declared quotation parameter whose rows are
+        // App-free is now a supported member shape (the S2-3 Quotation arm);
+        // only an App *inside* a row is fenced (S2-15.d, tested below).
+        // (A fully-concrete quotation folds to `PolyType::Concrete` at parse
+        // time; a variable-bearing one stays `PolyType::Quotation`.)
+        let module = parse_src("trait: Apply['T] : run ( &'T [ 'T -- 'T ] -- ) ; ;").unwrap();
+        let apply = module
+            .traits
+            .iter()
+            .find(|t| t.name == "Apply")
+            .expect("the trait parsed");
+        assert_eq!(
+            apply.members[0].sig.inputs[1],
+            PolyType::Quotation(
+                vec![PolyType::Var(0)],
+                vec![PolyType::Var(0)],
+                false,
+                None,
+                None
+            )
+        );
     }
 
     #[test]
@@ -10790,6 +10945,224 @@ mod tests {
         // rather than a wildcard fall-through.
         let err = parse_src("trait: Sink['T] : sink ( ^'T -- ) ; ;").unwrap_err();
         assert!(err.contains("unsupported signature shape"), "{err}");
+    }
+
+    #[test]
+    fn parse_trait_decl_publishes_header_kind_and_span() {
+        // P7b.S2 (S2-1): the header bracket's kind annotation and the header
+        // variable's own span are published on `TraitDecl` instead of
+        // discarded (F4). An annotated header carries its `Kind::Arrow`;
+        // a plain one defaults to `Star`.
+        let module = parse_src("trait: Functor['F: * -> *] : map ( 'F['T] -- ) ; ;").unwrap();
+        let functor = module
+            .traits
+            .iter()
+            .find(|t| t.name == "Functor")
+            .expect("the trait parsed");
+        assert_eq!(
+            functor.var_kind,
+            Kind::Arrow {
+                domains: vec![Kind::Star],
+                result: Box::new(Kind::Star),
+            }
+        );
+        assert_eq!((functor.var_span.line, functor.var_span.col), (1, 16));
+        let plain = parse_src("trait: F['F] : m ( 'F -- ) ; ;").unwrap();
+        let f = plain
+            .traits
+            .iter()
+            .find(|t| t.name == "F")
+            .expect("the trait parsed");
+        assert_eq!(f.var_kind, Kind::Star);
+        assert_eq!((f.var_span.line, f.var_span.col), (1, 10));
+    }
+
+    #[test]
+    fn parse_trait_decl_hkt_member_seeds_header_kind_and_keeps_var_zero() {
+        // P7b.S2 (S2-1): each member's builder is seeded with the header
+        // kind before the effect parse, so the W1 member -- `map ( 'F['T]
+        // [ 'T -- 'U ] -- 'F['U] )` -- parses with the header var at id 0
+        // carrying the declared `Arrow` kind and the member locals interning
+        // after it as `Star`s. `ty_var_spans[0]` is the *header* span, so an
+        // annotation-vs-usage conflict names the header as origin (S2-15.b).
+        let module =
+            parse_src("trait: Functor['F: * -> *] : map ( 'F['T] [ 'T -- 'U ] -- 'F['U] ) ; ;")
+                .unwrap();
+        let functor = module
+            .traits
+            .iter()
+            .find(|t| t.name == "Functor")
+            .expect("the trait parsed");
+        let sig = &functor.members[0].sig;
+        assert_eq!(sig.ty_var_names, vec!["'F", "'T", "'U"]);
+        assert_eq!(
+            sig.ty_kinds,
+            vec![
+                Kind::Arrow {
+                    domains: vec![Kind::Star],
+                    result: Box::new(Kind::Star),
+                },
+                Kind::Star,
+                Kind::Star,
+            ]
+        );
+        assert_eq!((sig.ty_var_spans[0].line, sig.ty_var_spans[0].col), (1, 16));
+        assert_eq!((sig.ty_var_spans[1].line, sig.ty_var_spans[1].col), (1, 39));
+        assert_eq!((sig.ty_var_spans[2].line, sig.ty_var_spans[2].col), (1, 51));
+        assert_eq!(
+            sig.inputs[0],
+            PolyType::App {
+                head: 0,
+                args: vec![PolyType::Var(1)],
+            }
+        );
+        assert_eq!(
+            sig.outputs[0],
+            PolyType::App {
+                head: 0,
+                args: vec![PolyType::Var(2)],
+            }
+        );
+    }
+
+    #[test]
+    fn parse_trait_decl_arrow_header_bare_member_mention_names_both_spans() {
+        // P7b.S2 (S2-15.b, direction 1): an `'F: * -> *` header with a bare
+        // `'F` mention in a member is a located error carrying both spans --
+        // the header annotation (the seeded kind's origin) and the member
+        // usage. p6c's accepted fixture dies only now that S2-1 publishes
+        // the kind.
+        let err = parse_src("trait: Functor['F: * -> *] : size ( 'F -- i64 ) ; ;").unwrap_err();
+        assert!(
+            err.contains("is used as a plain type but has kind `* -> *`"),
+            "{err}"
+        );
+        // Member-usage span, then header-annotation span.
+        assert!(err.contains("line 1, col 37"), "{err}");
+        assert!(err.contains("line 1, col 16"), "{err}");
+    }
+
+    #[test]
+    fn parse_trait_decl_star_header_applied_member_mention_names_both_spans() {
+        // P7b.S2 (S2-15.b, direction 2): a `*`-kinded header with an
+        // `'F['T]` member dies the mirrored way -- the application is the
+        // misuse, the header's bare binding the origin.
+        let err = parse_src("trait: Wrap['F] : m ( 'F['T] -- ) ; ;").unwrap_err();
+        assert!(
+            err.contains("is applied like a type constructor but has kind `*`"),
+            "{err}"
+        );
+        assert!(err.contains("line 1, col 23"), "{err}");
+        assert!(err.contains("line 1, col 13"), "{err}");
+    }
+
+    #[test]
+    fn parse_trait_decl_app_inside_member_quotation_row_is_fenced() {
+        // P7b.S2 (S2-15.d, F10): an App inside a member quotation row is a
+        // located fence of its own -- declarations *represent* the shape,
+        // but `call` cannot see through one.
+        let err =
+            parse_src("trait: Functor['F: * -> *] : map ( 'F['T] [ 'F['T] -- 'U ] -- 'F['U] ) ; ;")
+                .unwrap_err();
+        assert!(
+            err.contains("applies a type variable inside a quotation row"),
+            "{err}"
+        );
+        assert!(err.contains("line 1, col 30"), "{err}");
+        assert!(err.contains("keep quotation rows App-free"), "{err}");
+    }
+
+    #[test]
+    fn parse_trait_decl_member_local_headed_app_is_unsupported_shape_error() {
+        // P7b.S2 (S2-15.d, review fix): the row fence is for an App *inside a
+        // quotation row*. A plain-slot App headed by a member local is also an
+        // unsupported shape (the `[`-router accepts any var head), but no
+        // quotation is involved -- it must take the generic unsupported-shape
+        // message, not the self-contradictory fence text.
+        let err = parse_src("trait: Functor['F: * -> *] : m ( 'G['T] -- ) ; ;").unwrap_err();
+        assert!(err.contains("unsupported signature shape"), "{err}");
+        assert!(err.contains("trait-var-headed application"), "{err}");
+        assert!(!err.contains("inside a quotation row"), "{err}");
+        // The ref-wrapped spelling routes the same way: an App under `&` is
+        // still a plain-slot App, not a row-nested one.
+        let err = parse_src("trait: Functor['F: * -> *] : m ( & 'G['T] -- ) ; ;").unwrap_err();
+        assert!(err.contains("unsupported signature shape"), "{err}");
+        assert!(!err.contains("inside a quotation row"), "{err}");
+    }
+
+    #[test]
+    fn member_shape_is_supported_trait_var_headed_app_only() {
+        // P7b.S2 (S2-3, App arm): supported iff the head is the trait var
+        // (id 0) -- a member-local head has no dispatch story this slice.
+        let dispatchable = PolyType::App {
+            head: 0,
+            args: vec![PolyType::Var(1)],
+        };
+        let local_headed = PolyType::App {
+            head: 1,
+            args: vec![PolyType::Var(2)],
+        };
+        assert!(member_shape_is_supported(&dispatchable));
+        assert!(!member_shape_is_supported(&local_headed));
+    }
+
+    #[test]
+    fn member_shape_is_supported_quotation_arm_fences_app_rows() {
+        // P7b.S2 (S2-3, Quotation arm): App-free rows are supported; an App
+        // anywhere inside a row -- including buried under an array element
+        // or a nested quotation -- is fenced.
+        let app_free = PolyType::Quotation(
+            vec![PolyType::Var(0)],
+            vec![PolyType::Var(1)],
+            false,
+            None,
+            None,
+        );
+        let app_in_row = PolyType::Quotation(
+            vec![PolyType::App {
+                head: 0,
+                args: vec![PolyType::Var(1)],
+            }],
+            vec![],
+            false,
+            None,
+            None,
+        );
+        let app_under_array_in_row = PolyType::Quotation(
+            vec![PolyType::Array(
+                Box::new(PolyType::App {
+                    head: 0,
+                    args: vec![PolyType::Var(1)],
+                }),
+                Len::Concrete(2),
+            )],
+            vec![],
+            false,
+            None,
+            None,
+        );
+        let app_in_nested_row = PolyType::Quotation(
+            vec![PolyType::Quotation(
+                vec![PolyType::App {
+                    head: 0,
+                    args: vec![PolyType::Var(1)],
+                }],
+                vec![],
+                false,
+                None,
+                None,
+            )],
+            vec![],
+            false,
+            None,
+            None,
+        );
+        assert!(member_shape_is_supported(&app_free));
+        assert!(!member_shape_is_supported(&app_in_row));
+        assert!(!member_shape_is_supported(&app_under_array_in_row));
+        assert!(!member_shape_is_supported(&app_in_nested_row));
+        assert!(member_quotation_row_mentions_app(&app_in_row));
+        assert!(!member_quotation_row_mentions_app(&app_free));
     }
 
     #[test]
@@ -11097,6 +11470,8 @@ mod tests {
         let show = crate::ast::TraitDecl {
             name: "Show".to_string(),
             kind: TraitKind::Nominal,
+            var_kind: crate::ast::Kind::Star,
+            var_span: Span::default(),
             members: Vec::new(),
             module: 1,
             span: Span::default(),
@@ -11165,6 +11540,8 @@ mod tests {
         let greet = crate::ast::TraitDecl {
             name: "Greet".to_string(),
             kind: TraitKind::Nominal,
+            var_kind: crate::ast::Kind::Star,
+            var_span: Span::default(),
             members: Vec::new(),
             module: 0,
             span: Span::default(),
@@ -11199,6 +11576,8 @@ mod tests {
         let greet = crate::ast::TraitDecl {
             name: "Greet".to_string(),
             kind: TraitKind::Nominal,
+            var_kind: crate::ast::Kind::Star,
+            var_span: Span::default(),
             members: Vec::new(),
             module: 0,
             span: Span::default(),
