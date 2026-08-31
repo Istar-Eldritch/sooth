@@ -64,6 +64,47 @@ fn build_error(entry: &Path) -> String {
     String::from_utf8(build.stderr).expect("stderr should be utf8")
 }
 
+/// The printing-golden runner, from `tests/phase7b_slice1.rs`: builds, runs
+/// the binary, asserts exit 0, and returns the exact stdout.
+fn build_and_run(entry: &Path) -> String {
+    let build = sooth_build(entry);
+    assert!(
+        build.status.success(),
+        "build should succeed; stderr: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let binary = entry.with_extension("");
+    let run = Command::new(&binary)
+        .output()
+        .expect("the built binary should run");
+    assert!(run.status.success(), "the built binary should exit 0");
+    std::fs::remove_file(&binary).ok();
+    String::from_utf8_lossy(&run.stdout).into_owned()
+}
+
+/// The hosted twin of `single_file`, from `tests/phase7b_slice1.rs`: adds
+/// the hosted manifest (a bare package cannot import `core` --
+/// `anonymous_package_error`) and the selective `hosted::show | . |` import
+/// (P7.S7d retired the `.` intrinsic onto `hosted::show`'s ordinary word).
+/// Core modules are NOT pre-imported: a fixture declaring a local twin of a
+/// core type (`Result` in golden #7) must not collide with an import, so
+/// each fixture's src pulls its own imports.
+fn single_file_hosted(tag: &str, src: &str) -> (Tree, PathBuf) {
+    let t = Tree::new(tag);
+    t.write(
+        "sooth.pkg",
+        &format!(
+            "package: p7bs2 ;\nlayer: hosted ;\ndepends: core path \"{root}/lib/core\" ;\ndepends: hosted path \"{root}/lib/hosted\" ;\n",
+            root = env!("CARGO_MANIFEST_DIR")
+        ),
+    );
+    let entry = t.write(
+        "main.sth",
+        &format!("import: intrinsics * ;\nimport: hosted::show | . | ;\n{src}"),
+    );
+    (t, entry)
+}
+
 fn single_file(tag: &str, src: &str) -> (Tree, PathBuf) {
     let t = Tree::new(tag);
     let entry = t.write("main.sth", &format!("import: intrinsics * ;\n{src}"));
@@ -178,4 +219,167 @@ trait: Functor['F: * -> *] :
     // S2-15.a report parenthesizes -- each keeps its stage's house style.)
     assert!(err.contains("line 3, col 3"), "{err}");
     assert!(err.contains("keep quotation rows App-free"), "{err}");
+}
+
+// ---- Phase 2: target and member-word construction + the F14 arm fix ----
+
+/// Golden (positive #5): a bare ctor impl target (`for Box`) desugars to the
+/// ctor applied to fresh pattern variables (S2-4, m2's shape as a permanent
+/// golden), registers, and dispatches at a concrete operand through the
+/// existing applied-var machinery. Pre-S2-4 this died at the shared arity
+/// gate (`generic type Box declares 1 type variable, but none were
+/// supplied`). The declared-sig helper `mk` is the pinned ctor-in-`main`
+/// idiom (F12).
+#[test]
+fn bare_ctor_impl_target_resolves_and_dispatches() {
+    let src = "\
+type: Box['T] v 'T ;
+trait: Functor['F] : size ( 'F -- i64 ) ; ;
+impl: Functor for Box
+  : size drop 9 ;
+;
+: sized['F: Functor] ( 'F -- i64 ) size ;
+: mk ( i64 -- Box[i64] ) Box ;
+: main ( -- ) 5 mk sized . ;
+";
+    let (_t, entry) = single_file_hosted("s2-4-bare-ctor-target", src);
+    let out = build_and_run(&entry);
+    assert_eq!(out, "9\n");
+}
+
+/// Golden (positive #7): a partially-applied ctor target (`for Result[i64]`,
+/// the S2-4 extension) desugars to the explicit prefix plus fresh variables
+/// for the remaining slots (`Result[i64 'ctor1]`), and the pinned prefix
+/// binds at dispatch: two impls differing only in the explicit prefix
+/// (`Result[i64]` vs `Result[Flag]`) are distinct targets, each dispatching
+/// its own member at the operand whose leading slot matches the pin. The
+/// desugar dropping the pin (minting an all-variable pattern) would make
+/// the two impls alpha-equivalent duplicates and this program would not
+/// build. The ctor is a local 2-arg twin of `core::result`'s `Result` (the
+/// spec's literal `Result` spelling): the S1-era module-identity convention
+/// mismatches a lib-declared header's declaring-module pattern against a
+/// user-module-named instantiation's recorded module (pre-existing, F-level,
+/// reachable only via imported headers) -- a local twin keeps this golden
+/// on S2-4's mechanics.
+#[test]
+fn partially_applied_ctor_impl_target_binds_explicit_prefix() {
+    let src = "\
+type: Result['T 'E] | Ok 'T | Err 'E ;
+type: Flag | yes | no ;
+trait: Prj['F] : proj ( 'F -- i64 ) ; ;
+impl: Prj for Result[i64]
+  : proj ~[ ( Ok ) Ok> ] ~[ ( Err ) drop -1 ] Result? ;
+;
+impl: Prj for Result[Flag]
+  : proj ~[ ( Ok ) drop 42 ] ~[ ( Err ) drop -2 ] Result? ;
+;
+: callproj['F: Prj] ( 'F -- i64 ) proj ;
+: mki64ok ( i64 -- Result[i64 i64] ) Ok ;
+: mkflagok ( Flag -- Result[Flag i64] ) Ok ;
+: main ( -- )
+  1 mki64ok callproj .
+  yes mkflagok callproj . ;
+";
+    let (_t, entry) = single_file_hosted("s2-4-partial-ctor-prefix", src);
+    let out = build_and_run(&entry);
+    assert_eq!(out, "1\n42\n");
+}
+
+/// Golden (positive #6, S2-13/F14): a zero-field variant ctor in a
+/// polymorphic arm unifies with the ambient type variable. The `mapover`
+/// poly word is W2's member body pinned as a standalone word (over a local
+/// twin of `core::option`, keeping the fixture self-contained -- the F14
+/// mechanics are the ctor's, not the module's); the `mknone` declaration
+/// registers a concrete `Option[i64]` instantiation, whose generated
+/// zero-field `None` ctor word used to capture the poly arm's call (an
+/// empty input row trivially exact-matches) and mint the mono
+/// `Option[i64]` against the Some arm's `Option['U]` -- the arms-disagree
+/// error. The symbolic construction now binds the header argument from the
+/// declared output, so the arms agree (`Option['U]`).
+#[test]
+fn zero_field_ctor_unifies_with_ambient_var_in_poly_arm() {
+    let src = "\
+type: Option['T] | None | Some 'T ;
+: mapover['T 'U] ( Option['T] [ 'T -- 'U ] -- Option['U] )
+  swap
+  ~[ ( Some ) Some> swap call Some ]
+  ~[ ( None ) drop drop None ]
+  Option? ;
+: mknone ( -- Option[i64] ) None ;
+: main ( -- ) ;
+";
+    let (_t, entry) = single_file("s2-13-zero-field-ctor-poly-arm", src);
+    build_ok(&entry);
+}
+
+/// Golden (positive #9, S2-11): a ctor-abstract impl (`for Box`) living in
+/// the *constructor's* module satisfies the orphan rule -- the same two
+/// homes a concrete target gets. Pre-S2-11 a generic target was treated
+/// like a scalar (trait-module-only), so this exact program was an orphan
+/// rejection.
+#[test]
+fn ctor_impl_in_ctor_module_satisfies_orphan_rule() {
+    let t = Tree::new("s2-11-orphan-ctor-module");
+    t.write(
+        "sooth.pkg",
+        &format!(
+            "package: p7bs2 ;\nlayer: hosted ;\ndepends: core path \"{root}/lib/core\" ;\ndepends: hosted path \"{root}/lib/hosted\" ;\n",
+            root = env!("CARGO_MANIFEST_DIR")
+        ),
+    );
+    t.write(
+        "trait.sth",
+        "trait: Functor['F] : size ( 'F -- i64 ) ; ;\nexport: Functor ;\n",
+    );
+    t.write(
+        "main.sth",
+        "import: intrinsics * ;\nimport: hosted::show | . | ;\nimport: self::trait * ;\n\
+         type: Box['T] v 'T ;\n\
+         impl: Functor for Box\n  : size drop 9 ;\n;\n\
+         : sized['F: Functor] ( 'F -- i64 ) size ;\n\
+         : mk ( i64 -- Box[i64] ) Box ;\n\
+         : main ( -- ) 5 mk sized . ;\n",
+    );
+    let entry = t.0.join("main.sth");
+    let out = build_and_run(&entry);
+    assert_eq!(out, "9\n");
+}
+
+/// Golden (error #3, S2-15.c/S2-7): a member application applying the trait
+/// variable to more arguments than the impl target constructor declares is
+/// a located parse-time error, raised by the grounding App arm before its
+/// `targetArgs[n..]` slice could panic. The member's own application arity
+/// is self-consistent within the trait (it *establishes* the header
+/// variable's kind, S1-3), so the fit against the ctor is only checkable at
+/// the impl's desugar -- the only point where both arities are in hand
+/// (S2-7) -- and `Option`'s one slot cannot take the two-argument
+/// application. The error locates at the impl member (where the failing
+/// fit is declared), not the trait declaration.
+#[test]
+fn member_app_arity_exceeding_target_ctor_arity_is_error() {
+    let src = "\
+type: Option['T] | None | Some 'T ;
+trait: P2['F: * -> * -> *] : pairup ( 'F['A 'B] -- ) ; ;
+impl: P2 for Option['O]
+  : pairup drop ;
+;
+: main ( -- ) ;
+";
+    let (_t, entry) = single_file("s2-15c-arity-exceeds", src);
+    let err = build_error(&entry);
+    assert!(
+        err.contains(
+            "error: trait member `pairup` of `P2` (line 5, col 5) applies the trait \
+             variable `'F` to 2 type arguments, but the impl target constructor `Option` \
+             declares 1"
+        ),
+        "{err}"
+    );
+    assert!(
+        err.contains(
+            "an application of the trait variable may not exceed the constructor's \
+             declared type-parameter count"
+        ),
+        "{err}"
+    );
 }

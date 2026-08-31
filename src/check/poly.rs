@@ -4780,14 +4780,38 @@ fn poly_construct_generic(
     let Some(cell) = ctx.generics() else {
         return Ok(None);
     };
-    if poly_env_exact_match(env, name, stack) {
-        return Ok(None);
-    }
-    let generics = cell.borrow();
-    let Some((is_enum, idx, variant)) = poly_construction_header(&generics, name, ctx.module())
+    // The header lookup moves ahead of the env-exact-match gate: whether the
+    // gate may apply at all depends on the constructor's field count (S2-13).
+    let Some((is_enum, idx, variant)) =
+        poly_construction_header(&cell.borrow(), name, ctx.module())
     else {
         return Ok(None);
     };
+    let fieldless = {
+        let generics = cell.borrow();
+        if is_enum {
+            generics.enums[idx].variants[variant].fields.is_empty()
+        } else {
+            generics.structs[idx].fields.is_empty()
+        }
+    };
+    // P7b.S2 (S2-13, F14): a *zero-field* constructor's generated word (one
+    // exists for every concrete instantiation of the header registered
+    // anywhere in the program) has an empty input row, so the exact-match
+    // gate below is trivially true and would capture the call, minting that
+    // instantiation's mono type where the ambient type variable was expected
+    // (the poly `mapover`'s None arm leaving `Option[i64]` against the Some
+    // arm's `Option['U]`). The symbolic path must run instead, so the
+    // constructor's argument binds from the ambient context exactly as a
+    // field-carrying constructor's does -- from its operands, or from the
+    // declared output naming this header (the fallback below). A poly body
+    // with no ambient determination still gets the honest
+    // `poly_generic_constructor_undetermined_error`, never a random
+    // instantiation's type.
+    if !fieldless && poly_env_exact_match(env, name, stack) {
+        return Ok(None);
+    }
+    let generics = cell.borrow();
     let fallback = poly_construction_fallback(sig, is_enum, idx);
     // Leaked regardless of whether a fallback exists: operand-only
     // determination can still leave a symbolic result (a header variable
@@ -11902,6 +11926,33 @@ mod tests {
              : main ( -- ) True wrap drop ;\n",
         )
         .expect("a phantom argument recovers from the declared output");
+    }
+
+    /// P7b.S2 (S2-13/F14): a zero-field variant ctor in a polymorphic arm
+    /// unifies with the ambient type variable -- the same binding a
+    /// field-carrying ctor gets from its operands, taken here from the
+    /// declared output naming the header. A concrete instantiation
+    /// registered elsewhere in the program (`mknone`'s declared output
+    /// registers `Option[i64]`) used to capture the arm's ctor call through
+    /// its generated zero-field word -- an empty input row trivially
+    /// exact-matches `poly_env_exact_match` -- and mint the mono
+    /// `Option[i64]` against the Some arm's `Option['U]`: the
+    /// arms-disagree error anchored at `poly_arm_output_disagreement_error`.
+    /// The fix routes the fieldless ctor through the symbolic path
+    /// unconditionally, so the registered instantiation is irrelevant.
+    #[test]
+    fn zero_field_ctor_unifies_with_ambient_var_in_poly_arm() {
+        check_src(
+            "type: Option['T] | None | Some 'T ;\n\
+             : mapover['T 'U] ( Option['T] [ 'T -- 'U ] -- Option['U] )\n\
+               swap\n\
+               ~[ ( Some ) Some> swap call Some ]\n\
+               ~[ ( None ) drop drop None ]\n\
+               Option? ;\n\
+             : mknone ( -- Option[i64] ) None ;\n\
+             : main ( -- ) ;\n",
+        )
+        .expect("a zero-field ctor arm unifies with the ambient variable");
     }
 
     /// P7 slice 3a (R5.2): a generic constructor call whose header variable

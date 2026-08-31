@@ -473,12 +473,21 @@ fn trait_name_collision_error(decl: &TraitDecl, kind: &str) -> String {
 /// target type, for the orphan rule -- `None` for a scalar or any other
 /// builtin-shaped type, which declares no module of its own (an `impl:`
 /// naming one satisfies the orphan rule only by living in the trait's own
-/// module).
+/// module; builtin-shaped ctor images such as `impl: Functor for usize`
+/// take that same `None` path, so such impls are trait-module-only --
+/// coherent, and now stated).
 ///
 /// P7.S4 (R4): a generic target (`PolyType` not `Concrete(Struct/Enum)`) is
 /// treated exactly like a scalar: `None`, so the orphan rule requires the impl
 /// to live in the trait's own module. A concrete struct/enum target keeps
 /// the existing rule (the target's module **or** the trait's module).
+///
+/// P7b.S2 (S2-11): a ctor-abstract target (`for Box`, `for Result[i64]` --
+/// the S2-4 desugar's `Generic` pattern) names its constructor, so the same
+/// two homes a concrete target gets apply: the constructor's module or the
+/// trait's module. `Generic.module` is the declaring module `poly_generic_
+/// header` resolved the header under (the same `(idx, module)` identity
+/// `Type::CtorImage` carries), so the arm is exact, not a heuristic.
 fn impl_target_module(target: &crate::ast::ImplTarget, module: &Module) -> Option<u32> {
     match target.pattern {
         crate::ast::PolyType::Concrete(crate::ast::Type::Struct(id, _)) => {
@@ -487,6 +496,10 @@ fn impl_target_module(target: &crate::ast::ImplTarget, module: &Module) -> Optio
         crate::ast::PolyType::Concrete(crate::ast::Type::Enum(id, _)) => {
             Some(module.enums[id.0].module)
         }
+        crate::ast::PolyType::Generic {
+            module: ctor_module,
+            ..
+        } => Some(ctor_module),
         _ => None,
     }
 }
@@ -4268,5 +4281,73 @@ mod tests {
             &extended_variant_sigs[..base_variant_sigs.len()],
             &base_variant_sigs[..]
         );
+    }
+}
+
+/// P7b.S2 (S2-11): a ctor-abstract target names its constructor's module
+/// for the orphan rule -- the same two homes a concrete target gets. A
+/// scalar stays `None` (trait-module-only), now stated for builtin-shaped
+/// ctor images too.
+#[cfg(test)]
+mod s2_orphan_tests {
+    use super::*;
+    use crate::ast::ImplTarget;
+
+    fn module_with_ctor(ctor_module: u32) -> Module {
+        Module {
+            structs: vec![StructDecl {
+                name: "Box".to_string(),
+                name_static: "Box",
+                fields: vec![("v".to_string(), crate::ast::Type::I64)],
+                span: Span::default(),
+                has_drop_overload: false,
+                is_bundle: false,
+                module: ctor_module,
+            }],
+            enums: Vec::new(),
+            ..Module::default()
+        }
+    }
+
+    #[test]
+    fn impl_target_module_generic_ctor_target_names_the_ctor_module() {
+        let target = ImplTarget {
+            pattern: crate::ast::PolyType::Generic {
+                is_enum: false,
+                idx: 0,
+                module: 3,
+                args: vec![crate::ast::PolyType::Var(0)],
+                len_args: vec![],
+                name: "Box",
+            },
+            ty_var_names: vec!["'T".to_string()],
+            ty_var_spans: vec![Span::default()],
+            ty_kinds: vec![crate::ast::Kind::Star],
+            len_var_names: vec![],
+            len_var_spans: vec![],
+            user_spelling: None,
+            bounds: vec![],
+        };
+        let module = module_with_ctor(7);
+        // The Generic pattern's module is the ctor's declaring module, so
+        // the arm is exact: the impl may live in the ctor's module (or the
+        // trait's, by the rule's other arm).
+        assert_eq!(impl_target_module(&target, &module), Some(3));
+    }
+
+    #[test]
+    fn impl_target_module_scalar_target_stays_trait_module_only() {
+        let target = ImplTarget {
+            pattern: crate::ast::PolyType::Concrete(crate::ast::Type::I64),
+            ty_var_names: vec![],
+            ty_var_spans: vec![],
+            ty_kinds: vec![],
+            len_var_names: vec![],
+            len_var_spans: vec![],
+            user_spelling: None,
+            bounds: vec![],
+        };
+        let module = module_with_ctor(7);
+        assert_eq!(impl_target_module(&target, &module), None);
     }
 }

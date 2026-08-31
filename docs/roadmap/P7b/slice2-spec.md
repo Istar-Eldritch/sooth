@@ -659,6 +659,13 @@ The remaining runtime witnesses and the full suite green.
   `poly_cross_match`, so the lift was aimed at the wrong site; S2-16 owns App slots and
   p8's baseline stays passable. Recorded in S2-10 and [Considered and
   rejected](#considered-and-rejected).
+- **S2-6 `ground_member_type` App arm — deliberate location-of-check deviation.** The
+  spec's "retire the `unreachable!` with a located message" is implemented parser-side
+  instead: `fence_member_app_against_concrete_target` raises the located S2-6 error at
+  the desugar before grounding, so the arm stays `unreachable!` (a non-raising backstop,
+  consistent with S2-15.f's non-raising-signature constraint — `ground_member_type`
+  returns `Type`, not `Result`). Observable behavior conforms; recorded deliberately,
+  not silently (Phase 2 review round).
 
 ## Anchor status
 

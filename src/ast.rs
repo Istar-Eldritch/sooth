@@ -1982,6 +1982,147 @@ pub struct TraitMember {
 /// here to synthesize the impl body's word, and `check::poly` grounds the same
 /// member here to render it in a diagnostic, so the effect a body is checked
 /// against and the effect an error names cannot drift apart.
+/// P7b.S2 (S2-5/S2-6): what the member-signature grounding needs to raise
+/// the located S2-15-family diagnostics beside the shapes they describe.
+/// The desugar builds one per impl member body; `ground_member_poly`'s App
+/// arm and the concrete-path App fence both render through it, so the
+/// effect a body is grounded against and the error a bad shape names
+/// cannot drift apart.
+pub struct MemberGrounding<'a> {
+    pub trait_name: &'a str,
+    pub member: &'a str,
+    /// The member name's own span (`TraitMember::span`) -- the located
+    /// position every member-grounding diagnostic names.
+    pub member_span: Span,
+    /// The trait header variable's surface name (`'F`) -- the head every
+    /// supported member application applies.
+    pub head_name: &'a str,
+    /// The impl target as the user spelled it (S2-4: `Option`, not
+    /// `Option['ctor0]`) -- what the non-Generic-target errors name.
+    pub target_display: &'a str,
+    /// When the target is a bare variable (`impl: Functor for 'T`), its name
+    /// and binding span, so the abstract-target error carries both spans.
+    pub target_var: Option<(&'a str, Span)>,
+}
+
+/// P7b.S2 (S2-15.c/S2-7): a member application applying the trait variable
+/// to more arguments than the target constructor declares. The grounding
+/// App arm validates `n ≤ m` before its `targetArgs[n..]` slice (which
+/// would panic on `n > m`); the desugar is the only point where both
+/// arities are in hand (S2-7), so the check is a parse-time error.
+fn member_app_arity_error(dg: &MemberGrounding, ctor: &str, n: usize, m: usize) -> String {
+    format!(
+        "error: trait member `{}` of `{}` (line {}, col {}) applies the trait variable `{}` to {} type arguments, but the impl target constructor `{ctor}` declares {m}\n  an application of the trait variable may not exceed the constructor's declared type-parameter count",
+        dg.member,
+        dg.trait_name,
+        dg.member_span.line,
+        dg.member_span.col,
+        dg.head_name,
+        n
+    )
+}
+
+/// P7b.S2 (S2-15.e, grounding twin): a member application grounding against
+/// a non-Generic target. A bare-variable target (`impl: Functor for 'T`)
+/// names no constructor for the application to dissolve into; the
+/// dispatch-side twin of this diagnostic is S2-8's `for 'T` catch-all guard.
+/// `pub` because the parser's member-word union (`build_member_var_union`)
+/// raises the same diagnostic at the desugar, before grounding could see
+/// the shape -- the review-round ordering fix that lets S2-15.e win over
+/// the S2-5 name-collision check for a local matching the target variable's
+/// name.
+pub fn member_app_abstract_target_error(dg: &MemberGrounding) -> String {
+    let origin = match dg.target_var {
+        Some((name, span)) => format!("`{name}` at line {}, col {}", span.line, span.col),
+        None => format!("`{}`", dg.target_display),
+    };
+    format!(
+        "error: trait member `{}` of `{}` (line {}, col {}) applies the trait variable `{}`, but the impl target {} is not a constructor\n  a fully-abstract target names no constructor for the application to dissolve into; implement the trait for a constructor application (e.g. `impl: ... for Option['Opt]`)",
+        dg.member,
+        dg.trait_name,
+        dg.member_span.line,
+        dg.member_span.col,
+        dg.head_name,
+        origin
+    )
+}
+
+/// P7b.S2 (S2-6, concrete-target twin): an App-headed member signature
+/// grounded against a concrete target. There is no mono representation for
+/// member locals (the application's arguments are the member's own
+/// variables), so an HKT member is never checked by grounding against a
+/// concrete `Type` -- the concrete desugar fences the shape before
+/// grounding; `ground_member_type`'s own App arm is the unreachable
+/// backstop this message documents.
+fn member_app_concrete_target_error(dg: &MemberGrounding) -> String {
+    format!(
+        "error: trait member `{}` of `{}` (line {}, col {}) applies the trait variable `{}`, but the impl target `{}` is concrete\n  an application-headed member has no monomorphic representation (its applied arguments are member locals); implement the trait for a constructor target with a type variable instead",
+        dg.member,
+        dg.trait_name,
+        dg.member_span.line,
+        dg.member_span.col,
+        dg.head_name,
+        dg.target_display
+    )
+}
+
+/// P7b.S2 (S2-6): whether a type application is reachable anywhere in `t`,
+/// in plain position or nested (under an array element, a reference, a cell
+/// payload, a generic argument). The concrete desugar's App fence scans
+/// whole member slots with this, since `ground_member_type` (which the
+/// concrete path grounds with) has no way to raise.
+fn member_ty_mentions_app(t: &PolyType) -> bool {
+    match t {
+        PolyType::App { .. } => true,
+        PolyType::Array(elem, _) => member_ty_mentions_app(elem),
+        PolyType::Ref(referent, _) => member_ty_mentions_app(referent),
+        PolyType::OwnedCell(inner) => member_ty_mentions_app(inner),
+        PolyType::Generic { args, .. } | PolyType::GenericVariant { args, .. } => {
+            args.iter().any(member_ty_mentions_app)
+        }
+        PolyType::Quotation(ins, outs, ..) => ins.iter().chain(outs).any(member_ty_mentions_app),
+        PolyType::Concrete(_) | PolyType::Var(_) | PolyType::QuotLit => false,
+    }
+}
+
+/// P7b.S2 (S2-6): the concrete-path App fence. An App-headed member
+/// signature grounded against a concrete target has no mono representation
+/// (the application's arguments are member locals), so the desugar rejects
+/// the shape here -- located, at parse time -- before
+/// `ground_member_type` could see it. Quotation rows never carry an App
+/// (S2-15.d fences those at declaration), but the scan is total anyway:
+/// any App anywhere in a slot takes the fence.
+pub fn fence_member_app_against_concrete_target(
+    inputs: &[PolyType],
+    outputs: &[PolyType],
+    dg: &MemberGrounding,
+) -> Result<(), String> {
+    if inputs.iter().chain(outputs).any(member_ty_mentions_app) {
+        return Err(member_app_concrete_target_error(dg));
+    }
+    Ok(())
+}
+
+/// P7.S3e (R4/R8): ground a trait member's declared `PolyType` (over the
+/// trait's sole implicit type variable, id 0) against a concrete `impl:`
+/// target, interning a fresh array/reference shape if the grounded shape is
+/// new (deduped by `intern_array_type`/`intern_ref_type`, so this never
+/// double-registers one already interned elsewhere). Trait member
+/// signatures are restricted to concrete/array/reference shapes over `'T`
+/// (`parse_trait_member_effect` rejects anything else at declaration time),
+/// so every other `PolyType` shape is unreachable here.
+///
+/// P7.S3r (R2): the single grounding rule. The parser grounds a trait member
+/// here to synthesize the impl body's word, and `check::poly` grounds the
+/// same member here to render it in a diagnostic, so the effect a body is
+/// checked against and the effect an error names cannot drift apart.
+///
+/// P7b.S2 (S2-6): an application-headed member (`'F['T]`, S2-3's supported
+/// HKT shape) has **no** mono representation here -- its applied arguments
+/// are member locals, and a concrete `Type` cannot carry one. The concrete
+/// desugar fences the shape first (`fence_member_app_against_concrete_
+/// target`, a located S2-6 error at parse time); this arm is the backstop
+/// that keeps the wildcard below from ever silently growing an App route.
 pub fn ground_member_type(
     pty: &PolyType,
     target: Type,
@@ -1999,31 +2140,74 @@ pub fn ground_member_type(
             let r = ground_member_type(referent, target, arrays, refs);
             intern_ref_type(refs, r, *mutable)
         }
+        PolyType::App { .. } => unreachable!(
+            "an App-headed member signature reaches ground_member_type only through the concrete desugar, which fences it first (S2-6: no mono representation for member locals)"
+        ),
         _ => unreachable!(
             "trait member signatures are restricted to concrete/array/reference shapes over 'T (parse_trait_member_effect rejects the rest)"
         ),
     }
 }
 
+/// P7b.S2 (S2-5): how each of a trait member signature's variables renders
+/// in the member word's union id space, indexed by the member signature's
+/// own variable ids. The desugar builds one per member body: the header
+/// variable (id 0) is `None` -- it dissolves into the target (bare mentions
+/// become the whole target pattern, applications head the target
+/// constructor) -- and each member local renders as the union-space entry
+/// S2-5's identification assigned it (a target slot variable, a pinned
+/// slot's concrete content, or a freshly appended local). Grounding takes
+/// the map by slice (`&member_vars`), so either spelling is accepted at a
+/// call site.
+pub type MemberVarMap = Vec<Option<PolyType>>;
+
 /// P7.S4 (R5): ground a trait member's declared `PolyType` (over the trait's
 /// sole implicit type variable, id 0) against a *generic* `impl:` target —
-/// binding `PolyType::Var(0)` to the whole target `PolyType` and recursing
+/// binding the header variable to the whole target `PolyType` and recursing
 /// over every other shape. Unlike `ground_member_type` (which grounds to a
-/// concrete `Type`), this returns a `PolyType` over the impl's own variables,
-/// yielding the polymorphic member word's `PolySig`.
-pub fn ground_member_poly(pty: &PolyType, target: &PolyType) -> PolyType {
+/// concrete `Type`), this returns a `PolyType` over the member word's union
+/// id space (S2-5: the target's variables keep their ids and order; member
+/// locals append after them), yielding the polymorphic member word's
+/// `PolySig`.
+///
+/// P7b.S2 (S2-6): the App arm -- the leading-slot rule. A member
+/// `'F[X₁…Xₙ]` against a target `Generic(C, [A₁…Aₘ])` with `m ≥ n` grounds
+/// to `Generic{C, memberArgs ⧺ targetArgs[n..]}`: the member's own
+/// arguments (rendered through `member_vars`, so an argument identified
+/// with a target slot aliases that slot's variable or keeps a pinned
+/// slot's `Concrete`) occupy the leading slots, and the leftover target
+/// slots -- the impl's own variables -- flow through untouched. The arm
+/// validates `n ≤ m` **first** (S2-15.c, located at the desugar, the only
+/// point where both arities are in hand) because the `targetArgs[n..]`
+/// slice would panic on `n > m`. A non-Generic target is a located error
+/// too: a fully-abstract (`Var`) target names no constructor to dissolve
+/// into (S2-15.e's grounding twin), and the concrete case is unreachable
+/// here (the concrete desugar routes through `ground_member_type`).
+pub fn ground_member_poly(
+    pty: &PolyType,
+    target: &PolyType,
+    member_vars: &[Option<PolyType>],
+    dg: &MemberGrounding,
+) -> Result<PolyType, String> {
     match pty {
-        PolyType::Concrete(t) => PolyType::Concrete(*t),
-        PolyType::Var(_) => target.clone(),
-        PolyType::Array(elem, len) => {
-            PolyType::Array(Box::new(ground_member_poly(elem, target)), len.clone())
-        }
-        PolyType::Ref(referent, mutable) => {
-            PolyType::Ref(Box::new(ground_member_poly(referent, target)), *mutable)
-        }
-        PolyType::OwnedCell(payload) => {
-            PolyType::OwnedCell(Box::new(ground_member_poly(payload, target)))
-        }
+        PolyType::Concrete(t) => Ok(PolyType::Concrete(*t)),
+        PolyType::Var(v) => match &member_vars[*v as usize] {
+            // The trait header's own variable: dissolves into the target.
+            None => Ok(target.clone()),
+            // A member local, rendered into the union id space (S2-5).
+            Some(rendered) => Ok(rendered.clone()),
+        },
+        PolyType::Array(elem, len) => Ok(PolyType::Array(
+            Box::new(ground_member_poly(elem, target, member_vars, dg)?),
+            len.clone(),
+        )),
+        PolyType::Ref(referent, mutable) => Ok(PolyType::Ref(
+            Box::new(ground_member_poly(referent, target, member_vars, dg)?),
+            *mutable,
+        )),
+        PolyType::OwnedCell(payload) => Ok(PolyType::OwnedCell(Box::new(
+            ground_member_poly(payload, target, member_vars, dg)?,
+        ))),
         PolyType::Generic {
             is_enum,
             idx,
@@ -2031,29 +2215,97 @@ pub fn ground_member_poly(pty: &PolyType, target: &PolyType) -> PolyType {
             args,
             len_args,
             name,
-        } => PolyType::Generic {
+        } => Ok(PolyType::Generic {
             is_enum: *is_enum,
             idx: *idx,
             module: *module,
-            args: args.iter().map(|a| ground_member_poly(a, target)).collect(),
+            args: args
+                .iter()
+                .map(|a| ground_member_poly(a, target, member_vars, dg))
+                .collect::<Result<Vec<_>, _>>()?,
             len_args: len_args.clone(),
             name,
-        },
-        PolyType::Quotation(ins, outs, is_inline, row_in, row_out) => PolyType::Quotation(
-            ins.iter().map(|p| ground_member_poly(p, target)).collect(),
-            outs.iter().map(|p| ground_member_poly(p, target)).collect(),
+        }),
+        PolyType::Quotation(ins, outs, is_inline, row_in, row_out) => Ok(PolyType::Quotation(
+            ins.iter()
+                .map(|p| ground_member_poly(p, target, member_vars, dg))
+                .collect::<Result<Vec<_>, _>>()?,
+            outs.iter()
+                .map(|p| ground_member_poly(p, target, member_vars, dg))
+                .collect::<Result<Vec<_>, _>>()?,
             *is_inline,
             *row_in,
             *row_out,
-        ),
+        )),
+        PolyType::App { head, args } => {
+            // S2-3's shape gate admits only a trait-var-headed application at
+            // a member slot's top level, but it does not recurse into an
+            // application's arguments -- a member local may head a *nested*
+            // application (`'F['G['T]]`). The head-0 case is the dispatchable
+            // dissolve; any other head re-renders through the union map with
+            // its application shape preserved.
+            if *head != 0 {
+                let rendered_head = match &member_vars[*head as usize] {
+                    Some(PolyType::Var(u)) => *u,
+                    // A pinned local cannot head an application: pinning
+                    // requires the local as a dispatchable input's argument
+                    // (a bare, `Star`-kinded mention), while heading one
+                    // establishes `Arrow` -- the member parser rejects the
+                    // kind conflict before any grounding runs.
+                    _ => unreachable!(
+                        "a member local heading an application is always an appended Star-space variable (the member parser rejects the pinned/kind-conflict shapes)"
+                    ),
+                };
+                return Ok(PolyType::App {
+                    head: rendered_head,
+                    args: args
+                        .iter()
+                        .map(|a| ground_member_poly(a, target, member_vars, dg))
+                        .collect::<Result<Vec<_>, _>>()?,
+                });
+            }
+            let PolyType::Generic {
+                is_enum,
+                idx,
+                module,
+                args: target_args,
+                len_args,
+                name: ctor_name,
+            } = target
+            else {
+                return Err(member_app_abstract_target_error(dg));
+            };
+            // S2-7/S2-15.c: validate `n ≤ m` before the `targetArgs[n..]`
+            // slice, which would panic on `n > m` before any later
+            // validation could run.
+            let n = args.len();
+            let m = target_args.len();
+            if n > m {
+                return Err(member_app_arity_error(dg, ctor_name, n, m));
+            }
+            let member_args = args
+                .iter()
+                .map(|a| ground_member_poly(a, target, member_vars, dg))
+                .collect::<Result<Vec<_>, _>>()?;
+            // The leftover target slots are the impl's own variables: they
+            // flow through untouched (they are already in the union id
+            // space's target prefix, S2-5).
+            let mut grounded = member_args;
+            grounded.extend(target_args[n..].iter().cloned());
+            Ok(PolyType::Generic {
+                is_enum: *is_enum,
+                idx: *idx,
+                module: *module,
+                args: grounded,
+                len_args: len_args.clone(),
+                name: ctor_name,
+            })
+        }
         PolyType::QuotLit => {
             unreachable!("a quotation-literal marker never reaches a signature")
         }
         PolyType::GenericVariant { .. } => unreachable!(
             "a generic variant is unconstructible outside an eliminator arm's own input row (R3.5); a trait member signature never carries one"
-        ),
-        PolyType::App { .. } => unreachable!(
-            "trait member signatures are restricted to concrete/array/reference/generic shapes over 'T (parse_trait_member_effect rejects the rest)"
         ),
     }
 }
@@ -2097,6 +2349,12 @@ pub fn seed_predicate_traits() -> Vec<TraitDecl> {
 pub struct ImplTarget {
     pub pattern: PolyType,
     pub ty_var_names: Vec<String>,
+    /// P7b.S2 (S2-5): each target variable's introduction span, parallel to
+    /// `ty_var_names` -- the span the member-word `PolySig` union stamps on
+    /// every target-side variable so a merged-signature diagnostic names the
+    /// binding site. For a desugared ctor target (S2-4) every entry is the
+    /// ctor name's own span.
+    pub ty_var_spans: Vec<Span>,
     /// P7b.S1 (R1/R5): parallel to `ty_var_names`. `parse_impl_target` has
     /// no annotation grammar (it interns purely from usage through
     /// `parse_poly_slot`), so every entry is `Star` this slice -- but the
@@ -2105,6 +2363,15 @@ pub struct ImplTarget {
     /// retrofit the field.
     pub ty_kinds: Vec<Kind>,
     pub len_var_names: Vec<String>,
+    /// P7b.S2 (S2-5): each target length variable's introduction span,
+    /// parallel to `len_var_names` (the type-variable twin above).
+    pub len_var_spans: Vec<Span>,
+    /// P7b.S2 (S2-4): the user's own spelling of a desugared ctor target --
+    /// the name (and its span) as written, kept alongside the desugared
+    /// pattern so diagnostics render `Option`, not `Option['ctor0]`.
+    /// `None` for a target spelled out in full (nothing was desugared, so
+    /// the pattern already *is* the user's spelling).
+    pub user_spelling: Option<(String, Span)>,
     /// P7.S4b (R2): bounds declared on the impl's own type variables via a
     /// `where`-clause (`impl: Show for array['T 'N] where 'T: Show`). Each pair's
     /// `u32` is an index into `ty_var_names`, mirroring `PolySig::bounds`.
@@ -4770,7 +5037,17 @@ mod tests {
             name: "Buffer",
         };
         let target = PolyType::Concrete(Type::I64);
-        let grounded = ground_member_poly(&pty, &target);
+        // A bare-variable mention with no member locals beyond the header
+        // (the S1-era sig shape): the map's only entry is the header's.
+        let dg = MemberGrounding {
+            trait_name: "Show",
+            member: "show",
+            member_span: Span::default(),
+            head_name: "'T",
+            target_display: "i64",
+            target_var: None,
+        };
+        let grounded = ground_member_poly(&pty, &target, &[None], &dg).unwrap();
         let PolyType::Generic { len_args, .. } = grounded else {
             panic!("ground_member_poly's Generic arm stays Generic: {grounded:?}")
         };
@@ -5030,5 +5307,168 @@ mod tests {
     fn overload_symbols_drop_is_exempt_regardless_of_count() {
         let words = vec![bare_word("drop"), bare_word("drop"), bare_word("drop")];
         assert_eq!(overload_symbols(&words), vec!["drop", "drop", "drop"]);
+    }
+}
+
+/// P7b.S2 Phase 2: `ground_member_poly`'s App arm -- the leading-slot rule
+/// (S2-6) -- and its located error arms. Beside the function they pin.
+#[cfg(test)]
+mod s2_grounding_tests {
+    use super::*;
+
+    fn dg() -> MemberGrounding<'static> {
+        MemberGrounding {
+            trait_name: "Functor",
+            member: "map",
+            member_span: Span {
+                line: 4,
+                col: 8,
+                ..Span::default()
+            },
+            head_name: "'F",
+            target_display: "Option",
+            target_var: None,
+        }
+    }
+
+    /// S2-6, Option case: the dispatchable input `'F['T]` against target
+    /// `Option['Opt]` grounds to the whole target pattern -- the member's
+    /// identified argument aliases the target slot variable.
+    #[test]
+    fn ground_member_poly_app_arm_option_input_aliases_the_target_slot() {
+        let member_app = PolyType::App {
+            head: 0,
+            args: vec![PolyType::Var(1)],
+        };
+        let target = PolyType::Generic {
+            is_enum: true,
+            idx: 0,
+            module: 0,
+            args: vec![PolyType::Var(0)],
+            len_args: vec![],
+            name: "Option",
+        };
+        // Member sig id space: 0 = header, 1 = 'T identified with slot 0.
+        let map = vec![None, Some(PolyType::Var(0))];
+        let grounded = ground_member_poly(&member_app, &target, &map, &dg()).unwrap();
+        assert_eq!(grounded, target, "'F['T] grounds to the target pattern");
+    }
+
+    /// S2-6, Result case: the dispatchable input aliases both leading slots;
+    /// the output `'F['U]` displaces slot 0 with the member's own local and
+    /// keeps the leftover target slot -- the phase-doc Result criterion.
+    #[test]
+    fn ground_member_poly_app_arm_result_output_displaces_the_leading_slot() {
+        let target = PolyType::Generic {
+            is_enum: true,
+            idx: 0,
+            module: 0,
+            args: vec![PolyType::Var(0), PolyType::Var(1)],
+            len_args: vec![],
+            name: "Result",
+        };
+        // 'F['T] input: 'T aliases slot 0.
+        let input = PolyType::App {
+            head: 0,
+            args: vec![PolyType::Var(1)],
+        };
+        // 'F['U] output: 'U is an appended local (union id 2).
+        let output = PolyType::App {
+            head: 0,
+            args: vec![PolyType::Var(2)],
+        };
+        let map = vec![None, Some(PolyType::Var(0)), Some(PolyType::Var(2))];
+        let grounded_input = ground_member_poly(&input, &target, &map, &dg()).unwrap();
+        assert_eq!(grounded_input, target);
+        let grounded_output = ground_member_poly(&output, &target, &map, &dg()).unwrap();
+        let PolyType::Generic { args, .. } = grounded_output else {
+            panic!("the output grounds to the ctor")
+        };
+        assert_eq!(args[0], PolyType::Var(2), "'U displaces the slot");
+        assert_eq!(args[1], PolyType::Var(1), "the leftover slot flows through");
+    }
+
+    /// S2-6, partial-target pin: `'F['T]` against `Result[i64 'ctor1]` with
+    /// 'T identified with the *pinned* slot keeps the pin `Concrete(i64)`
+    /// in the grounded sig -- golden #7's pinned-prefix dispatch depends on
+    /// it.
+    #[test]
+    fn ground_member_poly_app_arm_keeps_a_pinned_prefix_concrete() {
+        let target = PolyType::Generic {
+            is_enum: true,
+            idx: 0,
+            module: 0,
+            args: vec![PolyType::Concrete(Type::I64), PolyType::Var(0)],
+            len_args: vec![],
+            name: "Result",
+        };
+        let member_app = PolyType::App {
+            head: 0,
+            args: vec![PolyType::Var(1)],
+        };
+        // 'T identified with the pinned slot's *content*.
+        let map = vec![None, Some(PolyType::Concrete(Type::I64))];
+        let grounded = ground_member_poly(&member_app, &target, &map, &dg()).unwrap();
+        assert_eq!(
+            grounded, target,
+            "the pin stays Concrete in the grounded sig"
+        );
+    }
+
+    /// S2-7/S2-15.c: an application applying the trait variable to more
+    /// arguments than the target ctor declares is a located error, raised
+    /// before the `targetArgs[n..]` slice could panic.
+    #[test]
+    fn ground_member_poly_app_arity_exceeding_target_ctor_is_located_error() {
+        let member_app = PolyType::App {
+            head: 0,
+            args: vec![PolyType::Var(1), PolyType::Var(2), PolyType::Var(3)],
+        };
+        let target = PolyType::Generic {
+            is_enum: true,
+            idx: 0,
+            module: 0,
+            args: vec![PolyType::Var(0)],
+            len_args: vec![],
+            name: "Option",
+        };
+        let map = vec![
+            None,
+            Some(PolyType::Var(0)),
+            Some(PolyType::Var(1)),
+            Some(PolyType::Var(2)),
+        ];
+        let err = ground_member_poly(&member_app, &target, &map, &dg()).unwrap_err();
+        assert!(
+            err.contains(
+                "trait member `map` of `Functor` (line 4, col 8) applies the trait variable \
+                 `'F` to 3 type arguments, but the impl target constructor `Option` declares 1"
+            ),
+            "{err}"
+        );
+    }
+
+    /// S2-15.e, grounding twin: a member application against a fully
+    /// abstract (`Var`) target names no constructor to dissolve into -- a
+    /// located error naming both the member and the target variable.
+    #[test]
+    fn ground_member_poly_app_against_var_target_is_located_error() {
+        let member_app = PolyType::App {
+            head: 0,
+            args: vec![PolyType::Var(1)],
+        };
+        let target = PolyType::Var(0);
+        let map = vec![None, Some(PolyType::Var(0))];
+        let mut d = dg();
+        d.target_display = "'T";
+        d.target_var = Some(("'T", Span::default()));
+        let err = ground_member_poly(&member_app, &target, &map, &d).unwrap_err();
+        assert!(
+            err.contains(
+                "trait member `map` of `Functor` (line 4, col 8) applies the trait variable \
+                 `'F`, but the impl target `'T`"
+            ) && err.contains("is not a constructor"),
+            "{err}"
+        );
     }
 }

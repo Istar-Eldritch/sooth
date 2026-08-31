@@ -1337,7 +1337,14 @@ pub(crate) fn word_span(word: &WordDef) -> Span {
 /// own variable name tables so `'T`/`'N` spell as the user wrote them.
 /// Shared by `declarations.rs`'s duplicate-target error and `poly.rs`'s
 /// ambiguity error -- elevated here, their lowest common ancestor.
+///
+/// P7b.S2 (S2-4): a desugared ctor target renders the user's own spelling
+/// (`Option`, not `Option['ctor0]`) -- the pattern's fresh variables are
+/// the desugar's, not the user's, and diagnostics are behaviour.
 pub(super) fn impl_target_str(target: &ImplTarget) -> String {
+    if let Some((spelling, _)) = &target.user_spelling {
+        return spelling.clone();
+    }
     let sig = PolySig {
         row_in: None,
         inputs: Vec::new(),
@@ -1346,9 +1353,9 @@ pub(super) fn impl_target_str(target: &ImplTarget) -> String {
         bounds: Vec::new(),
         ty_kinds: target.ty_kinds.clone(),
         ty_var_names: target.ty_var_names.clone(),
-        ty_var_spans: vec![Span::default(); target.ty_var_names.len()],
+        ty_var_spans: target.ty_var_spans.clone(),
         len_var_names: target.len_var_names.clone(),
-        len_var_spans: vec![Span::default(); target.len_var_names.len()],
+        len_var_spans: target.len_var_spans.clone(),
         row_var_names: Vec::new(),
     };
     poly::poly_type_str(&target.pattern, &sig)

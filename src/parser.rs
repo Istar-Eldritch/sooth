@@ -16,13 +16,14 @@
 //!   if       := 'if' term* ('else' term*)? 'end'
 
 use crate::ast::{
-    ground_member_poly, ground_member_type, intern_array_type, is_name_dispatched_builtin,
-    ArrayDecl, Bound, EnumDecl, ExternDecl, GenericTypes, GlobalEntry, GlobalMode, ImplDecl,
-    ImplTarget, Import, ImportAnchor, ImportBinding, ImportTarget, IntrinsicVisibility, Kind, Len,
-    Module, ModuleInfo, ModuleName, MutRegistries, OwnedCellDecl, PolySig, PolyType, QuotAnnot,
-    RefDecl, SliceDecl, Span, StackEffect, StaticDecl, StaticInit, StructDecl, Term, TermKind,
-    TraitDecl, TraitId, TraitKind, TraitMember, Type, TypedSlot, VariantDecl, VariantTag,
-    VariantTagMode, WordDef, OWNING_QUOTATION_KEYWORD,
+    fence_member_app_against_concrete_target, ground_member_poly, ground_member_type,
+    intern_array_type, is_name_dispatched_builtin, member_app_abstract_target_error, ArrayDecl,
+    Bound, EnumDecl, ExternDecl, GenericTypes, GlobalEntry, GlobalMode, ImplDecl, ImplTarget,
+    Import, ImportAnchor, ImportBinding, ImportTarget, IntrinsicVisibility, Kind, Len,
+    MemberGrounding, MemberVarMap, Module, ModuleInfo, ModuleName, MutRegistries, OwnedCellDecl,
+    PolySig, PolyType, QuotAnnot, RefDecl, SliceDecl, Span, StackEffect, StaticDecl, StaticInit,
+    StructDecl, Term, TermKind, TraitDecl, TraitId, TraitKind, TraitMember, Type, TypedSlot,
+    VariantDecl, VariantTag, VariantTagMode, WordDef, OWNING_QUOTATION_KEYWORD,
 };
 use crate::lexer::Token;
 use std::collections::HashMap;
@@ -561,6 +562,300 @@ fn poly_type_shape_str(pt: &PolyType) -> String {
     }
 }
 
+/// P7b.S2 (S2-4): what a generic application's bracket does when it closes
+/// before the constructor's declared arity. A signature-site application is
+/// the shared arity error (`generic_arity_error`, F3); an `impl:` target
+/// desugars the missing slots to fresh pattern variables (`for Box` ≡
+/// `for Box['ctor0 …]`, `for Result[i64]` ≡ `for Result[i64 'ctor1]`),
+/// m2-proven mechanics that make bare ctors expressible as existing S4
+/// applied-var patterns with everything downstream unchanged.
+enum UnderApplication {
+    Error,
+    PadImplTarget,
+}
+
+/// P7b.S2 (S2-4): what `parse_impl_target_pattern` reads back -- the folded
+/// pattern; when the ctor path was taken, the ctor name's own span (the
+/// desugared variables' introduction span and the anchor the user-spelling
+/// diagnostics render); and the exact number of type/length slots the
+/// desugar padded, which the user-spelling renderer consumes in place of
+/// the retired name-prefix heuristic (P7b.S2 review).
+struct RawImplTargetPattern {
+    raw: RawTy,
+    ctor_span: Option<Span>,
+    padded: (usize, usize),
+}
+
+/// P7b.S2 (S2-4): the user's own spelling of a desugared ctor target --
+/// the ctor name plus its explicit prefix arguments, rendered from the
+/// folded pattern (`Some` only when the desugar actually padded; `padded`
+/// is the exact number of type/length slots the desugar filled with fresh
+/// variables, threaded from `pad_impl_ctor_slots` -- the review-round fix
+/// that retired the old `'ctor`-prefix name heuristic, which misread a
+/// fully-applied user spelling as padding). Diagnostics render `Option`,
+/// not `Option['ctor0]`.
+fn impl_target_user_spelling(
+    pattern: &PolyType,
+    ty_var_names: &[String],
+    len_var_names: &[String],
+    padded: (usize, usize),
+    span: Span,
+) -> Option<(String, Span)> {
+    let PolyType::Generic {
+        name,
+        args,
+        len_args,
+        ..
+    } = pattern
+    else {
+        return None;
+    };
+    // The desugar's padding is always a suffix of each argument list, so
+    // the explicit prefix is the leading run it did not fill.
+    let explicit_ty = args.len().saturating_sub(padded.0);
+    let explicit_len = len_args.len().saturating_sub(padded.1);
+    if explicit_ty == args.len() && explicit_len == len_args.len() {
+        // Nothing was desugared: the pattern already is the user's spelling.
+        return None;
+    }
+    if explicit_ty == 0 && explicit_len == 0 {
+        // A bare ctor target (`for Box`): no explicit prefix at all, so the
+        // user's spelling is just the name, no empty brackets.
+        return Some((name.to_string(), span));
+    }
+    let mut parts: Vec<String> = args[..explicit_ty]
+        .iter()
+        .map(|a| render_target_pt(a, ty_var_names, len_var_names))
+        .collect();
+    parts.extend(len_args[..explicit_len].iter().map(|l| {
+        match l {
+            Len::Concrete(n) => n.to_string(),
+            Len::Var(v) => len_var_names
+                .get(*v as usize)
+                .cloned()
+                .unwrap_or_else(|| format!("'{v}")),
+        }
+    }));
+    Some((format!("{name}[{}]", parts.join(" ")), span))
+}
+
+/// P7b.S2 (S2-5): the member-word id-space union for one impl member body.
+/// `map` is indexed by the member signature's own variable ids (the header
+/// var dissolves; each local renders into the union space), `appended` the
+/// freshly appended locals' names and member-sig spans, in S2-5's order.
+struct MemberVarUnion {
+    map: MemberVarMap,
+    appended: Vec<(String, Span)>,
+}
+
+/// P7b.S2 (S2-5): union the target's variables with a member signature's
+/// own locals. The target's variables keep their ids and order (so every
+/// `where`-bound, keyed by target id, survives the merge); within the
+/// member sig, a name in an identifying position (an App argument of the
+/// dispatchable input) binds to the target slot's contents for the whole
+/// sig, and a local not in an identifying position appends after the
+/// target's variables, never renumbered -- and must not collide with a
+/// target variable name, which would make the merged signature text
+/// ambiguous (a located desugar error, outside the S2-15 family).
+fn build_member_var_union(
+    target: &ImplTarget,
+    sig: &PolySig,
+    dg: &MemberGrounding,
+) -> Result<MemberVarUnion, String> {
+    let mut map: Vec<Option<PolyType>> = vec![None; sig.ty_var_names.len()];
+    // Identification: every dispatchable input (S2-2 reads one `Ref` layer;
+    // ref-ness is an addressing mode, not a type identity) that is an
+    // application headed by the trait var binds its argument names to the
+    // target slots' contents. Two applications reading the same leading
+    // slots is the pinned reading for one trait head -- the slot variables
+    // coincide (an Applicative-shaped `ap`); the same local named at two
+    // *different* slots is an ambiguity this desugar refuses.
+    for input in &sig.inputs {
+        let app = match input {
+            PolyType::Ref(referent, _) => referent,
+            other => other,
+        };
+        let PolyType::App { head: 0, args } = app else {
+            continue;
+        };
+        let PolyType::Generic {
+            args: target_args, ..
+        } = &target.pattern
+        else {
+            // A fully-abstract (`Var`) target names no constructor for the
+            // application to dissolve into: raise the located S2-15.e twin
+            // here, at the union build (P7b.S2 review), rather than letting
+            // the collision check below win -- a member local whose name
+            // happens to match the target variable's would otherwise report
+            // the name clash when the real problem is the abstract target.
+            return Err(member_app_abstract_target_error(dg));
+        };
+        for (i, arg) in args.iter().enumerate() {
+            let PolyType::Var(v) = arg else {
+                // A pinned argument (`'F[i64]`) renders as itself; only a
+                // *name* in an identifying position binds.
+                continue;
+            };
+            if *v == 0 {
+                // The header cannot be its own application's argument (the
+                // member parser's kind machinery rejects it).
+                continue;
+            }
+            if i >= target_args.len() {
+                // Over-applied: the grounding App arm raises the located
+                // S2-15.c arity error; identification reads no slot here.
+                continue;
+            }
+            let rendered = target_args[i].clone();
+            match &map[*v as usize] {
+                None => map[*v as usize] = Some(rendered),
+                Some(existing) if *existing == rendered => {}
+                Some(existing) => {
+                    return Err(member_local_reidentified_error(
+                        dg, target, existing, &rendered,
+                    ));
+                }
+            }
+        }
+    }
+    // Append the unbound locals after the target's variables, in the
+    // member sig's own declaration order, never renumbered.
+    let mut appended = Vec::new();
+    for (v, name) in sig.ty_var_names.iter().enumerate().skip(1) {
+        if map[v].is_some() {
+            continue;
+        }
+        if let Some(t) = target.ty_var_names.iter().position(|t| t == name) {
+            return Err(member_local_collides_with_target_error(
+                dg,
+                name,
+                sig.ty_var_spans.get(v).copied().unwrap_or_default(),
+                &target.ty_var_names[t],
+                target.ty_var_spans.get(t).copied().unwrap_or_default(),
+            ));
+        }
+        let id = (target.ty_var_names.len() + appended.len()) as u32;
+        map[v] = Some(PolyType::Var(id));
+        appended.push((
+            name.clone(),
+            sig.ty_var_spans.get(v).copied().unwrap_or_default(),
+        ));
+    }
+    Ok(MemberVarUnion { map, appended })
+}
+
+/// P7b.S2 (S2-5): one member-local name bound by two different dispatchable
+/// input slots. The sig text would claim the local aliases two target slots
+/// at once; refused rather than silently last-write-wins. The two slots
+/// render over the target's own name tables, so the message names the
+/// variables as the user spelled them (P7b.S2 review: the arm's first unit
+/// test pins this).
+fn member_local_reidentified_error(
+    dg: &MemberGrounding,
+    target: &ImplTarget,
+    first: &PolyType,
+    second: &PolyType,
+) -> String {
+    format!(
+        "error: trait member `{}` of `{}` (line {}, col {}) binds the same local name to two different target slots (`{}` and `{}`)\n  a name in an identifying position binds one slot for the whole signature; spell the second occurrence with its own name",
+        dg.member,
+        dg.trait_name,
+        dg.member_span.line,
+        dg.member_span.col,
+        render_target_pt(first, &target.ty_var_names, &target.len_var_names),
+        render_target_pt(second, &target.ty_var_names, &target.len_var_names)
+    )
+}
+
+/// P7b.S2 (S2-5): a member local that no dispatchable-input argument
+/// identifies reuses a target variable's name -- the merged signature's
+/// text would be ambiguous between the local and the target variable.
+fn member_local_collides_with_target_error(
+    dg: &MemberGrounding,
+    local: &str,
+    local_span: Span,
+    target_var: &str,
+    target_span: Span,
+) -> String {
+    format!(
+        "error: trait member `{}` of `{}` (line {}, col {}) declares local `{local}` at line {}, col {}, which is also the impl target's variable `{target_var}` at line {}, col {}\n  a member local that no dispatchable-input argument identifies must not reuse a target variable's name; rename the local",
+        dg.member,
+        dg.trait_name,
+        dg.member_span.line,
+        dg.member_span.col,
+        local_span.line,
+        local_span.col,
+        target_span.line,
+        target_span.col
+    )
+}
+
+/// P7b.S2 (S2-4): a compact surface rendering of a target-side `PolyType`
+/// over the impl target's own name tables -- the user-spelling prefix
+/// renderer and the non-desugared target's display for the grounding
+/// diagnostics. `GenericVariant`/`QuotLit` are unconstructible in an impl
+/// target pattern; an `App` is fenced before any rendering runs.
+fn render_target_pt(pt: &PolyType, ty_var_names: &[String], len_var_names: &[String]) -> String {
+    let ty = |v: u32| {
+        ty_var_names
+            .get(v as usize)
+            .cloned()
+            .unwrap_or_else(|| format!("'{v}"))
+    };
+    let len = |l: &Len| match l {
+        Len::Concrete(n) => n.to_string(),
+        Len::Var(v) => len_var_names
+            .get(*v as usize)
+            .cloned()
+            .unwrap_or_else(|| format!("'{v}")),
+    };
+    match pt {
+        PolyType::Concrete(t) => t.name().to_string(),
+        PolyType::Var(v) => ty(*v),
+        PolyType::Array(elem, l) => format!(
+            "array[{} {}]",
+            render_target_pt(elem, ty_var_names, len_var_names),
+            len(l)
+        ),
+        PolyType::Ref(referent, mutable) => format!(
+            "&{}{}",
+            if *mutable { "!" } else { "" },
+            render_target_pt(referent, ty_var_names, len_var_names)
+        ),
+        PolyType::OwnedCell(payload) => {
+            format!(
+                "^{}",
+                render_target_pt(payload, ty_var_names, len_var_names)
+            )
+        }
+        PolyType::App { head, args } => format!(
+            "{}[{}]",
+            ty(*head),
+            args.iter()
+                .map(|a| render_target_pt(a, ty_var_names, len_var_names))
+                .collect::<Vec<_>>()
+                .join(" ")
+        ),
+        PolyType::Generic {
+            name,
+            args,
+            len_args,
+            ..
+        } => {
+            let mut parts: Vec<String> = args
+                .iter()
+                .map(|a| render_target_pt(a, ty_var_names, len_var_names))
+                .collect();
+            parts.extend(len_args.iter().map(len));
+            format!("{name}[{}]", parts.join(" "))
+        }
+        PolyType::Quotation(..) => "[…]".to_string(),
+        PolyType::QuotLit | PolyType::GenericVariant { .. } => {
+            unreachable!("unconstructible in an impl target pattern (R3.5/the target grammar)")
+        }
+    }
+}
+
 /// P7.S4 (R1): an `impl:` target with a bound on one of its variables
 /// (`'T: Copy`). Bounds on impl variables are out of scope this slice.
 fn impl_target_bound_error() -> String {
@@ -571,6 +866,21 @@ fn impl_target_bound_error() -> String {
 /// are not meaningful in an impl target.
 fn impl_target_row_var_error() -> String {
     "error: an `impl:` target may not carry a row variable".to_string()
+}
+
+/// P7b.S2 review (S2-4): a user-written variable inside an `impl:` target
+/// pattern whose name carries the ctor desugar's reserved prefix. The
+/// bare/partial ctor desugar pads missing slots with fresh variables named
+/// `'ctorN` (type slots) / `'ctorlenN` (length slots), interning them *by
+/// name* -- a user variable with such a name would alias a padded slot (one
+/// variable silently standing for two slots, no diagnostic) and would be
+/// misread as desugar padding by the user-spelling renderer, so the whole
+/// prefix is reserved inside impl targets.
+fn impl_target_reserved_var_error(name: &str, span: Span) -> String {
+    format!(
+        "error: an `impl:` target may not declare the variable `{name}` at line {}, col {}\n  names starting with the reserved prefix `'ctor` (`'ctor0`, `'ctorlen0`, …) belong to the bare/partial ctor desugar's own fresh pattern variables; pick another name",
+        span.line, span.col
+    )
 }
 
 /// P7b.S1 review fix (P1), sibling of S1-17.i's `poly_cross_call_unsupported_
@@ -588,11 +898,18 @@ fn impl_target_app_unsupported_error(var: &str, span: Span) -> String {
     )
 }
 
-/// The first `PolyType::App`'s head variable found anywhere in `pty`'s
-/// structure, if any -- used only by `parse_impl_target` to fence the shape
-/// (`impl_target_app_unsupported_error`). Exhaustive over `PolyType` so a
+/// The first `PolyType::App`'s head variable found in `pty`'s *plain*
+/// structure, if any -- the predicate half of two dispatches:
+/// `parse_impl_target`'s applied-own-variable fence
+/// (`impl_target_app_unsupported_error`) and `parse_trait_member_effect`'s
+/// S2-15.d row-scoped dispatch, which pairs it with
+/// `member_quotation_row_mentions_app` (that predicate answers "an App
+/// exists anywhere", so `mentions && app_head.is_none()` is what isolates
+/// the row-nested case). Quotation rows are deliberately *not* descended
+/// into: a row-nested App must read as `None` here or the row-scoped
+/// dispatch could never isolate its case. Exhaustive over `PolyType` so a
 /// future variant that can carry an `App` (a new compound shape) is forced
-/// to extend this arm rather than silently skip the fence.
+/// to extend this arm rather than silently skip one of the two dispatches.
 fn poly_type_app_head(pty: &PolyType) -> Option<u32> {
     match pty {
         PolyType::App { head, .. } => Some(*head),
@@ -1681,6 +1998,23 @@ impl PolyBuilder {
                 "a ty var id never carries Len: intern_ty_var/intern_len_var already reject that at X1"
             ),
         }
+    }
+
+    /// P7b.S2 review (S2-4): inside an `impl:` target's builder
+    /// (`forbid_bounds`, set by `parse_impl_target`), the ctor desugar's
+    /// `'ctor…` name prefixes are reserved for its own generated pattern
+    /// variables. Every user-written variable in an impl target passes
+    /// through this check before interning -- the type-slot path
+    /// (`parse_poly_ty_var`) and both length-slot paths (`parse_poly_array`,
+    /// a ctor application's length arguments) -- so a generated pad name can
+    /// never alias one (S2-4 review: one variable silently standing for two
+    /// slots). Signature-site builders (`forbid_bounds == false`) are
+    /// unaffected: a word signature may still spell `'ctor0` itself.
+    fn check_impl_target_reserved_name(&self, name: &str, span: Span) -> Result<(), String> {
+        if self.forbid_bounds && name.starts_with("'ctor") {
+            return Err(impl_target_reserved_var_error(name, span));
+        }
+        Ok(())
     }
 
     /// Intern a length variable (an array count `'N`). A name already seen in
@@ -3465,11 +3799,12 @@ impl<'t> Parser<'t> {
                 // plain-slot App (bare or under array/`&`) headed by a member
                 // local is unsupported too, but no quotation is involved, so
                 // it takes the generic message instead. The row-mentions
-                // predicate answers "an App exists somewhere", so it is
-                // paired with `poly_type_app_head`, which finds a
-                // plain-position App head but does not recurse into
-                // quotation rows -- `None` here means the App is row-nested
-                // (a plain App was already excluded by the first conjunct).
+                // predicate answers "an App exists somewhere" -- true for a
+                // plain App too, the S2-3-supported dispatchable shape -- so
+                // the row-nested case is isolated by the *second* conjunct:
+                // `poly_type_app_head` finds a plain-position App head but
+                // does not recurse into quotation rows, so `None` here means
+                // the App is row-nested.
                 if member_quotation_row_mentions_app(t) && poly_type_app_head(t).is_none() {
                     return Err(app_in_member_quotation_row_error(trait_name, member_span));
                 }
@@ -3567,27 +3902,96 @@ impl<'t> Parser<'t> {
     /// `:`-bound arm of `parse_poly_ty_var`) and row variables (`..s`), which
     /// are out of scope for an impl target. A concrete target (`Point`,
     /// `array[i64 4]`) folds to `PolyType::Concrete(t)`.
+    ///
+    /// P7b.S2 (S2-4): a word naming a generic `type:` header, bare or
+    /// under-applied, desugars to the ctor applied to fresh pattern
+    /// variables, one per declared slot (`for Option` ≡
+    /// `for Option['ctor0 …]`, `for Result[i64]` ≡ `for Result[i64
+    /// 'ctor1]`) -- m2-proven mechanics making bare ctors expressible as
+    /// existing S4 applied-var patterns, everything downstream unchanged.
+    /// The user's span and name ride along (`user_spelling`) so diagnostics
+    /// render `Option`, not `Option['ctor0]`.
     fn parse_impl_target(&mut self) -> Result<ImplTarget, String> {
         let mut builder = PolyBuilder {
             forbid_bounds: true,
             ..PolyBuilder::default()
         };
-        let raw = self.parse_poly_slot(&mut builder, false)?;
+        let parsed = self.parse_impl_target_pattern(&mut builder)?;
         if builder.row_in.is_some() || builder.row_out.is_some() {
             return Err(impl_target_row_var_error());
         }
-        let pattern = self.raw_to_poly_type(raw)?;
+        let pattern = self.raw_to_poly_type(parsed.raw)?;
         if let Some(head) = poly_type_app_head(&pattern) {
             let var = builder.ty_names[head as usize].clone();
             let span = builder.ty_var_spans[head as usize];
             return Err(impl_target_app_unsupported_error(&var, span));
         }
+        let user_spelling = parsed.ctor_span.and_then(|span| {
+            impl_target_user_spelling(
+                &pattern,
+                &builder.ty_names,
+                &builder.len_names,
+                parsed.padded,
+                span,
+            )
+        });
         Ok(ImplTarget {
             pattern,
             ty_kinds: vec![Kind::Star; builder.ty_names.len()],
             ty_var_names: builder.ty_names,
+            ty_var_spans: builder.ty_var_spans,
             len_var_names: builder.len_names,
+            len_var_spans: builder.len_var_spans,
+            user_spelling,
             bounds: Vec::new(),
+        })
+    }
+
+    /// P7b.S2 (S2-4): the impl-target slot path -- the ordinary poly-slot
+    /// reader, plus the ctor intercept: a word naming a generic `type:`
+    /// header takes the (padding-aware) application reader, so a bare or
+    /// partially-applied ctor desugars instead of dying at the shared arity
+    /// gate (F3).
+    fn parse_impl_target_pattern(
+        &mut self,
+        builder: &mut PolyBuilder,
+    ) -> Result<RawImplTargetPattern, String> {
+        if let Some((Token::Word(w), span)) = self.peek() {
+            let (w, span) = (w.clone(), *span);
+            // `array[...]` keeps its named-array reader (parse_poly_slot's
+            // first arm) -- only a genuine generic `type:` header intercepts.
+            if !w.starts_with('\'')
+                && !w.starts_with('&')
+                && !w.starts_with('^')
+                && !self.array_type_ahead()
+            {
+                if let Some((is_enum, idx, module)) = self.poly_generic_header(&w, span)? {
+                    // Consume the ctor name itself -- the application reader
+                    // enters positioned at the bracket (or, for a bare
+                    // target, at whatever ends the target slot).
+                    self.pos += 1;
+                    let (raw, padded) = self.parse_poly_generic_application(
+                        builder,
+                        false,
+                        &w,
+                        is_enum,
+                        idx,
+                        module,
+                        span,
+                        UnderApplication::PadImplTarget,
+                    )?;
+                    return Ok(RawImplTargetPattern {
+                        raw,
+                        ctor_span: Some(span),
+                        padded,
+                    });
+                }
+            }
+        }
+        Ok(RawImplTargetPattern {
+            raw: self.parse_poly_slot(builder, false)?,
+            ctor_span: None,
+            padded: (0, 0),
         })
     }
 
@@ -3723,9 +4127,40 @@ impl<'t> Parser<'t> {
         self.expect(Token::Semicolon)?;
         let name = synth_member_word_name(&member_name, &trait_name, trait_module, target);
         let body = rewrite_member_self_calls(&body, &member_name, &name)?;
+        // P7b.S2 (S2-5/S2-6): the grounding diagnostics' shared context --
+        // the member's position and the target as the user spelled it (S2-4),
+        // so every member-grounding error names its offending position.
+        let target_display = target
+            .user_spelling
+            .clone()
+            .map(|(spelling, _)| spelling)
+            .unwrap_or_else(|| {
+                render_target_pt(&target.pattern, &target.ty_var_names, &target.len_var_names)
+            });
+        let dg = MemberGrounding {
+            trait_name: trait_name.as_str(),
+            member: member_name.as_str(),
+            member_span,
+            head_name: sig.ty_var_names[0].as_str(),
+            target_display: target_display.as_str(),
+            target_var: match &target.pattern {
+                PolyType::Var(0) => Some((
+                    target.ty_var_names[0].as_str(),
+                    target.ty_var_spans.first().copied().unwrap_or_default(),
+                )),
+                _ => None,
+            },
+        };
         if target.is_concrete() {
             // R5 concrete path: the existing monomorphic member word, with
             // the trait member's signature grounded at the concrete `Type`.
+            //
+            // P7b.S2 (S2-6): an App-headed member has no mono representation
+            // against a concrete target (its applied arguments are member
+            // locals) -- a located fence before grounding,
+            // `ground_member_type`'s own App arm being the unreachable
+            // backstop the fence guards.
+            fence_member_app_against_concrete_target(&sig.inputs, &sig.outputs, &dg)?;
             let target_ty = target.concrete_ty().expect("checked is_concrete");
             let ground =
                 |slots: &[PolyType], arrays: &mut Vec<ArrayDecl>, refs: &mut Vec<RefDecl>| {
@@ -3756,32 +4191,57 @@ impl<'t> Parser<'t> {
             ))
         } else {
             // P7.S4 (R5) generic path: the member word is polymorphic, its
-            // `PolySig` the trait member's signature grounded by binding the
-            // trait's self-variable (`Var(0)`) to the whole target `PolyType`,
-            // over the impl's own variable name tables. P7.S4b (R3): the
-            // `PolySig`'s `bounds` are populated from the target's declared
-            // `where`-clause bounds (empty when no `where`-clause is present).
-            let inputs: Vec<PolyType> = sig
+            // `PolySig` the trait member's signature grounded over the
+            // member word's union id space. P7.S4b (R3): the `PolySig`'s
+            // `bounds` are populated from the target's declared
+            // `where`-clause bounds (empty when no `where`-clause is
+            // present).
+            //
+            // P7b.S2 (S2-5): the union is load-bearing -- the target's
+            // variables keep their ids and order (so every `where`-bound,
+            // keyed by target id, survives the merge); the member's own
+            // locals append after them, identified ones aliased to the
+            // target slot a dispatchable input's application argument names.
+            // Every variable gets the span of its introduction (target var →
+            // target span; member local → member sig span) -- no more
+            // `Span::default()` stamps.
+            let union = build_member_var_union(target, &sig, &dg)?;
+            let inputs = sig
                 .inputs
                 .iter()
-                .map(|t| ground_member_poly(t, &target.pattern))
-                .collect();
-            let outputs: Vec<PolyType> = sig
+                .map(|t| ground_member_poly(t, &target.pattern, &union.map, &dg))
+                .collect::<Result<Vec<_>, _>>()?;
+            let outputs = sig
                 .outputs
                 .iter()
-                .map(|t| ground_member_poly(t, &target.pattern))
-                .collect();
+                .map(|t| ground_member_poly(t, &target.pattern, &union.map, &dg))
+                .collect::<Result<Vec<_>, _>>()?;
             let poly_sig = PolySig {
                 row_in: None,
                 inputs,
                 outputs,
                 row_out: None,
                 bounds: target.bounds.clone(),
-                ty_kinds: target.ty_kinds.clone(),
-                ty_var_names: target.ty_var_names.clone(),
-                ty_var_spans: vec![Span::default(); target.ty_var_names.len()],
+                ty_kinds: target
+                    .ty_kinds
+                    .iter()
+                    .cloned()
+                    .chain(std::iter::repeat_n(Kind::Star, union.appended.len()))
+                    .collect(),
+                ty_var_names: target
+                    .ty_var_names
+                    .iter()
+                    .cloned()
+                    .chain(union.appended.iter().map(|(n, _)| n.clone()))
+                    .collect(),
+                ty_var_spans: target
+                    .ty_var_spans
+                    .iter()
+                    .copied()
+                    .chain(union.appended.iter().map(|(_, s)| *s))
+                    .collect(),
                 len_var_names: target.len_var_names.clone(),
-                len_var_spans: vec![Span::default(); target.len_var_names.len()],
+                len_var_spans: target.len_var_spans.clone(),
                 row_var_names: Vec::new(),
             };
             Ok((
@@ -4291,7 +4751,7 @@ impl<'t> Parser<'t> {
                 if matches!(self.tokens.get(self.pos + 1), Some((Token::LBracket, _))) {
                     if let Some((is_enum, idx, module)) = self.poly_generic_header(&w, span)? {
                         self.pos += 1;
-                        return self.parse_poly_generic_application(
+                        let (raw, _) = self.parse_poly_generic_application(
                             builder,
                             word_is_output,
                             &w,
@@ -4299,7 +4759,9 @@ impl<'t> Parser<'t> {
                             idx,
                             module,
                             span,
-                        );
+                            UnderApplication::Error,
+                        )?;
+                        return Ok(raw);
                     }
                 }
             }
@@ -4312,6 +4774,10 @@ impl<'t> Parser<'t> {
     /// list, each argument a poly slot rather than a concrete type
     /// expression -- the poly-slot twin of `parse_type_arguments`, reusing
     /// only its arity check, never its concrete-only argument parser.
+    /// Returns the folded pattern plus the number of type/length slots the
+    /// impl-target desugar padded (`(0, 0)` on every signature-site path,
+    /// which never pads) -- the exact padding record the user-spelling
+    /// renderer consumes (P7b.S2 review: retired the name-prefix heuristic).
     #[allow(clippy::too_many_arguments)]
     fn parse_poly_generic_application(
         &mut self,
@@ -4322,7 +4788,8 @@ impl<'t> Parser<'t> {
         idx: usize,
         module: u32,
         span: Span,
-    ) -> Result<RawTy, String> {
+        under_application: UnderApplication,
+    ) -> Result<(RawTy, (usize, usize)), String> {
         // P7.S6a (R7): the signature twin of `resolve_type_or_apply`'s split
         // (R6) -- `ty_arity` type slots, parsed as poly slots so a variable
         // is preserved, followed by `len_arity` length slots, each either a
@@ -4340,7 +4807,28 @@ impl<'t> Parser<'t> {
             )
         };
         if !matches!(self.peek(), Some((Token::LBracket, _))) {
-            return Err(generic_arity_error(name, ty_arity, len_arity, 0, 0, span));
+            if matches!(under_application, UnderApplication::Error) {
+                return Err(generic_arity_error(name, ty_arity, len_arity, 0, 0, span));
+            }
+            // S2-4: a bare ctor target (`for Box`) -- an empty explicit
+            // prefix falls through to the padding below, which desugars it
+            // to the ctor applied to a fresh pattern variable per declared
+            // slot. The bracket-reading loop is skipped entirely.
+            let (mut args, mut lens) = (Vec::new(), Vec::new());
+            let padded =
+                Self::pad_impl_ctor_slots(builder, span, ty_arity, len_arity, &mut args, &mut lens);
+            return Ok((
+                RawTy::Generic {
+                    is_enum,
+                    idx,
+                    module,
+                    args,
+                    len_args: lens,
+                    name: name.to_string(),
+                    span,
+                },
+                padded,
+            ));
         }
         self.pos += 1;
         let mut args = Vec::new();
@@ -4364,6 +4852,10 @@ impl<'t> Parser<'t> {
                 match self.peek().cloned() {
                     Some((Token::Word(w), wspan)) if w.starts_with('\'') => {
                         self.pos += 1;
+                        // P7b.S2 review (S2-4): reserved `'ctor…` prefixes in
+                        // an impl target ctor application's length slots (the
+                        // twin of the type-slot check in `parse_poly_ty_var`).
+                        builder.check_impl_target_reserved_name(&w, wspan)?;
                         lens.push(RawLen::Var(builder.intern_len_var(&w, wspan)?));
                     }
                     _ => lens.push(RawLen::Concrete(self.parse_array_count(name)?)),
@@ -4377,24 +4869,111 @@ impl<'t> Parser<'t> {
             args.push(self.parse_poly_slot(builder, word_is_output)?);
         }
         if args.len() != ty_arity || lens.len() != len_arity {
-            return Err(generic_arity_error(
-                name,
-                ty_arity,
-                len_arity,
-                args.len(),
-                lens.len(),
-                span,
+            // S2-4: an under-applied impl target pads the missing slots with
+            // fresh pattern variables (`for Result[i64]` ≡ `for Result[i64
+            // 'ctor1]`); over-application and every signature-site shape
+            // keep the arity error.
+            let padded = if matches!(under_application, UnderApplication::PadImplTarget)
+                && args.len() < ty_arity
+                && lens.len() <= len_arity
+            {
+                Self::pad_impl_ctor_slots(builder, span, ty_arity, len_arity, &mut args, &mut lens)
+            } else {
+                return Err(generic_arity_error(
+                    name,
+                    ty_arity,
+                    len_arity,
+                    args.len(),
+                    lens.len(),
+                    span,
+                ));
+            };
+            return Ok((
+                RawTy::Generic {
+                    is_enum,
+                    idx,
+                    module,
+                    args,
+                    len_args: lens,
+                    name: name.to_string(),
+                    span,
+                },
+                padded,
             ));
         }
-        Ok(RawTy::Generic {
-            is_enum,
-            idx,
-            module,
-            args,
-            len_args: lens,
-            name: name.to_string(),
-            span,
-        })
+        Ok((
+            RawTy::Generic {
+                is_enum,
+                idx,
+                module,
+                args,
+                len_args: lens,
+                name: name.to_string(),
+                span,
+            },
+            (0, 0),
+        ))
+    }
+
+    /// P7b.S2 (S2-4): fill an under-applied ctor target's remaining type
+    /// slots with fresh pattern variables (`'ctor0`, `'ctor1`, …, named by
+    /// the slot they fill) and its remaining length slots with fresh length
+    /// variables, all spanning the ctor name -- the m2-proven desugar that
+    /// makes bare (`for Box`) and partially-applied (`for Result[i64]`)
+    /// ctor targets expressible as existing S4 applied-var patterns.
+    /// Returns the number of generated type/length variables, so the
+    /// user-spelling renderer knows the exact padded suffix without a
+    /// name-prefix heuristic (P7b.S2 review).
+    fn pad_impl_ctor_slots(
+        builder: &mut PolyBuilder,
+        span: Span,
+        ty_arity: usize,
+        len_arity: usize,
+        args: &mut Vec<RawTy>,
+        lens: &mut Vec<RawLen>,
+    ) -> (usize, usize) {
+        let mut ty_padded = 0usize;
+        while args.len() < ty_arity {
+            let slot = args.len();
+            // Belt-and-braces: user-written `'ctor…` names are rejected in
+            // the impl-target path (`check_impl_target_reserved_name`), so
+            // the slot-indexed name is always free -- skip to the next free
+            // index anyway, so the generator itself can never alias one
+            // variable onto two slots.
+            let mut n = slot;
+            let name = loop {
+                let candidate = format!("'ctor{n}");
+                if !builder.ty_index.contains_key(&candidate) {
+                    break candidate;
+                }
+                n += 1;
+            };
+            // Fresh, internally-generated names cannot collide and cannot
+            // carry a bound; the unwrap-equivalent is the `?`'s absence.
+            let (id, _) = builder
+                .intern_ty_var(&name, span)
+                .expect("a generated 'ctorN variable is fresh and boundless");
+            args.push(RawTy::Var(id));
+            ty_padded += 1;
+        }
+        let mut len_padded = 0usize;
+        while lens.len() < len_arity {
+            let slot = lens.len();
+            let mut n = slot;
+            let name = loop {
+                let candidate = format!("'ctorlen{n}");
+                if !builder.len_index.contains_key(&candidate) {
+                    break candidate;
+                }
+                n += 1;
+            };
+            let id = builder
+                .intern_len_var(&name, span)
+                .expect("a generated 'ctorlenN variable is fresh and Star-free");
+            lens.push(RawLen::Var(id));
+            len_padded += 1;
+        }
+        (ty_padded, len_padded)
     }
 
     /// P7b.S1 (S1-6/S1-7): a type variable applied to type arguments
@@ -4493,6 +5072,11 @@ impl<'t> Parser<'t> {
                 bound_in_effect_error(&name, span)
             });
         }
+        // P7b.S2 review (S2-4): the ctor desugar's `'ctor…` prefixes are
+        // reserved inside an `impl:` target (see the builder helper) -- a
+        // user variable so named would alias a padded slot and would be
+        // misread as desugar padding by the user-spelling renderer.
+        builder.check_impl_target_reserved_name(&name, span)?;
         let (id, _) = builder.intern_ty_var(&name, span)?;
         Ok(RawTy::Var(id))
     }
@@ -4630,6 +5214,10 @@ impl<'t> Parser<'t> {
         let count = match self.peek().cloned() {
             Some((Token::Word(w), span)) if w.starts_with('\'') => {
                 self.pos += 1;
+                // P7b.S2 review (S2-4): reserved `'ctor…` prefixes in an
+                // impl target's length positions too (the twin of the
+                // type-slot check in `parse_poly_ty_var`).
+                builder.check_impl_target_reserved_name(&w, span)?;
                 let id = builder.intern_len_var(&w, span)?;
                 RawLen::Var(id)
             }
@@ -13871,5 +14459,359 @@ mod tests {
             name: "Buffer",
         };
         assert_eq!(poly_type_shape_str(&buffer), "Buffer[i64 256 'N0]");
+    }
+
+    // ---- P7b.S2 Phase 2: target and member-word construction ----
+
+    /// S2-4: `for Box` desugars to the ctor applied to one fresh pattern
+    /// variable per declared slot, named `'ctor{slot}` and spanning the ctor
+    /// name; the user's spelling rides along.
+    #[test]
+    fn parse_impl_target_bare_ctor_desugars_to_fresh_vars_and_user_spelling() {
+        let module = parse_src(
+            "type: Box['T] v 'T ;\n\
+             trait: Show['T] : show ( &'T -- ) ; ;\n\
+             impl: Show for Box\n\
+               : show | a | a drop ;\n\
+             ;",
+        )
+        .unwrap();
+        let target = &module.impls[0].target;
+        assert!(!target.is_concrete());
+        let PolyType::Generic { args, name, .. } = &target.pattern else {
+            panic!("a desugared bare ctor target stays Generic")
+        };
+        assert_eq!(*name, "Box");
+        assert_eq!(args.len(), 1, "one fresh var per declared type slot");
+        assert_eq!(target.ty_var_names, vec!["'ctor0".to_string()]);
+        // The fresh variable's introduction span is the ctor name's own.
+        assert_eq!(
+            target.ty_var_spans[0],
+            Span {
+                line: 3,
+                col: 16,
+                ..Span::default()
+            }
+        );
+        assert_eq!(
+            target.user_spelling,
+            Some((
+                "Box".to_string(),
+                Span {
+                    line: 3,
+                    col: 16,
+                    ..Span::default()
+                }
+            ))
+        );
+    }
+
+    /// S2-4: `for Result[i64]` pads only the missing slots -- the explicit
+    /// prefix stays `Concrete`, the fresh var fills slot 1, and the user's
+    /// spelling renders the prefix (`Result[i64]`).
+    #[test]
+    fn parse_impl_target_partial_ctor_binds_explicit_prefix() {
+        let module = parse_src(
+            "type: Result['T 'E] | Ok 'T | Err 'E ;\n\
+             trait: Show['T] : show ( &'T -- ) ; ;\n\
+             impl: Show for Result[i64]\n\
+               : show | a | a drop ;\n\
+             ;",
+        )
+        .unwrap();
+        let target = &module.impls[0].target;
+        let PolyType::Generic { args, .. } = &target.pattern else {
+            panic!("a partially-applied ctor target stays Generic")
+        };
+        assert_eq!(args[0], PolyType::Concrete(Type::I64), "the prefix pins");
+        assert_eq!(args[1], PolyType::Var(0), "the remaining slot desugars");
+        assert_eq!(target.ty_var_names, vec!["'ctor1".to_string()]);
+        assert_eq!(
+            target.user_spelling.as_ref().map(|(s, _)| s.as_str()),
+            Some("Result[i64]")
+        );
+    }
+
+    /// S2-5: an HKT member's word sig unions the target's variables (ids and
+    /// order kept) with its own locals appended, every variable carrying its
+    /// introduction span, and the target's `where`-bounds surviving keyed by
+    /// their unchanged target ids. `'F['T]`'s `'T` is identified with the
+    /// target slot; `'U` appends.
+    #[test]
+    fn parse_impl_member_hkt_sig_unions_target_vars_and_locals() {
+        let module = parse_src(
+            "type: Result['T 'E] | Ok 'T | Err 'E ;\n\
+             trait: Functor['F: * -> *] :\n\
+               map ( 'F['T] [ 'T -- 'U ] -- 'F['U] ) ;\n\
+             ;\n\
+             impl: Functor for Result['R 'E2] where 'R: Copy\n\
+               : map | x | x drop ;\n\
+             ;",
+        )
+        .unwrap();
+        let word = module
+            .words
+            .iter()
+            .find(|w| w.name.starts_with("map;"))
+            .expect("the desugar splices the member word");
+        let sig = word
+            .poly
+            .as_deref()
+            .expect("a generic member is polymorphic");
+        // Union id space: target vars first ('R, 'E2), then the appended
+        // locals that no dispatchable-input argument identified ('U; 'T was
+        // identified with target slot 0).
+        assert_eq!(sig.ty_var_names, vec!["'R", "'E2", "'U"]);
+        assert_eq!(sig.ty_kinds, vec![Kind::Star, Kind::Star, Kind::Star]);
+        // Spans: target vars carry their target introduction spans, the
+        // appended local its member-sig span ('U's first mention, in the
+        // member's own declaration).
+        assert_eq!(
+            sig.ty_var_spans[0],
+            Span {
+                line: 5,
+                col: 26,
+                ..Span::default()
+            }
+        );
+        assert_eq!(
+            sig.ty_var_spans[2],
+            Span {
+                line: 3,
+                col: 22,
+                ..Span::default()
+            }
+        );
+        // The where-bound survives, keyed by the target var's unchanged id.
+        assert_eq!(sig.bounds.len(), 1);
+        assert_eq!(sig.bounds[0].0, 0, "'R keeps id 0");
+        // The dispatchable input grounds to the whole target pattern; the
+        // output displaces slot 0 with 'U and keeps the leftover slot.
+        assert_eq!(sig.inputs[0], module.impls[0].target.pattern);
+        let PolyType::Generic { args, .. } = &sig.outputs[0] else {
+            panic!("the output grounds to the ctor")
+        };
+        assert_eq!(args[0], PolyType::Var(2), "'U displaces the slot");
+        assert_eq!(args[1], PolyType::Var(1), "the leftover slot flows through");
+    }
+
+    /// S2-5: a member local that no dispatchable-input argument identifies
+    /// must not reuse a target variable's name -- a located desugar error
+    /// (outside the S2-15 family).
+    #[test]
+    fn parse_impl_member_local_colliding_with_target_var_name_is_error() {
+        let err = parse_src(
+            "type: Result['T 'E] | Ok 'T | Err 'E ;\n\
+             trait: Functor['F: * -> *] :\n\
+               map ( 'F['T] [ 'T -- 'E ] -- 'F['E] ) ;\n\
+             ;\n\
+             impl: Functor for Result['R 'E]\n\
+               : map | x | x drop ;\n\
+             ;",
+        )
+        .unwrap_err();
+        // 'T is identified (slot 0); 'E is not, and 'E is the target's
+        // second variable's name -- the collision.
+        assert!(
+            err.contains("declares local `'E`") && err.contains("the impl target's variable `'E`"),
+            "{err}"
+        );
+    }
+
+    /// S2-6: an App-headed member against a *concrete* target is a located
+    /// error (no mono representation for member locals), raised at the
+    /// desugar before `ground_member_type` could see it.
+    #[test]
+    fn parse_impl_member_app_against_concrete_target_is_located_error() {
+        let err = parse_src(
+            "type: Option['T] | None | Some 'T ;\n\
+             trait: Functor['F: * -> *] :\n\
+               map ( 'F['T] [ 'T -- 'U ] -- 'F['U] ) ;\n\
+             ;\n\
+             impl: Functor for Option[i64]\n\
+               : map | x | x drop ;\n\
+             ;",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains(
+                "trait member `map` of `Functor` (line 6, col 3) applies the trait variable \
+                 `'F`, but the impl target `Option[i64]` is concrete"
+            ),
+            "{err}"
+        );
+    }
+
+    /// P7b.S2 review (S2-4): the ctor desugar's `'ctor…` name prefixes are
+    /// reserved inside an `impl:` target. A user variable so named would
+    /// alias a padded slot (the pad interns by name, so on the 2-slot
+    /// `Pair` the user's `'ctor1` in slot 0 and the pad for slot 1 would
+    /// collapse into one variable standing for two slots, silently) and
+    /// would be misread as desugar padding by the user-spelling renderer.
+    /// All four user spellings reject, located at the offending variable.
+    #[test]
+    fn parse_impl_target_reserved_ctor_var_names_are_error() {
+        // The aliasing proof shape: a user-written `'ctor1` in a partially
+        // applied 2-slot ctor target.
+        let err = parse_src(
+            "type: Pair['A 'B] | P 'A 'B ;\n\
+             trait: Show['T] : show ( &'T -- ) ; ;\n\
+             impl: Show for Pair[i64 'ctor1]\n\
+               : show | a | a drop ;\n\
+             ;",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("may not declare the variable `'ctor1` at line 3, col 25"),
+            "{err}"
+        );
+        assert!(
+            err.contains("reserved prefix `'ctor`"),
+            "the message must name the reserved prefix: {err}"
+        );
+        assert!(
+            err.contains("desugar's own fresh pattern variables"),
+            "the message must say why: {err}"
+        );
+        // The fully-applied spelling the renderer used to misread as
+        // desugar padding.
+        let err = parse_src(
+            "type: Box['T] v 'T ;\n\
+             trait: Show['T] : show ( &'T -- ) ; ;\n\
+             impl: Show for Box['ctor0]\n\
+               : show | a | a drop ;\n\
+             ;",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("may not declare the variable `'ctor0` at line 3, col 20"),
+            "{err}"
+        );
+        // A length-slot spelling inside the target's own array shape.
+        let err = parse_src(
+            "trait: Show['T] : show ( &'T -- ) ; ;\n\
+             impl: Show for array[i64 'ctorlen0]\n\
+               : show | a | a drop ;\n\
+             ;",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("may not declare the variable `'ctorlen0` at line 2, col 26"),
+            "{err}"
+        );
+        // And inside a ctor application's length slots.
+        let err = parse_src(
+            "type: Buf['T 'N: Len] d array['T 'N] ;\n\
+             trait: Show['T] : show ( &'T -- ) ; ;\n\
+             impl: Show for Buf[i64 'ctorlen0]\n\
+               : show | a | a drop ;\n\
+             ;",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("may not declare the variable `'ctorlen0` at line 3, col 24"),
+            "{err}"
+        );
+    }
+
+    /// P7b.S2 review (S2-4): the user-spelling renderer's contract -- `Some`
+    /// only when the desugar actually padded. A fully-applied ctor pattern
+    /// (however its variables happen to be named) is already the user's own
+    /// spelling, so the display must render it in full (`Box['ctor0]` via
+    /// the `None` fallback), never collapse to the bare ctor name. The
+    /// reserved-name rejection keeps a user-typed `'ctor0` out of real
+    /// targets; this pins the renderer structurally.
+    #[test]
+    fn impl_target_user_spelling_fully_applied_pattern_is_not_desugared() {
+        let span = Span {
+            line: 3,
+            col: 16,
+            ..Span::default()
+        };
+        let fully_applied = PolyType::Generic {
+            is_enum: false,
+            idx: 0,
+            module: 0,
+            args: vec![PolyType::Var(0)],
+            len_args: vec![],
+            name: "Box",
+        };
+        let ctor_named = vec!["'ctor0".to_string()];
+        // Nothing was desugared: user_spelling is None, so diagnostics fall
+        // back to the full render -- "Box['ctor0]", never the bare "Box".
+        assert_eq!(
+            impl_target_user_spelling(&fully_applied, &ctor_named, &[], (0, 0), span),
+            None
+        );
+        assert_eq!(
+            render_target_pt(&fully_applied, &ctor_named, &[]),
+            "Box['ctor0]"
+        );
+        // The desugar DID pad the one slot: the spelling is the bare ctor
+        // name, the fresh variable omitted.
+        assert_eq!(
+            impl_target_user_spelling(&fully_applied, &ctor_named, &[], (1, 0), span),
+            Some(("Box".to_string(), span))
+        );
+    }
+
+    /// P7b.S2 review (S2-5 ordering): for a fully-abstract (`Var`) target,
+    /// a member local whose name matches the target variable's must surface
+    /// the S2-15.e abstract-target error -- the real problem -- not the S2-5
+    /// name-collision error the append loop would otherwise raise first.
+    #[test]
+    fn parse_impl_member_app_against_var_target_is_abstract_target_error() {
+        let err = parse_src(
+            "trait: Functor['F: * -> *] :\n\
+               map ( 'F['T] [ 'T -- 'U ] -- 'F['U] ) ;\n\
+             ;\n\
+             impl: Functor for 'T\n\
+               : map | x | x drop ;\n\
+             ;",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains(
+                "trait member `map` of `Functor` (line 5, col 3) applies the trait variable \
+                 `'F`, but the impl target `'T` at line 4, col 19 is not a constructor"
+            ),
+            "{err}"
+        );
+        // The S2-5 collision diagnostic must not win the ordering race.
+        assert!(!err.contains("the impl target's variable"), "{err}");
+        assert!(!err.contains("declares local"), "{err}");
+    }
+
+    /// P7b.S2 (S2-5): one member-local name bound at two different target
+    /// slots across the dispatchable inputs -- the sig text would claim the
+    /// local aliases two slots at once; refused rather than silently
+    /// last-write-wins. The two slots render over the target's own name
+    /// tables (P7b.S2 review: this arm was the only union error without a
+    /// unit test).
+    #[test]
+    fn parse_impl_member_local_reidentified_across_slots_is_error() {
+        let err = parse_src(
+            "type: Pair['A 'B] | P 'A 'B ;\n\
+             trait: Dist['F: * -> * -> *] :\n\
+               both ( 'F['T 'T] -- ) ;\n\
+             ;\n\
+             impl: Dist for Pair['X 'Y]\n\
+               : both | a | a drop ;\n\
+             ;",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains(
+                "trait member `both` of `Dist` (line 6, col 3) binds the same local name to \
+                 two different target slots (`'X` and `'Y`)"
+            ),
+            "{err}"
+        );
+        assert!(
+            err.contains(
+                "a name in an identifying position binds one slot for the whole signature"
+            ),
+            "{err}"
+        );
     }
 }
