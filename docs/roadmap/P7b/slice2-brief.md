@@ -175,6 +175,12 @@ p8's exact fence text as the regression baseline and a dedicated cross-call gold
 fall back to (i) if general lifting turns out to reopen the soundness concern S1
 fenced (the spec's probes will tell).
 
+**Amended 260831 after the spec review round:** the fence is **not lifted**. Member calls
+never reach `poly_cross_match` (`poly_trait_member_call` fronts them), so the lift was
+aimed at the wrong site; the member-call path (spec S2-16) owns App slots, p8's exact
+fence text stays as the regression baseline, and the fence was a scope fence (S1-17.i),
+not a soundness fence.
+
 **R8 — Orphan/coherence for ctor targets.** Extend `impl_target_module`'s Generic arm
 to `Some(ctor module)` so a ctor-abstract impl may live in the constructor's module or
 the trait's module — the same rule concrete targets already get. Draft diagnostic:
@@ -192,6 +198,17 @@ degrade safely, but the fence's message is better UX and no exit criterion needs
 them). (iii) Quotation-valued outputs stay an S10 slice-7 boundary. (iv) The F10
 ctor-word wart (`5 Box` in `main`): record, do not fix in S2 — goldens use
 declared-sig helpers, as the S1 goldens already do.
+
+**R11 — Member-call checking mechanism (added 260831 after the spec review round;
+user-approved option (a), the full member-call path).** No existing path can check an
+HKT member call: the poly operand check (`poly_trait_member_call` +
+`substitute_member_var`) conflates member locals with the caller's bound var, mono
+bodies have no member-call path at all (a bare member is an unknown word), and splice
+grounding can leak a `CtorImage` into a value-type position. Approved: unify the
+member's dispatchable input against caller slots at `poly_trait_member_call` **and** add
+a mono member-call path so a bare member with fully concrete operands dispatches
+directly — the phase doc's exit criteria 3-4 read as direct calls. Spec requirement
+S2-16.
 
 ## Witness programs
 
