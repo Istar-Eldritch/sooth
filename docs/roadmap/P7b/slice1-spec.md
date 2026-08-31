@@ -365,6 +365,17 @@ as-is or a deliberate non-change:
   v. **Word-header spelling**: `inline` goes **before** the bracket
      (`: pass inline ['F 'T] ( … ) ;`); k4's first attempt failed on `inline` after the
      bracket.
+  vi. **S1-15.g's golden is source-unreachable, by ruling.** The kind-error golden list
+      names `hkt_ctor_image_used_as_a_type_is_error` (S1-15.g), but no *source program*
+      can reach it: S1-4's parser-side kind consistency means a single signature can never
+      declare both a bare and an applied use of the same variable (the bare mention would
+      already fail S1-15.b/e before a `CtorImage` binding could exist to misuse). The
+      diagnostic itself is real and exercised directly — `apply_subst_ctor_image_reaching_
+      bare_var_is_a_located_error` (`check/poly.rs`) hand-builds a `Subst` binding a
+      variable to a `Type::CtorImage` exactly as `unify_poly_input`'s `App` arm would, then
+      reads it back through a declared bare output — but the golden itself does not ship.
+      Not a phase gap: recorded here so a future reader does not go looking for a source
+      fixture that cannot exist.
 
 ## Considered and rejected
 
@@ -488,6 +499,7 @@ attach-anchored in Phase 2, its golden riding this phase's full suite).
   - `hkt_use_site_ctor_arg_of_wrong_kind_is_error` — `Wrap[Nat i64]` where `'F: * -> *`
       and `Nat` is `*`. (15.f)
   - `hkt_ctor_image_used_as_a_type_is_error` — a `CtorImage` in a plain type slot. (15.g)
+    Does not ship as a golden — source-unreachable by ruling; see S1-17.vi.
   - `hkt_annotation_arity_unsatisfiable_by_application_is_error` —
       `: bad['F: * -> Len -> * 'T] ( 'F['T] -- ) ;`. (15.h)
 

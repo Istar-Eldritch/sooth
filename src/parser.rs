@@ -517,6 +517,41 @@ fn impl_target_row_var_error() -> String {
     "error: an `impl:` target may not carry a row variable".to_string()
 }
 
+/// P7b.S1 review fix (P1), sibling of S1-17.i's `poly_cross_call_unsupported_
+/// error`: an `impl:` target whose pattern applies one of its own variables
+/// (`impl: Trait for 'F['T]`) used to parse silently, but
+/// `match_impl_target_rec` (S1-16's census) never matches an `App` pattern
+/// -- the impl would register and then never dispatch, surfacing as a
+/// misleading "does not satisfy" error at an unrelated call site instead of
+/// naming the real problem here. A located rejection at parse time instead,
+/// naming the applied variable's own binding span.
+fn impl_target_app_unsupported_error(var: &str, span: Span) -> String {
+    format!(
+        "error: an `impl:` target may not apply its own type variable (`{var}[...]` at line {}, col {}); a constructor-abstract impl target is not supported this slice",
+        span.line, span.col
+    )
+}
+
+/// The first `PolyType::App`'s head variable found anywhere in `pty`'s
+/// structure, if any -- used only by `parse_impl_target` to fence the shape
+/// (`impl_target_app_unsupported_error`). Exhaustive over `PolyType` so a
+/// future variant that can carry an `App` (a new compound shape) is forced
+/// to extend this arm rather than silently skip the fence.
+fn poly_type_app_head(pty: &PolyType) -> Option<u32> {
+    match pty {
+        PolyType::App { head, .. } => Some(*head),
+        PolyType::Array(elem, _) => poly_type_app_head(elem),
+        PolyType::Ref(referent, _) => poly_type_app_head(referent),
+        PolyType::OwnedCell(payload) => poly_type_app_head(payload),
+        PolyType::Generic { args, .. } => args.iter().find_map(poly_type_app_head),
+        PolyType::Concrete(_)
+        | PolyType::Var(_)
+        | PolyType::Quotation(..)
+        | PolyType::QuotLit
+        | PolyType::GenericVariant { .. } => None,
+    }
+}
+
 /// P7.S3e (R4): an `impl:` naming a trait that resolves to nothing in scope
 /// (unknown, or not imported).
 fn unknown_trait_error(name: &str, span: Span) -> String {
@@ -3410,6 +3445,11 @@ impl<'t> Parser<'t> {
             return Err(impl_target_row_var_error());
         }
         let pattern = self.raw_to_poly_type(raw)?;
+        if let Some(head) = poly_type_app_head(&pattern) {
+            let var = builder.ty_names[head as usize].clone();
+            let span = builder.ty_var_spans[head as usize];
+            return Err(impl_target_app_unsupported_error(&var, span));
+        }
         Ok(ImplTarget {
             pattern,
             ty_kinds: vec![Kind::Star; builder.ty_names.len()],
@@ -6403,10 +6443,14 @@ impl<'t> Parser<'t> {
                 // named generic header. A field `f 'F['T]` applies the
                 // header's own type variable to its argument list.
                 if matches!(self.peek(), Some((Token::LBracket, _))) {
-                    self.check_field_arrow_kind(decl_name, head, &w, span)?;
-                    return self.parse_generic_field_var_application(
+                    let applied = self.parse_generic_field_var_application(
                         decl_name, ty_vars, used, len_vars, used_len, head, span,
-                    );
+                    )?;
+                    let PolyType::App { args, .. } = &applied else {
+                        unreachable!("parse_generic_field_var_application always returns App")
+                    };
+                    self.check_field_arrow_kind(decl_name, head, &w, span, args.len())?;
+                    return Ok(applied);
                 }
                 self.check_field_bare_kind(decl_name, head, &w, span)?;
                 return Ok(PolyType::Var(head));
@@ -6645,17 +6689,25 @@ impl<'t> Parser<'t> {
 
     /// P7b.S1 (S1-8/S1-15.e, Phase 3): an *applied* field mention (`f
     /// 'F['T]`) -- the header-field twin of `PolyBuilder::mark_ty_arrow`.
-    /// First field-usage mention establishes `Arrow`; a later applied
-    /// mention is consistent (arity is not distinguished here -- no golden
-    /// requires it, and the header-field path carries no per-mention arity
-    /// table); a var already established `Star` by an earlier bare field
-    /// mention is the header-field twin of S1-15.a.
+    /// First field-usage mention establishes `Arrow { domains: [Star;
+    /// domain_count], .. }`, `domain_count` being the application's real
+    /// argument count (review fix: this used to hardcode an empty domain
+    /// list regardless of arity, so `kind_str` rendered the established
+    /// kind as `*` -- self-contradictory in `header_field_kind_conflict_
+    /// error`'s message, and a dishonest arity in `publish_field_inferred_
+    /// kinds`' published vector). A later applied mention is consistent
+    /// regardless of its own arity (no golden requires distinguishing it,
+    /// and the header-field path carries no per-mention arity table -- only
+    /// *whether* the var is Arrow-kinded, same as before this fix); a var
+    /// already established `Star` by an earlier bare field mention is the
+    /// header-field twin of S1-15.a.
     fn check_field_arrow_kind(
         &mut self,
         decl_name: &str,
         idx: u32,
         name: &str,
         span: Span,
+        domain_count: usize,
     ) -> Result<(), String> {
         match self.field_kind_marks.get(&idx).cloned() {
             None => {
@@ -6663,7 +6715,7 @@ impl<'t> Parser<'t> {
                     idx,
                     (
                         Kind::Arrow {
-                            domains: Vec::new(),
+                            domains: vec![Kind::Star; domain_count],
                             result: Box::new(Kind::Star),
                         },
                         span,
@@ -12104,6 +12156,43 @@ mod tests {
         assert!(err.contains("may not carry an inline bound"), "{err}");
     }
 
+    /// P7b.S1 review fix (P1): an `impl:` target that applies one of its
+    /// own variables (`'F['T]`) used to parse and register silently even
+    /// though `match_impl_target_rec` never matches an `App` pattern -- a
+    /// located rejection at parse time instead, naming the applied
+    /// variable and its binding span.
+    #[test]
+    fn parse_impl_target_app_is_error() {
+        let err = parse_src(
+            "trait: Show['T] : show ( &'T -- ) ; ;\n\
+             impl: Show for 'F['T]\n\
+               : show | a | a drop ;\n\
+             ;",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("may not apply its own type variable") && err.contains("'F[...]"),
+            "{err}"
+        );
+    }
+
+    /// The concrete-head twin: `impl: Show for Box['T]` still parses --
+    /// only a *variable*-headed application is fenced, not `Generic`'s own
+    /// existing shape (F5's applied-target impls already worked before
+    /// this slice).
+    #[test]
+    fn parse_impl_target_generic_head_application_still_parses() {
+        let module = parse_src(
+            "type: Box['T] v 'T ;\n\
+             trait: Show['T] : show ( &'T -- ) ; ;\n\
+             impl: Show for Box['T]\n\
+               : show | a | a drop ;\n\
+             ;",
+        )
+        .unwrap();
+        assert!(!module.impls[0].target.is_concrete());
+    }
+
     // P7.S4b (R1): `where`-clause on an impl target parses and threads
     // bounds into the member word's PolySig.
 
@@ -12559,6 +12648,45 @@ mod tests {
         // var used bare in a field is unaffected by the new side table.
         let module = parse_src("type: Box['F: * 'T] f 'F g 'T ;").unwrap();
         assert_eq!(module.generic_structs[0].fields.len(), 2);
+    }
+
+    /// P7b.S1 review fix (P1): the reversed field order from
+    /// `hkt_header_field_applies_star_var_is_located_error`'s golden --
+    /// the applied mention (`f 'F['T]`) comes *first*, establishing
+    /// `Arrow`, and the bare mention (`g 'F`) comes second, conflicting
+    /// with it. This is `check_field_bare_kind`'s `field_kind_marks`
+    /// fallback arm (the header's own `ty_kinds` isn't published until decl
+    /// end, so this arm -- not `header_ty_var_kind`'s early-return -- is
+    /// what fires here), which used to render the established kind through
+    /// a zero-domain `Arrow` (`kind_str` renders that as `*`), making the
+    /// message assert the opposite of the fact that triggered it. Must now
+    /// say `* -> *`, not `*`.
+    #[test]
+    fn header_field_bare_mention_after_an_earlier_application_names_the_real_arrow_kind() {
+        let err = parse_src("type: Bad['F 'T] f 'F['T] g 'F ;").unwrap_err();
+        assert!(
+            err.contains("is declared kind `* -> *` in its header"),
+            "{err}"
+        );
+    }
+
+    /// P7b.S1 review fix (P1): `publish_field_inferred_kinds` must publish
+    /// the field-application's *real* arity, not a zero-arity placeholder --
+    /// otherwise S1-5's "no default-to-`Star` shortcut that would drop an
+    /// `Arrow` on the floor" is honored in name only (an `Arrow` survives,
+    /// but a dishonest one).
+    #[test]
+    fn publish_field_inferred_kinds_records_the_applications_real_arity() {
+        let module = parse_src("type: Bad['F 'T 'U] f 'F['T 'U] ;").unwrap();
+        let published = &module.generic_structs[0].ty_kinds[0];
+        match published {
+            Kind::Arrow { domains, .. } => assert_eq!(
+                domains.len(),
+                2,
+                "'F['T 'U] applies two arguments; the published kind must say so"
+            ),
+            other => panic!("expected an Arrow kind, got {other:?}"),
+        }
     }
 
     #[test]

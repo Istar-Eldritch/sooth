@@ -8451,22 +8451,42 @@ pub(super) fn unify_poly_input(
                 )
             };
             let generics = cell.borrow();
-            let (found_is_enum, found_idx, found_module, found_args) = match slot_ty {
+            let (found_is_enum, found_idx, found_module, found_args, found_lens) = match slot_ty {
                 Type::Struct(id, _) => {
-                    let Some((fi, fm, fargs, _flens)) = generics.struct_instantiation_of(id)
+                    let Some((fi, fm, fargs, flens)) = generics.struct_instantiation_of(id)
                     else {
                         return Err(mismatch());
                     };
-                    (false, fi, fm, fargs.to_vec())
+                    (false, fi, fm, fargs.to_vec(), flens.to_vec())
                 }
                 Type::Enum(id, _) => {
-                    let Some((fi, fm, fargs, _flens)) = generics.enum_instantiation_of(id) else {
+                    let Some((fi, fm, fargs, flens)) = generics.enum_instantiation_of(id) else {
                         return Err(mismatch());
                     };
-                    (true, fi, fm, fargs.to_vec())
+                    (true, fi, fm, fargs.to_vec(), flens.to_vec())
                 }
                 _ => return Err(mismatch()),
             };
+            // S1-7: `App` carries type arguments only -- a `Len`-domain
+            // application is fenced to S2+. The concrete slot recovered
+            // above may still be an instantiation of a length-parameterized
+            // header (`Buf['T 'N: Len]`), which an `App` binding can never
+            // re-mint (it has no length argument to supply, unlike the
+            // `Generic` arm above, which reads `len_args` off the callee's
+            // own declared signature). A located error, not the panic that
+            // `apply_subst`'s later `instantiate_*(&[]` call would hit.
+            if !found_lens.is_empty() {
+                let var = &sig.ty_var_names[*head as usize];
+                let ctor_name = if found_is_enum {
+                    generics.enums[found_idx].name.clone()
+                } else {
+                    generics.structs[found_idx].name.clone()
+                };
+                drop(generics);
+                return Err(poly_app_len_domain_unsupported_error(
+                    ctx, span, name, var, &ctor_name,
+                ));
+            }
             drop(generics);
             if found_args.len() != args.len() {
                 return Err(mismatch());
@@ -8515,6 +8535,27 @@ pub(super) fn poly_generic_not_yet_groundable_error(
     let where_ = ctx.rendered_word();
     format!(
         "error: `{op}` in {where_} (line {}) names the generic type `{ty}`, which cannot yet be instantiated at a variable-bearing application\n  grounding a generic over its own type variable is not yet implemented",
+        span.line
+    )
+}
+
+/// S1-7: `PolyType::App` carries type arguments only -- a `Len`-domain
+/// application is fenced to S2+ ("any application attempt raises S1-15.h's
+/// arity/kind-mismatch diagnostic"). This is that diagnostic's non-
+/// annotation twin: the head variable's binding turned out to be a
+/// constructor that itself declares a length parameter, which no `App`
+/// (type arguments only) can ever supply. Located, not a panic.
+pub(super) fn poly_app_len_domain_unsupported_error(
+    ctx: &Ctx,
+    span: Span,
+    op: &str,
+    var: &str,
+    ctor_name: &str,
+) -> String {
+    let op = crate::resolve::demangle_call(op);
+    let where_ = ctx.rendered_word();
+    format!(
+        "error: `{op}` in {where_} (line {}) applies `{var}` to the constructor `{ctor_name}`, which declares a length parameter\n  a type-variable application (`{var}[...]`) supplies type arguments only; a length-parameterized constructor is not supported here",
         span.line
     )
 }
@@ -8824,6 +8865,30 @@ pub(super) fn apply_subst(
                     &poly_type_str(pty, sig),
                 ));
             };
+            // S1-7 defense-in-depth: an explicit call-site instantiation
+            // (`pass[Buf i64]`) can seed `head` directly with a
+            // length-parameterized constructor's `CtorImage`, bypassing
+            // `unify_poly_input`'s own App-arm check entirely -- there is no
+            // operand to unify an App-typed *output* against. Guard here
+            // too, against the header's own declared length arity, so no
+            // path reaches `instantiate_struct`/`instantiate_enum` below
+            // with a mismatched (empty) length list.
+            {
+                let generics = cell.borrow();
+                let (len_arity, ctor_name) = if gid.is_enum {
+                    let d = &generics.enums[gid.idx as usize];
+                    (d.len_var_names.len(), d.name.clone())
+                } else {
+                    let d = &generics.structs[gid.idx as usize];
+                    (d.len_var_names.len(), d.name.clone())
+                };
+                if len_arity != 0 {
+                    let var = &sig.ty_var_names[*head as usize];
+                    return Err(poly_app_len_domain_unsupported_error(
+                        ctx, span, name, var, &ctor_name,
+                    ));
+                }
+            }
             let regs = crate::ast::MutRegistries {
                 structs: ctx.structs(),
                 enums: ctx.enums(),
@@ -11289,6 +11354,125 @@ mod tests {
         )
         .expect("`'F['T]` should ground to `Box[i64]`");
         assert_eq!(ty.name(), "Box[i64]");
+    }
+
+    /// P7b.S1 review fix (P0): `unify_poly_input`'s `App` arm used to
+    /// discard the recovered instantiation's length arguments entirely --
+    /// binding `'F := Type::CtorImage(buffer_gid)` for a *length*-
+    /// parameterized header exactly as it would for a plain one. S1-7 fences
+    /// `App` to type arguments only, so this must be a located error, not a
+    /// silent bind that panics three calls later in `apply_subst`.
+    #[test]
+    fn unify_poly_input_app_rejects_a_length_parameterized_constructor() {
+        let mut generics = GenericTypes::with_bases(0, 0);
+        generics.structs.push(buffer_header());
+        let mut arrays: Vec<ArrayDecl> = Vec::new();
+        let mut cells: Vec<OwnedCellDecl> = Vec::new();
+        let mut refs: Vec<RefDecl> = Vec::new();
+        let slot_ty = generics.instantiate_struct(
+            0,
+            &[Type::I64],
+            &[Len::Concrete(4)],
+            0,
+            crate::ast::MutRegistries {
+                structs: &[],
+                enums: &[],
+                arrays: &mut arrays,
+                cells: &mut cells,
+                refs: &mut refs,
+            },
+        );
+        let cell = RefCell::new(generics);
+        let sig = app_sig();
+        let probe = probe_word();
+        let ctx = word_ctx(
+            &probe,
+            &[],
+            &[],
+            &[],
+            None,
+            &CombinatorIndex::new(),
+            Some(&cell),
+        );
+        let mut subst = Subst::default();
+        let declared = PolyType::App {
+            head: 0,
+            args: vec![PolyType::Var(1)],
+        };
+        let err = unify_poly_input(
+            &sig,
+            &declared,
+            slot_ty,
+            "f",
+            Span::default(),
+            &ctx,
+            &arrays,
+            &cells,
+            &refs,
+            &mut subst,
+            &[],
+            &[],
+        )
+        .expect_err("'F['T]' must not bind against a length-parameterized constructor");
+        assert!(err.contains("declares a length parameter"), "{err}");
+        assert_eq!(
+            subst.ty_of(0),
+            None,
+            "a rejected application must not bind 'F"
+        );
+    }
+
+    /// P7b.S1 review fix (P0), `apply_subst`'s half: defense-in-depth for a
+    /// binding that reached `'F := Type::CtorImage(buffer_gid)` by some
+    /// route other than `unify_poly_input`'s own (now-guarded) `App` arm --
+    /// grounding must still refuse to mint through `instantiate_struct`
+    /// with an empty length list rather than let it index out of bounds.
+    #[test]
+    fn apply_subst_app_rejects_a_length_parameterized_ctor_binding() {
+        let mut generics = GenericTypes::with_bases(0, 0);
+        generics.structs.push(buffer_header());
+        let cell = RefCell::new(generics);
+        let sig = app_sig();
+        let probe = probe_word();
+        let ctx = word_ctx(
+            &probe,
+            &[],
+            &[],
+            &[],
+            None,
+            &CombinatorIndex::new(),
+            Some(&cell),
+        );
+        let mut subst = Subst::default();
+        subst.ty.push((
+            0,
+            Type::CtorImage(crate::ast::GenericId {
+                is_enum: false,
+                idx: 0,
+                module: 0,
+            }),
+        ));
+        subst.ty.push((1, Type::I64));
+        let declared = PolyType::App {
+            head: 0,
+            args: vec![PolyType::Var(1)],
+        };
+        let mut arrays: Vec<ArrayDecl> = Vec::new();
+        let mut cells: Vec<OwnedCellDecl> = Vec::new();
+        let mut refs: Vec<RefDecl> = Vec::new();
+        let err = apply_subst(
+            &sig,
+            &declared,
+            &subst,
+            "f",
+            Span::default(),
+            &ctx,
+            &mut arrays,
+            &mut cells,
+            &mut refs,
+        )
+        .expect_err("grounding must reject a length-parameterized ctor binding, not panic");
+        assert!(err.contains("declares a length parameter"), "{err}");
     }
 
     /// S1-15.g: a bare `Type::CtorImage` reaching a value-type position

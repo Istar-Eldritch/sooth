@@ -307,3 +307,42 @@ type: Wrap['F 'T] f 'F['T] t 'T ;
     let out = build_and_run(&entry);
     assert_eq!(out, "5\n");
 }
+
+// ---- Review fix (P0): App unification against a length-parameterized ctor ----
+
+/// `'F['T]` unified against a call site whose concrete argument is an
+/// instantiation of a *length*-parameterized header (`Buf['T 'N: Len]`)
+/// used to panic in `apply_subst` (an out-of-bounds index into a length
+/// list `unify_poly_input`'s `App` arm minted empty). S1-7 fences `App` to
+/// type arguments only, so this must be a located build error, not a crash.
+#[test]
+fn hkt_app_against_a_length_parameterized_constructor_is_a_located_error_not_a_panic() {
+    let src = "\
+type: Buf['T 'N: Len] d array['T 'N] ;
+: pass['F 'T] ( 'F['T] -- 'F['T] ) ;
+: mk ( -- Buf[i64 4] ) 0 4 fill Buf ;
+: main ( -- ) mk pass Buf> drop ;
+";
+    let (_t, entry) = single_file("len-domain-app", src);
+    let err = build_error(&entry);
+    assert!(err.contains("declares a length parameter"), "{err}");
+}
+
+// ---- Review fix (P1): App-headed `impl:` targets ----
+
+/// `impl: Trait for 'F['T]` used to parse and register silently, then never
+/// dispatch (`match_impl_target_rec` never matches an `App` pattern),
+/// surfacing a misleading "does not satisfy" error at the *call site*
+/// instead. Now a located rejection at the impl target itself.
+#[test]
+fn hkt_app_headed_impl_target_is_a_located_error() {
+    let src = "\
+trait: Shw['T] : shw ( &'T -- ) ; ;
+: shows['T: Shw] ( &'T -- ) shw ;
+impl: Shw for 'F['T] : shw | a | a drop ; ;
+: main ( -- ) ;
+";
+    let (_t, entry) = single_file("impl-target-app", src);
+    let err = build_error(&entry);
+    assert!(err.contains("may not apply its own type variable"), "{err}");
+}
