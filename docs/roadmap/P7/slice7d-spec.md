@@ -56,10 +56,11 @@ compiler duplicating what the library now did.
   truncation. The cstr dot keeps the old strlen-bound semantics via its own
   `extern: sys-strlen` — `len` doesn't accept `cstr` (precedent: `examples/strings.sth`).
 - **Floats print through hosted `snprintf`**, gated on an in-slice ABI fix (below).
-  Both new externs (`write`, `snprintf`, `strlen`) live in `hosted::show` itself, not
-  `hosted::libc` — the module that calls a C symbol declares its own binding to it;
-  multiple Sooth bindings to one C symbol are fine since the declared C symbol is what
-  links.
+  The three C symbols (`write`, `snprintf`, `strlen`) live in `hosted::show` itself,
+  not `hosted::libc` — the module that calls a C symbol declares its own binding to it.
+  `write` gets two `extern:` decls (one per argument shape: a string's own bytes, the
+  float path's scratch buffer); multiple Sooth bindings to one C symbol are fine since
+  the declared C symbol is what links.
 - **Migration is program-wide, atomic, no compatibility shim.** Every printing
   program now needs `depends: hosted` and `import: hosted::show | . | ;`. The test
   harness derives this for fixture-based tests the same way it already derived
@@ -68,7 +69,7 @@ compiler duplicating what the library now did.
   intermediate state where the tree was green with `.` half-migrated — the compiler
   deletions, the library, and the migration landed as one commit.
 - **The R17 trace/dot split-stream reorder.** Backend-internal trace lines
-  (`SOOTH_TRACE`) still ride buffered `printf` and flush at exit; dots now go out via
+  (`SOOTH_TRACE_ALLOC`) still ride buffered `printf` and flush at exit; dots now go out via
   unbuffered `write(2)` immediately. Programs mixing trace output with dots therefore
   reorder relative to before — an intended-to-change output delta, not a regression —
   and 31 goldens were migrated to the new order.

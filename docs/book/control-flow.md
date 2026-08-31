@@ -90,8 +90,6 @@ An `if` without `else` is an `if` with an empty else branch. Both
 branches still must agree:
 
 ```sooth
-import: hosted::show | . | ;
-
 : print-if-positive ( i64 -- )
   | n |
   0 n lt if
@@ -118,8 +116,6 @@ each `else` to the nearest open `if`, and each `end` closes the
 innermost:
 
 ```sooth
-import: hosted::show | . | ;
-
 : classify ( i64 -- )
   | n |
   n 0 lt if
@@ -150,8 +146,6 @@ stack: (empty)
 There is no `while` or `for`. You loop by calling yourself:
 
 ```sooth
-import: hosted::show | . | ;
-
 : countdown ( i64 -- )
   | n |
   n 0 eq if

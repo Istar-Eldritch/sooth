@@ -9,10 +9,10 @@ Design phase complete (DESIGN.md, Decided section). Backend: **QBE**. Phases 0-6
 complete and merged to `main` — see each phase file's own header for its exit criteria
 and dogfood (Phase 6's S5, nested tag paths, is deferred by design, not owed).
 **Phase 7 (language prerequisites for the stdlib) is in progress**: every slice is done
-and merged, including **S7d** (retiring the intrinsic `.` onto `hosted::show`); S3u
-(trait objects) is parked for want of a consumer, S3w (the generic Show-backed dot) is
-parked as a follow-up to S7d, and S6c (runtime bounds-checked indexing in a poly body)
-still needs its brief; see
+and merged except **S6c** (runtime bounds-checked indexing in a poly body), which still
+needs its brief; **S7d** (retiring the intrinsic `.` onto `hosted::show`) is merged, S3u
+(trait objects) is parked for want of a consumer, and S3w (the generic Show-backed dot)
+is parked as a follow-up to S7d; see
 [P7](./P7-language-prereqs.md) for the full slice breakdown. Per-phase completion history
 (what shipped in which slice,
 defects found and fixed in review) lives in each phase's own file and its

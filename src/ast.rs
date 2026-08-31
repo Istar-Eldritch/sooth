@@ -1691,6 +1691,11 @@ pub(crate) fn is_builtin_word_name(name: &str) -> bool {
 /// `.` left it in P7.S7d for `hosted::show`. They stay listed in
 /// `BUILTIN_WORDS` so `has_self_tail_call` does not read a trailing `lt` as a
 /// self-call, and so an `extern:` or a local binding may not be spelled as one.
+/// Consequence: `has_self_tail_call` and the mutual-cycle graph
+/// (`src/check/drop_graph.rs`) both skip every builtin-named word by name, so
+/// a user's own word named `.` (or `eq`, `lt`, ...) gets neither the
+/// self-tail loop nor the mutual-cycle diagnostic, same as any other builtin
+/// name.
 ///
 /// Two consumers. P8 S2 (R2): the set the `intrinsics` import gates -- the six
 /// live in `core::cmp` and `.` in `hosted::show`, so gating them would answer

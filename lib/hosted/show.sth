@@ -143,7 +143,13 @@ export: . ;
   \ also only returns negative on an encoding error, which "%g" cannot
   \ produce.
   g-fmt >usize | n |
-  1 >i32 d n sys-write-buf drop
+  \ Clamped to the 64-byte `scratch` regardless of `n`: today's "%g\n"
+  \ format can't produce a return that large (see above), but the clamp
+  \ makes that a today-true fact instead of a load-bearing one -- a
+  \ future format-string change can't turn `n` into an out-of-bounds
+  \ `write(2)` length.
+  n 64 >usize ult ~[ n ] ~[ 64 >usize ] branch | n-clamped |
+  1 >i32 d n-clamped sys-write-buf drop
   scratch drop ;
 
 : . ( f64 -- ) print-g ;

@@ -524,9 +524,21 @@ export function $print.2d.g__m1(d %v0) {
 	%v21 =l loadl %v20
 	%v22 =w call $snprintf(..., l %v17, l %v19, l %v21, d %v0)
 	%v23 =l extsw %v22
-	%v24 =l copy 1
-	%v25 =w copy %v24
-	%v26 =l call $write(..., w %v25, l %v17, l %v23)
+	%v24 =l copy 64
+	%v25 =l copy %v24
+	%v26 =w cultl %v23, %v25
+	jnz %v26, @blk4, @blk5
+@blk4
+	jmp @blk6
+@blk5
+	%v29 =l copy 64
+	%v30 =l copy %v29
+	jmp @blk6
+@blk6
+	%v31 =l phi @blk4 %v23, @blk5 %v30
+	%v32 =l copy 1
+	%v33 =w copy %v32
+	%v34 =l call $write(..., w %v33, l %v17, l %v31)
 	ret
 }
 
