@@ -651,12 +651,36 @@ pub(super) fn subst_polytype(
         PolyType::GenericVariant { .. } => unreachable!(
             "a generic variant is unconstructible outside an eliminator arm's own input row; it never reaches a declared signature"
         ),
-        // S1-13: `apply_subst` grounds an `App` to `Generic` before symbol
-        // derivation (S1-11/S1-12), so lowering never sees a bare `App` here
-        // -- this arm exists only for the exhaustive `match` to compile.
-        PolyType::App { .. } => unreachable!(
-            "apply_subst grounds an App to a Generic before lowering ever sees it (S1-11/S1-12)"
-        ),
+        // S1-13: a lookup arm, consistent with every other compound arm in
+        // this function -- `concrete_effect` calls `subst_polytype` directly
+        // on `sig.inputs`/`outputs`, without routing through `apply_subst`
+        // first, so a declared `'F['T]` reaches this arm as itself. `head`
+        // resolves through `subst.ty` to the `Type::CtorImage` check-side
+        // unification bound it to (S1-10); a miss, or a resolution to
+        // anything but a `CtorImage`, means check accepted what this arm
+        // cannot ground -- an assertion, never a mint.
+        PolyType::App { head, args } => {
+            let ctor = subst
+                .ty_of(*head)
+                .expect("checked: unification bound the App head to a CtorImage");
+            let Type::CtorImage(gid) = ctor else {
+                unreachable!(
+                    "checked: an App head always binds to a CtorImage; any other binding is rejected before lowering (S1-15.g)"
+                )
+            };
+            let concrete_args: Vec<Type> = args
+                .iter()
+                .map(|a| subst_polytype(a, subst, arrays, owned_cells, refs, generics))
+                .collect();
+            let found = if gid.is_enum {
+                generics.lookup_enum(gid.idx as usize, gid.module, &concrete_args, &[])
+            } else {
+                generics.lookup_struct(gid.idx as usize, gid.module, &concrete_args, &[])
+            };
+            found.expect(
+                "checked: apply_subst already minted this application's instantiation at check time",
+            )
+        }
     }
 }
 
@@ -1140,6 +1164,98 @@ mod tests {
             grounded,
             crate::ast::quotation_type(vec![Type::I64], vec![Type::I64])
         );
+    }
+
+    /// S1-13: `subst_polytype`'s `App` arm resolves `head`'s binding to a
+    /// `Type::CtorImage`, then looks up the already-minted instantiation --
+    /// a lookup, never a mint (mirroring the `Generic` arm's own contract).
+    #[test]
+    fn subst_polytype_app_looks_up_an_already_minted_instantiation() {
+        use crate::ast::{GenericId, GenericStructDecl, PolyType};
+        let mut generics = GenericTypes::with_bases(0, 0);
+        generics.structs.push(GenericStructDecl {
+            name: "Box".to_string(),
+            ty_var_names: vec!["'T".to_string()],
+            ty_kinds: Vec::new(),
+            len_var_names: Vec::new(),
+            fields: vec![("val".to_string(), PolyType::Var(0))],
+            span: Span::default(),
+            module: 0,
+        });
+        let mut arrays: Vec<ArrayDecl> = Vec::new();
+        let mut cells: Vec<OwnedCellDecl> = Vec::new();
+        let mut refs: Vec<RefDecl> = Vec::new();
+        let minted = generics.instantiate_struct(
+            0,
+            &[Type::I64],
+            &[],
+            0,
+            crate::ast::MutRegistries {
+                structs: &[],
+                enums: &[],
+                arrays: &mut arrays,
+                cells: &mut cells,
+                refs: &mut refs,
+            },
+        );
+        let subst = Subst {
+            ty: vec![
+                (
+                    0,
+                    Type::CtorImage(GenericId {
+                        is_enum: false,
+                        idx: 0,
+                        module: 0,
+                    }),
+                ),
+                (1, Type::I64),
+            ],
+            len: Vec::new(),
+        };
+        let app = PolyType::App {
+            head: 0,
+            args: vec![PolyType::Var(1)],
+        };
+        let ty = subst_polytype(&app, &subst, &arrays, &cells, &refs, &generics);
+        assert_eq!(ty, minted);
+    }
+
+    /// S1-13: a miss -- check should already have minted this application's
+    /// instantiation, so `subst_polytype` asserts rather than falling back
+    /// to minting one itself (the lookup-only contract).
+    #[test]
+    #[should_panic(expected = "checked")]
+    fn subst_polytype_app_miss_is_an_assertion() {
+        use crate::ast::{GenericId, GenericStructDecl, PolyType};
+        let mut generics = GenericTypes::with_bases(0, 0);
+        generics.structs.push(GenericStructDecl {
+            name: "Box".to_string(),
+            ty_var_names: vec!["'T".to_string()],
+            ty_kinds: Vec::new(),
+            len_var_names: Vec::new(),
+            fields: vec![("val".to_string(), PolyType::Var(0))],
+            span: Span::default(),
+            module: 0,
+        });
+        let subst = Subst {
+            ty: vec![
+                (
+                    0,
+                    Type::CtorImage(GenericId {
+                        is_enum: false,
+                        idx: 0,
+                        module: 0,
+                    }),
+                ),
+                (1, Type::I64),
+            ],
+            len: Vec::new(),
+        };
+        let app = PolyType::App {
+            head: 0,
+            args: vec![PolyType::Var(1)],
+        };
+        let _ = subst_polytype(&app, &subst, &[], &[], &[], &generics);
     }
 
     /// P7.S3n (R3): `subst_polytype`'s owned-cell arm resolves `^'T` to the

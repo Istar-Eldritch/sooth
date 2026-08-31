@@ -54,6 +54,12 @@ fn build_ok(entry: &Path) {
     std::fs::remove_file(&binary).ok();
 }
 
+fn build_error(entry: &Path) -> String {
+    let build = sooth_build(entry);
+    assert!(!build.status.success(), "build should have failed");
+    String::from_utf8(build.stderr).expect("stderr should be utf8")
+}
+
 fn build_and_run(entry: &Path) -> String {
     let build = sooth_build(entry);
     assert!(
@@ -120,4 +126,147 @@ fn hkt_concrete_generic_effect_and_explicit_instantiation_unchanged() {
 ";
     let (_t, entry) = single_file("nonregression", src);
     build_ok(&entry);
+}
+
+// ---- Phase 3: checking and grounding ----
+
+/// Positive golden #3 (S1-9 consumer): `'F`'s kind is inferred purely from
+/// its application-head usage in the effect -- no bare `'F` anywhere, no
+/// annotation.
+#[test]
+fn hkt_var_kind_inferred_from_application_head_alone() {
+    let src = "\
+: pass['F 'T] ( 'F['T] -- 'F['T] ) ;
+: main ( -- ) ;
+";
+    let (_t, entry) = single_file("kind-inferred", src);
+    build_ok(&entry);
+}
+
+/// Positive golden #4: the same signature, with an explicit `* -> *`
+/// annotation confirming the inferred kind -- the annotation-fallback
+/// criterion.
+#[test]
+fn hkt_explicit_annotation_confirms_inferred_kind() {
+    let src = "\
+: pass['F: * -> * 'T] ( 'F['T] -- 'F['T] ) ;
+: main ( -- ) ;
+";
+    let (_t, entry) = single_file("kind-annotated", src);
+    build_ok(&entry);
+}
+
+/// Kind error #1 (S1-15.a, W3): a `Star`-kind variable (bound bare) applied
+/// like a type constructor.
+#[test]
+fn hkt_star_var_applied_like_constructor_is_located_error() {
+    let src = "\
+: bad['F 'T] ( 'F 'F['T] -- ) drop drop ;
+: main ( -- ) ;
+";
+    let (_t, entry) = single_file("kind-error-a", src);
+    let err = build_error(&entry);
+    assert!(
+        err.contains("is applied like a type constructor but has kind `*`"),
+        "{err}"
+    );
+}
+
+/// Kind error #2 (S1-15.b): an arrow-kind variable (established by an
+/// earlier application) used bare.
+#[test]
+fn hkt_arrow_var_used_bare_is_located_error() {
+    let src = "\
+: bad['F 'T] ( 'F['T] 'F -- ) drop drop ;
+: main ( -- ) ;
+";
+    let (_t, entry) = single_file("kind-error-b", src);
+    let err = build_error(&entry);
+    assert!(
+        err.contains("is used as a plain type but has kind `* -> *`"),
+        "{err}"
+    );
+}
+
+/// Kind error #3 (S1-15.c): an explicit `* -> *` annotation conflicting
+/// with a bare usage in the effect.
+#[test]
+fn hkt_annotation_conflicting_with_usage_is_error() {
+    let src = "\
+: bad['F: * -> * 'T] ( 'F 'T -- ) drop drop ;
+: main ( -- ) ;
+";
+    let (_t, entry) = single_file("kind-error-c", src);
+    let err = build_error(&entry);
+    assert!(
+        err.contains("is used as a plain type but is annotated `* -> *`"),
+        "{err}"
+    );
+}
+
+/// Kind error #4 (S1-15.d): an application's arity (2 arguments) conflicts
+/// with the arity (1 argument) an earlier application of the same variable
+/// already established.
+#[test]
+fn hkt_application_arity_conflicts_with_inferred_kind_is_error() {
+    let src = "\
+: bad['F 'T 'U] ( 'F['T] 'F['T 'U] -- ) drop drop ;
+: main ( -- ) ;
+";
+    let (_t, entry) = single_file("kind-error-d", src);
+    let err = build_error(&entry);
+    assert!(
+        err.contains("applies `'F` to 2 arguments but its kind takes 1"),
+        "{err}"
+    );
+}
+
+/// Kind error #5 (S1-15.e, header-field twin of S1-15.a): a header field
+/// bare-mentions a variable another field of the same header applies like a
+/// constructor.
+#[test]
+fn hkt_header_field_applies_star_var_is_located_error() {
+    let src = "\
+type: Bad['F 'T] g 'F f 'F['T] ;
+: main ( -- ) ;
+";
+    let (_t, entry) = single_file("kind-error-e", src);
+    let err = build_error(&entry);
+    assert!(
+        err.contains("applies `'F` like a type constructor in `Bad`'s field"),
+        "{err}"
+    );
+}
+
+/// Kind error #6 (S1-15.f): a use-site constructor argument (`Wrap[Nat
+/// i64]`) whose kind (`Nat` is `*`) disagrees with the header variable's
+/// declared kind (`'F: * -> *`).
+#[test]
+fn hkt_use_site_ctor_arg_of_wrong_kind_is_error() {
+    let src = "\
+type: Nat val i64 ;
+type: Wrap['F: * -> * 'T] f 'F['T] ;
+: main ( -- ) ;
+: use ( Wrap[Nat i64] -- ) drop ;
+";
+    let (_t, entry) = single_file("kind-error-f", src);
+    let err = build_error(&entry);
+    assert!(
+        err.contains("supplies `Nat` for `'F`") && err.contains("a type constructor is required"),
+        "{err}"
+    );
+}
+
+/// Kind error #8 (S1-15.h): an explicit `* -> Len -> *` annotation is
+/// unsatisfiable by any type-only application (`'F['T]` supplies only one
+/// type argument, never a length).
+#[test]
+fn hkt_annotation_arity_unsatisfiable_by_application_is_error() {
+    let src = "\
+: bad['F: * -> Len -> * 'T] ( 'F['T] -- ) drop ;
+: main ( -- ) ;
+";
+    let (_t, entry) = single_file("kind-error-h", src);
+    let err = build_error(&entry);
+    assert!(err.contains("is annotated `* -> Len -> *`"), "{err}");
 }

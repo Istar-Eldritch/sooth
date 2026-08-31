@@ -1095,6 +1095,16 @@ fn substitute_member_var(t: &PolyType, var: u32) -> PolyType {
         PolyType::Array(elem, len) => {
             PolyType::Array(Box::new(substitute_member_var(elem, var)), len.clone())
         }
+        // S1-16: `head` names one of the trait's own type variables (id 0,
+        // the only one a trait member's signature can mention), the same
+        // space `Var`'s bare occurrence rewrites above -- an `other =>
+        // other.clone()` catch-all would pass an `App` head through
+        // unrewritten, silently leaving it pointing at the trait's own
+        // variable space instead of the dispatching word's.
+        PolyType::App { head, args } => PolyType::App {
+            head: if *head == 0 { var } else { *head },
+            args: args.iter().map(|a| substitute_member_var(a, var)).collect(),
+        },
         other => other.clone(),
     }
 }
@@ -2659,6 +2669,16 @@ fn poly_cross_match(
                 poly_cross_match(d, sup, mapping, callee_sig, caller_sig, callee, span, ctx)?;
             }
             Ok(())
+        }
+        // S1-17.i: a poly *cross-call* with an `App` slot stays a located
+        // "unsupported" rejection -- S2 owns constructor-keyed dispatch.
+        (PolyType::App { .. }, _) | (_, PolyType::App { .. }) => {
+            Err(poly_cross_call_unsupported_error(
+                ctx,
+                span,
+                callee,
+                "a higher-kinded application in a cross-called polymorphic word",
+            ))
         }
         _ => Err(mismatch()),
     }
@@ -4565,17 +4585,63 @@ fn poly_bind_construction_arg(
                 ))
             }
         }
-        // P7b.S1 (S1-8): a construction field can now be an application
-        // (`f 'F['T]`) -- binding the header variable it applies (`head`)
-        // and unifying its arguments against the operand's own shape is
-        // Phase 3 work (real `App` decomposition, S1-10); a located error
-        // rather than a panic or a silent (wrong) bind until then.
-        PolyType::App { .. } => Err(poly_app_not_yet_supported_error(
-            ctx,
-            span,
-            name,
-            &poly_type_str(field_pty, sig),
-        )),
+        // S1-10: a construction field is an application (`f 'F['T]`) --
+        // bind the header variable it applies (`head`) to a `Type::CtorImage`
+        // naming the operand's own header, then unify its arguments against
+        // the operand's own argument list positionally, mirroring
+        // `unify_poly_input`'s own `App` decomposition one level up (there,
+        // against a concrete `Type`; here, symbolically against a poly-body
+        // operand's own `PolyType::Generic` shape).
+        PolyType::App {
+            head,
+            args: field_args,
+        } => {
+            let mismatch = || {
+                poly_rendered_type_mismatch_error(
+                    ctx,
+                    span,
+                    name,
+                    &poly_type_str(field_pty, sig),
+                    &poly_type_str(operand, sig),
+                )
+            };
+            let PolyType::Generic {
+                is_enum,
+                idx,
+                module,
+                args: op_args,
+                ..
+            } = operand
+            else {
+                return Err(mismatch());
+            };
+            if op_args.len() != field_args.len() {
+                return Err(mismatch());
+            }
+            let gid = GenericId {
+                is_enum: *is_enum,
+                idx: *idx,
+                module: *module,
+            };
+            let ctor = PolyType::Concrete(Type::CtorImage(gid));
+            let slot = &mut args[*head as usize];
+            match slot {
+                Some(existing) if existing != &ctor => {
+                    return Err(poly_rendered_type_mismatch_error(
+                        ctx,
+                        span,
+                        name,
+                        &poly_type_str(existing, sig),
+                        &poly_type_str(&ctor, sig),
+                    ));
+                }
+                _ => *slot = Some(ctor),
+            }
+            for (fa, oa) in field_args.iter().zip(op_args.iter()) {
+                poly_bind_construction_arg(fa, oa, args, sig, ctx, span, name)?;
+            }
+            Ok(())
+        }
         other => unreachable!("a generic `type:` field is never {other:?}"),
     }
 }
@@ -7704,6 +7770,12 @@ fn generic_args_of(pattern: &PolyType, ty_args: &[Type]) -> Vec<PolyType> {
     match pattern {
         PolyType::Generic { args, .. } => args.clone(),
         PolyType::Concrete(_) => ty_args.iter().map(|t| PolyType::Concrete(*t)).collect(),
+        // S1-16: an `App`-shaped candidate never reaches specificity
+        // comparison -- `poly_cross_match` rejects an `App` slot as
+        // unsupported before ordering ever compares two candidates (S1-17.i).
+        PolyType::App { .. } => unreachable!(
+            "an App-shaped candidate pattern never reaches specificity comparison (S1-17.i)"
+        ),
         _ => unreachable!("ty is generic-shaped, so a matching pattern is Generic or Concrete"),
     }
 }
@@ -7716,6 +7788,10 @@ fn generic_len_args_of(pattern: &PolyType, len_args: &[Len]) -> Vec<Len> {
     match pattern {
         PolyType::Generic { len_args, .. } => len_args.clone(),
         PolyType::Concrete(_) => len_args.to_vec(),
+        // S1-16: see `generic_args_of`'s own `App` arm.
+        PolyType::App { .. } => unreachable!(
+            "an App-shaped candidate pattern never reaches specificity comparison (S1-17.i)"
+        ),
         _ => unreachable!("ty is generic-shaped, so a matching pattern is Generic or Concrete"),
     }
 }
@@ -7726,6 +7802,12 @@ fn quotation_parts(pattern: &PolyType, eff: &QuotEffect) -> (Vec<PolyType>, Vec<
         PolyType::Concrete(_) => (
             eff.inputs.iter().map(|t| PolyType::Concrete(*t)).collect(),
             eff.outputs.iter().map(|t| PolyType::Concrete(*t)).collect(),
+        ),
+        // S1-16: an `App` never has a quotation shape, so a candidate
+        // reaching a quotation-typed slot as an `App` is unreachable for
+        // the same reason `generic_args_of`'s own `App` arm is.
+        PolyType::App { .. } => unreachable!(
+            "an App-shaped candidate pattern never reaches specificity comparison (S1-17.i)"
         ),
         _ => unreachable!("ty is quotation-shaped, so a matching pattern is Quotation or Concrete"),
     }
@@ -8344,17 +8426,75 @@ pub(super) fn unify_poly_input(
         PolyType::GenericVariant { .. } => unreachable!(
             "a generic variant is unconstructible outside an eliminator arm's own input row; it never reaches a declared signature"
         ),
-        // P7b.S1 Phase 2 stub (S1-16): `App` decomposition against a
-        // concrete slot (binding the head to a `Type::CtorImage` and its
-        // arguments positionally) is Phase 3's S1-10 work; a located error
-        // rather than a panic or a silent (wrong) bind until then.
-        PolyType::App { .. } => {
-            return Err(poly_app_not_yet_supported_error(
-                ctx,
-                span,
-                name,
-                &poly_type_str(pty, sig),
-            ));
+        // S1-10: decompose an application against a concrete slot -- the
+        // slot must be an instantiation of *some* generic header (struct or
+        // enum), whose identity binds `head` to a `Type::CtorImage` in the
+        // existing `ty` map, then each applied argument unifies positionally
+        // against the recovered concrete argument, exactly as the `Generic`
+        // arm above does for a fully-named header.
+        PolyType::App { head, args } => {
+            let Some(cell) = ctx.generics() else {
+                return Err(poly_generic_not_yet_groundable_error(
+                    ctx,
+                    span,
+                    name,
+                    &poly_type_str(pty, sig),
+                ));
+            };
+            let mismatch = || {
+                poly_rendered_type_mismatch_error(
+                    ctx,
+                    span,
+                    name,
+                    &poly_type_str(pty, sig),
+                    &slot_ty.to_string(),
+                )
+            };
+            let generics = cell.borrow();
+            let (found_is_enum, found_idx, found_module, found_args) = match slot_ty {
+                Type::Struct(id, _) => {
+                    let Some((fi, fm, fargs, _flens)) = generics.struct_instantiation_of(id)
+                    else {
+                        return Err(mismatch());
+                    };
+                    (false, fi, fm, fargs.to_vec())
+                }
+                Type::Enum(id, _) => {
+                    let Some((fi, fm, fargs, _flens)) = generics.enum_instantiation_of(id) else {
+                        return Err(mismatch());
+                    };
+                    (true, fi, fm, fargs.to_vec())
+                }
+                _ => return Err(mismatch()),
+            };
+            drop(generics);
+            if found_args.len() != args.len() {
+                return Err(mismatch());
+            }
+            let gid = GenericId {
+                is_enum: found_is_enum,
+                idx: found_idx as u32,
+                module: found_module,
+            };
+            let ctor = Type::CtorImage(gid);
+            if let Some(prev) = subst.ty_of(*head) {
+                if prev != ctor {
+                    let var = &sig.ty_var_names[*head as usize];
+                    return Err(match seeded.contains(head) {
+                        true => explicit_instantiation_conflict_error(ctx, span, name, var, prev, ctor),
+                        false => poly_var_conflict_error(ctx, span, name, var, prev, ctor),
+                    });
+                }
+            } else {
+                let pos = subst.ty.partition_point(|(id, _)| *id < *head);
+                subst.ty.insert(pos, (*head, ctor));
+            }
+            for (arg_pty, arg_ty) in args.iter().zip(found_args.iter()) {
+                unify_poly_input(
+                    sig, arg_pty, *arg_ty, name, span, ctx, arrays, cells, refs, subst, seeded,
+                    seeded_len,
+                )?;
+            }
         }
     }
     Ok(())
@@ -8375,24 +8515,6 @@ pub(super) fn poly_generic_not_yet_groundable_error(
     let where_ = ctx.rendered_word();
     format!(
         "error: `{op}` in {where_} (line {}) names the generic type `{ty}`, which cannot yet be instantiated at a variable-bearing application\n  grounding a generic over its own type variable is not yet implemented",
-        span.line
-    )
-}
-
-/// P7b.S1 Phase 2 stub (S1-16): a declared higher-kinded application
-/// (`'F['T]`) reached unification -- decomposing it against a concrete slot
-/// (binding `'F` to a `Type::CtorImage` and its arguments positionally) is
-/// Phase 3's S1-10 work, not yet implemented.
-pub(super) fn poly_app_not_yet_supported_error(
-    ctx: &Ctx,
-    span: Span,
-    op: &str,
-    ty: &str,
-) -> String {
-    let op = crate::resolve::demangle_call(op);
-    let where_ = ctx.rendered_word();
-    format!(
-        "error: `{op}` in {where_} (line {}) names the application `{ty}`, which cannot yet be checked against a concrete type\n  higher-kinded application (P7b.S1) is not yet fully supported this slice",
         span.line
     )
 }
@@ -8444,15 +8566,44 @@ pub(super) fn apply_subst(
         // walk (P7.S3l), so `q ( [ 'T -- ] 'U -- 'U )` called bare has always
         // landed here and been told `'T` is an output it appears nowhere in.
         // R9 freezes the text, so that misdescription stays an open gap.
-        PolyType::Var(v) => subst.ty_of(*v).ok_or_else(|| {
-            poly_unbound_output_ty_error(
+        PolyType::Var(v) => match subst.ty_of(*v) {
+            // S1-15.g: a bare `CtorImage` reaching a value-type position
+            // outside `App`-head resolution -- both spans where available:
+            // the binding site (`ty_var_spans`, the variable's first
+            // mention) and the misuse site (`span`, this grounding call).
+            // An internally-created signature with no span table degrades
+            // to the misuse span alone.
+            Some(Type::CtorImage(gid)) => {
+                let binding_span = sig.ty_var_spans.get(*v as usize).copied().unwrap_or(span);
+                let ctor_name = ctx
+                    .generics()
+                    .map(|cell| {
+                        let g = cell.borrow();
+                        if gid.is_enum {
+                            g.enums[gid.idx as usize].name.clone()
+                        } else {
+                            g.structs[gid.idx as usize].name.clone()
+                        }
+                    })
+                    .unwrap_or_else(|| "<constructor image>".to_string());
+                Err(poly_ctor_image_as_type_error(
+                    ctx,
+                    span,
+                    name,
+                    &sig.ty_var_names[*v as usize],
+                    binding_span,
+                    &ctor_name,
+                ))
+            }
+            Some(t) => Ok(t),
+            None => Err(poly_unbound_output_ty_error(
                 ctx,
                 span,
                 name,
                 &sig.ty_var_names[*v as usize],
                 sig.ty_var_names.len(),
-            )
-        }),
+            )),
+        },
         PolyType::Array(elem, len) => {
             let elem_ty = apply_subst(sig, elem, subst, name, span, ctx, arrays, cells, refs)?;
             let count = match len {
@@ -8635,17 +8786,83 @@ pub(super) fn apply_subst(
             };
             Ok(Type::Variant(id, *vi, display))
         }
-        // P7b.S1 Phase 2 stub (S1-16/S1-11): grounding an application via
-        // the `Generic` mint route (resolving `head`'s `Type::CtorImage`
-        // binding, substituting its arguments through the constructor's
-        // declared parameters) is Phase 3's S1-11 work.
-        PolyType::App { .. } => Err(poly_app_not_yet_supported_error(
-            ctx,
-            span,
-            name,
-            &poly_type_str(pty, sig),
-        )),
+        // S1-11: ground an `App` by resolving `head`'s binding (a
+        // `Type::CtorImage`, minted by `unify_poly_input`'s own `App` arm),
+        // substituting the application's arguments through the
+        // constructor's declared parameters, and delegating to the same
+        // instantiator the `Generic` arm above mints through.
+        PolyType::App { head, args } => {
+            let ctor = subst.ty_of(*head).ok_or_else(|| {
+                poly_unbound_output_ty_error(
+                    ctx,
+                    span,
+                    name,
+                    &sig.ty_var_names[*head as usize],
+                    sig.ty_var_names.len(),
+                )
+            })?;
+            let Type::CtorImage(gid) = ctor else {
+                return Err(poly_rendered_type_mismatch_error(
+                    ctx,
+                    span,
+                    name,
+                    &poly_type_str(pty, sig),
+                    &ctor.to_string(),
+                ));
+            };
+            let mut concrete_args = Vec::with_capacity(args.len());
+            for a in args {
+                concrete_args.push(apply_subst(
+                    sig, a, subst, name, span, ctx, arrays, cells, refs,
+                )?);
+            }
+            let Some(cell) = ctx.generics() else {
+                return Err(poly_generic_not_yet_groundable_error(
+                    ctx,
+                    span,
+                    name,
+                    &poly_type_str(pty, sig),
+                ));
+            };
+            let regs = crate::ast::MutRegistries {
+                structs: ctx.structs(),
+                enums: ctx.enums(),
+                arrays,
+                cells,
+                refs,
+            };
+            let mut g = cell.borrow_mut();
+            Ok(if gid.is_enum {
+                g.instantiate_enum(gid.idx as usize, &concrete_args, &[], gid.module, regs)
+            } else {
+                g.instantiate_struct(gid.idx as usize, &concrete_args, &[], gid.module, regs)
+            })
+        }
     }
+}
+
+/// S1-15.g: a bare `Type::CtorImage` reached a value-type position outside
+/// `App`-head resolution -- `var` is used as a plain type, but the
+/// application walk (`unify_poly_input`, S1-10) bound it to the constructor
+/// `ctor_name` instead. Both spans travel: `binding_span` (the variable's
+/// first mention, `PolySig::ty_var_spans`) and `span` (this misuse site).
+pub(super) fn poly_ctor_image_as_type_error(
+    ctx: &Ctx,
+    span: Span,
+    callee: &str,
+    var: &str,
+    binding_span: Span,
+    ctor_name: &str,
+) -> String {
+    let callee = crate::resolve::demangle_call(callee);
+    format!(
+        "error: `{callee}` in {name} (line {line}) uses type variable `{var}` at line {line}, col {col} as a plain type, but it is bound to the constructor `{ctor_name}` at line {bline}, col {bcol}\n  a constructor is not a type until applied to arguments: `{var}[...]`",
+        name = ctx.rendered_word(),
+        line = span.line,
+        col = span.col,
+        bline = binding_span.line,
+        bcol = binding_span.col,
+    )
 }
 
 /// R7 twin of `linear_local_unconsumed_error` for the polymorphic body
@@ -10918,6 +11135,293 @@ mod tests {
             span: Span::default(),
             module: 0,
         }
+    }
+
+    /// A single-field `Box['T]`-shaped generic header, for the S1-10/S1-11
+    /// `App` unit tests below -- the plain (length-free) twin of
+    /// `buffer_header`.
+    fn box_header() -> GenericStructDecl {
+        GenericStructDecl {
+            name: "Box".to_string(),
+            ty_var_names: vec!["'T".to_string()],
+            ty_kinds: Vec::new(),
+            len_var_names: Vec::new(),
+            fields: vec![("val".to_string(), PolyType::Var(0))],
+            span: Span::default(),
+            module: 0,
+        }
+    }
+
+    /// A signature over two variables, `'F` (the application head, id 0)
+    /// and `'T` (its argument, id 1) -- the fixture the S1-10/S1-11 `App`
+    /// unit tests share.
+    fn app_sig() -> PolySig {
+        PolySig {
+            row_in: None,
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            row_out: None,
+            bounds: Vec::new(),
+            ty_var_names: vec!["'F".to_string(), "'T".to_string()],
+            ty_var_spans: vec![Span::default(), Span::default()],
+            ty_kinds: Vec::new(),
+            len_var_names: Vec::new(),
+            len_var_spans: Vec::new(),
+            row_var_names: Vec::new(),
+        }
+    }
+
+    /// S1-10: `unify_poly_input`'s `App` arm decomposes an application
+    /// against a concrete slot -- matching `'F['T]` against `Box[i64]`
+    /// binds `'F := Type::CtorImage(box_generic_id)` (in the existing `ty`
+    /// map) and `'T := i64` positionally.
+    #[test]
+    fn unify_poly_input_app_decomposition_binds_ctor_and_arg() {
+        let mut generics = GenericTypes::with_bases(0, 0);
+        generics.structs.push(box_header());
+        let mut arrays: Vec<ArrayDecl> = Vec::new();
+        let mut cells: Vec<OwnedCellDecl> = Vec::new();
+        let mut refs: Vec<RefDecl> = Vec::new();
+        let slot_ty = generics.instantiate_struct(
+            0,
+            &[Type::I64],
+            &[],
+            0,
+            crate::ast::MutRegistries {
+                structs: &[],
+                enums: &[],
+                arrays: &mut arrays,
+                cells: &mut cells,
+                refs: &mut refs,
+            },
+        );
+        let cell = RefCell::new(generics);
+        let sig = app_sig();
+        let probe = probe_word();
+        let ctx = word_ctx(
+            &probe,
+            &[],
+            &[],
+            &[],
+            None,
+            &CombinatorIndex::new(),
+            Some(&cell),
+        );
+        let mut subst = Subst::default();
+        let declared = PolyType::App {
+            head: 0,
+            args: vec![PolyType::Var(1)],
+        };
+        unify_poly_input(
+            &sig,
+            &declared,
+            slot_ty,
+            "f",
+            Span::default(),
+            &ctx,
+            &arrays,
+            &cells,
+            &refs,
+            &mut subst,
+            &[],
+            &[],
+        )
+        .expect("`'F['T]` should unify against `Box[i64]`");
+        assert_eq!(
+            subst.ty_of(0),
+            Some(Type::CtorImage(crate::ast::GenericId {
+                is_enum: false,
+                idx: 0,
+                module: 0,
+            })),
+            "'F should bind to Box's CtorImage"
+        );
+        assert_eq!(subst.ty_of(1), Some(Type::I64), "'T should bind to i64");
+    }
+
+    /// S1-11: `apply_subst`'s `App` arm grounds `'F['T]` to a concrete
+    /// `Type` via the `Generic` mint route -- resolving `'F`'s
+    /// `Type::CtorImage` binding, substituting `'T`, and minting (or
+    /// finding) `Box[i64]`.
+    #[test]
+    fn apply_subst_app_grounds_via_the_generic_mint_route() {
+        let mut generics = GenericTypes::with_bases(0, 0);
+        generics.structs.push(box_header());
+        let cell = RefCell::new(generics);
+        let sig = app_sig();
+        let probe = probe_word();
+        let ctx = word_ctx(
+            &probe,
+            &[],
+            &[],
+            &[],
+            None,
+            &CombinatorIndex::new(),
+            Some(&cell),
+        );
+        let mut subst = Subst::default();
+        subst.ty.push((
+            0,
+            Type::CtorImage(crate::ast::GenericId {
+                is_enum: false,
+                idx: 0,
+                module: 0,
+            }),
+        ));
+        subst.ty.push((1, Type::I64));
+        let declared = PolyType::App {
+            head: 0,
+            args: vec![PolyType::Var(1)],
+        };
+        let mut arrays: Vec<ArrayDecl> = Vec::new();
+        let mut cells: Vec<OwnedCellDecl> = Vec::new();
+        let mut refs: Vec<RefDecl> = Vec::new();
+        let ty = apply_subst(
+            &sig,
+            &declared,
+            &subst,
+            "f",
+            Span::default(),
+            &ctx,
+            &mut arrays,
+            &mut cells,
+            &mut refs,
+        )
+        .expect("`'F['T]` should ground to `Box[i64]`");
+        assert_eq!(ty.name(), "Box[i64]");
+    }
+
+    /// S1-15.g: a bare `Type::CtorImage` reaching a value-type position
+    /// outside `App`-head resolution is a located error naming both spans
+    /// -- the binding site (`'F`'s first mention) and the misuse site (this
+    /// grounding call). Parser-side kind consistency (S1-4) means no
+    /// *single* signature can ever declare both a bare and an applied use
+    /// of the same variable, so this exercises `apply_subst`'s own arm
+    /// directly: a hand-built `Subst` binds `'F` to a `CtorImage` exactly
+    /// as `unify_poly_input`'s `App` arm would, and a declared bare `'F`
+    /// output reads it back.
+    #[test]
+    fn apply_subst_ctor_image_reaching_bare_var_is_a_located_error() {
+        let mut generics = GenericTypes::with_bases(0, 0);
+        generics.structs.push(box_header());
+        let cell = RefCell::new(generics);
+        let sig = PolySig {
+            row_in: None,
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            row_out: None,
+            bounds: Vec::new(),
+            ty_var_names: vec!["'F".to_string()],
+            ty_var_spans: vec![Span {
+                line: 3,
+                col: 5,
+                ..Span::default()
+            }],
+            ty_kinds: Vec::new(),
+            len_var_names: Vec::new(),
+            len_var_spans: Vec::new(),
+            row_var_names: Vec::new(),
+        };
+        let probe = probe_word();
+        let ctx = word_ctx(
+            &probe,
+            &[],
+            &[],
+            &[],
+            None,
+            &CombinatorIndex::new(),
+            Some(&cell),
+        );
+        let mut subst = Subst::default();
+        subst.ty.push((
+            0,
+            Type::CtorImage(crate::ast::GenericId {
+                is_enum: false,
+                idx: 0,
+                module: 0,
+            }),
+        ));
+        let mut arrays: Vec<ArrayDecl> = Vec::new();
+        let mut cells: Vec<OwnedCellDecl> = Vec::new();
+        let mut refs: Vec<RefDecl> = Vec::new();
+        let err = apply_subst(
+            &sig,
+            &PolyType::Var(0),
+            &subst,
+            "f",
+            Span {
+                line: 9,
+                col: 1,
+                ..Span::default()
+            },
+            &ctx,
+            &mut arrays,
+            &mut cells,
+            &mut refs,
+        )
+        .expect_err("a bare CtorImage in a value-type position must be rejected");
+        assert!(err.contains("Box"), "{err}");
+        assert!(err.contains("line 9"), "{err}");
+        assert!(err.contains("line 3"), "{err}");
+    }
+
+    /// S1-17.i: a poly *cross-call* with an `App` slot stays a located
+    /// "unsupported" rejection, not a bare mismatch -- S2 owns
+    /// constructor-keyed dispatch.
+    #[test]
+    fn poly_cross_match_app_slot_is_unsupported_not_a_panic() {
+        let callee_sig = app_sig();
+        let caller_sig = app_sig();
+        let probe = probe_word();
+        let ctx = probe_ctx(&probe);
+        let mut mapping = Vec::new();
+        let err = poly_cross_match(
+            &PolyType::App {
+                head: 0,
+                args: vec![PolyType::Var(1)],
+            },
+            &PolyType::Var(0),
+            &mut mapping,
+            &callee_sig,
+            &caller_sig,
+            "f",
+            Span::default(),
+            &ctx,
+        )
+        .expect_err("an App-shaped declared slot must be rejected, not accepted");
+        assert!(err.contains("supported"), "{err}");
+    }
+
+    /// S1-12 (R5): two call sites binding `'F` to *distinct* constructors
+    /// mint distinct mangled symbols -- the last-write-wins hazard
+    /// `CtorImage` resolves one abstraction level up from S12's own defect
+    /// -- while a duplicate call to the *same* constructor dedups onto one
+    /// symbol.
+    #[test]
+    fn hkt_two_constructor_call_sites_mint_distinct_symbols() {
+        let module = checked_module(
+            "type: Box['T] val 'T ;\n\
+             type: Cell2['T] val 'T ;\n\
+             type: SeedBox b Box[i64] ;\n\
+             type: SeedCell c Cell2[i64] ;\n\
+             : pass['F 'T] ( 'F['T] -- 'F['T] ) ;\n\
+             : main ( -- )\n\
+               5 Box pass drop\n\
+               5 Box pass drop\n\
+               5 Cell2 pass drop\n\
+             ;\n",
+        );
+        let symbols: std::collections::HashSet<&str> = module
+            .instantiations
+            .values()
+            .filter(|c| c.callee == "pass")
+            .map(|c| c.symbol.as_str())
+            .collect();
+        assert_eq!(
+            symbols.len(),
+            2,
+            "two distinct constructors (Box, Cell2) must mint two distinct symbols, and the duplicate Box call must dedup onto one of them"
+        );
     }
 
     /// P7.S6a (R8a): `unify_poly_input`'s `Generic` arm binds a declared

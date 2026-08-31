@@ -2152,7 +2152,7 @@ pub enum Len {
 /// not a monomorph -- mirroring `PolyType::Generic`'s own
 /// `(is_enum, idx, module)` identity so `Type::CtorImage` names exactly the
 /// same header a `PolyType::Generic { .. }` scrutinee would.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct GenericId {
     pub is_enum: bool,
     pub idx: u32,
@@ -2998,16 +2998,42 @@ impl Type {
             // `name_static` by `inline_quotation_type`/`owning_quotation_type`,
             // so these mirror the `Quotation` arm.
             Type::InlineQuotation(eff) | Type::OwningQuotation(eff) => eff.name_static,
-            // P7b.S1 Phase 2 stub: a `CtorImage` names a generic `type:`
-            // header, but `name()` carries no `GenericTypes` registry to
-            // look its declared name up in (unlike every other variant
-            // here, whose name is baked into the variant at construction).
-            // Real rendering is Phase 3's concern, alongside the rest of
-            // the symbol-distinctness ruling (S1-12); this placeholder is
-            // never mangled into a symbol before then.
-            Type::CtorImage(_) => "<constructor image>",
+            // P7b.S1 (S1-12): `name()` carries no `GenericTypes` registry
+            // to look the constructor's declared name up in (unlike every
+            // other variant here, whose name is baked in at construction),
+            // so this renders a *stable, distinct-per-`GenericId`* string
+            // instead -- memoized so repeated calls for the same `gid`
+            // return the same leaked `&'static str`. This is what makes
+            // S1-12's symbol-distinctness ruling hold: the mangler folds
+            // `subst.ty` by rendering each bound `Type`'s `name()`, so two
+            // call sites binding `'F` to different constructors must
+            // render different strings here, or the last-write-wins defect
+            // S12 fixed recurs one abstraction level up.
+            Type::CtorImage(gid) => ctor_image_name(*gid),
         }
     }
+}
+
+/// P7b.S1 (S1-12): a stable, distinct-per-`GenericId` `&'static str` for
+/// `Type::CtorImage`'s own `name()` -- memoized (not merely leaked fresh on
+/// every call, which `name()`'s hot-path call sites would exhaust memory
+/// over) so two renders of the *same* `gid` return the identical string,
+/// letting the mangler's dedup-by-string-equality work unchanged.
+fn ctor_image_name(gid: GenericId) -> &'static str {
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<std::collections::HashMap<GenericId, &'static str>>> =
+        OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+    let mut map = cache.lock().expect("ctor_image_name cache poisoned");
+    map.entry(gid).or_insert_with(|| {
+        let s = format!(
+            "<ctor:{}:{}:{}>",
+            if gid.is_enum { "enum" } else { "struct" },
+            gid.idx,
+            gid.module
+        );
+        Box::leak(s.into_boxed_str())
+    })
 }
 
 impl IntType {
