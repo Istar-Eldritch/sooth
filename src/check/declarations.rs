@@ -681,6 +681,14 @@ fn collect_poly_concrete(t: &PolyType, out: &mut Vec<Type>) {
         PolyType::GenericVariant { .. } => unreachable!(
             "a generic variant is unconstructible outside an eliminator arm's own input row; it never reaches a declared signature"
         ),
+        // P7b.S1 (S1-16): same reasoning as `Generic` -- the applied
+        // variable itself names no concrete `Type`, but a concrete argument
+        // still needs the ordinary check.
+        PolyType::App { args, .. } => {
+            for a in args {
+                collect_poly_concrete(a, out);
+            }
+        }
     }
 }
 
@@ -1621,6 +1629,10 @@ fn type_node(ty: &Type) -> Option<TypeNode> {
         | Type::Quotation(_)
         | Type::InlineQuotation(_)
         | Type::OwningQuotation(_) => None,
+        // P7b.S1 (S1-12): a `CtorImage` is not a concrete value type (any
+        // matcher that would treat it as one routes to S1-15.g), so it
+        // names no field/containment node here either.
+        Type::CtorImage(_, _) => None,
     }
 }
 
@@ -1883,8 +1895,11 @@ pub fn enum_eliminator_sigs(enums: &[EnumDecl]) -> Vec<(String, String, PolySig)
                 outputs: vec![],
                 row_out: Some(ROW_OUT),
                 bounds: vec![],
+                ty_kinds: vec![],
                 ty_var_names: vec![],
+                ty_var_spans: vec![],
                 len_var_names: vec![],
+                len_var_spans: vec![],
                 row_var_names: vec!["..a".to_string(), "..b".to_string()],
             },
         ));
@@ -2632,6 +2647,7 @@ mod tests {
         let generic_box = |module: u32| crate::ast::GenericStructDecl {
             name: "Box".to_string(),
             ty_var_names: vec!["'T".to_string()],
+            ty_kinds: vec![crate::ast::Kind::Star],
             len_var_names: vec![],
             fields: Vec::new(),
             span: crate::ast::Span::default(),
@@ -2933,8 +2949,11 @@ mod tests {
                 outputs: Vec::new(),
                 row_out: None,
                 bounds: Vec::new(),
+                ty_kinds: vec![crate::ast::Kind::Star; arity],
                 ty_var_names: (0..arity).map(|i| format!("'T{i}")).collect(),
+                ty_var_spans: vec![Span::default(); arity],
                 len_var_names: Vec::new(),
+                len_var_spans: Vec::new(),
                 row_var_names: Vec::new(),
             };
             WordDef {

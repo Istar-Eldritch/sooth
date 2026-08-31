@@ -529,6 +529,26 @@ pub fn variant_type(enums: &[EnumDecl], id: EnumId, vi: usize) -> Type {
     Type::Variant(id, vi, enums[id.index()].variants[vi].display_static)
 }
 
+/// P7b.S1 (R1): the kind a `'`-name was bound as -- `Star` (an ordinary
+/// type variable), `Len` (a length variable), or `Arrow` (a higher-kinded
+/// variable, `* -> *`). Replaces the parser-private `enum Kind { Star, Len }`
+/// P7.S6a introduced (`Ty` renamed `Star` there already): an `Arrow`-kinded
+/// variable is still a *type* variable, so it needs to travel alongside
+/// `Star`/`Len` rather than living only in the parser. The arrow is
+/// **n-ary, not curried**: Sooth application splits type slots from length
+/// slots at every call site (`PolyType::Generic` carries parallel
+/// `args`/`len_args`), so `array` is honestly `* -> Len -> *`, not
+/// `* -> (Len -> *)`.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Kind {
+    Star,
+    Len,
+    Arrow {
+        domains: Vec<Kind>,
+        result: Box<Kind>,
+    },
+}
+
 /// Phase 5 slice 1 (R1, D5): a `type:` header that bound one or more type
 /// variables (`type: Box['T] ...`), parsed into its variable-scoped field
 /// list but not yet monomorphized -- minting a concrete `StructDecl` per
@@ -545,6 +565,10 @@ pub struct GenericStructDecl {
     /// each keeping its leading `'` (e.g. `"'T"`) -- the id space a field's
     /// `PolyType::Var` indexes into.
     pub ty_var_names: Vec<String>,
+    /// P7b.S1 (R1/R5): each header type variable's declared kind, parallel
+    /// to `ty_var_names` (`Star` unless the header annotates it, e.g.
+    /// `type: Box['F: * -> *] ...`).
+    pub ty_kinds: Vec<Kind>,
     /// P7.S6a (R3): the header's bound length-variable names, parallel to
     /// `ty_var_names` but in the separate length id space `Len::Var`
     /// indexes into.
@@ -560,6 +584,8 @@ pub struct GenericStructDecl {
 pub struct GenericEnumDecl {
     pub name: String,
     pub ty_var_names: Vec<String>,
+    /// P7b.S1 (R1/R5): see `GenericStructDecl::ty_kinds`.
+    pub ty_kinds: Vec<Kind>,
     pub len_var_names: Vec<String>,
     pub variants: Vec<GenericVariantDecl>,
     pub span: Span,
@@ -905,6 +931,50 @@ impl GenericTypes {
                     self.instantiate_enum(*idx as usize, &concrete, &concrete_lens, *module, regs)
                 } else {
                     self.instantiate_struct(*idx as usize, &concrete, &concrete_lens, *module, regs)
+                }
+            }
+            // P7b.S1 (S1-8): `head` names one of the header's own type
+            // variables, so its binding is `args[head]` exactly as
+            // `PolyType::Var` resolves above -- when the use site bound it
+            // to a constructor image (S1-12), apply this field's own
+            // (substituted) arguments through that header, mirroring the
+            // `Generic` arm above. A binding that is not a `CtorImage` is a
+            // kind mismatch `validate_ctor_arg_kinds` (S1-15.f, `parser.rs`)
+            // already rejects at the use site, so this arm's fallback --
+            // returning the resolved (non-`CtorImage`) binding unapplied --
+            // is unreachable in practice; kept as a non-panicking default
+            // rather than an `unreachable!` since `CtorImage` is not a
+            // concrete value type and nothing here re-proves the parser's
+            // own guard.
+            PolyType::App {
+                head,
+                args: field_args,
+            } => {
+                let concrete_field_args: Vec<Type> = field_args
+                    .iter()
+                    .map(|a| self.substitute_generic_field(a, args, lens, regs.reborrow()))
+                    .collect();
+                match args[*head as usize] {
+                    Type::CtorImage(gid, _) => {
+                        if gid.is_enum {
+                            self.instantiate_enum(
+                                gid.idx as usize,
+                                &concrete_field_args,
+                                &[],
+                                gid.module,
+                                regs,
+                            )
+                        } else {
+                            self.instantiate_struct(
+                                gid.idx as usize,
+                                &concrete_field_args,
+                                &[],
+                                gid.module,
+                                regs,
+                            )
+                        }
+                    }
+                    not_ctor_image => not_ctor_image,
                 }
             }
             other => unreachable!(
@@ -1965,6 +2035,9 @@ pub fn ground_member_poly(pty: &PolyType, target: &PolyType) -> PolyType {
         PolyType::GenericVariant { .. } => unreachable!(
             "a generic variant is unconstructible outside an eliminator arm's own input row (R3.5); a trait member signature never carries one"
         ),
+        PolyType::App { .. } => unreachable!(
+            "trait member signatures are restricted to concrete/array/reference/generic shapes over 'T (parse_trait_member_effect rejects the rest)"
+        ),
     }
 }
 
@@ -2005,6 +2078,13 @@ pub fn seed_predicate_traits() -> Vec<TraitDecl> {
 pub struct ImplTarget {
     pub pattern: PolyType,
     pub ty_var_names: Vec<String>,
+    /// P7b.S1 (R1/R5): parallel to `ty_var_names`. `parse_impl_target` has
+    /// no annotation grammar (it interns purely from usage through
+    /// `parse_poly_slot`), so every entry is `Star` this slice -- but the
+    /// vector is length-matched to `ty_var_names` rather than defaulted
+    /// away, so a later slice adding annotation support here never has to
+    /// retrofit the field.
+    pub ty_kinds: Vec<Kind>,
     pub len_var_names: Vec<String>,
     /// P7.S4b (R2): bounds declared on the impl's own type variables via a
     /// `where`-clause (`impl: Show for array['T 'N] where 'T: Show`). Each pair's
@@ -2071,6 +2151,17 @@ pub enum Len {
     Var(u32),
 }
 
+/// P7b.S1 (S1-12): identifies a generic `type:` header -- a *constructor*,
+/// not a monomorph -- mirroring `PolyType::Generic`'s own
+/// `(is_enum, idx, module)` identity so `Type::CtorImage` names exactly the
+/// same header a `PolyType::Generic { .. }` scrutinee would.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct GenericId {
+    pub is_enum: bool,
+    pub idx: u32,
+    pub module: u32,
+}
+
 /// R4: a type in a polymorphic signature. A monomorphic sub-type folds to
 /// `Concrete`; a variable-bearing array (`array['T 'N]`, `array[i64 'N]`, `array['T 4]`)
 /// stays `Array`. `Type` itself gains **no** variant (S1): the variable forms
@@ -2126,6 +2217,17 @@ pub enum PolyType {
     /// declared signature -- which is what makes the arms for it outside the
     /// poly walk unreachable rather than merely unexercised.
     QuotLit,
+    /// P7b.S1 (R3/S1-7): a type variable applied to type arguments
+    /// (`'F['T]`), the higher-kinded twin of `Generic` -- a dedicated
+    /// variant rather than reshaping `Generic`'s head to an enum, so
+    /// `Generic`'s registry-index invariant stays intact. `head` names a
+    /// variable (index into `PolySig::ty_var_names`); `args` are the
+    /// applied type expressions and carry type args only -- a `Len`-domain
+    /// application is fenced to S2+.
+    App {
+        head: u32,
+        args: Vec<PolyType>,
+    },
     /// P7 slice 3a (R1/D2): a generic type applied to the enclosing
     /// signature's own variables (`Result['T 'E]`), deferred exactly as
     /// `Ref` defers its `RefId`: there is no `StructId`/`EnumId` to mint
@@ -2227,6 +2329,20 @@ pub fn substitute_generic_variant_field(field_pty: &PolyType, args: &[PolyType])
     match field_pty {
         PolyType::Var(v) => args[*v as usize].clone(),
         PolyType::Concrete(t) => PolyType::Concrete(*t),
+        // P7b.S1 (S1-8): a variant field parses through the same shape
+        // parser as a struct field (`parser.rs:5222`/`:5248`), so an
+        // application (`f 'F['T]`) reaches here too -- substitute its
+        // (symbolic) arguments and carry `head`'s own binding through
+        // unchanged; real grounding (resolving a `CtorImage` head) is
+        // `apply_subst`'s job at Phase 3, which this function -- R4.3's own
+        // doc -- deliberately does not do for any shape.
+        PolyType::App { head, args: fargs } => PolyType::App {
+            head: *head,
+            args: fargs
+                .iter()
+                .map(|a| substitute_generic_variant_field(a, args))
+                .collect(),
+        },
         other => unreachable!(
             "a generic enum variant field is never {other:?}: `array['A N]`, `Inner['A]`, `&'A` and `^'A` are all parser rejections for a variant field"
         ),
@@ -2252,7 +2368,20 @@ pub struct PolySig {
     pub row_out: Option<u32>,
     pub bounds: Vec<(u32, Bound)>,
     pub ty_var_names: Vec<String>,
+    /// P7b.S1 (R1/R5): each type variable's kind as resolved from usage,
+    /// parallel to `ty_var_names` (`Star`, the only kind a bare mention in
+    /// an effect can establish this slice -- an application head's `Arrow`
+    /// requirement arrives with Phase 2).
+    pub ty_kinds: Vec<Kind>,
+    /// P7b.S1 (R2/S1-4): each type variable's first-mention span, parallel
+    /// to `ty_var_names`. Needed by `attach_bracket_bounds`'s
+    /// annotation-vs-usage conflict diagnostic (S1-15.c), which fires after
+    /// `PolyBuilder` (where every mention span lives) has already been
+    /// consumed into this `PolySig`.
+    pub ty_var_spans: Vec<Span>,
     pub len_var_names: Vec<String>,
+    /// P7b.S1 (R2/S1-4): the length-variable twin of `ty_var_spans`.
+    pub len_var_spans: Vec<Span>,
     pub row_var_names: Vec<String>,
 }
 
@@ -2595,6 +2724,20 @@ pub enum Type {
     /// rejected as an array/slice element (P7.S5), behind a reference, and at
     /// an `extern:` boundary: none of those owns what it names.
     OwningQuotation(&'static QuotEffect),
+    /// P7b.S1 (R5/S1-12): a bare constructor image -- a generic `type:`
+    /// header bound to a higher-kinded variable (`'F := Box`), not a
+    /// monomorph. Ground-flowing (it lives in the same `ty` substitution map
+    /// as every other binding) but **not a concrete value type**: it exists
+    /// only to be resolved as an `App` head (S1-11) or to carry a use-site
+    /// constructor argument (`Wrap[Box i64]`) through to `struct_keys`. Any
+    /// matcher that would treat it as an ordinary value type routes to the
+    /// S1-15.g diagnostic ("constructor used as a type") instead.
+    ///
+    /// Carries the constructor's own declared name as a leaked `&'static
+    /// str`, mirroring `Type::Variant`'s `display_static`: computed once at
+    /// construction (`ctor_image_type`, the sole constructor) from the live
+    /// `GenericTypes` registry, never re-derived by `name()`.
+    CtorImage(GenericId, &'static str),
 }
 
 /// Slice 6a (R4): a declared quotation effect, the payload behind
@@ -2863,8 +3006,49 @@ impl Type {
             // `name_static` by `inline_quotation_type`/`owning_quotation_type`,
             // so these mirror the `Quotation` arm.
             Type::InlineQuotation(eff) | Type::OwningQuotation(eff) => eff.name_static,
+            // P7b.S1 (S1-12): the constructor's real declared name,
+            // carried on the variant itself (`ctor_image_type`, the sole
+            // constructor) rather than re-derived here -- mirrors
+            // `Type::Variant`'s `display_static`. This is what makes
+            // S1-12's symbol-distinctness ruling hold: the mangler folds
+            // `subst.ty` by rendering each bound `Type`'s `name()`, so two
+            // call sites binding `'F` to different constructors must
+            // render different strings here, or the last-write-wins defect
+            // S12 fixed recurs one abstraction level up. (Two same-named
+            // constructors declared in different modules still collide --
+            // a pre-existing, documented limit; see `ctor_image_type`.)
+            Type::CtorImage(_, name) => name,
         }
     }
+}
+
+/// P7b.S1 (S1-12): the **sole** constructor of a `Type::CtorImage`. Reads the
+/// constructor's declared name off the live `GenericTypes` registry and leaks
+/// it (per construction -- no dedup; call volume is unification attempts,
+/// which is bounded for a compiler process), mirroring `variant_type`'s read
+/// of `display_static` -- never a lookup table keyed by `GenericId` (that
+/// idiom, and the `Mutex`-guarded global it required, is what this replaces).
+/// Every construction site shares this one function, so `name()` never
+/// re-derives the string.
+///
+/// Limit introduced here (report-only, S1-12): the carried name is the bare
+/// declared name, so two same-named constructors declared in different
+/// modules bound to the same variable at two call sites would render
+/// identically and collide in the mangled symbol (`instantiation_symbol`
+/// sanitizes `Type::name()`). At HEAD's `<ctor:struct:{idx}:{module}>`
+/// rendering the symbol was module-qualified and distinct by construction,
+/// so this pass weakens cross-module distinctness for `CtorImage`; it is
+/// guarded only by the fact that a generic struct constructor does not
+/// resolve across a module boundary yet. Lifting that reachability (S2)
+/// must restore qualification (or key the symbol on `GenericId`) or S1-12
+/// breaks.
+pub fn ctor_image_type(generics: &GenericTypes, gid: GenericId) -> Type {
+    let name = if gid.is_enum {
+        generics.enums[gid.idx as usize].name.clone()
+    } else {
+        generics.structs[gid.idx as usize].name.clone()
+    };
+    Type::CtorImage(gid, Box::leak(name.into_boxed_str()))
 }
 
 impl IntType {
@@ -3833,6 +4017,7 @@ mod tests {
         let decl = GenericStructDecl {
             name: "Box".to_string(),
             ty_var_names: vec!["'T".to_string()],
+            ty_kinds: Vec::new(),
             len_var_names: vec![],
             fields: vec![("val".to_string(), PolyType::Var(0))],
             span: Span::default(),
@@ -3855,6 +4040,31 @@ mod tests {
         );
     }
 
+    /// P7b.S1 review fix (S1-12): `ctor_image_type` renders the
+    /// constructor's real declared name, not the index-derived placeholder
+    /// the old `OnceLock<Mutex<HashMap>>` cache used to produce.
+    #[test]
+    fn ctor_image_type_renders_the_real_constructor_name() {
+        let decl = GenericStructDecl {
+            name: "Buf".to_string(),
+            ty_var_names: vec!["'T".to_string()],
+            ty_kinds: Vec::new(),
+            len_var_names: Vec::new(),
+            fields: vec![("val".to_string(), PolyType::Var(0))],
+            span: Span::default(),
+            module: 0,
+        };
+        let mut generics = GenericTypes::with_bases(0, 0);
+        generics.structs.push(decl);
+        let gid = GenericId {
+            is_enum: false,
+            idx: 0,
+            module: 0,
+        };
+        let ty = ctor_image_type(&generics, gid);
+        assert_eq!(ty.name(), "Buf");
+    }
+
     /// A one-type-variable, one-length-variable generic struct header with a
     /// `data array['T 'N]` field -- the `Buffer` fixture R5's distinct-
     /// monomorph tests instantiate.
@@ -3862,6 +4072,7 @@ mod tests {
         GenericStructDecl {
             name: "Buffer".to_string(),
             ty_var_names: vec!["'T".to_string()],
+            ty_kinds: Vec::new(),
             len_var_names: vec!["'N".to_string()],
             fields: vec![(
                 "data".to_string(),
@@ -3937,6 +4148,7 @@ mod tests {
         let decl = GenericStructDecl {
             name: "Box".to_string(),
             ty_var_names: vec!["'T".to_string()],
+            ty_kinds: Vec::new(),
             len_var_names: vec![],
             fields: vec![("val".to_string(), PolyType::Var(0))],
             span: Span::default(),
@@ -3963,6 +4175,7 @@ mod tests {
         let decl = GenericStructDecl {
             name: "Box".to_string(),
             ty_var_names: vec!["'T".to_string()],
+            ty_kinds: Vec::new(),
             len_var_names: vec![],
             fields: vec![("val".to_string(), PolyType::Var(0))],
             span: Span::default(),
@@ -3987,6 +4200,7 @@ mod tests {
         GenericStructDecl {
             name: name.to_string(),
             ty_var_names: vec!["'T".to_string()],
+            ty_kinds: Vec::new(),
             len_var_names: vec![],
             fields: vec![("f".to_string(), field)],
             span: Span::default(),
@@ -4046,6 +4260,7 @@ mod tests {
         generics.structs.push(GenericStructDecl {
             name: "Inner".to_string(),
             ty_var_names: vec!["'T".to_string()],
+            ty_kinds: Vec::new(),
             len_var_names: vec!["'N".to_string()],
             fields: vec![(
                 "data".to_string(),
@@ -4057,6 +4272,7 @@ mod tests {
         generics.structs.push(GenericStructDecl {
             name: "Outer".to_string(),
             ty_var_names: vec!["'T".to_string()],
+            ty_kinds: Vec::new(),
             len_var_names: vec!["'N".to_string()],
             fields: vec![(
                 "inner".to_string(),
@@ -4166,6 +4382,7 @@ mod tests {
         generics.enums.push(GenericEnumDecl {
             name: "Holder".to_string(),
             ty_var_names: vec!["'T".to_string()],
+            ty_kinds: Vec::new(),
             len_var_names: vec![],
             variants: vec![GenericVariantDecl {
                 name: "Some".to_string(),
@@ -4238,6 +4455,7 @@ mod tests {
         generics.structs.push(GenericStructDecl {
             name: "A".to_string(),
             ty_var_names: vec!["'K".to_string(), "'V".to_string()],
+            ty_kinds: Vec::new(),
             len_var_names: vec![],
             fields: vec![(
                 "next".to_string(),
@@ -4300,6 +4518,7 @@ mod tests {
         let decl = GenericStructDecl {
             name: "Box".to_string(),
             ty_var_names: vec!["'T".to_string()],
+            ty_kinds: Vec::new(),
             len_var_names: vec![],
             fields: vec![("val".to_string(), PolyType::Var(0))],
             span: Span::default(),
@@ -4348,6 +4567,7 @@ mod tests {
         let decl = GenericEnumDecl {
             name: "Res".to_string(),
             ty_var_names: vec!["'T".to_string()],
+            ty_kinds: Vec::new(),
             len_var_names: vec![],
             variants: vec![GenericVariantDecl {
                 name: "Ok".to_string(),
@@ -4376,6 +4596,7 @@ mod tests {
         let decl = GenericEnumDecl {
             name: "Res".to_string(),
             ty_var_names: vec!["'T".to_string()],
+            ty_kinds: Vec::new(),
             len_var_names: vec![],
             variants: vec![GenericVariantDecl {
                 name: "Ok".to_string(),
@@ -4428,6 +4649,7 @@ mod tests {
         let decl = GenericEnumDecl {
             name: "Res".to_string(),
             ty_var_names: vec!["'T".to_string()],
+            ty_kinds: Vec::new(),
             len_var_names: vec![],
             variants: vec![GenericVariantDecl {
                 name: "Ok".to_string(),
@@ -4455,6 +4677,7 @@ mod tests {
         let decl = GenericEnumDecl {
             name: "Pair".to_string(),
             ty_var_names: vec!["'A".to_string()],
+            ty_kinds: Vec::new(),
             len_var_names: vec![],
             variants: vec![GenericVariantDecl {
                 name: "One".to_string(),
@@ -4485,6 +4708,7 @@ mod tests {
         let decl = GenericEnumDecl {
             name: "Buffer".to_string(),
             ty_var_names: vec!["'A".to_string()],
+            ty_kinds: Vec::new(),
             len_var_names: vec!["'N".to_string()],
             variants: vec![GenericVariantDecl {
                 name: "Full".to_string(),

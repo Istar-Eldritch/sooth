@@ -376,6 +376,11 @@ fn contains_poly_reference(
         PolyType::GenericVariant { .. } => unreachable!(
             "a generic variant is unconstructible outside an eliminator arm's own input row; it never reaches a declared signature"
         ),
+        // P7b.S1 (S1-16): an application's arguments must not launder a
+        // reference past this audit either -- same reasoning as `Generic`.
+        PolyType::App { args, .. } => args
+            .iter()
+            .any(|a| contains_poly_reference(a, structs, enums, arrays)),
     }
 }
 
@@ -432,6 +437,16 @@ fn audit_poly_input_quotation(pt: &PolyType, sig: &PolySig) -> Result<(), String
         PolyType::GenericVariant { .. } => unreachable!(
             "a generic variant is unconstructible outside an eliminator arm's own input row; it never reaches a declared signature"
         ),
+        // P7b.S1 (S1-16): a quotation smuggled into an application argument
+        // (`'F[[ 'T -- ]]`) is fenced at parse time (S1-6), so this arm is
+        // only reached by a concrete argument; recurse for parity with
+        // `Generic`.
+        PolyType::App { args, .. } => {
+            for a in args {
+                reject_poly_quotation_anywhere(a, sig, "a generic type argument")?;
+            }
+            Ok(())
+        }
     }
 }
 
@@ -477,6 +492,15 @@ fn reject_poly_quotation_anywhere(
         PolyType::GenericVariant { .. } => unreachable!(
             "a generic variant is unconstructible outside an eliminator arm's own input row; it never reaches a declared signature"
         ),
+        // P7b.S1 (S1-16): recurse into an application's arguments, so a
+        // quotation smuggled in as one is still rejected -- same reasoning
+        // as `Generic`.
+        PolyType::App { args, .. } => {
+            for a in args {
+                reject_poly_quotation_anywhere(a, sig, "a generic type argument")?;
+            }
+            Ok(())
+        }
     }
 }
 
@@ -733,7 +757,10 @@ mod tests {
                 row_out: None,
                 bounds: Vec::new(),
                 ty_var_names: vec!["'T".to_string()],
+                ty_var_spans: Vec::new(),
+                ty_kinds: Vec::new(),
                 len_var_names: Vec::new(),
+                len_var_spans: Vec::new(),
                 row_var_names: Vec::new(),
             })),
             declares_inline: false,

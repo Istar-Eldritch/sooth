@@ -32,10 +32,10 @@ use crate::ast::{
     generic_surface_name, ground_member_type, instantiation_symbol, intern_array_type,
     intern_bundle_struct, intern_owned_cell_type, intern_ref_type, intern_slice_type,
     is_builtin_word_name, is_name_dispatched_builtin, resolve_bool_type, variant_type, ArrayDecl,
-    Bound, CallInst, EnumDecl, EnumId, ExternDecl, GenericEnumDecl, GenericStructDecl, Image,
-    ImplDecl, ImplTarget, Len, Module, ModuleInfo, OwnedCellDecl, PolyCrossCall, PolySig, PolyType,
-    QuotAnnot, QuotEffect, RefDecl, SliceDecl, Span, StackEffect, StaticDecl, StructDecl, StructId,
-    Subst, Term, TermKind, TraitDecl, TraitId, TraitMember, Type, TypedSlot, VariantDecl,
+    Bound, CallInst, EnumDecl, EnumId, ExternDecl, GenericEnumDecl, GenericId, GenericStructDecl,
+    Image, ImplDecl, ImplTarget, Len, Module, ModuleInfo, OwnedCellDecl, PolyCrossCall, PolySig,
+    PolyType, QuotAnnot, QuotEffect, RefDecl, SliceDecl, Span, StackEffect, StaticDecl, StructDecl,
+    StructId, Subst, Term, TermKind, TraitDecl, TraitId, TraitMember, Type, TypedSlot, VariantDecl,
     VariantTag, VariantTagMode, WordDef, RESERVED_TRAIT_MODULE,
 };
 
@@ -1344,8 +1344,11 @@ pub(super) fn impl_target_str(target: &ImplTarget) -> String {
         outputs: Vec::new(),
         row_out: None,
         bounds: Vec::new(),
+        ty_kinds: target.ty_kinds.clone(),
         ty_var_names: target.ty_var_names.clone(),
+        ty_var_spans: vec![Span::default(); target.ty_var_names.len()],
         len_var_names: target.len_var_names.clone(),
+        len_var_spans: vec![Span::default(); target.len_var_names.len()],
         row_var_names: Vec::new(),
     };
     poly::poly_type_str(&target.pattern, &sig)

@@ -18,7 +18,7 @@
 use crate::ast::{
     ground_member_poly, ground_member_type, intern_array_type, is_name_dispatched_builtin,
     ArrayDecl, Bound, EnumDecl, ExternDecl, GenericTypes, GlobalEntry, GlobalMode, ImplDecl,
-    ImplTarget, Import, ImportAnchor, ImportBinding, ImportTarget, IntrinsicVisibility, Len,
+    ImplTarget, Import, ImportAnchor, ImportBinding, ImportTarget, IntrinsicVisibility, Kind, Len,
     Module, ModuleInfo, ModuleName, MutRegistries, OwnedCellDecl, PolySig, PolyType, QuotAnnot,
     RefDecl, SliceDecl, Span, StackEffect, StaticDecl, StaticInit, StructDecl, Term, TermKind,
     TraitDecl, TraitId, TraitKind, TraitMember, Type, TypedSlot, VariantDecl, VariantTag,
@@ -381,7 +381,11 @@ fn member_shape_is_supported(t: &PolyType) -> bool {
         | PolyType::QuotLit
         // P7.S12 (R3.5): unconstructible outside an eliminator arm's own
         // input row, never in a trait member signature.
-        | PolyType::GenericVariant { .. } => false,
+        | PolyType::GenericVariant { .. }
+        // P7b.S1 (R4/S1-8): a trait member signature never mentions a
+        // higher-kinded application (parse_trait_member_effect's restricted
+        // grammar has no route to one).
+        | PolyType::App { .. } => false,
     }
 }
 
@@ -490,6 +494,14 @@ fn poly_type_shape_str(pt: &PolyType) -> String {
         PolyType::GenericVariant { .. } => unreachable!(
             "a generic variant is unconstructible outside an eliminator arm's own input row; it never reaches an impl target shape"
         ),
+        // P7b.S1: `member_shape_is_supported` rejects an `App` shape before
+        // this renderer is ever called on one; kept as a real render (not
+        // an `unreachable!`) since it costs nothing and matches `App`'s
+        // other renderer, `poly_type_str`.
+        PolyType::App { head, args } => {
+            let parts: Vec<String> = args.iter().map(poly_type_shape_str).collect();
+            format!("'T{head}[{}]", parts.join(" "))
+        }
     }
 }
 
@@ -503,6 +515,41 @@ fn impl_target_bound_error() -> String {
 /// are not meaningful in an impl target.
 fn impl_target_row_var_error() -> String {
     "error: an `impl:` target may not carry a row variable".to_string()
+}
+
+/// P7b.S1 review fix (P1), sibling of S1-17.i's `poly_cross_call_unsupported_
+/// error`: an `impl:` target whose pattern applies one of its own variables
+/// (`impl: Trait for 'F['T]`) used to parse silently, but
+/// `match_impl_target_rec` (S1-16's census) never matches an `App` pattern
+/// -- the impl would register and then never dispatch, surfacing as a
+/// misleading "does not satisfy" error at an unrelated call site instead of
+/// naming the real problem here. A located rejection at parse time instead,
+/// naming the applied variable's own binding span.
+fn impl_target_app_unsupported_error(var: &str, span: Span) -> String {
+    format!(
+        "error: an `impl:` target may not apply its own type variable (`{var}[...]` at line {}, col {}); a constructor-abstract impl target is not supported this slice",
+        span.line, span.col
+    )
+}
+
+/// The first `PolyType::App`'s head variable found anywhere in `pty`'s
+/// structure, if any -- used only by `parse_impl_target` to fence the shape
+/// (`impl_target_app_unsupported_error`). Exhaustive over `PolyType` so a
+/// future variant that can carry an `App` (a new compound shape) is forced
+/// to extend this arm rather than silently skip the fence.
+fn poly_type_app_head(pty: &PolyType) -> Option<u32> {
+    match pty {
+        PolyType::App { head, .. } => Some(*head),
+        PolyType::Array(elem, _) => poly_type_app_head(elem),
+        PolyType::Ref(referent, _) => poly_type_app_head(referent),
+        PolyType::OwnedCell(payload) => poly_type_app_head(payload),
+        PolyType::Generic { args, .. } => args.iter().find_map(poly_type_app_head),
+        PolyType::Concrete(_)
+        | PolyType::Var(_)
+        | PolyType::Quotation(..)
+        | PolyType::QuotLit
+        | PolyType::GenericVariant { .. } => None,
+    }
 }
 
 /// P7.S3e (R4): an `impl:` naming a trait that resolves to nothing in scope
@@ -890,6 +937,7 @@ pub fn parse_bodies(
         type_origin,
         trait_origin,
         generics,
+        field_kind_marks: std::collections::HashMap::new(),
         traits,
     };
     parser.parse_generic_typedefs()?;
@@ -965,6 +1013,7 @@ pub(crate) fn prepass_generic_typedefs(
         exports,
         selective,
         generics,
+        field_kind_marks: std::collections::HashMap::new(),
         type_origin: &[],
         trait_origin: &[],
         traits: crate::ast::predicate_traits(),
@@ -1031,6 +1080,7 @@ pub(crate) fn prepass_trait_decls(
                 exports,
                 selective,
                 generics,
+                field_kind_marks: std::collections::HashMap::new(),
                 type_origin: &[],
                 trait_origin: &[],
                 // A trait member's own signature can still name a bound
@@ -1214,6 +1264,7 @@ pub fn scan_imports(tokens: &[(Token, Span)]) -> Result<Vec<Import>, String> {
                 exports: &[],
                 selective: &no_imports,
                 generics: &mut generics,
+                field_kind_marks: std::collections::HashMap::new(),
                 type_origin: &[],
                 trait_origin: &[],
                 traits: crate::ast::predicate_traits(),
@@ -1260,6 +1311,7 @@ pub fn scan_exports(tokens: &[(Token, Span)]) -> Result<Vec<(String, Span)>, Str
                 exports: &[],
                 selective: &no_imports,
                 generics: &mut generics,
+                field_kind_marks: std::collections::HashMap::new(),
                 type_origin: &[],
                 trait_origin: &[],
                 traits: crate::ast::predicate_traits(),
@@ -1278,7 +1330,13 @@ pub fn scan_exports(tokens: &[(Token, Span)]) -> Result<Vec<(String, Span)>, Str
 /// diagnostics), and the `type:` keyword's span. Registered as a placeholder
 /// by `parse_generic_typedefs`' stage (a), then handed back to stage (b) to
 /// parse that header's own field/variant list against.
-type GenericHeader = (String, Vec<(String, Span)>, Vec<(String, Span)>, Span);
+type GenericHeader = (
+    String,
+    Vec<(String, Span)>,
+    Vec<Kind>,
+    Vec<(String, Span)>,
+    Span,
+);
 
 /// A parsed polymorphic type before folding to `PolyType`: a concrete type, a
 /// type variable (already interned to its id), or an array whose element
@@ -1306,6 +1364,14 @@ enum RawTy {
     /// `Concrete(Type::OwnedCell)` when the payload folds fully concrete --
     /// by `raw_to_poly_type`, exactly as `Ref` folds.
     OwnedCell(Box<RawTy>),
+    /// P7b.S1 (S1-7): a type variable applied to type arguments
+    /// (`'F['T]`), folded to `PolyType::App` by `raw_to_poly_type` -- there
+    /// is no all-concrete fold, since a variable head never grounds to a
+    /// `Type` at parse time (unlike `Generic`'s named header).
+    App {
+        head: u32,
+        args: Vec<RawTy>,
+    },
     /// P7 slice 3a (R1): a generic type applied to poly slots
     /// (`Result['T 'E]`), folded to `PolyType::Generic` -- or to a plain
     /// `Concrete` by instantiating through `GenericTypes`, exactly as the
@@ -1333,21 +1399,10 @@ enum RawLen {
     Var(u32),
 }
 
-/// P7.S6a (R1): the kind a `'`-name was bound as -- `Star` (a type
-/// variable) or `Len` (a length variable). Word signatures used a
-/// parser-private `VarKind { Ty, Len }` for exactly this distinction before
-/// this slice; `Kind` replaces it in place (`Ty` renamed `Star`, matching the
-/// implicit "no kind" `ty_var_names` already assumed) so the new `type:`/
-/// `trait:` header bracket path (`parse_header_bracket`) can share it rather
-/// than inventing a second kind type. Stays `{ Star, Len }`: no `Const`
-/// (non-length const kinds) and no `Arrow` (higher-kinded), which
-/// DESIGN.md's "dependent types: never" and P7b respectively keep out.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Kind {
-    Star,
-    Len,
-}
-
+/// `Kind` is `ast::Kind` (P7b.S1 promotion, R1): the parser no longer
+/// defines it, since a variable's kind must now travel past the parser (an
+/// `Arrow`-kinded variable is still a *type* variable, so the checker needs
+/// to see it too).
 /// Accumulates a polymorphic signature's variables as an effect is parsed
 /// left-to-right. Variable id spaces are per-signature and assigned in
 /// binding (first-mention) order; the `*_names` vectors are the id -> spelling
@@ -1359,6 +1414,11 @@ struct PolyBuilder {
     ty_index: HashMap<String, u32>,
     len_index: HashMap<String, u32>,
     kind: HashMap<String, Kind>,
+    /// P7b.S1 (R2/S1-4): each ty/len var's first-mention span, parallel to
+    /// `ty_names`/`len_names`, retained past `finish` for
+    /// `attach_bracket_bounds`'s annotation-vs-usage conflict diagnostic.
+    ty_var_spans: Vec<Span>,
+    len_var_spans: Vec<Span>,
     row_in: Option<u32>,
     row_out: Option<u32>,
     /// Slice 10a (R7): the row-name id table, shared by the top-level row
@@ -1381,6 +1441,15 @@ struct PolyBuilder {
     /// target gets `impl_target_bound_error`, a word or trait-member effect
     /// gets `bound_in_effect_error`.
     forbid_bounds: bool,
+    /// P7b.S1 (S1-3/S1-4, Phase 3): each type variable's kind as
+    /// established by its *first* usage-establishing mention (a bare
+    /// mention establishes `Star`; an application head establishes
+    /// `Arrow`), keyed by ty var id. First mention binds; every later
+    /// mention checks against it (`mark_ty_star`/`mark_ty_arrow`) -- the
+    /// binding span for a conflict diagnostic is always `ty_var_spans[id]`,
+    /// since that is unconditionally the very first mention regardless of
+    /// which kind it establishes.
+    ty_established_kind: HashMap<u32, Kind>,
 }
 
 impl PolyBuilder {
@@ -1478,7 +1547,72 @@ impl PolyBuilder {
         let id = self.ty_names.len() as u32;
         self.ty_names.push(name.to_string());
         self.ty_index.insert(name.to_string(), id);
+        // P7b.S1 (R2/S1-4): the first-mention span, retained past `finish`
+        // so `attach_bracket_bounds` can report an annotation-vs-usage
+        // conflict (S1-15.c) with both spans.
+        self.ty_var_spans.push(span);
         Ok((id, true))
+    }
+
+    /// P7b.S1 (S1-3/S1-4): record a *bare* mention of type variable `id` --
+    /// a plain type slot, or an application argument (S1-2: an application's
+    /// arguments are always `Star`-kind slots). First mention establishes
+    /// `Star`; a later bare mention is consistent by construction; a var
+    /// already established `Arrow` by an earlier application-head mention
+    /// is S1-15.b, "an arrow-kind variable used bare".
+    fn mark_ty_star(&mut self, id: u32, span: Span) -> Result<(), String> {
+        match self.ty_established_kind.get(&id).cloned() {
+            None => {
+                self.ty_established_kind.insert(id, Kind::Star);
+                Ok(())
+            }
+            Some(Kind::Star) => Ok(()),
+            Some(arrow @ Kind::Arrow { .. }) => Err(arrow_var_used_bare_error(
+                &self.ty_names[id as usize],
+                span,
+                self.ty_var_spans[id as usize],
+                &arrow,
+            )),
+            Some(Kind::Len) => unreachable!(
+                "a ty var id never carries Len: intern_ty_var/intern_len_var already reject that at X1"
+            ),
+        }
+    }
+
+    /// P7b.S1 (S1-3/S1-4): record an application-head mention of type
+    /// variable `id`, applied to `domain_count` type arguments. First
+    /// mention establishes `Arrow { domains: [Star; domain_count], .. }`; a
+    /// later application-head mention with the *same* arity is consistent;
+    /// a different arity is S1-15.d, "application arity conflicting with
+    /// inferred kind"; a var already established `Star` by an earlier bare
+    /// mention is S1-15.a, "star-kind variable applied like a constructor".
+    fn mark_ty_arrow(&mut self, id: u32, domain_count: usize, span: Span) -> Result<(), String> {
+        let new_kind = Kind::Arrow {
+            domains: vec![Kind::Star; domain_count],
+            result: Box::new(Kind::Star),
+        };
+        match self.ty_established_kind.get(&id).cloned() {
+            None => {
+                self.ty_established_kind.insert(id, new_kind);
+                Ok(())
+            }
+            Some(Kind::Arrow { domains, .. }) if domains.len() == domain_count => Ok(()),
+            Some(Kind::Arrow { domains, .. }) => Err(application_arity_conflict_error(
+                &self.ty_names[id as usize],
+                span,
+                domain_count,
+                self.ty_var_spans[id as usize],
+                domains.len(),
+            )),
+            Some(Kind::Star) => Err(star_applied_like_constructor_error(
+                &self.ty_names[id as usize],
+                span,
+                self.ty_var_spans[id as usize],
+            )),
+            Some(Kind::Len) => unreachable!(
+                "a ty var id never carries Len: intern_ty_var/intern_len_var already reject that at X1"
+            ),
+        }
     }
 
     /// Intern a length variable (an array count `'N`). A name already seen in
@@ -1494,10 +1628,24 @@ impl PolyBuilder {
         let id = self.len_names.len() as u32;
         self.len_names.push(name.to_string());
         self.len_index.insert(name.to_string(), id);
+        self.len_var_spans.push(span);
         Ok(id)
     }
 
     fn finish(self, inputs: Vec<PolyType>, outputs: Vec<PolyType>) -> PolySig {
+        // P7b.S1 (S1-3/S1-9, Phase 3 consumer): each var's resolved kind,
+        // read back from `mark_ty_star`/`mark_ty_arrow`'s bookkeeping --
+        // `Star` for any id that somehow never went through either marker
+        // (there is no such path today: every mention reaches one or the
+        // other), never a silent default that could mask a real `Arrow`.
+        let ty_kinds = (0..self.ty_names.len() as u32)
+            .map(|id| {
+                self.ty_established_kind
+                    .get(&id)
+                    .cloned()
+                    .unwrap_or(Kind::Star)
+            })
+            .collect();
         PolySig {
             row_in: self.row_in,
             inputs,
@@ -1508,8 +1656,11 @@ impl PolyBuilder {
             // signature is built (so ids stay effect-derived). Nothing an
             // effect can contain declares one.
             bounds: Vec::new(),
+            ty_kinds,
             ty_var_names: self.ty_names,
+            ty_var_spans: self.ty_var_spans,
             len_var_names: self.len_names,
+            len_var_spans: self.len_var_spans,
             row_var_names: self.row_names,
         }
     }
@@ -1721,14 +1872,121 @@ fn header_var_kind_conflict_error(name: &str, decl_name: &str, span: Span) -> St
     )
 }
 
-/// P7.S6a (R2): a header-bracket kind annotation naming anything but `Len`
-/// (`'N: Foo`). No other kind is spellable this slice (see `Kind`'s own doc
-/// comment).
+/// P7.S6a (R2), widened P7b.S1 (R1/S1-9): a header-bracket kind annotation
+/// naming anything but `*`, `Len`, or an n-ary arrow of those (`'N: Foo`).
 fn header_bracket_unknown_kind_error(found: &str, span: Span) -> String {
     format!(
-        "error: unknown kind annotation `{found}` at line {}, col {} (the only spellable kind is `Len`, e.g. `'N: Len`)",
+        "error: unknown kind annotation `{found}` at line {}, col {} (a kind is `*`, `Len`, or an arrow of those, e.g. `'N: Len`, `'F: * -> *`)",
         span.line, span.col
     )
+}
+
+/// P7b.S1 (R2/R5, header-field twin of S1-15.a/e): a `type:`/`trait:`
+/// header field bare-mentioning a variable the header declared
+/// higher-kinded (`type: Box['F: * -> *] ... f 'F ...`). A bare field
+/// position is always a `Star` requirement; only Phase 2's application
+/// grammar can satisfy an `Arrow`-kinded variable.
+fn header_field_kind_conflict_error(
+    decl_name: &str,
+    name: &str,
+    span: Span,
+    declared_kind: &str,
+) -> String {
+    format!(
+        "error: `{name}` at line {}, col {} is used as a plain type in `{decl_name}`'s field but is declared kind `{declared_kind}` in its header",
+        span.line, span.col
+    )
+}
+
+/// P7b.S1 (S1-8/S1-15.e, header-field twin of S1-15.a): a header field
+/// applies a variable the header declared `Star`-kinded, e.g. `f 'F['T]`
+/// where `'F` has no arrow annotation.
+fn header_field_applies_star_var_error(
+    decl_name: &str,
+    name: &str,
+    span: Span,
+    declared_kind: &str,
+) -> String {
+    format!(
+        "error: `{name}[...]` at line {}, col {} applies `{name}` like a type constructor in `{decl_name}`'s field, but `{name}` is declared kind `{declared_kind}` in its header",
+        span.line, span.col
+    )
+}
+
+/// P7b.S1 (R2/S1-4/S1-15.c): a bracket kind annotation (`'F: * -> *`)
+/// conflicting with how the signature's own effect already used the
+/// variable -- both spans, the usage mention and the annotation, per the
+/// house diagnostic style (`var_kind_conflict_error`).
+fn var_kind_annotation_conflict_error(
+    name: &str,
+    usage_span: Span,
+    usage_desc: &str,
+    annotation_span: Span,
+    annotation_kind: &str,
+) -> String {
+    format!(
+        "error: type variable `{name}` at line {}, col {} is used as {usage_desc} but is annotated `{annotation_kind}` at line {}, col {}",
+        usage_span.line, usage_span.col, annotation_span.line, annotation_span.col
+    )
+}
+
+/// P7b.S1 (R1/S1-14 precursor): render a `Kind` the way a kind expression is
+/// spelled in source (`*`, `Len`, `* -> Len -> *`).
+fn kind_str(kind: &Kind) -> String {
+    match kind {
+        Kind::Star => "*".to_string(),
+        Kind::Len => "Len".to_string(),
+        Kind::Arrow { domains, result } => {
+            let mut parts: Vec<String> = domains.iter().map(kind_str).collect();
+            parts.push(kind_str(result));
+            parts.join(" -> ")
+        }
+    }
+}
+
+/// P7b.S1 (R1/S1-2/S1-9): one atom of a kind expression -- `*` or `Len`.
+/// `unknown_kind_error` lets each of the two call sites
+/// (`parse_optional_bound_bracket`, `parse_header_bracket`) report in its own
+/// established voice (`unknown_capability_error` vs
+/// `header_bracket_unknown_kind_error`).
+fn parse_kind_atom(
+    parser: &mut Parser<'_>,
+    unknown_kind_error: impl Fn(&str, Span) -> String,
+) -> Result<Kind, String> {
+    let (w, span) = parser.expect_word_any_spanned()?;
+    if w == "*" {
+        Ok(Kind::Star)
+    } else if w == LEN_KIND_NAME {
+        Ok(Kind::Len)
+    } else {
+        Err(unknown_kind_error(&w, span))
+    }
+}
+
+/// P7b.S1 (R1/S1-2): a full kind expression -- one atom, or an n-ary arrow
+/// chain (`* -> Len -> *`) folded into `Kind::Arrow { domains, result }`
+/// (the last atom is the result; every earlier atom is a domain). Not
+/// curried (S1-1): Sooth application splits type slots from length slots at
+/// every call site, so `array` is honestly `* -> Len -> *`, a single
+/// two-domain arrow, not `* -> (Len -> *)`.
+fn parse_kind_expr(
+    parser: &mut Parser<'_>,
+    unknown_kind_error: impl Fn(&str, Span) -> String + Copy,
+) -> Result<Kind, String> {
+    let mut atoms = vec![parse_kind_atom(parser, unknown_kind_error)?];
+    while matches!(parser.peek(), Some((Token::Word(w), _)) if w == "->") {
+        parser.pos += 1;
+        atoms.push(parse_kind_atom(parser, unknown_kind_error)?);
+    }
+    if atoms.len() == 1 {
+        Ok(atoms.pop().expect("just pushed"))
+    } else {
+        let result = atoms.pop().expect("len() > 1");
+        Ok(Kind::Arrow {
+            domains: atoms,
+            result: Box::new(result),
+        })
+    }
 }
 
 /// P7.S6a (R2.1): a non-empty header bracket binding zero type variables
@@ -1895,6 +2153,108 @@ fn generic_arity_error(
         span.line,
         span.col,
         example,
+    )
+}
+
+/// P7b.S1 (S1-7): an application supplying zero type arguments (`'F[]`),
+/// pinned as an arity error -- an application always names at least one
+/// argument, unlike a generic header applied to zero variables (which has
+/// no bracket at all).
+fn empty_type_application_error(var: &str, span: Span) -> String {
+    format!(
+        "error: `{var}[]` at line {}, col {} applies `{var}` to zero arguments (an application needs at least one type argument)",
+        span.line, span.col
+    )
+}
+
+/// P7b.S1 (S1-6): a quotation-shaped argument inside a type application's
+/// argument list (`'F[[ i64 -- i64 ]]`) -- S1's application arguments are
+/// type expressions only.
+fn app_arg_quotation_error(span: Span) -> String {
+    format!(
+        "error: expected a type, found `[` at line {}, col {} (a type application's arguments are types, not quotations)",
+        span.line, span.col
+    )
+}
+
+/// S1-15.a: a type variable bound bare (kind `*`) at an earlier mention,
+/// then applied like a constructor (`'F['T]`) at a later one -- located,
+/// naming both the misuse site and the binding site.
+fn star_applied_like_constructor_error(name: &str, misuse: Span, binding: Span) -> String {
+    format!(
+        "error: type variable `{name}` at line {}, col {} is applied like a type constructor but has kind `*` (bound bare at line {}, col {}); only a higher-kinded variable can head `{name}[...]`",
+        misuse.line, misuse.col, binding.line, binding.col
+    )
+}
+
+/// S1-15.b: a type variable applied at an earlier mention (kind `* -> ...`),
+/// then used bare at a later one -- located, naming both the misuse site and
+/// the binding (first application) site.
+fn arrow_var_used_bare_error(name: &str, misuse: Span, binding: Span, kind: &Kind) -> String {
+    format!(
+        "error: type variable `{name}` at line {}, col {} is used as a plain type but has kind `{}` (from an application of `{name}` at line {}, col {}); a higher-kinded variable never appears bare",
+        misuse.line, misuse.col, kind_str(kind), binding.line, binding.col
+    )
+}
+
+/// S1-15.f: a use-site constructor-header argument (`Wrap[Nat i64]`) whose
+/// `CtorImage`-ness disagrees with the header variable's own declared kind --
+/// a plain type supplied where the header expects a constructor (`'F: * ->
+/// *`), or a constructor supplied where it expects a plain type.
+fn validate_ctor_arg_kinds(
+    header: &str,
+    ty_var_names: &[String],
+    ty_kinds: &[Kind],
+    args: &[Type],
+    span: Span,
+) -> Result<(), String> {
+    for ((var, kind), arg) in ty_var_names.iter().zip(ty_kinds.iter()).zip(args.iter()) {
+        let is_ctor = matches!(arg, Type::CtorImage(_, _));
+        let wants_ctor = matches!(kind, Kind::Arrow { .. });
+        if is_ctor != wants_ctor {
+            return Err(ctor_arg_kind_mismatch_error(header, var, kind, *arg, span));
+        }
+    }
+    Ok(())
+}
+
+fn ctor_arg_kind_mismatch_error(
+    header: &str,
+    var: &str,
+    expected: &Kind,
+    got: Type,
+    span: Span,
+) -> String {
+    let remedy = if matches!(expected, Kind::Arrow { .. }) {
+        "a type constructor is required here, not a concrete type"
+    } else {
+        "a concrete type is required here, not a type constructor"
+    };
+    format!(
+        "error: `{header}[...]` at line {}, col {} supplies `{got}` for `{var}`, but `{var}` has kind `{}` ({remedy})",
+        span.line,
+        span.col,
+        kind_str(expected)
+    )
+}
+
+/// S1-15.d: an application's arity conflicts with the arity an earlier
+/// application of the same variable already established -- located, naming
+/// both the conflicting site and the binding (first application) site.
+fn application_arity_conflict_error(
+    name: &str,
+    misuse: Span,
+    got_arity: usize,
+    binding: Span,
+    expected_arity: usize,
+) -> String {
+    format!(
+        "error: `{name}[...]` at line {}, col {} applies `{name}` to {got_arity} argument{} but its kind takes {expected_arity} (from `{name}[...]` at line {}, col {})",
+        misuse.line,
+        misuse.col,
+        if got_arity == 1 { "" } else { "s" },
+        binding.line,
+        binding.col
     )
 }
 
@@ -2077,6 +2437,15 @@ fn generic_field_type_str(
         PolyType::GenericVariant { .. } => unreachable!(
             "a generic variant is unconstructible outside an eliminator arm's own input row; it is never a generic `type:` field's shape"
         ),
+        // P7b.S1 (S1-8): a header/field application (`f 'F['T]`), rendered
+        // by the applied variable's own surface spelling plus its arguments.
+        PolyType::App { head, args } => {
+            let parts: Vec<String> = args
+                .iter()
+                .map(|a| generic_field_type_str(a, ty_vars, len_vars))
+                .collect();
+            format!("{}[{}]", ty_vars[*head as usize].0, parts.join(" "))
+        }
     }
 }
 
@@ -2135,6 +2504,23 @@ fn reject_growing_generic_argument(
         PolyType::GenericVariant { .. } => unreachable!(
             "a generic variant is unconstructible outside an eliminator arm's own input row; it is never a generic `type:` field's shape"
         ),
+        // P7b.S1 (S1-8): an application field is subject to the same
+        // growth restriction as a `Generic` field -- an argument that is
+        // itself compound and variable-bearing would grow at every
+        // instantiation exactly as a `Generic`'s would.
+        PolyType::App { head, args } => {
+            for arg in args {
+                if !matches!(arg, PolyType::Concrete(_) | PolyType::Var(_)) {
+                    return Err(growing_generic_self_reference_error(
+                        decl_name,
+                        &format!("'F{head}"),
+                        arg,
+                        span,
+                    ));
+                }
+            }
+            Ok(())
+        }
     }
 }
 
@@ -2290,6 +2676,13 @@ struct Parser<'t> {
     /// never written) for the import/export scans, which have no generic
     /// declaration to apply.
     generics: &'t mut GenericTypes,
+    /// P7b.S1 (S1-5/S1-9, Phase 3): each header type variable's kind as
+    /// established by its *first* field-usage mention within the
+    /// declaration currently being parsed -- the header-field twin of
+    /// `PolyBuilder::ty_established_kind`. Reset at the start of each
+    /// declaration's field list (`parse_generic_typedef_fields`), since a
+    /// ty var id is decl-local and would otherwise collide across decls.
+    field_kind_marks: std::collections::HashMap<u32, (Kind, Span)>,
     /// P7.S3e (R3): the whole-program trait registry (pre-seeded `Copy`
     /// plus every user `trait:` declaration in the closure), populated by
     /// `prepass_trait_decls` before any body parses -- mirrors `structs`/
@@ -2442,13 +2835,13 @@ impl<'t> Parser<'t> {
     #[allow(clippy::type_complexity)]
     fn parse_optional_bound_bracket(
         &mut self,
-    ) -> Result<Option<Vec<(String, Span, Vec<Bound>, bool)>>, String> {
+    ) -> Result<Option<Vec<(String, Span, Vec<Bound>, Option<Kind>)>>, String> {
         if !matches!(self.peek(), Some((Token::LBracket, _))) {
             return Ok(None);
         }
         let bracket_span = self.peek().map(|(_, s)| *s).unwrap_or_default();
         self.pos += 1; // consume `[`
-        let mut entries: Vec<(String, Span, Vec<Bound>, bool)> = Vec::new();
+        let mut entries: Vec<(String, Span, Vec<Bound>, Option<Kind>)> = Vec::new();
         loop {
             match self.peek() {
                 Some((Token::RBracket, _)) => {
@@ -2475,15 +2868,22 @@ impl<'t> Parser<'t> {
                     if bound_follows && !glued_colon {
                         self.pos += 1;
                     }
-                    let is_len_kind = bound_follows
-                        && matches!(self.peek(), Some((Token::Word(k), _)) if k == LEN_KIND_NAME);
-                    let bounds = if is_len_kind {
-                        self.pos += 1;
-                        Vec::new()
+                    // P7b.S1 (R1/S1-9): a bound position starting with `*` or
+                    // `Len` is a *kind* annotation, not a capability bound --
+                    // routed here, before `parse_capabilities` ever sees it,
+                    // so `*`/`->` never need reserving as capability names
+                    // (they simply never reach that parser).
+                    let starts_kind = bound_follows
+                        && matches!(self.peek(), Some((Token::Word(w), _)) if w == "*" || w == LEN_KIND_NAME);
+                    let (bounds, kind) = if starts_kind {
+                        (
+                            Vec::new(),
+                            Some(parse_kind_expr(self, unknown_capability_error)?),
+                        )
                     } else if bound_follows {
-                        self.parse_capabilities(span, true)?
+                        (self.parse_capabilities(span, true)?, None)
                     } else {
-                        Vec::new()
+                        (Vec::new(), None)
                     };
                     if entries.iter().any(|(n, _, _, _)| n == &name) {
                         return Err(duplicate_generic_ty_var_error(
@@ -2492,7 +2892,7 @@ impl<'t> Parser<'t> {
                             span,
                         ));
                     }
-                    entries.push((name, span, bounds, is_len_kind));
+                    entries.push((name, span, bounds, kind));
                 }
                 Some((tok, span)) => {
                     return Err(bound_bracket_non_var_error(tok, *span));
@@ -2511,35 +2911,113 @@ impl<'t> Parser<'t> {
     /// `sig.ty_var_names`; a name that never appears in the effect is a
     /// located error (it would leave a bound on a variable with no slot).
     ///
-    /// P7.S6a (R2b): an `is_len_kind` entry is a pure validation, not a
-    /// bound -- it looks its name up in `sig.len_var_names` instead, and
-    /// pushes nothing to `sig.bounds`. A word's variable ids are already
-    /// effect-first-mention-derived, so `sig.len_var_names` needs no new
-    /// interning path here: `'N: Len` only confirms a length variable the
-    /// effect itself already bound.
+    /// P7b.S1 (R2/S1-4, widening P7.S6a's R2b): a `Some(kind)` entry is a
+    /// pure validation/annotation, never a bound. The k8 flip (S1-3): a
+    /// bare, unannotated entry (`None`) with no bounds no longer assumes
+    /// `ty_var_names` -- it resolves against whichever of `ty_var_names`/
+    /// `len_var_names` the effect actually used the name as, so an
+    /// unannotated length var (`array['T 'N]` with no `'N: Len`) is accepted
+    /// with its kind inferred from the count position, annotations becoming
+    /// optional-but-available. A `Some(kind)` entry conflicting with the
+    /// effect's own usage (S1-15.c) is a located error carrying both spans:
+    /// the usage mention (`sig.ty_var_spans`/`len_var_spans`) and the
+    /// annotation (`span`).
     fn attach_bracket_bounds(
         &self,
         sig: &mut PolySig,
-        bracket: &[(String, Span, Vec<Bound>, bool)],
+        bracket: &[(String, Span, Vec<Bound>, Option<Kind>)],
         word_name: &str,
     ) -> Result<(), String> {
-        for (name, span, bounds, is_len_kind) in bracket {
-            if *is_len_kind {
-                sig.len_var_names
-                    .iter()
-                    .any(|n| n == name)
-                    .then_some(())
-                    .ok_or_else(|| bracket_len_var_unused_error(name, *span, word_name))?;
-                continue;
-            }
-            let id = sig
-                .ty_var_names
-                .iter()
-                .position(|n| n == name)
-                .ok_or_else(|| bracket_var_unused_error(name, *span, word_name))?
-                as u32;
-            for b in bounds {
-                sig.bounds.push((id, *b));
+        // S1-5: every published kind vector is length-matched to its name
+        // table -- `sig.ty_kinds[i]` below indexes on a position recovered
+        // from `sig.ty_var_names`, so a drift here would silently index
+        // past (or short of) the real per-variable kind.
+        debug_assert_eq!(
+            sig.ty_var_names.len(),
+            sig.ty_kinds.len(),
+            "PolySig::ty_kinds must stay parallel to ty_var_names (S1-5)"
+        );
+        for (name, span, bounds, kind) in bracket {
+            let ty_idx = sig.ty_var_names.iter().position(|n| n == name);
+            let len_idx = sig.len_var_names.iter().position(|n| n == name);
+            match kind {
+                Some(k) => match (k, ty_idx, len_idx) {
+                    (Kind::Len, _, Some(_)) => {}
+                    (Kind::Len, Some(i), None) => {
+                        return Err(var_kind_annotation_conflict_error(
+                            name,
+                            sig.ty_var_spans[i],
+                            "a plain type",
+                            *span,
+                            "Len",
+                        ));
+                    }
+                    (Kind::Len, None, None) => {
+                        return Err(bracket_len_var_unused_error(name, *span, word_name));
+                    }
+                    // P7b.S1 (S1-4 Phase 3): compare against the *resolved*
+                    // usage kind, not merely against whether the variable
+                    // was mentioned at all -- a var mentioned only as an
+                    // application head (`'F['T]`) is still `Some(i)` in
+                    // `ty_idx` (identity tracking, not kind tracking), so an
+                    // `Arrow` annotation confirming an `Arrow` usage must
+                    // not be flagged merely because the variable "is a plain
+                    // type" by presence alone.
+                    (k, Some(i), None) if *k == sig.ty_kinds[i] => {}
+                    (k, Some(i), None) => {
+                        let usage_desc = match &sig.ty_kinds[i] {
+                            Kind::Star => "a plain type".to_string(),
+                            Kind::Len => "a length".to_string(),
+                            arrow @ Kind::Arrow { .. } => {
+                                format!("an application of kind `{}`", kind_str(arrow))
+                            }
+                        };
+                        return Err(var_kind_annotation_conflict_error(
+                            name,
+                            sig.ty_var_spans[i],
+                            &usage_desc,
+                            *span,
+                            &kind_str(k),
+                        ));
+                    }
+                    (k, None, Some(i)) => {
+                        return Err(var_kind_annotation_conflict_error(
+                            name,
+                            sig.len_var_spans[i],
+                            "a length",
+                            *span,
+                            &kind_str(k),
+                        ));
+                    }
+                    // P7b.S1 (R2/S1-4): an arrow-kind annotation on a header
+                    // var never mentioned anywhere in the effect has no
+                    // usage to compare against -- unlike the `Some(i)` arms
+                    // above, which do compare against `sig.ty_kinds[i]` --
+                    // so it stays a bare declaration, permanently, not a
+                    // temporary Phase 1 shortcut.
+                    (Kind::Arrow { .. }, None, None) => {}
+                    (_, None, None) => {
+                        return Err(bracket_var_unused_error(name, *span, word_name));
+                    }
+                    // Unreachable: `intern_ty_var`/`intern_len_var` reject a
+                    // name mentioned in both spaces before a signature can
+                    // ever reach here (`var_kind_conflict_error`, X1).
+                    (_, Some(_), Some(_)) => {
+                        return Err(bracket_var_unused_error(name, *span, word_name));
+                    }
+                },
+                None => {
+                    if let Some(i) = ty_idx {
+                        for b in bounds {
+                            sig.bounds.push((i as u32, *b));
+                        }
+                    } else if !bounds.is_empty() || len_idx.is_none() {
+                        return Err(bracket_var_unused_error(name, *span, word_name));
+                    }
+                    // `len_idx.is_some()` with no bounds: the k8 flip -- a
+                    // bare bracket entry confirming a length variable the
+                    // effect already bound, nothing to push.
+                }
             }
         }
         Ok(())
@@ -2976,8 +3454,14 @@ impl<'t> Parser<'t> {
             return Err(impl_target_row_var_error());
         }
         let pattern = self.raw_to_poly_type(raw)?;
+        if let Some(head) = poly_type_app_head(&pattern) {
+            let var = builder.ty_names[head as usize].clone();
+            let span = builder.ty_var_spans[head as usize];
+            return Err(impl_target_app_unsupported_error(&var, span));
+        }
         Ok(ImplTarget {
             pattern,
+            ty_kinds: vec![Kind::Star; builder.ty_names.len()],
             ty_var_names: builder.ty_names,
             len_var_names: builder.len_names,
             bounds: Vec::new(),
@@ -3170,8 +3654,11 @@ impl<'t> Parser<'t> {
                 outputs,
                 row_out: None,
                 bounds: target.bounds.clone(),
+                ty_kinds: target.ty_kinds.clone(),
                 ty_var_names: target.ty_var_names.clone(),
+                ty_var_spans: vec![Span::default(); target.ty_var_names.len()],
                 len_var_names: target.len_var_names.clone(),
+                len_var_spans: vec![Span::default(); target.len_var_names.len()],
                 row_var_names: Vec::new(),
             };
             Ok((
@@ -3496,7 +3983,24 @@ impl<'t> Parser<'t> {
         }
         if matches!(self.peek(), Some((Token::Word(w), _)) if w.starts_with('\'')) {
             let (w, span) = self.expect_word_any_spanned()?;
-            return self.parse_poly_ty_var(builder, &w, span);
+            let raw = self.parse_poly_ty_var(builder, &w, span)?;
+            // P7b.S1 (S1-6): the `[`-router. A `[` following the variable is
+            // a type application when its bracket holds no top-depth `--`;
+            // when it does, this is unchanged -- the `[` opens the *next*
+            // slot in the effect (a quotation parameter), not an
+            // application on this variable.
+            if let RawTy::Var(head) = raw {
+                if matches!(self.peek(), Some((Token::LBracket, _)))
+                    && !self.top_depth_arrow_present(0)
+                {
+                    return self.parse_poly_var_application(builder, word_is_output, head, span);
+                }
+                // P7b.S1 (S1-3/S1-4): a bare mention -- establishes `Star`
+                // on first sight, or checks against an already-established
+                // `Arrow` (S1-15.b).
+                builder.mark_ty_star(head, span)?;
+            }
+            return Ok(raw);
         }
         // Slice 13 (R-A3): a `&`-led slot, intercepted *before* the
         // `parse_type_expr` fallthrough -- which resolves a reference's
@@ -3533,6 +4037,15 @@ impl<'t> Parser<'t> {
                     };
                     self.pos += 1;
                     let inner = self.parse_poly_ty_var(builder, &remainder, remainder_span)?;
+                    // P7b.S1 review fix: this glued-sigil site used to skip
+                    // straight past kind collection -- unlike the spaced `'`
+                    // arm above, which marks a bare mention immediately
+                    // after interning. A referent behind `&`/`&!` is always
+                    // a bare (non-applied) use, so this mirrors that arm's
+                    // `mark_ty_star` call, not its `[`-router.
+                    if let RawTy::Var(head) = inner {
+                        builder.mark_ty_star(head, remainder_span)?;
+                    }
                     return Ok(RawTy::Ref(Box::new(inner), mutable));
                 }
                 // P7.S6 (R1a): `&array['T 4]` -- the `&` and `array` are
@@ -3581,7 +4094,14 @@ impl<'t> Parser<'t> {
                         ..span
                     };
                     self.pos += 1;
-                    Some(self.parse_poly_ty_var(builder, &remainder, remainder_span)?)
+                    let inner = self.parse_poly_ty_var(builder, &remainder, remainder_span)?;
+                    // P7b.S1 review fix: mirrors the `&`-glued arm above --
+                    // a payload behind `^`/`^^` is always a bare use, so mark
+                    // it here rather than skipping kind collection entirely.
+                    if let RawTy::Var(head) = inner {
+                        builder.mark_ty_star(head, remainder_span)?;
+                    }
+                    Some(inner)
                 } else if remainder == ARRAY_TYPE_NAME
                     && matches!(self.tokens.get(self.pos + 1), Some((Token::LBracket, _)))
                 {
@@ -3752,6 +4272,65 @@ impl<'t> Parser<'t> {
             name: name.to_string(),
             span,
         })
+    }
+
+    /// P7b.S1 (S1-6/S1-7): a type variable applied to type arguments
+    /// (`'F['T]`) -- the higher-kinded twin of `parse_poly_generic_application`,
+    /// but with no known header to read an arity from (the head is a
+    /// *variable*, whose kind is inferred from this very application, S1-3),
+    /// so every argument parses as a type slot with no arity bound.
+    /// Positioned just past the variable; `span` is the variable's own span,
+    /// for the empty-application diagnostic. Arguments are type expressions
+    /// only (S1-6): a quotation-shaped argument is fenced by
+    /// `parse_poly_app_arg`.
+    fn parse_poly_var_application(
+        &mut self,
+        builder: &mut PolyBuilder,
+        word_is_output: bool,
+        head: u32,
+        span: Span,
+    ) -> Result<RawTy, String> {
+        self.expect(Token::LBracket)?;
+        let mut args = Vec::new();
+        loop {
+            match self.peek() {
+                Some((Token::RBracket, _)) => {
+                    self.pos += 1;
+                    break;
+                }
+                None => {
+                    return Err(self.eof_error("`]` (unterminated type application)"));
+                }
+                _ => args.push(self.parse_poly_app_arg(builder, word_is_output)?),
+            }
+        }
+        if args.is_empty() {
+            let var = builder.ty_names[head as usize].clone();
+            return Err(empty_type_application_error(&var, span));
+        }
+        // P7b.S1 (S1-3/S1-4): an application-head mention -- establishes
+        // `Arrow { domains: [Star; args.len()], .. }` on first sight, or
+        // checks against an already-established kind (S1-15.a/d).
+        builder.mark_ty_arrow(head, args.len(), span)?;
+        Ok(RawTy::App { head, args })
+    }
+
+    /// P7b.S1 (S1-6): one argument of a type application -- a type
+    /// expression only, never a quotation. A bare `[` here would otherwise
+    /// be read as a quotation effect by `parse_poly_slot`'s own `[` arm,
+    /// which is exactly the shape S1-6 fences: `'F[[ i64 -- i64 ]]` is a
+    /// parse error, not an application argument.
+    fn parse_poly_app_arg(
+        &mut self,
+        builder: &mut PolyBuilder,
+        word_is_output: bool,
+    ) -> Result<RawTy, String> {
+        if let Some((tok, span)) = self.peek() {
+            if matches!(tok, Token::LBracket | Token::TildeLBracket) {
+                return Err(app_arg_quotation_error(*span));
+            }
+        }
+        self.parse_poly_slot(builder, word_is_output)
     }
 
     /// One type-variable slot, already lexed: `'T`, with an optional bound at
@@ -4133,6 +4712,16 @@ impl<'t> Parser<'t> {
                 } else {
                     PolyType::OwnedCell(Box::new(inner))
                 }
+            }
+            // P7b.S1 (S1-7): no all-concrete fold -- the head names a
+            // variable, which never grounds to a `Type` at parse time (that
+            // is Phase 3's `apply_subst`/S1-11 grounding via `CtorImage`).
+            RawTy::App { head, args } => {
+                let args: Vec<PolyType> = args
+                    .into_iter()
+                    .map(|r| self.raw_to_poly_type(r))
+                    .collect::<Result<_, _>>()?;
+                PolyType::App { head, args }
             }
             // P7 slice 3a (R1): the fold mirrors the array fold exactly --
             // if every argument is `PolyType::Concrete`, instantiate through
@@ -4522,6 +5111,24 @@ impl<'t> Parser<'t> {
             self.tokens.get(self.pos)
         };
         let span = opener.map(|(_, s)| *s).unwrap_or_default();
+        if self.top_depth_arrow_present(depth_base) {
+            return Ok(());
+        }
+        Err(quotation_effect_missing_arrow_error(
+            span,
+            opened_with_tilde,
+        ))
+    }
+
+    /// P7b.S1 (S1-6): the boolean scan `require_top_depth_arrow` errors on,
+    /// extracted as a **router predicate** -- whether the bracket the parser
+    /// is positioned at (per `depth_base`, exactly as that function's own
+    /// doc explains) holds a top-depth `--`. Used by `parse_poly_ty_var` to
+    /// decide whether a `[` following a type variable opens a quotation slot
+    /// (present) or a type application (absent); `require_top_depth_arrow`
+    /// itself keeps its own `Result`-returning, error-on-absence contract for
+    /// its existing callers.
+    fn top_depth_arrow_present(&self, depth_base: i32) -> bool {
         let mut depth = depth_base;
         let mut i = self.pos;
         while let Some((tok, _)) = self.tokens.get(i) {
@@ -4533,15 +5140,12 @@ impl<'t> Parser<'t> {
                         break;
                     }
                 }
-                Token::Word(w) if w == "--" && depth == 1 => return Ok(()),
+                Token::Word(w) if w == "--" && depth == 1 => return true,
                 _ => {}
             }
             i += 1;
         }
-        Err(quotation_effect_missing_arrow_error(
-            span,
-            opened_with_tilde,
-        ))
+        false
     }
 
     /// Slice 6a (R2): parse `[ <in-types> -- <out-types> ]` into a
@@ -5078,6 +5682,10 @@ impl<'t> Parser<'t> {
     ) -> Result<Vec<(String, PolyType)>, String> {
         let mut used = vec![false; ty_vars.len()];
         let mut used_len = vec![false; len_vars.len()];
+        // P7b.S1 (S1-5/S1-9): a fresh per-decl kind side table -- ty var
+        // ids are decl-local, so a table left over from a previous
+        // declaration's fields would misattribute a stale established kind.
+        self.field_kind_marks.clear();
         let mut fields = Vec::new();
         loop {
             match self.peek() {
@@ -5126,6 +5734,10 @@ impl<'t> Parser<'t> {
         }
         let mut used = vec![false; ty_vars.len()];
         let mut used_len = vec![false; len_vars.len()];
+        // P7b.S1 (S1-5/S1-9): see `parse_generic_typedef_fields`'s own
+        // reset -- shared across every variant of this one enum decl (the
+        // header's ty vars are decl-wide, not per-variant).
+        self.field_kind_marks.clear();
         let mut variants = Vec::new();
         loop {
             match self.peek() {
@@ -5180,17 +5792,25 @@ impl<'t> Parser<'t> {
         let (name, _) = self.expect_word_any_spanned()?;
         // `header_is_generic` gates every route here, so the `[` is present.
         let vars = self.parse_header_bracket(&name)?;
+        // P7b.S1 (R1): an `Arrow`-kinded variable is still a *type* variable
+        // (`Kind`'s own doc comment), so it joins `ty_vars`/`ty_kinds`
+        // alongside `Star`, never `len_vars`.
         let ty_vars = vars
             .iter()
-            .filter(|(_, _, k)| *k == Kind::Star)
+            .filter(|(_, _, k)| !matches!(k, Kind::Len))
             .map(|(n, s, _)| (n.clone(), *s))
+            .collect();
+        let ty_kinds = vars
+            .iter()
+            .filter(|(_, _, k)| !matches!(k, Kind::Len))
+            .map(|(_, _, k)| k.clone())
             .collect();
         let len_vars = vars
             .iter()
-            .filter(|(_, _, k)| *k == Kind::Len)
+            .filter(|(_, _, k)| matches!(k, Kind::Len))
             .map(|(n, s, _)| (n.clone(), *s))
             .collect();
-        Ok((name, ty_vars, len_vars, type_span))
+        Ok((name, ty_vars, ty_kinds, len_vars, type_span))
     }
 
     /// One generic variant's field list, mirroring `parse_variant_fields`
@@ -5308,7 +5928,8 @@ impl<'t> Parser<'t> {
                     self.skip_typedef();
                 } else {
                     let is_enum = self.current_typedef_is_enum();
-                    let (name, ty_vars, len_vars, type_span) = self.parse_generic_header()?;
+                    let (name, ty_vars, ty_kinds, len_vars, type_span) =
+                        self.parse_generic_header()?;
                     let ty_var_names = ty_vars.iter().map(|(n, _)| n.clone()).collect();
                     let len_var_names = len_vars.iter().map(|(n, _)| n.clone()).collect();
                     let idx = if is_enum {
@@ -5316,6 +5937,7 @@ impl<'t> Parser<'t> {
                             .push_enum_placeholder(crate::ast::GenericEnumDecl {
                                 name: name.clone(),
                                 ty_var_names,
+                                ty_kinds: ty_kinds.clone(),
                                 len_var_names,
                                 variants: Vec::new(),
                                 span: type_span,
@@ -5326,13 +5948,19 @@ impl<'t> Parser<'t> {
                             .push_struct_placeholder(crate::ast::GenericStructDecl {
                                 name: name.clone(),
                                 ty_var_names,
+                                ty_kinds: ty_kinds.clone(),
                                 len_var_names,
                                 fields: Vec::new(),
                                 span: type_span,
                                 module: self.module,
                             })
                     };
-                    headers.push((is_enum, idx, self.pos, (name, ty_vars, len_vars, type_span)));
+                    headers.push((
+                        is_enum,
+                        idx,
+                        self.pos,
+                        (name, ty_vars, ty_kinds, len_vars, type_span),
+                    ));
                     self.skip_typedef();
                 }
                 i = self.pos;
@@ -5340,7 +5968,7 @@ impl<'t> Parser<'t> {
             }
             i += 1;
         }
-        for (is_enum, idx, pos, (name, ty_vars, len_vars, type_span)) in headers {
+        for (is_enum, idx, pos, (name, ty_vars, _ty_kinds, len_vars, type_span)) in headers {
             self.pos = pos;
             if is_enum {
                 let variants = self
@@ -5355,6 +5983,7 @@ impl<'t> Parser<'t> {
                     refs: self.refs,
                 };
                 self.generics.fill_enum_variants(idx, variants, regs);
+                self.publish_field_inferred_kinds(true, idx);
             } else {
                 let fields = self.parse_generic_typedef_fields(&name, &ty_vars, &len_vars)?;
                 let regs = MutRegistries {
@@ -5365,6 +5994,7 @@ impl<'t> Parser<'t> {
                     refs: self.refs,
                 };
                 self.generics.fill_struct_fields(idx, fields, regs);
+                self.publish_field_inferred_kinds(false, idx);
             }
         }
         self.pos = 0;
@@ -5499,9 +6129,16 @@ impl<'t> Parser<'t> {
             }
         }
         if let Some(idx) = self.generics.find_struct(base, owner) {
-            let ty_arity = self.generics.structs[idx].ty_var_names.len();
+            let ty_var_names = self.generics.structs[idx].ty_var_names.clone();
+            let ty_kinds = self.generics.structs[idx].ty_kinds.clone();
+            let ty_arity = ty_var_names.len();
             let len_arity = self.generics.structs[idx].len_var_names.len();
             let (args, lens) = self.parse_type_arguments(name, ty_arity, len_arity, span)?;
+            // S1-15.f: a use-site argument's `CtorImage`-ness must agree with
+            // the header variable's own declared kind -- a plain type where a
+            // constructor was declared (or the reverse) is a located error,
+            // not a silent (wrong) bind at instantiation.
+            validate_ctor_arg_kinds(name, &ty_var_names, &ty_kinds, &args, span)?;
             let regs = MutRegistries {
                 structs: self.structs,
                 enums: self.enums,
@@ -5514,9 +6151,12 @@ impl<'t> Parser<'t> {
                 .instantiate_struct(idx, &args, &lens, self.module, regs));
         }
         if let Some(idx) = self.generics.find_enum(base, owner) {
-            let ty_arity = self.generics.enums[idx].ty_var_names.len();
+            let ty_var_names = self.generics.enums[idx].ty_var_names.clone();
+            let ty_kinds = self.generics.enums[idx].ty_kinds.clone();
+            let ty_arity = ty_var_names.len();
             let len_arity = self.generics.enums[idx].len_var_names.len();
             let (args, lens) = self.parse_type_arguments(name, ty_arity, len_arity, span)?;
+            validate_ctor_arg_kinds(name, &ty_var_names, &ty_kinds, &args, span)?;
             let regs = MutRegistries {
                 structs: self.structs,
                 enums: self.enums,
@@ -5603,6 +6243,33 @@ impl<'t> Parser<'t> {
     /// variable, since it parses inside another header's own field list; a
     /// concrete use site never has a length variable in scope, so this one
     /// only ever reads a literal).
+    /// P7b.S1 (S1-8/S1-12): one use-site type argument. A bare word naming
+    /// a generic `type:` header, *not* itself followed by `[`, is a
+    /// constructor image (`Wrap[Box i64]`'s `Box`) rather than an
+    /// under-applied header -- `resolve_type_or_apply` would otherwise
+    /// require it to be applied here and report an arity error. Anything
+    /// else (a concrete type, or a header immediately applied, `Wrap[Box[i64]
+    /// i64]`) parses exactly as before.
+    fn parse_type_argument(&mut self) -> Result<Type, String> {
+        if let Some((Token::Word(w), span)) = self.peek() {
+            if !w.starts_with(['\'', '&', '^']) {
+                let (w, span) = (w.clone(), *span);
+                if !matches!(self.tokens.get(self.pos + 1), Some((Token::LBracket, _))) {
+                    if let Some((is_enum, idx, module)) = self.poly_generic_header(&w, span)? {
+                        self.pos += 1;
+                        let gid = crate::ast::GenericId {
+                            is_enum,
+                            idx: idx as u32,
+                            module,
+                        };
+                        return Ok(crate::ast::ctor_image_type(self.generics, gid));
+                    }
+                }
+            }
+        }
+        self.parse_type_expr()
+    }
+
     fn parse_type_arguments(
         &mut self,
         name: &str,
@@ -5628,7 +6295,7 @@ impl<'t> Parser<'t> {
                 _ => {}
             }
             if args.len() < ty_arity {
-                args.push(self.parse_type_expr()?);
+                args.push(self.parse_type_argument()?);
                 continue;
             }
             if lens.len() < len_arity {
@@ -5639,7 +6306,7 @@ impl<'t> Parser<'t> {
             // permissively (as a type expression) so the arity check below
             // reports the real supplied count instead of a misleading
             // length-literal error.
-            args.push(self.parse_type_expr()?);
+            args.push(self.parse_type_argument()?);
         }
         if args.len() != ty_arity || lens.len() != len_arity {
             return Err(generic_arity_error(
@@ -5696,11 +6363,7 @@ impl<'t> Parser<'t> {
                         self.pos += 1;
                     }
                     let kind = if colon_follows {
-                        let (kind_name, kind_span) = self.expect_word_any_spanned()?;
-                        if kind_name != LEN_KIND_NAME {
-                            return Err(header_bracket_unknown_kind_error(&kind_name, kind_span));
-                        }
-                        Kind::Len
+                        parse_kind_expr(self, header_bracket_unknown_kind_error)?
                     } else {
                         Kind::Star
                     };
@@ -5721,7 +6384,10 @@ impl<'t> Parser<'t> {
         if vars.is_empty() {
             return Err(empty_header_bracket_error(decl_name, bracket_span));
         }
-        if !vars.iter().any(|(_, _, k)| *k == Kind::Star) {
+        // P7b.S1 (R1): an `Arrow`-kinded variable is still a *type*
+        // variable (`Kind`'s own doc comment), so it satisfies this check
+        // exactly as `Star` does; only an all-`Len` bracket is rejected.
+        if !vars.iter().any(|(_, _, k)| !matches!(k, Kind::Len)) {
             return Err(header_bracket_no_type_variable_error(
                 decl_name,
                 bracket_span,
@@ -5797,9 +6463,23 @@ impl<'t> Parser<'t> {
             let (w, span) = (w.clone(), *span);
             if w.starts_with('\'') {
                 self.pos += 1;
-                return Ok(PolyType::Var(
-                    self.resolve_field_ty_var(decl_name, ty_vars, used, &w, span)?,
-                ));
+                let head = self.resolve_field_ty_var(decl_name, ty_vars, used, &w, span)?;
+                // P7b.S1 (S1-8): the variable arm's own bracket continuation
+                // -- unlike the `&`/`^` arms, which have always had one for a
+                // named generic header. A field `f 'F['T]` applies the
+                // header's own type variable to its argument list.
+                if matches!(self.peek(), Some((Token::LBracket, _))) {
+                    let applied = self.parse_generic_field_var_application(
+                        decl_name, ty_vars, used, len_vars, used_len, head, span,
+                    )?;
+                    let PolyType::App { args, .. } = &applied else {
+                        unreachable!("parse_generic_field_var_application always returns App")
+                    };
+                    self.check_field_arrow_kind(decl_name, head, &w, span, args.len())?;
+                    return Ok(applied);
+                }
+                self.check_field_bare_kind(decl_name, head, &w, span)?;
+                return Ok(PolyType::Var(head));
             }
             // A `&`-led field: intercepted before the concrete fall-through,
             // which resolves the referent concretely and would blame `'T` as
@@ -5830,6 +6510,7 @@ impl<'t> Parser<'t> {
                         &remainder,
                         remainder_span,
                     )?;
+                    self.check_field_bare_kind(decl_name, id, &remainder, remainder_span)?;
                     return Ok(self.fold_field_ref(PolyType::Var(id), mutable));
                 }
                 // P7.S6 (R1a): `&array['T 4]` -- the `&` and `array` are
@@ -5908,6 +6589,7 @@ impl<'t> Parser<'t> {
                             &remainder,
                             remainder_span,
                         )?;
+                        self.check_field_bare_kind(decl_name, id, &remainder, remainder_span)?;
                         Some(PolyType::Var(id))
                     } else if remainder == ARRAY_TYPE_NAME
                         && matches!(self.tokens.get(self.pos + 1), Some((Token::LBracket, _)))
@@ -5987,6 +6669,136 @@ impl<'t> Parser<'t> {
             .ok_or_else(|| unbound_generic_ty_var_error(name, decl_name, span))?;
         used[idx] = true;
         Ok(idx as u32)
+    }
+
+    /// P7b.S1 (R2/S1-5/S1-9, Phase 3): a *bare* field mention (no bracket
+    /// continuation) -- the header-field twin of `PolyBuilder::mark_ty_star`.
+    /// First field-usage mention of this ty var (within the declaration
+    /// currently being parsed) establishes `Star`; a later bare mention is
+    /// consistent; a var already established `Arrow` by an earlier applied
+    /// field mention is the header-field twin of S1-15.b. An *explicit*
+    /// `Arrow` header annotation (never a default -- `parse_header_bracket`
+    /// only ever defaults to `Star`) is authoritative and pre-empts
+    /// inference, so a bare mention against an explicitly higher-kinded
+    /// header variable is flagged even on its very first field mention.
+    fn check_field_bare_kind(
+        &mut self,
+        decl_name: &str,
+        idx: u32,
+        name: &str,
+        span: Span,
+    ) -> Result<(), String> {
+        if let Some(arrow @ Kind::Arrow { .. }) =
+            self.header_ty_var_kind(decl_name, idx as usize).cloned()
+        {
+            return Err(header_field_kind_conflict_error(
+                decl_name,
+                name,
+                span,
+                &kind_str(&arrow),
+            ));
+        }
+        match self.field_kind_marks.get(&idx).cloned() {
+            None => {
+                self.field_kind_marks.insert(idx, (Kind::Star, span));
+                Ok(())
+            }
+            Some((Kind::Star, _)) => Ok(()),
+            Some((arrow, _first_span)) => Err(header_field_kind_conflict_error(
+                decl_name,
+                name,
+                span,
+                &kind_str(&arrow),
+            )),
+        }
+    }
+
+    /// P7b.S1 (S1-8/S1-15.e, Phase 3): an *applied* field mention (`f
+    /// 'F['T]`) -- the header-field twin of `PolyBuilder::mark_ty_arrow`.
+    /// First field-usage mention establishes `Arrow { domains: [Star;
+    /// domain_count], .. }`, `domain_count` being the application's real
+    /// argument count (review fix: this used to hardcode an empty domain
+    /// list regardless of arity, so `kind_str` rendered the established
+    /// kind as `*` -- self-contradictory in `header_field_kind_conflict_
+    /// error`'s message, and a dishonest arity in `publish_field_inferred_
+    /// kinds`' published vector). A later applied mention is consistent
+    /// regardless of its own arity (no golden requires distinguishing it,
+    /// and the header-field path carries no per-mention arity table -- only
+    /// *whether* the var is Arrow-kinded, same as before this fix); a var
+    /// already established `Star` by an earlier bare field mention is the
+    /// header-field twin of S1-15.a.
+    fn check_field_arrow_kind(
+        &mut self,
+        decl_name: &str,
+        idx: u32,
+        name: &str,
+        span: Span,
+        domain_count: usize,
+    ) -> Result<(), String> {
+        match self.field_kind_marks.get(&idx).cloned() {
+            None => {
+                self.field_kind_marks.insert(
+                    idx,
+                    (
+                        Kind::Arrow {
+                            domains: vec![Kind::Star; domain_count],
+                            result: Box::new(Kind::Star),
+                        },
+                        span,
+                    ),
+                );
+                Ok(())
+            }
+            Some((Kind::Arrow { .. }, _)) => Ok(()),
+            Some((Kind::Star, _first_span)) => Err(header_field_applies_star_var_error(
+                decl_name, name, span, "*",
+            )),
+            Some((Kind::Len, _)) => {
+                unreachable!("a header ty var never carries Len: X1 already rejects that")
+            }
+        }
+    }
+
+    /// P7b.S1 (S1-5/S1-9, Phase 3): publish this declaration's field-usage-
+    /// inferred kinds (`field_kind_marks`, collected while its fields/
+    /// variants were just parsed) into the header's own `ty_kinds` -- an
+    /// unannotated header var's kind is otherwise stuck at
+    /// `parse_header_bracket`'s `Star` default forever, which is wrong the
+    /// moment a field actually applies it (S1-9: usage infers a kind, an
+    /// annotation is only the fallback). A var the header *explicitly*
+    /// annotated `Arrow` is left alone -- `check_field_bare_kind`/
+    /// `check_field_arrow_kind` already enforce that every field mention
+    /// agrees with it, so overwriting would only ever be a no-op there.
+    fn publish_field_inferred_kinds(&mut self, is_enum: bool, idx: usize) {
+        for (var_idx, (kind, _span)) in self.field_kind_marks.drain() {
+            let ty_kinds = if is_enum {
+                &mut self.generics.enums[idx].ty_kinds
+            } else {
+                &mut self.generics.structs[idx].ty_kinds
+            };
+            if let Some(slot) = ty_kinds.get_mut(var_idx as usize) {
+                if !matches!(slot, Kind::Arrow { .. }) {
+                    *slot = kind;
+                }
+            }
+        }
+    }
+
+    /// P7b.S1 (R5): the declared kind of ty-var `idx` in `decl_name`'s own
+    /// header (struct or enum, whichever this parser's `self.generics`
+    /// already has a placeholder for at `self.module` -- registered by
+    /// stage (a) of `parse_generic_typedefs` before any field parses).
+    /// `None` when the header itself cannot be found (a unit test calling
+    /// this parser with no registry), in which case the kind conflict check
+    /// is simply skipped.
+    fn header_ty_var_kind(&self, decl_name: &str, idx: usize) -> Option<&Kind> {
+        if let Some(sidx) = self.generics.find_struct(decl_name, self.module) {
+            return self.generics.structs[sidx].ty_kinds.get(idx);
+        }
+        if let Some(eidx) = self.generics.find_enum(decl_name, self.module) {
+            return self.generics.enums[eidx].ty_kinds.get(idx);
+        }
+        None
     }
 
     /// P7.S6a (R2a): the length-path twin of `resolve_field_ty_var`. Unlike a
@@ -6083,6 +6895,49 @@ impl<'t> Parser<'t> {
     /// argument, so a variable type paired with a concrete length
     /// (`Buffer['T 4]`) and a concrete type paired with a variable length
     /// stay `PolyType::Generic` alike.
+    /// P7b.S1 (S1-8): a header/field application (`f 'F['T]`), the field-
+    /// grammar twin of `parse_poly_var_application` -- no known header to
+    /// read an arity from, so every argument parses as a field-shape type
+    /// expression with no arity bound. A bare `[` argument (a quotation
+    /// shape) is fenced exactly as the effect-grammar production fences it
+    /// (S1-6), and an empty application is the same pinned arity error.
+    #[allow(clippy::too_many_arguments)]
+    fn parse_generic_field_var_application(
+        &mut self,
+        decl_name: &str,
+        ty_vars: &[(String, Span)],
+        used: &mut [bool],
+        len_vars: &[(String, Span)],
+        used_len: &mut [bool],
+        head: u32,
+        span: Span,
+    ) -> Result<PolyType, String> {
+        self.pos += 1; // consume `[`
+        let mut args = Vec::new();
+        loop {
+            match self.peek() {
+                Some((Token::RBracket, _)) => {
+                    self.pos += 1;
+                    break;
+                }
+                None => {
+                    return Err(self.eof_error("`]` (unterminated type application)"));
+                }
+                Some((Token::LBracket | Token::TildeLBracket, arg_span)) => {
+                    return Err(app_arg_quotation_error(*arg_span));
+                }
+                _ => args.push(
+                    self.parse_generic_field_shape(decl_name, ty_vars, used, len_vars, used_len)?,
+                ),
+            }
+        }
+        if args.is_empty() {
+            let var = &ty_vars[head as usize].0;
+            return Err(empty_type_application_error(var, span));
+        }
+        Ok(PolyType::App { head, args })
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn parse_generic_field_application(
         &mut self,
@@ -6596,6 +7451,7 @@ mod tests {
             type_origin: &type_origin,
             trait_origin: &trait_origin,
             generics: &mut generics,
+            field_kind_marks: std::collections::HashMap::new(),
             traits: &[],
         };
         parser.parse_header_bracket("Test")
@@ -7524,6 +8380,7 @@ mod tests {
         generics.enums.push(crate::ast::GenericEnumDecl {
             name: "Shape".to_string(),
             ty_var_names: vec!["T".to_string()],
+            ty_kinds: Vec::new(),
             len_var_names: vec![],
             variants: vec![crate::ast::GenericVariantDecl {
                 name: "Circle".to_string(),
@@ -11325,6 +12182,43 @@ mod tests {
         assert!(err.contains("may not carry an inline bound"), "{err}");
     }
 
+    /// P7b.S1 review fix (P1): an `impl:` target that applies one of its
+    /// own variables (`'F['T]`) used to parse and register silently even
+    /// though `match_impl_target_rec` never matches an `App` pattern -- a
+    /// located rejection at parse time instead, naming the applied
+    /// variable and its binding span.
+    #[test]
+    fn parse_impl_target_app_is_error() {
+        let err = parse_src(
+            "trait: Show['T] : show ( &'T -- ) ; ;\n\
+             impl: Show for 'F['T]\n\
+               : show | a | a drop ;\n\
+             ;",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("may not apply its own type variable") && err.contains("'F[...]"),
+            "{err}"
+        );
+    }
+
+    /// The concrete-head twin: `impl: Show for Box['T]` still parses --
+    /// only a *variable*-headed application is fenced, not `Generic`'s own
+    /// existing shape (F5's applied-target impls already worked before
+    /// this slice).
+    #[test]
+    fn parse_impl_target_generic_head_application_still_parses() {
+        let module = parse_src(
+            "type: Box['T] v 'T ;\n\
+             trait: Show['T] : show ( &'T -- ) ; ;\n\
+             impl: Show for Box['T]\n\
+               : show | a | a drop ;\n\
+             ;",
+        )
+        .unwrap();
+        assert!(!module.impls[0].target.is_concrete());
+    }
+
     // P7.S4b (R1): `where`-clause on an impl target parses and threads
     // bounds into the member word's PolySig.
 
@@ -11670,7 +12564,7 @@ mod tests {
         let vars = header_bracket_vars("['T 'N: Len]").unwrap();
         assert_eq!(
             vars.iter()
-                .map(|(n, _, k)| (n.clone(), *k))
+                .map(|(n, _, k)| (n.clone(), k.clone()))
                 .collect::<Vec<_>>(),
             vec![
                 ("'T".to_string(), Kind::Star),
@@ -11709,10 +12603,252 @@ mod tests {
         assert!(err.contains("no type variable"), "{err}");
     }
 
+    // ---- P7b.S1 Phase 1: R1/R2/R5 kind-expression grammar and collection ----
+
+    #[test]
+    fn parse_header_bracket_kind_expr_annotations_parse() {
+        let vars = header_bracket_vars("['F: * -> Len -> * 'T]").unwrap();
+        assert_eq!(vars.len(), 2);
+        assert_eq!(vars[0].0, "'F");
+        assert_eq!(
+            vars[0].2,
+            Kind::Arrow {
+                domains: vec![Kind::Star, Kind::Len],
+                result: Box::new(Kind::Star),
+            }
+        );
+        assert_eq!(vars[1].0, "'T");
+        assert_eq!(vars[1].2, Kind::Star);
+    }
+
+    #[test]
+    fn poly_sig_ty_kinds_stays_parallel_to_ty_var_names_on_real_parsed_output() {
+        // S1-5: every published kind vector is length-matched to its name
+        // table. A mixed signature (a plain var, an applied var, an
+        // annotated var) exercises every path that can push onto either
+        // vector.
+        let module = parse_src(": f['F: * -> * 'T 'U] ( 'F['T] 'U -- ) drop drop ;").unwrap();
+        let sig = module.words[0].poly.as_ref().expect("poly sig present");
+        assert_eq!(sig.ty_var_names.len(), sig.ty_kinds.len());
+        assert_eq!(sig.ty_var_names.len(), 3);
+    }
+
+    #[test]
+    fn owned_cell_glued_sigil_bare_mention_after_application_is_located_error() {
+        // P7b.S1 review fix: the `^'F` glued-sigil arm used to call
+        // `parse_poly_ty_var` without ever reaching `mark_ty_star`, so a
+        // bare mention behind `^` went uncollected and this built clean
+        // instead of firing S1-15.b. `'F` is applied at `'F['T]` first
+        // (kind `* -> *`), then used bare behind `^`.
+        let err = parse_src(": bad['F 'T] ( 'F['T] ^'F -- 'F['T] ) drop ;").unwrap_err();
+        assert!(err.contains("'F"), "{err}");
+        assert!(
+            err.contains("used as a plain type but has kind `* -> *`"),
+            "{err}"
+        );
+        assert!(err.contains("line 1, col 24"), "{err}");
+        assert!(err.contains("line 1, col 16"), "{err}");
+    }
+
+    #[test]
+    fn ref_glued_sigil_bare_mention_after_application_is_located_error() {
+        // The `&'F` twin of the `^'F` test above -- the same gap existed in
+        // the `&`/`&!`-glued arm.
+        let err = parse_src(": bad['F 'T] ( 'F['T] &'F -- 'F['T] ) drop ;").unwrap_err();
+        assert!(err.contains("'F"), "{err}");
+        assert!(
+            err.contains("used as a plain type but has kind `* -> *`"),
+            "{err}"
+        );
+        assert!(err.contains("line 1, col 24"), "{err}");
+        assert!(err.contains("line 1, col 16"), "{err}");
+    }
+
+    #[test]
+    fn parse_optional_bound_bracket_kind_and_bound_coexist() {
+        // S1-9: a kind annotation on one variable (`'N: Len`) and a
+        // capability bound on another (`'T: Copy`), in the same bracket.
+        let module = parse_src(": f['T: Copy 'N: Len] ( array['T 'N] -- ) drop ;").unwrap();
+        let sig = module.words[0].poly.as_ref().expect("poly sig present");
+        assert!(sig.has_bound(0, Bound::Copy));
+        assert_eq!(sig.len_var_names, vec!["'N".to_string()]);
+    }
+
+    #[test]
+    fn attach_bracket_bounds_annotation_conflicting_with_usage_names_both_spans() {
+        // S1-15.c: `'F` is used bare (a plain type, `Star`) but annotated a
+        // higher kind. The error must carry both the usage mention's span
+        // and the annotation's own span.
+        let err = parse_src(": bad['F: * -> * 'T] ( 'F 'T -- ) drop drop ;").unwrap_err();
+        assert!(err.contains("'F"), "{err}");
+        assert!(err.contains("used as a plain type"), "{err}");
+        assert!(err.contains("* -> *"), "{err}");
+        // The usage mention is `'F` in the effect (line 1, col 24); the
+        // annotation is in the bound bracket (line 1, col 7).
+        assert!(err.contains("line 1, col 24"), "{err}");
+        assert!(err.contains("line 1, col 7"), "{err}");
+    }
+
+    #[test]
+    fn attach_bracket_bounds_arrow_kind_unused_in_effect_is_accepted() {
+        // P7b.S1: `'F: * -> *` is declared but never mentioned in the
+        // effect at all -- there is no usage to compare the annotation
+        // against, so the annotation alone is presence enough, permanently,
+        // and this must parse rather than raise `bracket_var_unused_error`.
+        let module = parse_src(": pass['F: * -> * 'T] ( 'T -- 'T ) ;").unwrap();
+        let sig = module.words[0].poly.as_ref().expect("poly sig present");
+        assert_eq!(sig.ty_var_names, vec!["'T".to_string()]);
+    }
+
+    #[test]
+    fn header_field_kind_collection_validated_at_decl_end() {
+        // S1-5: a header declaring `'F` higher-kinded, then a field
+        // bare-mentioning it -- a `Star`-only position -- is a located
+        // conflict naming the declaration.
+        let err = parse_src("type: Box['F: * -> * 'T] f 'F g 'T ;").unwrap_err();
+        assert!(err.contains("'F"), "{err}");
+        assert!(err.contains("Box"), "{err}");
+        assert!(err.contains("* -> *"), "{err}");
+    }
+
+    #[test]
+    fn header_field_kind_collection_accepts_a_star_kinded_var() {
+        // The non-conflict twin: a `Star`-annotated (or unannotated) header
+        // var used bare in a field is unaffected by the new side table.
+        let module = parse_src("type: Box['F: * 'T] f 'F g 'T ;").unwrap();
+        assert_eq!(module.generic_structs[0].fields.len(), 2);
+    }
+
+    /// P7b.S1 review fix (P1): the reversed field order from
+    /// `hkt_header_field_applies_star_var_is_located_error`'s golden --
+    /// the applied mention (`f 'F['T]`) comes *first*, establishing
+    /// `Arrow`, and the bare mention (`g 'F`) comes second, conflicting
+    /// with it. This is `check_field_bare_kind`'s `field_kind_marks`
+    /// fallback arm (the header's own `ty_kinds` isn't published until decl
+    /// end, so this arm -- not `header_ty_var_kind`'s early-return -- is
+    /// what fires here), which used to render the established kind through
+    /// a zero-domain `Arrow` (`kind_str` renders that as `*`), making the
+    /// message assert the opposite of the fact that triggered it. Must now
+    /// say `* -> *`, not `*`.
+    #[test]
+    fn header_field_bare_mention_after_an_earlier_application_names_the_real_arrow_kind() {
+        let err = parse_src("type: Bad['F 'T] f 'F['T] g 'F ;").unwrap_err();
+        assert!(
+            err.contains("is declared kind `* -> *` in its header"),
+            "{err}"
+        );
+    }
+
+    /// P7b.S1 review fix (P1): `publish_field_inferred_kinds` must publish
+    /// the field-application's *real* arity, not a zero-arity placeholder --
+    /// otherwise S1-5's "no default-to-`Star` shortcut that would drop an
+    /// `Arrow` on the floor" is honored in name only (an `Arrow` survives,
+    /// but a dishonest one).
+    #[test]
+    fn publish_field_inferred_kinds_records_the_applications_real_arity() {
+        let module = parse_src("type: Bad['F 'T 'U] f 'F['T 'U] ;").unwrap();
+        let published = &module.generic_structs[0].ty_kinds[0];
+        match published {
+            Kind::Arrow { domains, .. } => assert_eq!(
+                domains.len(),
+                2,
+                "'F['T 'U] applies two arguments; the published kind must say so"
+            ),
+            other => panic!("expected an Arrow kind, got {other:?}"),
+        }
+    }
+
     #[test]
     fn reject_reserved_name_rejects_trait_len() {
         let err = parse_src("trait: Len['T] : show ( 'T -- ) ; ;").unwrap_err();
         assert!(err.contains("reserved"), "{err}");
+    }
+
+    // ---- P7b.S1 Phase 2: S1-6/S1-7/S1-8 application parsing ----
+
+    #[test]
+    fn parse_poly_slot_router_application_before_quotation_parses() {
+        // R4 lookahead router, order 1: `'F['T]` applies before a
+        // separate quotation slot `[ 'T -- 'U ]` follows.
+        let module = parse_src(": fmap['F 'T 'U] ( 'F['T] [ 'T -- 'U ] -- ) drop drop ;").unwrap();
+        let sig = module.words[0].poly.as_ref().expect("poly sig present");
+        assert!(matches!(sig.inputs[0], PolyType::App { head: 0, .. }));
+        assert!(matches!(sig.inputs[1], PolyType::Quotation(..)));
+    }
+
+    #[test]
+    fn parse_poly_slot_router_quotation_before_application_parses() {
+        // R4 lookahead router, order 2: a quotation slot first, an
+        // application afterwards -- both orders must route correctly.
+        let module = parse_src(": fmap['F 'T 'U] ( [ 'T -- 'U ] 'F['T] -- ) drop drop ;").unwrap();
+        let sig = module.words[0].poly.as_ref().expect("poly sig present");
+        assert!(matches!(sig.inputs[0], PolyType::Quotation(..)));
+        assert!(matches!(sig.inputs[1], PolyType::App { .. }));
+    }
+
+    #[test]
+    fn parse_generic_field_shape_variable_application_parses_to_app() {
+        // S1-8: a field `f 'F['T]` parses to `PolyType::App`.
+        let module = parse_src("type: Box['F 'T] f 'F['T] ;").unwrap();
+        assert!(matches!(
+            module.generic_structs[0].fields[0].1,
+            PolyType::App { head: 0, .. }
+        ));
+    }
+
+    #[test]
+    fn parse_type_argument_bare_constructor_parses_to_ctor_image() {
+        // S1-8/S1-12: a use-site constructor type argument (`Wrap[Box i64]`)
+        // parses to `Type::CtorImage`, which the field's own `App`
+        // instantiation semantics (S1-8's stub) then resolves at
+        // instantiation time -- minting `Box[i64]` as `Wrap`'s field.
+        let module = parse_src(
+            "type: Box['T] v 'T ;\ntype: Wrap['F 'T] w 'F['T] ;\n\
+             : mk ( -- Wrap[Box i64] ) drop ;",
+        )
+        .unwrap();
+        let word = &module.words[0];
+        let ret = word.effect.outputs[0].ty;
+        let Type::Struct(id, _) = ret else {
+            panic!("expected a struct return, found {ret:?}")
+        };
+        let inst = &module.structs[id.index()];
+        assert_eq!(inst.fields.len(), 1);
+        let Type::Struct(field_id, field_name) = inst.fields[0].1 else {
+            panic!(
+                "expected `w`'s field to have folded to a struct, found {:?}",
+                inst.fields[0].1
+            )
+        };
+        assert_eq!(field_name, "Box[i64]");
+        assert_eq!(module.structs[field_id.index()].fields[0].1, Type::I64);
+    }
+
+    #[test]
+    fn parse_poly_var_application_quotation_argument_is_error() {
+        // S1-6: an application argument is a type expression only -- a
+        // quotation-shaped argument is a parse error.
+        let err = parse_src(": f['F 'T] ( 'F[[ i64 -- i64 ]] -- ) drop ;").unwrap_err();
+        assert!(err.contains("expected a type, found"), "{err}");
+        assert!(err.contains('['), "{err}");
+    }
+
+    #[test]
+    fn parse_poly_var_application_empty_is_error() {
+        // S1-7: `'F[]` is a pinned arity error.
+        let err = parse_src(": f['F 'T] ( 'F[] -- ) drop ;").unwrap_err();
+        assert!(err.contains("'F[]"), "{err}");
+        assert!(err.contains("zero arguments"), "{err}");
+    }
+
+    #[test]
+    fn raw_to_poly_type_app_fold_has_no_all_concrete_fold() {
+        // S1-7: unlike `Generic`, an `App` never folds to `Concrete` -- the
+        // head names a variable, which never grounds to a `Type` at parse
+        // time. Even a fully-concrete-looking argument list stays `App`.
+        let module = parse_src(": f['F] ( 'F[i64] -- ) drop ;").unwrap();
+        let sig = module.words[0].poly.as_ref().expect("poly sig present");
+        assert!(matches!(sig.inputs[0], PolyType::App { head: 0, .. }));
     }
 
     // ---- P7.S6a Phase 2: R2a array-field sub-case, R2b word bound bracket ----

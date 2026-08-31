@@ -241,6 +241,13 @@ pub fn is_copy(ty: Type, structs: &[StructDecl], enums: &[EnumDecl], arrays: &[A
         // exactly the leak this marker exists to prevent. Plain
         // `Type::Quotation` still falls to the wildcard and stays `Copy`.
         Type::OwningQuotation(_) => false,
+        // P7b.S1 (S1-16 gap): a `CtorImage` is not a concrete value type
+        // (S1-12) -- it never reaches a value position a real program can
+        // `dup`/`drop`, since every real consumer routes a bare one to
+        // S1-15.g first. Anchored above the wildcard rather than left to it,
+        // matching `OwningQuotation`/`Slice` above: the wildcard would
+        // silently call it freely duplicable.
+        Type::CtorImage(_, _) => false,
         _ => true,
     }
 }
@@ -575,6 +582,21 @@ mod tests {
         // R4: always linear, no payload lookup, even over a Copy payload.
         let mut cells = Vec::new();
         let ty = crate::ast::intern_owned_cell_type(&mut cells, Type::I64);
+        assert!(!is_copy(ty, &[], &[], &[]));
+    }
+    #[test]
+    fn is_copy_ctor_image_is_not_copy() {
+        // P7b.S1 (S1-16 gap, fixed): `Type::CtorImage` used to fall through
+        // to the wildcard `_ => true` arm, making it `Copy` -- it is not a
+        // concrete value type at all.
+        let ty = Type::CtorImage(
+            crate::ast::GenericId {
+                is_enum: false,
+                idx: 0,
+                module: 0,
+            },
+            "Box",
+        );
         assert!(!is_copy(ty, &[], &[], &[]));
     }
     #[test]
