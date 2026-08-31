@@ -1,7 +1,10 @@
 //! P7b.S1 exit goldens: kinds and type-level application. This file starts
 //! with the Phase 2 goldens (application parsing + compile-forcing); later
 //! phases add to it. Driven through the real `sooth` binary, styled after
-//! `tests/phase7_slice6a.rs`.
+//! `tests/phase7_slice6a.rs`. The printing goldens go through
+//! `single_file_hosted`, which adds the hosted manifest and a selective
+//! `hosted::show | . |` import (P7.S7d retired the `.` intrinsic onto
+//! `hosted::show`'s ordinary word); error goldens keep the minimal prefix.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -82,6 +85,28 @@ fn single_file(tag: &str, src: &str) -> (Tree, PathBuf) {
     (t, entry)
 }
 
+/// The printing-golden twin of `single_file`: adds the hosted manifest and
+/// the selective `hosted::show | . |` import (P7.S7d retired the `.`
+/// intrinsic onto `hosted::show`'s ordinary word). Only the end-to-end
+/// goldens use this -- the error goldens keep the minimal two-line prefix so
+/// their strengthened origin-span assertions keep their original line
+/// numbers.
+fn single_file_hosted(tag: &str, src: &str) -> (Tree, PathBuf) {
+    let t = Tree::new(tag);
+    t.write(
+        "sooth.pkg",
+        &format!(
+            "package: p7bs1 ;\nlayer: hosted ;\ndepends: core path \"{root}/lib/core\" ;\ndepends: hosted path \"{root}/lib/hosted\" ;\n",
+            root = env!("CARGO_MANIFEST_DIR")
+        ),
+    );
+    let entry = t.write(
+        "main.sth",
+        &format!("import: intrinsics * ;\nimport: hosted::show | . | ;\n{src}"),
+    );
+    (t, entry)
+}
+
 /// The k8 flip (S1-3/S1-5): `array['T 'N]` with no `'N: Len` annotation
 /// anywhere -- `'N`'s kind is inferred from the count position it appears
 /// in, so the program builds and runs instead of S6a's mandatory-annotation
@@ -91,7 +116,7 @@ fn hkt_len_var_inferred_from_count_position_is_accepted() {
     let src = "\
         : sum['T 'N] ( array['T 'N] -- usize ) len swap drop ;\n\
         : main ( -- )\n          0 >u8 4 fill sum .\n        ;\n";
-    let (_t, entry) = single_file("k8-flip", src);
+    let (_t, entry) = single_file_hosted("k8-flip", src);
     let out = build_and_run(&entry);
     assert_eq!(out, "4\n");
 }
@@ -305,7 +330,7 @@ type: Box['T] v 'T ;
 : mk ( i64 -- Box[i64] ) Box ;
 : main ( -- ) 5 mk pass Box> . ;
 ";
-    let (_t, entry) = single_file("w2-app-passthrough", src);
+    let (_t, entry) = single_file_hosted("w2-app-passthrough", src);
     let out = build_and_run(&entry);
     assert_eq!(out, "5\n");
 }
@@ -325,7 +350,7 @@ type: Wrap['F 'T] f 'F['T] t 'T ;
 : mk ( -- Wrap[Box i64] ) 5 Box 7 Wrap ;
 : main ( -- ) mk Wrap> . Box> . ;
 ";
-    let (_t, entry) = single_file("w1-field-monomorphize", src);
+    let (_t, entry) = single_file_hosted("w1-field-monomorphize", src);
     let out = build_and_run(&entry);
     assert_eq!(
         out, "7\n5\n",
