@@ -663,7 +663,7 @@ pub(super) fn subst_polytype(
             let ctor = subst
                 .ty_of(*head)
                 .expect("checked: unification bound the App head to a CtorImage");
-            let Type::CtorImage(gid) = ctor else {
+            let Type::CtorImage(gid, _) = ctor else {
                 unreachable!(
                     "checked: an App head always binds to a CtorImage; any other binding is rejected before lowering (S1-15.g)"
                 )
@@ -1202,11 +1202,14 @@ mod tests {
             ty: vec![
                 (
                     0,
-                    Type::CtorImage(GenericId {
-                        is_enum: false,
-                        idx: 0,
-                        module: 0,
-                    }),
+                    Type::CtorImage(
+                        GenericId {
+                            is_enum: false,
+                            idx: 0,
+                            module: 0,
+                        },
+                        "Box",
+                    ),
                 ),
                 (1, Type::I64),
             ],
@@ -1222,9 +1225,12 @@ mod tests {
 
     /// S1-13: a miss -- check should already have minted this application's
     /// instantiation, so `subst_polytype` asserts rather than falling back
-    /// to minting one itself (the lookup-only contract).
+    /// to minting one itself (the lookup-only contract). `head` is bound to
+    /// a `CtorImage` (unlike the two tests below), so this exercises
+    /// specifically the third of the App arm's three `expect`/`unreachable!`
+    /// sites -- the lookup miss, not the earlier binding checks.
     #[test]
-    #[should_panic(expected = "checked")]
+    #[should_panic(expected = "already minted this application's instantiation")]
     fn subst_polytype_app_miss_is_an_assertion() {
         use crate::ast::{GenericId, GenericStructDecl, PolyType};
         let mut generics = GenericTypes::with_bases(0, 0);
@@ -1241,11 +1247,14 @@ mod tests {
             ty: vec![
                 (
                     0,
-                    Type::CtorImage(GenericId {
-                        is_enum: false,
-                        idx: 0,
-                        module: 0,
-                    }),
+                    Type::CtorImage(
+                        GenericId {
+                            is_enum: false,
+                            idx: 0,
+                            module: 0,
+                        },
+                        "Box",
+                    ),
                 ),
                 (1, Type::I64),
             ],
@@ -1254,6 +1263,42 @@ mod tests {
         let app = PolyType::App {
             head: 0,
             args: vec![PolyType::Var(1)],
+        };
+        let _ = subst_polytype(&app, &subst, &[], &[], &[], &generics);
+    }
+
+    /// P7b.S1 review fix: the App arm's *first* assertion -- `head` never
+    /// bound at all in `subst.ty` -- distinct from the lookup-miss above,
+    /// which binds `head` but never mints the instantiation.
+    #[test]
+    #[should_panic(expected = "unification bound the App head to a CtorImage")]
+    fn subst_polytype_app_unbound_head_is_an_assertion() {
+        use crate::ast::PolyType;
+        let generics = GenericTypes::with_bases(0, 0);
+        let subst = Subst::default();
+        let app = PolyType::App {
+            head: 0,
+            args: Vec::new(),
+        };
+        let _ = subst_polytype(&app, &subst, &[], &[], &[], &generics);
+    }
+
+    /// P7b.S1 review fix: the App arm's *second* assertion -- `head` is
+    /// bound, but to something other than a `CtorImage` (check's own
+    /// `unify_poly_input`/S1-15.g should have rejected this before
+    /// lowering ever sees it).
+    #[test]
+    #[should_panic(expected = "any other binding is rejected before lowering")]
+    fn subst_polytype_app_non_ctor_image_head_is_an_assertion() {
+        use crate::ast::PolyType;
+        let generics = GenericTypes::with_bases(0, 0);
+        let subst = Subst {
+            ty: vec![(0, Type::I64)],
+            len: Vec::new(),
+        };
+        let app = PolyType::App {
+            head: 0,
+            args: Vec::new(),
         };
         let _ = subst_polytype(&app, &subst, &[], &[], &[], &generics);
     }

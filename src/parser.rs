@@ -2209,7 +2209,7 @@ fn validate_ctor_arg_kinds(
     span: Span,
 ) -> Result<(), String> {
     for ((var, kind), arg) in ty_var_names.iter().zip(ty_kinds.iter()).zip(args.iter()) {
-        let is_ctor = matches!(arg, Type::CtorImage(_));
+        let is_ctor = matches!(arg, Type::CtorImage(_, _));
         let wants_ctor = matches!(kind, Kind::Arrow { .. });
         if is_ctor != wants_ctor {
             return Err(ctor_arg_kind_mismatch_error(header, var, kind, *arg, span));
@@ -2928,6 +2928,15 @@ impl<'t> Parser<'t> {
         bracket: &[(String, Span, Vec<Bound>, Option<Kind>)],
         word_name: &str,
     ) -> Result<(), String> {
+        // S1-5: every published kind vector is length-matched to its name
+        // table -- `sig.ty_kinds[i]` below indexes on a position recovered
+        // from `sig.ty_var_names`, so a drift here would silently index
+        // past (or short of) the real per-variable kind.
+        debug_assert_eq!(
+            sig.ty_var_names.len(),
+            sig.ty_kinds.len(),
+            "PolySig::ty_kinds must stay parallel to ty_var_names (S1-5)"
+        );
         for (name, span, bounds, kind) in bracket {
             let ty_idx = sig.ty_var_names.iter().position(|n| n == name);
             let len_idx = sig.len_var_names.iter().position(|n| n == name);
@@ -2980,12 +2989,12 @@ impl<'t> Parser<'t> {
                             &kind_str(k),
                         ));
                     }
-                    // P7b.S1 (R2/S1-4, Phase 1): an arrow-kind annotation on
-                    // an otherwise-unused header var is presence enough on
-                    // its own -- usage-conflict enforcement (checking the
-                    // annotation against real usage) isn't wired until
-                    // Phase 3, so this can't yet be a conflict, only a
-                    // declaration.
+                    // P7b.S1 (R2/S1-4): an arrow-kind annotation on a header
+                    // var never mentioned anywhere in the effect has no
+                    // usage to compare against -- unlike the `Some(i)` arms
+                    // above, which do compare against `sig.ty_kinds[i]` --
+                    // so it stays a bare declaration, permanently, not a
+                    // temporary Phase 1 shortcut.
                     (Kind::Arrow { .. }, None, None) => {}
                     (_, None, None) => {
                         return Err(bracket_var_unused_error(name, *span, word_name));
@@ -4028,6 +4037,15 @@ impl<'t> Parser<'t> {
                     };
                     self.pos += 1;
                     let inner = self.parse_poly_ty_var(builder, &remainder, remainder_span)?;
+                    // P7b.S1 review fix: this glued-sigil site used to skip
+                    // straight past kind collection -- unlike the spaced `'`
+                    // arm above, which marks a bare mention immediately
+                    // after interning. A referent behind `&`/`&!` is always
+                    // a bare (non-applied) use, so this mirrors that arm's
+                    // `mark_ty_star` call, not its `[`-router.
+                    if let RawTy::Var(head) = inner {
+                        builder.mark_ty_star(head, remainder_span)?;
+                    }
                     return Ok(RawTy::Ref(Box::new(inner), mutable));
                 }
                 // P7.S6 (R1a): `&array['T 4]` -- the `&` and `array` are
@@ -4076,7 +4094,14 @@ impl<'t> Parser<'t> {
                         ..span
                     };
                     self.pos += 1;
-                    Some(self.parse_poly_ty_var(builder, &remainder, remainder_span)?)
+                    let inner = self.parse_poly_ty_var(builder, &remainder, remainder_span)?;
+                    // P7b.S1 review fix: mirrors the `&`-glued arm above --
+                    // a payload behind `^`/`^^` is always a bare use, so mark
+                    // it here rather than skipping kind collection entirely.
+                    if let RawTy::Var(head) = inner {
+                        builder.mark_ty_star(head, remainder_span)?;
+                    }
+                    Some(inner)
                 } else if remainder == ARRAY_TYPE_NAME
                     && matches!(self.tokens.get(self.pos + 1), Some((Token::LBracket, _)))
                 {
@@ -6232,11 +6257,12 @@ impl<'t> Parser<'t> {
                 if !matches!(self.tokens.get(self.pos + 1), Some((Token::LBracket, _))) {
                     if let Some((is_enum, idx, module)) = self.poly_generic_header(&w, span)? {
                         self.pos += 1;
-                        return Ok(Type::CtorImage(crate::ast::GenericId {
+                        let gid = crate::ast::GenericId {
                             is_enum,
                             idx: idx as u32,
                             module,
-                        }));
+                        };
+                        return Ok(crate::ast::ctor_image_type(self.generics, gid));
                     }
                 }
             }
@@ -12596,6 +12622,49 @@ mod tests {
     }
 
     #[test]
+    fn poly_sig_ty_kinds_stays_parallel_to_ty_var_names_on_real_parsed_output() {
+        // S1-5: every published kind vector is length-matched to its name
+        // table. A mixed signature (a plain var, an applied var, an
+        // annotated var) exercises every path that can push onto either
+        // vector.
+        let module = parse_src(": f['F: * -> * 'T 'U] ( 'F['T] 'U -- ) drop drop ;").unwrap();
+        let sig = module.words[0].poly.as_ref().expect("poly sig present");
+        assert_eq!(sig.ty_var_names.len(), sig.ty_kinds.len());
+        assert_eq!(sig.ty_var_names.len(), 3);
+    }
+
+    #[test]
+    fn owned_cell_glued_sigil_bare_mention_after_application_is_located_error() {
+        // P7b.S1 review fix: the `^'F` glued-sigil arm used to call
+        // `parse_poly_ty_var` without ever reaching `mark_ty_star`, so a
+        // bare mention behind `^` went uncollected and this built clean
+        // instead of firing S1-15.b. `'F` is applied at `'F['T]` first
+        // (kind `* -> *`), then used bare behind `^`.
+        let err = parse_src(": bad['F 'T] ( 'F['T] ^'F -- 'F['T] ) drop ;").unwrap_err();
+        assert!(err.contains("'F"), "{err}");
+        assert!(
+            err.contains("used as a plain type but has kind `* -> *`"),
+            "{err}"
+        );
+        assert!(err.contains("line 1, col 24"), "{err}");
+        assert!(err.contains("line 1, col 16"), "{err}");
+    }
+
+    #[test]
+    fn ref_glued_sigil_bare_mention_after_application_is_located_error() {
+        // The `&'F` twin of the `^'F` test above -- the same gap existed in
+        // the `&`/`&!`-glued arm.
+        let err = parse_src(": bad['F 'T] ( 'F['T] &'F -- 'F['T] ) drop ;").unwrap_err();
+        assert!(err.contains("'F"), "{err}");
+        assert!(
+            err.contains("used as a plain type but has kind `* -> *`"),
+            "{err}"
+        );
+        assert!(err.contains("line 1, col 24"), "{err}");
+        assert!(err.contains("line 1, col 16"), "{err}");
+    }
+
+    #[test]
     fn parse_optional_bound_bracket_kind_and_bound_coexist() {
         // S1-9: a kind annotation on one variable (`'N: Len`) and a
         // capability bound on another (`'T: Copy`), in the same bracket.
@@ -12622,10 +12691,10 @@ mod tests {
 
     #[test]
     fn attach_bracket_bounds_arrow_kind_unused_in_effect_is_accepted() {
-        // P7b.S1 Phase 1: `'F: * -> *` is declared but never mentioned in
-        // the effect at all. Usage-conflict enforcement lands in Phase 3;
-        // for Phase 1 the annotation alone is presence enough, so this must
-        // parse rather than raise `bracket_var_unused_error`.
+        // P7b.S1: `'F: * -> *` is declared but never mentioned in the
+        // effect at all -- there is no usage to compare the annotation
+        // against, so the annotation alone is presence enough, permanently,
+        // and this must parse rather than raise `bracket_var_unused_error`.
         let module = parse_src(": pass['F: * -> * 'T] ( 'T -- 'T ) ;").unwrap();
         let sig = module.words[0].poly.as_ref().expect("poly sig present");
         assert_eq!(sig.ty_var_names, vec!["'T".to_string()]);

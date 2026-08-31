@@ -1632,7 +1632,7 @@ fn type_node(ty: &Type) -> Option<TypeNode> {
         // P7b.S1 (S1-12): a `CtorImage` is not a concrete value type (any
         // matcher that would treat it as one routes to S1-15.g), so it
         // names no field/containment node here either.
-        Type::CtorImage(_) => None,
+        Type::CtorImage(_, _) => None,
     }
 }
 

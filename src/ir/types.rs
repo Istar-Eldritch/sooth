@@ -373,7 +373,7 @@ pub fn ir_type_of(ty: Type) -> IrType {
         // argument, never stored, returned, or otherwise lowered. Reaching
         // here is a checker bug (a bare `CtorImage` escaping to a value-type
         // position is S1-15.g's diagnostic), not a legal input.
-        Type::CtorImage(_) => unreachable!(
+        Type::CtorImage(_, _) => unreachable!(
             "a CtorImage never reaches the backend (S1-15.g rejects it at a value-type position)"
         ),
     }

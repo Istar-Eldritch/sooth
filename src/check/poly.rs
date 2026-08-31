@@ -4623,7 +4623,10 @@ fn poly_bind_construction_arg(
                 idx: *idx,
                 module: *module,
             };
-            let ctor = PolyType::Concrete(Type::CtorImage(gid));
+            let ctor = PolyType::Concrete(match ctx.generics() {
+                Some(cell) => crate::ast::ctor_image_type(&cell.borrow(), gid),
+                None => Type::CtorImage(gid, "<constructor>"),
+            });
             let slot = &mut args[*head as usize];
             match slot {
                 Some(existing) if existing != &ctor => {
@@ -7423,9 +7426,13 @@ fn match_impl_target_rec(
         PolyType::GenericVariant { .. } => unreachable!(
             "a generic variant is unconstructible outside an eliminator arm's own input row; it never reaches an impl target pattern"
         ),
-        // P7b.S1 Phase 2 stub (S1-16): `App` decomposition against a
-        // concrete target is Phase 3's `unify_poly_input`/S1-10 work; until
-        // then it simply never matches.
+        // P7b.S1 review fix (P1): an `impl:` target pattern can never
+        // actually carry an `App` -- `parse_impl_target`'s own fence
+        // (`impl_target_app_unsupported_error`) rejects one anywhere in the
+        // target's structure at parse time, since this matcher has no
+        // dispatch story for a constructor-abstract target (S2's). Kept as
+        // a real arm, not `unreachable!`, since S1-16's discipline still
+        // requires an explicit `App` arm here.
         PolyType::App { .. } => None,
     }
 }
@@ -7559,8 +7566,11 @@ fn collect_positions(
         PolyType::GenericVariant { .. } => unreachable!(
             "a generic variant is unconstructible outside an eliminator arm's own input row; it never reaches an impl target pattern"
         ),
-        // P7b.S1 Phase 2 stub (S1-16): mirrors `match_impl_target_rec`'s
-        // stub -- `App` decomposition is Phase 3's `unify_poly_input` work.
+        // P7b.S1 review fix (P1): mirrors `match_impl_target_rec`'s own
+        // `App` arm -- an impl-target pattern can never actually carry an
+        // `App` (`parse_impl_target`'s fence rejects one anywhere in the
+        // target's structure at parse time), so this specificity walk never
+        // sees one either. Kept as a real arm for S1-16's discipline.
         PolyType::App { .. } => None,
     }
 }
@@ -8487,8 +8497,8 @@ pub(super) fn unify_poly_input(
                     ctx, span, name, var, &ctor_name,
                 ));
             }
-            drop(generics);
             if found_args.len() != args.len() {
+                drop(generics);
                 return Err(mismatch());
             }
             let gid = GenericId {
@@ -8496,7 +8506,8 @@ pub(super) fn unify_poly_input(
                 idx: found_idx as u32,
                 module: found_module,
             };
-            let ctor = Type::CtorImage(gid);
+            let ctor = crate::ast::ctor_image_type(&generics, gid);
+            drop(generics);
             if let Some(prev) = subst.ty_of(*head) {
                 if prev != ctor {
                     let var = &sig.ty_var_names[*head as usize];
@@ -8613,27 +8624,18 @@ pub(super) fn apply_subst(
             // the binding site (`ty_var_spans`, the variable's first
             // mention) and the misuse site (`span`, this grounding call).
             // An internally-created signature with no span table degrades
-            // to the misuse span alone.
-            Some(Type::CtorImage(gid)) => {
+            // to the misuse span alone. The constructor's name is the one
+            // carried on the `CtorImage` itself (`ctor_image_type`'s own
+            // `GenericTypes` read at binding time), so no second lookup here.
+            Some(Type::CtorImage(_, ctor_name)) => {
                 let binding_span = sig.ty_var_spans.get(*v as usize).copied().unwrap_or(span);
-                let ctor_name = ctx
-                    .generics()
-                    .map(|cell| {
-                        let g = cell.borrow();
-                        if gid.is_enum {
-                            g.enums[gid.idx as usize].name.clone()
-                        } else {
-                            g.structs[gid.idx as usize].name.clone()
-                        }
-                    })
-                    .unwrap_or_else(|| "<constructor image>".to_string());
                 Err(poly_ctor_image_as_type_error(
                     ctx,
                     span,
                     name,
                     &sig.ty_var_names[*v as usize],
                     binding_span,
-                    &ctor_name,
+                    ctor_name,
                 ))
             }
             Some(t) => Ok(t),
@@ -8842,7 +8844,7 @@ pub(super) fn apply_subst(
                     sig.ty_var_names.len(),
                 )
             })?;
-            let Type::CtorImage(gid) = ctor else {
+            let Type::CtorImage(gid, ctor_name) = ctor else {
                 return Err(poly_rendered_type_mismatch_error(
                     ctx,
                     span,
@@ -8875,17 +8877,15 @@ pub(super) fn apply_subst(
             // with a mismatched (empty) length list.
             {
                 let generics = cell.borrow();
-                let (len_arity, ctor_name) = if gid.is_enum {
-                    let d = &generics.enums[gid.idx as usize];
-                    (d.len_var_names.len(), d.name.clone())
+                let len_arity = if gid.is_enum {
+                    generics.enums[gid.idx as usize].len_var_names.len()
                 } else {
-                    let d = &generics.structs[gid.idx as usize];
-                    (d.len_var_names.len(), d.name.clone())
+                    generics.structs[gid.idx as usize].len_var_names.len()
                 };
                 if len_arity != 0 {
                     let var = &sig.ty_var_names[*head as usize];
                     return Err(poly_app_len_domain_unsupported_error(
-                        ctx, span, name, var, &ctor_name,
+                        ctx, span, name, var, ctor_name,
                     ));
                 }
             }
@@ -11294,11 +11294,14 @@ mod tests {
         .expect("`'F['T]` should unify against `Box[i64]`");
         assert_eq!(
             subst.ty_of(0),
-            Some(Type::CtorImage(crate::ast::GenericId {
-                is_enum: false,
-                idx: 0,
-                module: 0,
-            })),
+            Some(Type::CtorImage(
+                crate::ast::GenericId {
+                    is_enum: false,
+                    idx: 0,
+                    module: 0,
+                },
+                "Box",
+            )),
             "'F should bind to Box's CtorImage"
         );
         assert_eq!(subst.ty_of(1), Some(Type::I64), "'T should bind to i64");
@@ -11327,11 +11330,14 @@ mod tests {
         let mut subst = Subst::default();
         subst.ty.push((
             0,
-            Type::CtorImage(crate::ast::GenericId {
-                is_enum: false,
-                idx: 0,
-                module: 0,
-            }),
+            Type::CtorImage(
+                crate::ast::GenericId {
+                    is_enum: false,
+                    idx: 0,
+                    module: 0,
+                },
+                "Box",
+            ),
         ));
         subst.ty.push((1, Type::I64));
         let declared = PolyType::App {
@@ -11446,11 +11452,14 @@ mod tests {
         let mut subst = Subst::default();
         subst.ty.push((
             0,
-            Type::CtorImage(crate::ast::GenericId {
-                is_enum: false,
-                idx: 0,
-                module: 0,
-            }),
+            Type::CtorImage(
+                crate::ast::GenericId {
+                    is_enum: false,
+                    idx: 0,
+                    module: 0,
+                },
+                "Buffer",
+            ),
         ));
         subst.ty.push((1, Type::I64));
         let declared = PolyType::App {
@@ -11519,11 +11528,14 @@ mod tests {
         let mut subst = Subst::default();
         subst.ty.push((
             0,
-            Type::CtorImage(crate::ast::GenericId {
-                is_enum: false,
-                idx: 0,
-                module: 0,
-            }),
+            Type::CtorImage(
+                crate::ast::GenericId {
+                    is_enum: false,
+                    idx: 0,
+                    module: 0,
+                },
+                "Box",
+            ),
         ));
         let mut arrays: Vec<ArrayDecl> = Vec::new();
         let mut cells: Vec<OwnedCellDecl> = Vec::new();

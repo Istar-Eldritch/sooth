@@ -170,6 +170,9 @@ fn hkt_star_var_applied_like_constructor_is_located_error() {
         err.contains("is applied like a type constructor but has kind `*`"),
         "{err}"
     );
+    // S1-15's both-spans rule: the origin clause naming where `'F` was
+    // bound bare must be present too, not just the misuse clause.
+    assert!(err.contains("bound bare at line 2, col 16"), "{err}");
 }
 
 /// Kind error #2 (S1-15.b): an arrow-kind variable (established by an
@@ -184,6 +187,12 @@ fn hkt_arrow_var_used_bare_is_located_error() {
     let err = build_error(&entry);
     assert!(
         err.contains("is used as a plain type but has kind `* -> *`"),
+        "{err}"
+    );
+    // S1-15's both-spans rule: the origin clause naming the earlier
+    // application that established the arrow kind.
+    assert!(
+        err.contains("from an application of `'F` at line 2, col 16"),
         "{err}"
     );
 }
@@ -219,6 +228,9 @@ fn hkt_application_arity_conflicts_with_inferred_kind_is_error() {
         err.contains("applies `'F` to 2 arguments but its kind takes 1"),
         "{err}"
     );
+    // S1-15's both-spans rule: the origin clause naming the earlier
+    // (1-argument) application that established the kind.
+    assert!(err.contains("from `'F[...]` at line 2, col 19"), "{err}");
 }
 
 /// Kind error #5 (S1-15.e, header-field twin of S1-15.a): a header field
@@ -269,6 +281,13 @@ fn hkt_annotation_arity_unsatisfiable_by_application_is_error() {
     let (_t, entry) = single_file("kind-error-h", src);
     let err = build_error(&entry);
     assert!(err.contains("is annotated `* -> Len -> *`"), "{err}");
+    // S1-15's both-spans rule: the origin clause naming the application
+    // whose inferred kind conflicts with the annotation.
+    assert!(
+        err.contains("is used as an application of kind `* -> *`"),
+        "{err}"
+    );
+    assert!(err.contains("at line 2, col 31"), "{err}");
 }
 
 // ---- Phase 4: IR + end-to-end goldens ----
@@ -293,19 +312,25 @@ type: Box['T] v 'T ;
 
 /// Positive golden #2 (W1): a generic struct field typed `'F['T]`
 /// monomorphizes to the applied constructor (`Box[i64]`) via S1-8's
-/// instantiation semantics for `App` fields.
+/// instantiation semantics for `App` fields. The boxed field (`f`) and the
+/// plain field (`t`) hold *distinct* values (5 and 7) -- a field-order bug
+/// in the `App` field's instantiation would go unnoticed if both held the
+/// same value, since the wrong field's value would still print correctly.
 #[test]
 fn hkt_struct_field_monomorphizes_to_the_applied_constructor() {
     let src = "\
 type: Box['T] v 'T ;
 type: Wrap['F 'T] f 'F['T] t 'T ;
 
-: mk ( i64 -- Wrap[Box i64] ) dup Box swap Wrap ;
-: main ( -- ) 5 mk Wrap> drop Box> . ;
+: mk ( -- Wrap[Box i64] ) 5 Box 7 Wrap ;
+: main ( -- ) mk Wrap> . Box> . ;
 ";
     let (_t, entry) = single_file("w1-field-monomorphize", src);
     let out = build_and_run(&entry);
-    assert_eq!(out, "5\n");
+    assert_eq!(
+        out, "7\n5\n",
+        "t (7) prints first, then f's Box payload (5)"
+    );
 }
 
 // ---- Review fix (P0): App unification against a length-parameterized ctor ----

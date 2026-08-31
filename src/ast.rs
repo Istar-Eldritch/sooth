@@ -939,11 +939,13 @@ impl GenericTypes {
             // to a constructor image (S1-12), apply this field's own
             // (substituted) arguments through that header, mirroring the
             // `Generic` arm above. A binding that is not a `CtorImage` is a
-            // kind mismatch this phase's parser does not yet validate
-            // (S1-15.f is Phase 3): rather than panic, fall back to the
-            // resolved (non-`CtorImage`) binding unapplied -- a pinned
-            // intermediate state, since `CtorImage` is not a concrete value
-            // type and every real consumer routes it to S1-15.g instead.
+            // kind mismatch `validate_ctor_arg_kinds` (S1-15.f, `parser.rs`)
+            // already rejects at the use site, so this arm's fallback --
+            // returning the resolved (non-`CtorImage`) binding unapplied --
+            // is unreachable in practice; kept as a non-panicking default
+            // rather than an `unreachable!` since `CtorImage` is not a
+            // concrete value type and nothing here re-proves the parser's
+            // own guard.
             PolyType::App {
                 head,
                 args: field_args,
@@ -953,7 +955,7 @@ impl GenericTypes {
                     .map(|a| self.substitute_generic_field(a, args, lens, regs.reborrow()))
                     .collect();
                 match args[*head as usize] {
-                    Type::CtorImage(gid) => {
+                    Type::CtorImage(gid, _) => {
                         if gid.is_enum {
                             self.instantiate_enum(
                                 gid.idx as usize,
@@ -2729,7 +2731,12 @@ pub enum Type {
     /// constructor argument (`Wrap[Box i64]`) through to `struct_keys`. Any
     /// matcher that would treat it as an ordinary value type routes to the
     /// S1-15.g diagnostic ("constructor used as a type") instead.
-    CtorImage(GenericId),
+    ///
+    /// Carries the constructor's own declared name as a leaked `&'static
+    /// str`, mirroring `Type::Variant`'s `display_static`: computed once at
+    /// construction (`ctor_image_type`, the sole constructor) from the live
+    /// `GenericTypes` registry, never re-derived by `name()`.
+    CtorImage(GenericId, &'static str),
 }
 
 /// Slice 6a (R4): a declared quotation effect, the payload behind
@@ -2998,42 +3005,49 @@ impl Type {
             // `name_static` by `inline_quotation_type`/`owning_quotation_type`,
             // so these mirror the `Quotation` arm.
             Type::InlineQuotation(eff) | Type::OwningQuotation(eff) => eff.name_static,
-            // P7b.S1 (S1-12): `name()` carries no `GenericTypes` registry
-            // to look the constructor's declared name up in (unlike every
-            // other variant here, whose name is baked in at construction),
-            // so this renders a *stable, distinct-per-`GenericId`* string
-            // instead -- memoized so repeated calls for the same `gid`
-            // return the same leaked `&'static str`. This is what makes
+            // P7b.S1 (S1-12): the constructor's real declared name,
+            // carried on the variant itself (`ctor_image_type`, the sole
+            // constructor) rather than re-derived here -- mirrors
+            // `Type::Variant`'s `display_static`. This is what makes
             // S1-12's symbol-distinctness ruling hold: the mangler folds
             // `subst.ty` by rendering each bound `Type`'s `name()`, so two
             // call sites binding `'F` to different constructors must
             // render different strings here, or the last-write-wins defect
-            // S12 fixed recurs one abstraction level up.
-            Type::CtorImage(gid) => ctor_image_name(*gid),
+            // S12 fixed recurs one abstraction level up. (Two same-named
+            // constructors declared in different modules still collide --
+            // a pre-existing, documented limit; see `ctor_image_type`.)
+            Type::CtorImage(_, name) => name,
         }
     }
 }
 
-/// P7b.S1 (S1-12): a stable, distinct-per-`GenericId` `&'static str` for
-/// `Type::CtorImage`'s own `name()` -- memoized (not merely leaked fresh on
-/// every call, which `name()`'s hot-path call sites would exhaust memory
-/// over) so two renders of the *same* `gid` return the identical string,
-/// letting the mangler's dedup-by-string-equality work unchanged.
-fn ctor_image_name(gid: GenericId) -> &'static str {
-    use std::sync::{Mutex, OnceLock};
-    static CACHE: OnceLock<Mutex<std::collections::HashMap<GenericId, &'static str>>> =
-        OnceLock::new();
-    let cache = CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
-    let mut map = cache.lock().expect("ctor_image_name cache poisoned");
-    map.entry(gid).or_insert_with(|| {
-        let s = format!(
-            "<ctor:{}:{}:{}>",
-            if gid.is_enum { "enum" } else { "struct" },
-            gid.idx,
-            gid.module
-        );
-        Box::leak(s.into_boxed_str())
-    })
+/// P7b.S1 (S1-12): the **sole** constructor of a `Type::CtorImage`. Reads the
+/// constructor's declared name off the live `GenericTypes` registry and leaks
+/// it (per construction -- no dedup; call volume is unification attempts,
+/// which is bounded for a compiler process), mirroring `variant_type`'s read
+/// of `display_static` -- never a lookup table keyed by `GenericId` (that
+/// idiom, and the `Mutex`-guarded global it required, is what this replaces).
+/// Every construction site shares this one function, so `name()` never
+/// re-derives the string.
+///
+/// Limit introduced here (report-only, S1-12): the carried name is the bare
+/// declared name, so two same-named constructors declared in different
+/// modules bound to the same variable at two call sites would render
+/// identically and collide in the mangled symbol (`instantiation_symbol`
+/// sanitizes `Type::name()`). At HEAD's `<ctor:struct:{idx}:{module}>`
+/// rendering the symbol was module-qualified and distinct by construction,
+/// so this pass weakens cross-module distinctness for `CtorImage`; it is
+/// guarded only by the fact that a generic struct constructor does not
+/// resolve across a module boundary yet. Lifting that reachability (S2)
+/// must restore qualification (or key the symbol on `GenericId`) or S1-12
+/// breaks.
+pub fn ctor_image_type(generics: &GenericTypes, gid: GenericId) -> Type {
+    let name = if gid.is_enum {
+        generics.enums[gid.idx as usize].name.clone()
+    } else {
+        generics.structs[gid.idx as usize].name.clone()
+    };
+    Type::CtorImage(gid, Box::leak(name.into_boxed_str()))
 }
 
 impl IntType {
@@ -4025,6 +4039,31 @@ mod tests {
             generics.inst_structs[0].fields,
             vec![("val".to_string(), Type::I64)]
         );
+    }
+
+    /// P7b.S1 review fix (S1-12): `ctor_image_type` renders the
+    /// constructor's real declared name, not the index-derived placeholder
+    /// the old `OnceLock<Mutex<HashMap>>` cache used to produce.
+    #[test]
+    fn ctor_image_type_renders_the_real_constructor_name() {
+        let decl = GenericStructDecl {
+            name: "Buf".to_string(),
+            ty_var_names: vec!["'T".to_string()],
+            ty_kinds: Vec::new(),
+            len_var_names: Vec::new(),
+            fields: vec![("val".to_string(), PolyType::Var(0))],
+            span: Span::default(),
+            module: 0,
+        };
+        let mut generics = GenericTypes::with_bases(0, 0);
+        generics.structs.push(decl);
+        let gid = GenericId {
+            is_enum: false,
+            idx: 0,
+            module: 0,
+        };
+        let ty = ctor_image_type(&generics, gid);
+        assert_eq!(ty.name(), "Buf");
     }
 
     /// A one-type-variable, one-length-variable generic struct header with a
