@@ -40,7 +40,7 @@ fn sum_to(branch: &str, iterations: u32) -> String {
 }
 
 fn lowered(src: &str) -> Vec<IrFunc> {
-    let tokens = lexer::lex(src).expect("lexing should succeed");
+    let tokens = lexer::lex(&common::silent_prints(src)).expect("lexing should succeed");
     let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
     check::check(&mut module).expect("check should succeed");
     lower(&module).expect("lowering should succeed").funcs
@@ -58,7 +58,7 @@ fn self_calls(f: &IrFunc) -> usize {
     f.blocks
         .iter()
         .flat_map(|b| b.instrs.iter())
-        .filter(|i| matches!(i, Instr::Call(_, sym, _) if *sym == f.name))
+        .filter(|i| matches!(i, Instr::Call(_, sym, _, _) if *sym == f.name))
         .count()
 }
 
@@ -192,7 +192,7 @@ fn forwarded_recursion_through_a_mid_body_bind_declines_the_loop_but_still_check
         n 0 eq ~[ ] rec decide ;\n\
         : main ( -- )\n\
         0 V | v | &!v 3 spin ;\n";
-    let funcs = lowered(src);
+    let funcs = lowered(&common::silent_prints(src));
     let spin = func(&funcs, "spin");
     assert_eq!(
         self_calls(spin),
@@ -220,7 +220,7 @@ fn linear_value_across_the_spliced_back_edge_is_error() {
          n 0 eq ~[ 0 ] ~[ n 1 sub spin ] decide ;\n\
          : main ( -- ) 3 spin . ;\n"
     );
-    let err = check_error(&src);
+    let err = check_error(&common::silent_prints(&src));
     assert!(
         err.contains("linear values across a loop are not supported yet"),
         "unexpected message: {err}"
@@ -241,7 +241,7 @@ fn linear_value_forwarded_into_the_spliced_back_edge_is_ok() {
         : spin ( Spy i64 -- i64 )\n\
         | n | n 0 eq ~[ | s | s drop 0 ] ~[ | s | s n 1 sub spin ] decide ;\n\
         : main ( -- ) 0 Spy 3 spin . ;\n";
-    let funcs = lowered(src);
+    let funcs = lowered(&common::silent_prints(src));
     let spin = func(&funcs, "spin");
     assert_eq!(self_calls(spin), 0, "the forwarded case still loops");
     assert_eq!(back_edges(spin), 1);
@@ -284,7 +284,7 @@ fn back_edges_repaired_helper_ignores_a_spliced_eliminators_join_block() {
   ~[ ( Greater ) drop n 1 sub countdown ]\n\
   Ordering? ;\n\
 : main ( -- ) 5 countdown . ;\n";
-    let funcs = lowered(src);
+    let funcs = lowered(&common::silent_prints(src));
     let countdown = func(&funcs, "countdown");
     assert_eq!(
         self_calls(countdown),
@@ -340,7 +340,7 @@ type: Uno\n\
 ;\n\
 : pick ( -- Uno ) Solo ;\n\
 : main ( -- ) pick ~[ ( Solo ) drop 1 . ] Uno? ;\n";
-    let funcs = lowered(src);
+    let funcs = lowered(&common::silent_prints(src));
     let main = func(&funcs, "main");
     assert!(
         opens_a_loop_header(main),

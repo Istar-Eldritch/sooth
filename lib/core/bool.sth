@@ -1,9 +1,9 @@
 \ core::bool -- the boolean type itself, plus the typed branch over it, over
 \ the two control primitives it imports and nothing else, so a reader can see
 \ this module's whole intrinsic surface in one line.
-import: intrinsics i | branch tag drop . | ;
+import: intrinsics i | branch tag drop | ;
 
-export: Bool False True if unless . ;
+export: Bool False True if unless ;
 
 \ `Bool` is an ordinary two-variant enum declared here in source, not a type
 \ the compiler injects into every program: a module reaches it, its variants
@@ -44,12 +44,3 @@ type: Bool
 : unless inline ( ..a Bool ~[ ..a -- ..b ] ~[ ..a -- ..b ] -- ..b )
   | unless--else-arm | | unless--then-arm | | unless--cond |
   unless--cond tag unless--else-arm unless--then-arm branch ;
-
-\ `.` on a Bool: an ordinary library overload of the print operator, reached
-\ through the builtin-row exact miss like any user overload. It eliminates over
-\ the two variants and delegates to the still-primitive `str` row, so the
-\ backend needs no boolean print arm of its own.
-: . ( Bool -- )
-  ~[ ( False ) drop "False\n" . ]
-  ~[ ( True )  drop "True\n" . ]
-  Bool? ;

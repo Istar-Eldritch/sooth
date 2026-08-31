@@ -4,6 +4,7 @@
 \ reads through `&field` projections and then consumes.
 
 import: intrinsics * ;
+import: hosted::show | . | ;
 
 type: Shape
 | Circle r i64

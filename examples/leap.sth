@@ -2,11 +2,8 @@
 \ `bool`. A year is leap if divisible by 4 and not by 100, or divisible by 400.
 
 import: intrinsics * ;
+import: hosted::show | . | ;
 import: core::prelude * ;
-\ A bool is printed with `.` below, and an operator overload does not follow
-\ the prelude hub's re-export (one hop only): it comes from the declaring
-\ module. `Bool` itself comes through `core::prelude`'s own re-export.
-import: core::bool b | . | ;
 
 : leap ( i64 -- Bool )
   dup 4 mod 0 eq

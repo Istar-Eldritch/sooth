@@ -9,6 +9,9 @@ Every word declares what it takes (`--` part before) and produces (`--` part aft
 When a word pushes a value as part of its output, that value is *consumed* from the caller's perspective: any value left on the stack after the call must be accounted for (used, returned, or dropped).
 
 ```sooth
+import: intrinsics * ;
+import: hosted::show | . | ;
+
 : sum ( i64 i64 -- i64 ) add ;
 : main ( -- ) 3 4 sum . ;
 ```

@@ -64,7 +64,7 @@ fn build_and_run_closure(name: &str, lib: &str, main: &str) -> (std::path::PathB
 }
 
 fn check_error(src: &str) -> String {
-    let tokens = lexer::lex(src).expect("lexing should succeed");
+    let tokens = lexer::lex(&common::silent_prints(src)).expect("lexing should succeed");
     let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
     check::check(&mut module).expect_err("check should fail")
 }
@@ -175,7 +175,7 @@ fn inline_word_calling_inline_word_splices_transitively() {
     assert_eq!(stdout, "12\n");
     assert_eq!(code, 0);
 
-    let tokens = lexer::lex(src).expect("lexing should succeed");
+    let tokens = lexer::lex(&common::silent_prints(src)).expect("lexing should succeed");
     let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
     check::check(&mut module).expect("check should succeed");
     let ir = lower(&module).expect("lowering should succeed");
@@ -211,7 +211,7 @@ fn inline_word_polymorphic_signature_is_accepted() {
     // six `core::cmp` comparison words be both `'T: Copy Ord`-polymorphic
     // and `inline`. R3's other rejections (`main`, a builtin operator name)
     // are untouched, and the tests above still pin them.
-    let tokens = lexer::lex(": id inline ( 'T -- 'T ) ;\n: main ( -- ) 3 id . ;\n")
+    let tokens = lexer::lex(": id inline ( 'T -- 'T ) ;\n: main ( -- ) 3 id drop ;\n")
         .expect("lexing should succeed");
     let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
     check::check(&mut module).expect("a polymorphic `inline` word is spliced, not rejected");
@@ -223,7 +223,7 @@ fn inline_word_self_nontail_cycle_is_located_error() {
     // umbrella term -- it need not take a quotation, so "a quotation-taking
     // word" no longer names the class the rule covers.
     let err = check_error(
-        ": loopy inline ( i64 -- i64 ) 1 add loopy 2 mul ;\n: main ( -- ) 3 loopy . ;\n",
+        ": loopy inline ( i64 -- i64 ) 1 add loopy 2 mul ;\n: main ( -- ) 3 loopy drop ;\n",
     );
     assert_eq!(
         err,
@@ -239,7 +239,7 @@ fn inline_on_main_is_located_error() {
     // `audit_word_quotation_positions` already keeps `main` off the *quotation*
     // route into `is_combinator` ("an input of `main`", D6/R28); the declared
     // flag is a second route to the same shape.
-    let err = check_error(": main inline ( -- ) 1 . ;\n");
+    let err = check_error(": main inline ( -- ) 1 drop ;\n");
     assert_eq!(
         err,
         "error: `inline` on `main`, which is the program entry point; the entry point is called by the runtime shim and cannot be spliced (line 1, col 3)"
@@ -257,7 +257,7 @@ fn inline_on_builtin_operator_overload_is_located_error() {
     let src = "type: A n i64 ;\n\
                : add inline ( A A -- i64 ) | x y | &x &n @ drop &y &n @ drop 1000 ;\n\
                : main ( -- ) 1 A 2 A add . ;\n";
-    let err = check_error(src);
+    let err = check_error(&common::silent_prints(src));
     assert_eq!(
         err,
         "error: `inline` on `add`, which overloads a builtin operator name; a call site of a builtin operator name dispatches through a real call and cannot be spliced (line 2, col 3)"
@@ -283,7 +283,7 @@ fn inline_tilde_parameter_word_is_accepted_and_spliced() {
     assert_eq!(stdout, "5\n");
     assert_eq!(code, 0);
 
-    let tokens = lexer::lex(src).expect("lexing should succeed");
+    let tokens = lexer::lex(&common::silent_prints(src)).expect("lexing should succeed");
     let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
     check::check(&mut module).expect("check should succeed");
     let ir = lower(&module).expect("lowering should succeed");
@@ -326,7 +326,7 @@ fn inline_word_self_tail_recursion_runs_as_a_loop() {
     assert_eq!(stdout, "0\n");
     assert_eq!(code, 0);
 
-    let tokens = lexer::lex(src).expect("lexing should succeed");
+    let tokens = lexer::lex(&common::silent_prints(src)).expect("lexing should succeed");
     let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
     check::check(&mut module).expect("check should succeed");
     let ir = lower(&module).expect("lowering should succeed");
@@ -422,7 +422,7 @@ fn inline_reference_to_linear_local_is_rejected() {
                : fresh inline ( -- &!usize )\n\
                  0 >u8 64 fill ^ 0 >usize Buf | b |\n\
                  &!b &!len ;\n";
-    let err = check_error(src);
+    let err = check_error(&common::silent_prints(src));
     assert_eq!(
         err,
         "error: linear value `b` is never consumed in `fresh` (line 4)\n  `b` has type `Buf`, which is linear: drop it or return it (nothing is dropped for you)\n  note: declared ( -- &!usize )"
@@ -595,7 +595,7 @@ fn combinators_retype_stored_quotation_still_rejected() {
 ",
         combinators_source("~")
     );
-    let err = check_error(&src);
+    let err = check_error(&common::silent_prints(&src));
     assert_eq!(
         err,
         "error: `each` expects a quotation `~[ i64 -- ]` here, found `[ i64 -- ]` in `main` (line 43)"

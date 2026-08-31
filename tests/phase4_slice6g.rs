@@ -111,7 +111,7 @@ fn if_inside_a_loop_reading_an_alias_is_an_error() {
     let err = check_error(&format!(
         "{TIMES_DEF}: main ( -- )\n\
          0 4 fill | a |\n\
-         2 ~[ | i | a | arr | &a 0 >usize &> @ . True ~[ &!arr 0 >usize &!> 9 ! ] ~[ ] if arr drop ] times ;\n"
+         2 ~[ | i | a | arr | &a 0 >usize &> @ drop True ~[ &!arr 0 >usize &!> 9 ! ] ~[ ] if arr drop ] times ;\n"
     ));
     assert_aliased_by(&err, "arr", "a");
 }
@@ -125,7 +125,7 @@ fn read_and_mutate_inside_a_looped_grant_is_an_error() {
     let err = check_error(&format!(
         "{TIMES_DEF}: main ( -- )\n\
          0 4 fill | a |\n\
-         2 ~[ | i | True ~[ a | arr | &a 0 >usize &> @ . &!arr 0 >usize &!> 9 ! arr drop ] ~[ ] if ] times ;\n"
+         2 ~[ | i | True ~[ a | arr | &a 0 >usize &> @ drop &!arr 0 >usize &!> 9 ! arr drop ] ~[ ] if ] times ;\n"
     ));
     assert_aliased_by(&err, "arr", "a");
 }
@@ -141,7 +141,7 @@ fn single_call_body_naming_the_alias_is_an_error() {
     let err = check_error(
         ": main ( -- )\n\
          0 4 fill | a |\n\
-         [ True ~[ a | arr | &!arr 0 >usize &!> 9 ! &arr 0 >usize &> @ . arr drop ] ~[ ] if ] call ;\n",
+         [ True ~[ a | arr | &!arr 0 >usize &!> 9 ! &arr 0 >usize &> @ drop arr drop ] ~[ ] if ] call ;\n",
     );
     assert_aliased_by(&err, "arr", "a");
 }
@@ -220,7 +220,7 @@ fn later_use_withholds_the_times_grant() {
          a | arr |\n\
          4 ~[ | i | &!arr i >usize &!> i ! ] times\n\
          arr drop\n\
-         &a 0 >usize &> @ .\n\
+         &a 0 >usize &> @ drop\n\
          a drop ;\n"
     ));
     assert_aliased_by(&err, "arr", "a");
@@ -239,7 +239,7 @@ fn binding_a_local_named_after_a_builtin_is_rejected() {
     let err = check_error(
         ": main ( -- )\n\
          1 | len |\n\
-         len . ;\n",
+         len drop ;\n",
     );
     assert!(
         err.contains("`len`") && err.contains("collides with the callable name"),
@@ -254,7 +254,7 @@ fn binding_a_poly_local_named_after_a_builtin_is_rejected() {
     // whole suite green while this builds and prints `2`.
     let err = check_error(
         ": pick ( 'T 'T -- 'T ) | len | | other | other drop len ;\n\
-         : main ( -- ) 1 2 pick . ;\n",
+         : main ( -- ) 1 2 pick drop ;\n",
     );
     assert!(
         err.contains("`len`") && err.contains("collides with the callable name"),

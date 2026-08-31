@@ -42,6 +42,9 @@ This works for any word, not just words that take quotations. A small
 helper marked `inline` costs nothing at runtime:
 
 ```sooth
+import: intrinsics * ;
+import: hosted::show | . | ;
+
 : square inline ( i64 -- i64 ) | x | x x mul ;
 
 : main ( -- )
@@ -108,6 +111,10 @@ first, then checks. This lets you put `main` at the top and helpers
 below:
 
 ```sooth
+import: intrinsics * ;
+import: core::prelude * ;
+import: hosted::show | . | ;
+
 : main ( -- )
   5 factorial . ;
 
@@ -126,6 +133,10 @@ because the word's name is in scope from the moment its definition
 begins.
 
 ```sooth
+import: intrinsics * ;
+import: core::prelude * ;
+import: hosted::show | . | ;
+
 : countdown ( i64 -- )
   dup 0 eq ~[ drop ] ~[ dup . 1 sub countdown ] if ;
 ```
@@ -166,6 +177,10 @@ your `main` word. If you forget it, the linker fails with an undefined
 reference to `sooth_main`.
 
 ```sooth
+import: intrinsics * ;
+import: core::prelude * ;
+import: hosted::show | . | ;
+
 : main ( -- )
   10 15 gcd . ;
 ```

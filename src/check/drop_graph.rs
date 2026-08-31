@@ -783,7 +783,7 @@ mod tests {
     /// not by any compiler-known bit. Always the first struct in a source
     /// string that uses it, so every other struct's `StructId` shifts up by
     /// one relative to a spy-free program.
-    const SPY_DEF: &str = "type: Spy tag i64 ;\n: drop ( Spy -- )  | s | \"drop \" . s Spy> . ;\n";
+    const SPY_DEF: &str = "type: Spy tag i64 ;\n: drop ( Spy -- )  | s | s Spy> drop ;\n";
     fn first_word(src: &str) -> WordDef {
         let tokens = lex(src).unwrap();
         let module = crate::test_support::parse_with_core(&tokens).unwrap();
@@ -850,7 +850,7 @@ mod tests {
         // neither of these.
         let src = "type: File fd i64 ; \
                    : shut ( File -- ) drop ; \
-                   : drop ( File -- ) | f | True ~[ f shut ] ~[ f shut ] if 1 . ; \
+                   : drop ( File -- ) | f | True ~[ f shut ] ~[ f shut ] if 1 drop ; \
                    : main ( -- ) 1 File drop ;";
         let err = check_src(src).unwrap_err();
         assert!(
@@ -972,7 +972,7 @@ mod tests {
         // both from an override and from elsewhere must not read as a cycle
         // just for being reachable from two places.
         let src = "type: File fd i64 ; \
-                   : show ( i64 -- ) . ; \
+                   : show ( i64 -- ) drop ; \
                    : drop ( File -- ) | f | f File> show ; \
                    : main ( -- ) 1 File drop 2 show ;";
         check_src(src).unwrap();
@@ -1394,7 +1394,10 @@ mod tests {
     #[test]
     fn check_self_tail_recursion_is_allowed() {
         // A self-loop (`gcd -> gcd`) is tier-1 and must not be flagged as a
-        // mutual cycle.
-        check_src(&std::fs::read_to_string("examples/gcd.sth").unwrap()).unwrap();
+        // mutual cycle. Read from the committed `examples/gcd.sth` through
+        // `test_support::check_example` (the driver's own closure discovery
+        // and `check`), the same mechanism `check.rs`'s `check_gcd_is_ok`
+        // uses, rather than a second, hand-inlined copy of `gcd`.
+        crate::test_support::check_example("examples/gcd.sth").unwrap();
     }
 }

@@ -1824,16 +1824,15 @@ mod tests {
             phrase,
         };
         let rows = [
-            // check_operator, both operand positions, plus print.
+            // check_operator, both operand positions.
             op(": main ( -- ) 1 [ add ] add ;\n", "`add`"),
-            op(": main ( -- ) [ add ] 1 sub . ;\n", "`sub`"),
-            op(": main ( -- ) [ add ] . ;\n", "`.`"),
+            op(": main ( -- ) [ add ] 1 sub drop ;\n", "`sub`"),
             // Slice 10c: the branch condition, before the flag mismatch.
             // `if` is a `lib/` word now, so the audited site is the primitive
             // it wraps -- the one builtin exempt from the quotation-operand
             // default-deny for its *branch* operands, but not for its
             // condition.
-            op(": main ( -- ) [ add ] [ 1 . ] [ 2 . ] branch ;\n", "`branch`"),
+            op(": main ( -- ) [ add ] [ 1 drop ] [ 2 drop ] branch ;\n", "`branch`"),
             // check_str_word (`len`/`cstr`).
             op(": main ( -- ) [ add ] len ;\n", "`len`"),
             op(": main ( -- ) [ add ] cstr ;\n", "`cstr`"),
@@ -2068,7 +2067,7 @@ mod tests {
         check_src(
             "static: LIMIT i64 = 10 ;\n\
              : peek ( &!i64 -- i64 ) @ ;\n\
-             : main ( -- ) &!LIMIT peek . ;",
+             : main ( -- ) &!LIMIT peek drop ;",
         )
         .unwrap();
     }
@@ -2078,7 +2077,7 @@ mod tests {
     /// scalar borrowable.
     #[test]
     fn borrow_of_scalar_local_still_error() {
-        let err = check_src(": main ( -- ) 1 | x | &!x @ . ;").unwrap_err();
+        let err = check_src(": main ( -- ) 1 | x | &!x @ drop ;").unwrap_err();
         assert!(
             err.contains("cannot borrow the scalar local `x` of type `i64`"),
             "unexpected message: {err}"
@@ -2098,7 +2097,7 @@ mod tests {
     fn two_live_mutable_static_borrows_conflict() {
         let err = check_src(
             "static: COUNT i64 = 0 ;\n\
-             : main ( -- ) &!COUNT &!COUNT @ . @ . ;",
+             : main ( -- ) &!COUNT &!COUNT @ drop @ drop ;",
         )
         .unwrap_err();
         assert!(
@@ -2112,7 +2111,7 @@ mod tests {
     fn shared_static_borrow_beside_a_live_mutable_one_conflicts() {
         let err = check_src(
             "static: COUNT i64 = 0 ;\n\
-             : main ( -- ) &!COUNT &COUNT @ . @ . ;",
+             : main ( -- ) &!COUNT &COUNT @ drop @ drop ;",
         )
         .unwrap_err();
         assert!(
@@ -2129,7 +2128,7 @@ mod tests {
     fn local_shadowing_a_static_resolves_to_the_local() {
         let err = check_src(
             "static: COUNT i64 = 0 ;\n\
-             : main ( -- ) 1 | COUNT | &COUNT @ . ;",
+             : main ( -- ) 1 | COUNT | &COUNT @ drop ;",
         )
         .unwrap_err();
         assert!(
@@ -2208,7 +2207,7 @@ mod tests {
     fn borrow_of_neither_local_nor_static_is_error() {
         let err = check_src(
             "static: COUNT i64 = 0 ;\n\
-             : main ( -- ) &NOPE @ . ;",
+             : main ( -- ) &NOPE @ drop ;",
         )
         .unwrap_err();
         assert!(
@@ -2227,7 +2226,7 @@ mod tests {
     fn conflicting_borrow_error_names_the_source_spelling_not_the_mangled_one() {
         let err = check_src_mangled(
             "static: COUNT i64 = 0 ;\n\
-             : main ( -- ) &!COUNT &!COUNT @ . @ . ;",
+             : main ( -- ) &!COUNT &!COUNT @ drop @ drop ;",
         )
         .unwrap_err();
         assert!(
@@ -2308,7 +2307,7 @@ mod tests {
         assert!(check_src(
             "type: Stats hp i64 ;\n\
              type: Unit stats Stats ;\n\
-             : main ( -- ) 1 Stats Unit | u | &u &stats &hp @ . &!u &!stats &!hp 2 ! u drop ;",
+             : main ( -- ) 1 Stats Unit | u | &u &stats &hp @ drop &!u &!stats &!hp 2 ! u drop ;",
         )
         .is_ok());
     }
@@ -2317,7 +2316,7 @@ mod tests {
     /// the borrow chain still gets it and a non-place still says so.
     #[test]
     fn projection_on_non_struct_receiver_is_error() {
-        let err = check_src("type: Point x i64 ;\n: main ( -- ) 7 &x @ . ;").unwrap_err();
+        let err = check_src("type: Point x i64 ;\n: main ( -- ) 7 &x @ drop ;").unwrap_err();
         assert!(
             err.contains("`&x` does not borrow a place"),
             "unexpected message: {err}"
@@ -2343,7 +2342,7 @@ mod tests {
         assert!(check_src(
             "type: Point x i64 ;\n\
              type: Box w i64 ;\n\
-             : main ( -- ) 1 Point | p | 2 Box &p &x @ . drop ;",
+             : main ( -- ) 1 Point | p | 2 Box &p &x @ drop drop ;",
         )
         .is_ok());
     }
@@ -2355,7 +2354,7 @@ mod tests {
     fn projection_unknown_field_names_the_receiver_type() {
         let err = check_src(
             "type: Buf len usize ;\n\
-             : main ( -- ) 0 >usize Buf &lenn @ . drop ;",
+             : main ( -- ) 0 >usize Buf &lenn @ drop drop ;",
         )
         .unwrap_err();
         assert!(
@@ -2370,7 +2369,7 @@ mod tests {
     fn projection_field_shadowed_by_local_is_error() {
         let err = check_src(
             "type: Stats hp i64 ;\n\
-             : main ( -- ) 9 | hp | 1 Stats &hp @ . drop hp drop ;",
+             : main ( -- ) 9 | hp | 1 Stats &hp @ drop drop hp drop ;",
         )
         .unwrap_err();
         assert!(
@@ -2392,7 +2391,7 @@ mod tests {
         let err = check_src_mangled(
             "static: n i64 = 0 ;\n\
              type: Cnt n i64 ;\n\
-             : main ( -- ) 1 Cnt &n @ . drop ;",
+             : main ( -- ) 1 Cnt &n @ drop drop ;",
         )
         .unwrap_err();
         assert!(
@@ -2411,7 +2410,7 @@ mod tests {
         assert!(check_src(
             "type: A n i64 ;\n\
              type: B tag i64 n u32 ;\n\
-             : main ( -- ) 1 A &n @ . drop 2 7 >u32 B &n @ . drop ;",
+             : main ( -- ) 1 A &n @ drop drop 2 7 >u32 B &n @ drop drop ;",
         )
         .is_ok());
         // ... and the field's *type* is the receiver's, not the other's:
@@ -2420,7 +2419,7 @@ mod tests {
             "type: A n i64 ;\n\
              type: B tag i64 n u32 ;\n\
              : sum ( i64 i64 -- i64 ) add ;\n\
-             : main ( -- ) 2 7 >u32 B &n @ 1 sum . drop ;",
+             : main ( -- ) 2 7 >u32 B &n @ 1 sum drop drop ;",
         )
         .unwrap_err();
         assert!(err.contains("`sum`"), "unexpected message: {err}");
@@ -2446,7 +2445,7 @@ mod tests {
         // and a projection bound to a local is found by name.
         let bound = check_src(
             "type: Point x i64 y i64 ;\n\
-             : main ( -- ) 1 2 Point &x | a | &!x 3 ! a @ . drop ;",
+             : main ( -- ) 1 2 Point &x | a | &!x 3 ! a @ drop drop ;",
         )
         .unwrap_err();
         assert!(
@@ -2547,7 +2546,7 @@ mod tests {
     fn drop_of_receiver_while_its_projection_is_live_is_error() {
         let err = check_src(
             "type: Point x i64 y i64 ;\n\
-             : main ( -- ) 1 2 Point &x swap drop @ . ;",
+             : main ( -- ) 1 2 Point &x swap drop @ drop ;",
         )
         .unwrap_err();
         assert!(
@@ -2560,7 +2559,7 @@ mod tests {
         // rides an anonymous stack slot.
         let bound = check_src(
             "type: Point x i64 y i64 ;\n\
-             : main ( -- ) 1 2 Point &x swap | p | p drop @ . ;",
+             : main ( -- ) 1 2 Point &x swap | p | p drop @ drop ;",
         )
         .unwrap_err();
         assert!(
@@ -2573,7 +2572,7 @@ mod tests {
         // order and stays legal.
         assert!(check_src(
             "type: Point x i64 y i64 ;\n\
-             : main ( -- ) 1 2 Point &x @ . drop ;",
+             : main ( -- ) 1 2 Point &x @ drop drop ;",
         )
         .is_ok());
     }
@@ -2587,7 +2586,7 @@ mod tests {
         let err = check_src(
             "type: Point x i64 y i64 ;\n\
              : eat ( Point -- ) drop ;\n\
-             : main ( -- ) 1 2 Point &x swap eat @ . ;",
+             : main ( -- ) 1 2 Point &x swap eat @ drop ;",
         )
         .unwrap_err();
         assert!(
@@ -2605,7 +2604,7 @@ mod tests {
     fn word_call_consuming_a_receiver_its_own_argument_projects_is_error() {
         let err = check_src(
             "type: Point x i64 y i64 ;\n\
-             : eat ( Point &i64 -- ) swap drop @ . ;\n\
+             : eat ( Point &i64 -- ) swap drop @ drop ;\n\
              : main ( -- ) 1 2 Point &x eat ;",
         )
         .unwrap_err();
@@ -2615,7 +2614,7 @@ mod tests {
         );
         let swapped = check_src(
             "type: Point x i64 y i64 ;\n\
-             : eat ( &i64 Point -- ) drop @ . ;\n\
+             : eat ( &i64 Point -- ) drop @ drop ;\n\
              : main ( -- ) 1 2 Point &x swap eat ;",
         )
         .unwrap_err();
@@ -2636,7 +2635,7 @@ mod tests {
         let err = check_src(
             "type: Point x i64 y i64 ;\n\
              : eat ( 'T -- ) drop ;\n\
-             : main ( -- ) 1 2 Point &x swap eat @ . ;",
+             : main ( -- ) 1 2 Point &x swap eat @ drop ;",
         )
         .unwrap_err();
         assert!(
@@ -2667,7 +2666,7 @@ mod tests {
     fn dropping_one_of_two_shared_projections_is_allowed() {
         assert!(check_src(
             "type: Point x i64 y i64 ;\n\
-             : main ( -- ) 1 2 Point &x swap &x drop swap @ . drop ;",
+             : main ( -- ) 1 2 Point &x swap &x drop swap @ drop drop ;",
         )
         .is_ok());
     }
@@ -2682,7 +2681,7 @@ mod tests {
         let err = check_src(
             "type: Buf data ^array[u8 4] len usize ;\n\
              : mk ( -- Buf ) 0 >u8 4 fill ^ 0 >usize Buf ;\n\
-             : main ( -- ) mk &data &^ 0 >usize &> swap drop @ >i64 . ;",
+             : main ( -- ) mk &data &^ 0 >usize &> swap drop @ >i64 drop ;",
         )
         .unwrap_err();
         assert!(
@@ -2700,7 +2699,7 @@ mod tests {
             "type: Buf data ^array[u8 4] len usize ;\n\
              type: Wrap b Buf ;\n\
              : mk ( -- Buf ) 0 >u8 4 fill ^ 0 >usize Buf ;\n\
-             : main ( -- ) mk Wrap &b &data &^ swap drop 0 >usize &> @ >i64 . ;",
+             : main ( -- ) mk Wrap &b &data &^ swap drop 0 >usize &> @ >i64 drop ;",
         )
         .unwrap_err();
         assert!(
@@ -2737,8 +2736,8 @@ mod tests {
         assert!(check_src(
             "type: Inner v i64 ;\n\
              type: Outer s Inner ;\n\
-             : main ( -- ) 2 Inner Outer &s &v @ . \
-             &!s &!v 1 Inner Outer drop 9 ! &s &v @ . drop ;",
+             : main ( -- ) 2 Inner Outer &s &v @ drop \
+             &!s &!v 1 Inner Outer drop 9 ! &s &v @ drop drop ;",
         )
         .is_ok());
     }
@@ -2751,7 +2750,7 @@ mod tests {
         let err = check_src_mangled(
             "type: Wrap n i64 ;\n\
              : eat ( Wrap -- ) drop ;\n\
-             : main ( -- ) 1 Wrap &n swap eat @ . ;",
+             : main ( -- ) 1 Wrap &n swap eat @ drop ;",
         )
         .unwrap_err();
         assert!(err.contains("`eat` consumes"), "unexpected message: {err}");
@@ -2761,7 +2760,7 @@ mod tests {
         let getter = check_src_mangled(
             "type: Inner v i64 ;\n\
              type: Outer tag i64 n Inner ;\n\
-             : main ( -- ) 0 0 Inner Outer &tag swap Outer> drop drop drop @ . ;",
+             : main ( -- ) 0 0 Inner Outer &tag swap Outer> drop drop drop @ drop ;",
         )
         .unwrap_err();
         assert!(
@@ -2777,7 +2776,7 @@ mod tests {
     fn owned_cell_alloc_consuming_receiver_while_its_projection_is_live_is_error() {
         let err = check_src(
             "type: Wrap n i64 ;\n\
-             : main ( -- ) 1 Wrap &n swap ^ drop @ . ;",
+             : main ( -- ) 1 Wrap &n swap ^ drop @ drop ;",
         )
         .unwrap_err();
         assert!(
@@ -2793,7 +2792,7 @@ mod tests {
         let err = check_src(
             "type: Inner v i64 ;\n\
              type: Outer tag i64 n Inner ;\n\
-             : main ( -- ) 0 0 Inner Outer &tag swap Outer> drop drop drop @ . ;",
+             : main ( -- ) 0 0 Inner Outer &tag swap Outer> drop drop drop @ drop ;",
         )
         .unwrap_err();
         assert!(
@@ -2965,7 +2964,7 @@ mod tests {
     fn consuming_the_buffer_under_a_live_slice_is_error() {
         let err = check_src(
             "type: W a array[i64 4] ;\n\
-             : main ( -- ) 7 4 fill W &a slice swap W> drop len . ;\n",
+             : main ( -- ) 7 4 fill W &a slice swap W> drop len drop ;\n",
         )
         .unwrap_err();
         assert!(
@@ -2978,7 +2977,7 @@ mod tests {
         // rejection.
         let twin = check_src(
             "type: W a array[i64 4] ;\n\
-             : main ( -- ) 7 4 fill W &a 0 >usize &> swap W> drop @ . ;\n",
+             : main ( -- ) 7 4 fill W &a 0 >usize &> swap W> drop @ drop ;\n",
         )
         .unwrap_err();
         assert!(

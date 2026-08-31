@@ -11,6 +11,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use sooth::driver;
 
+mod common;
+
 struct Tree(PathBuf);
 
 impl Tree {
@@ -28,7 +30,11 @@ impl Tree {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).unwrap();
         }
-        std::fs::write(&path, contents).unwrap();
+        std::fs::write(
+            &path,
+            format!("{contents}{}", common::printing_import(contents)),
+        )
+        .unwrap();
         path
     }
 }
@@ -43,10 +49,14 @@ fn checkout() -> &'static str {
     env!("CARGO_MANIFEST_DIR")
 }
 
-/// A `core`-layer manifest: `core::show` has no `hosted` dependency (R8).
+/// The fixture package is `layer: hosted` and depends on both: these goldens
+/// read `core::show`'s buffer back out with `.`, which P7.S7d made
+/// `hosted::show`'s vocabulary. That `core::show` itself has no `hosted`
+/// dependency (R8) is `lib/core/sooth.pkg`'s own `layer: core` line, not this
+/// consumer's.
 fn manifest() -> String {
     format!(
-        "package: s7c ;\nlayer: core ;\ndepends: core path \"{}/lib/core\" ;\n",
+        "package: s7c ;\nlayer: hosted ;\ndepends: core path \"{0}/lib/core\" ;\ndepends: hosted path \"{0}/lib/hosted\" ;\n",
         checkout()
     )
 }
@@ -76,7 +86,7 @@ fn show_i64_renders_positive_digits() {
         &t,
         "import: intrinsics * ;\n\
          import: core::prelude * ;\n\
-         import: core::show | StrBuf render | ;\n\
+         import: core::show cshow | StrBuf render | ;\n\
          : main ( -- )\n\
          0 >u8 64 fill 0 >usize StrBuf | buf |\n\
          42 &!buf render\n\
@@ -97,7 +107,7 @@ fn show_i64_negative_prepends_minus() {
         &t,
         "import: intrinsics * ;\n\
          import: core::prelude * ;\n\
-         import: core::show | StrBuf render | ;\n\
+         import: core::show cshow | StrBuf render | ;\n\
          : main ( -- )\n\
          0 >u8 64 fill 0 >usize StrBuf | buf |\n\
          -7 &!buf render\n\
@@ -119,7 +129,7 @@ fn show_i64_min_magnitude_is_exact() {
         &t,
         "import: intrinsics * ;\n\
          import: core::prelude * ;\n\
-         import: core::show | StrBuf render | ;\n\
+         import: core::show cshow | StrBuf render | ;\n\
          : main ( -- )\n\
          0 >u8 64 fill 0 >usize StrBuf | buf |\n\
          -9223372036854775808 &!buf render\n\
@@ -137,7 +147,7 @@ fn show_bool_renders_both_arms() {
         &t,
         "import: intrinsics * ;\n\
          import: core::prelude * ;\n\
-         import: core::show | StrBuf render | ;\n\
+         import: core::show cshow | StrBuf render | ;\n\
          : main ( -- )\n\
          0 >u8 64 fill 0 >usize StrBuf | t |\n\
          True &!t render\n\
@@ -158,7 +168,7 @@ fn show_usize_and_isize_render_digits() {
         &t,
         "import: intrinsics * ;\n\
          import: core::prelude * ;\n\
-         import: core::show | StrBuf render | ;\n\
+         import: core::show cshow | StrBuf render | ;\n\
          : main ( -- )\n\
          0 >u8 64 fill 0 >usize StrBuf | u |\n\
          123 >usize &!u render\n\
@@ -181,7 +191,7 @@ fn show_overflow_clamps_len_at_capacity() {
         &t,
         "import: intrinsics * ;\n\
          import: core::prelude * ;\n\
-         import: core::show | StrBuf render | ;\n\
+         import: core::show cshow | StrBuf render | ;\n\
          : main ( -- )\n\
          0 >u8 64 fill 0 >usize StrBuf | buf |\n\
          -9223372036854775808 &!buf render\n\
@@ -197,18 +207,8 @@ fn show_overflow_clamps_len_at_capacity() {
     );
 }
 
-/// A `hosted`-layer manifest: `hosted::libc`'s `Stdout` sink depends on
-/// `core::show`, so the Phase 2 dogfood needs both layers on the
-/// dependency path.
-fn hosted_manifest() -> String {
-    format!(
-        "package: s7c ;\nlayer: hosted ;\ndepends: core path \"{0}/lib/core\" ;\ndepends: hosted path \"{0}/lib/hosted\" ;\n",
-        checkout()
-    )
-}
-
 fn build_and_run_hosted(t: &Tree, main: &str) -> String {
-    t.write("sooth.pkg", &hosted_manifest());
+    t.write("sooth.pkg", &manifest());
     let entry = t.write("main.sth", main);
     let binary = driver::build(&entry).expect("the fixture should build");
     let output = std::process::Command::new(&binary)
@@ -236,7 +236,7 @@ fn stdout_flush_renders_two_instantiations() {
         &t,
         "import: intrinsics * ;\n\
          import: core::prelude * ;\n\
-         import: core::show | StrBuf render flush | ;\n\
+         import: core::show cshow | StrBuf render flush | ;\n\
          import: hosted::libc | Stdout | ;\n\
          : main ( -- )\n\
          0 >u8 64 fill 0 >usize StrBuf | n |\n\

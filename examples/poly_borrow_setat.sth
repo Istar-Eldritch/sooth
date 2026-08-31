@@ -6,6 +6,7 @@
 \ is dead once `!` consumes the element reference, so the array can be named
 \ and returned afterwards.
 import: intrinsics * ;
+import: hosted::show | . | ;
 
 type: Vec2 x i64 y i64 ;
 

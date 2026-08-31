@@ -5,6 +5,7 @@
 \ directed projection (`&x`), the words via their qualifier (`ops::point-add`/`len2`).
 
 import: intrinsics * ;
+import: hosted::show | . | ;
 
 import: self::modules_point point | Point | ;
 import: self::modules_ops ops | len2 point-add | ;

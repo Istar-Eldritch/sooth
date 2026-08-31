@@ -75,7 +75,10 @@ fn cross_package_import_public_module_builds() {
     t.write("core/cmp.sth", ": lt ( -- i64 ) 1 ;\nexport: lt ;\n");
     t.write(
         "app/sooth.pkg",
-        r#"package: app ; layer: hosted ; depends: core path "../core" ;"#,
+        &format!(
+            "package: app ; layer: hosted ; depends: core path \"../core\" ; depends: hosted path \"{}/lib/hosted\" ;",
+            env!("CARGO_MANIFEST_DIR")
+        ),
     );
     let entry = t.write(
         "app/main.sth",

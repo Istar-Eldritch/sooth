@@ -44,6 +44,9 @@ produces (outputs, bottom to top).
 Some common shapes:
 
 ```sooth
+import: intrinsics * ;
+import: hosted::show | . | ;
+
 : answer ( -- i64 ) 42 ;                \ no inputs, one output
 : print-it ( i64 -- ) . ;               \ one input, no outputs
 : double ( i64 -- i64 ) | x | x 2 mul ; \ one in, one out
@@ -73,6 +76,8 @@ of remainders on top. The caller receives both values on the stack in
 that order. Here is a program that uses it:
 
 ```sooth
+import: hosted::show | . | ;
+
 : main ( -- )
   17 5 remainder-range . . ;
 ```

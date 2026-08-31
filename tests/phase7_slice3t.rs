@@ -35,7 +35,7 @@ impl Scratch {
             std::env::temp_dir().join(format!("sooth-p7s3t-{}-{tag}-{seq}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("main.sth");
-        std::fs::write(&path, src).unwrap();
+        std::fs::write(&path, format!("{src}{}", common::printing_import(src))).unwrap();
         Scratch(path)
     }
 

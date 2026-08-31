@@ -74,6 +74,6 @@ fn annotated_literal_agreeing_builds() {
         \x20 [ ( i64 -- i64 Bool ) dup 10 lt ] drop\n\
         \x20 True ~[ ( Bool -- Bool ) dup drop ] on . ;\n";
     let (stdout, code) = run_src("phase6_slice1_agreeing", src);
-    assert_eq!(stdout, "True\n");
+    assert_eq!(stdout, "true\n");
     assert_eq!(code, 0);
 }

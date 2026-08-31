@@ -72,9 +72,8 @@ pub struct BuiltinRow {
 
 /// The codegen a resolved builtin row emits: one variant per distinct
 /// instruction the type-directed `check_operator` arms produced. This is why
-/// a row is not a `Sig` (Q-A): several rows for one name share the
-/// `(inputs, outputs)` shape but differ here (`.`'s 14 rows all lower a
-/// `Print`; a future user `.` lowers a `Call`).
+/// a row is not a `Sig` (Q-A): several rows for one name can share the
+/// `(inputs, outputs)` shape and still differ here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuiltinLower {
     Add,
@@ -91,7 +90,6 @@ pub enum BuiltinLower {
     Cmp(crate::ir::CmpOp),
     Max,
     MaxTotal,
-    Print,
 }
 
 /// The numeric types the arithmetic tower and comparisons range over (the
@@ -119,19 +117,6 @@ pub(super) fn float_types() -> Vec<Type> {
         .into_iter()
         .filter(|t| t.is_float())
         .collect()
-}
-
-/// The 14 printable types `.` dispatches over: every numeric type plus
-/// `str` and `cstr` (the `check_operator` `"."` predicate, cross-checked
-/// against the `Instr::Print` codegen arms). `bool` is no longer among them
-/// (slice 9 R6): its `.` overload is the library word
-/// `core::bool`'s own `: . ( bool -- )`, reached through 8a's
-/// `builtin_overloads` dispatch on a builtin-row exact miss, not a row here.
-pub(super) fn printable_types() -> Vec<Type> {
-    let mut v = numeric_types();
-    v.push(Type::Str);
-    v.push(Type::Cstr);
-    v
 }
 
 /// Slice 10c (R-P3-3): the six comparison primitives and the `CmpOp` each
@@ -193,9 +178,6 @@ pub fn builtin_table() -> HashMap<String, Vec<BuiltinRow>> {
         row("shl", vec![ty, Type::I64], vec![ty], BuiltinLower::Shl);
         row("shr", vec![ty, Type::I64], vec![ty], BuiltinLower::Shr);
         row("max", vec![ty, ty], vec![ty], BuiltinLower::Max);
-    }
-    for ty in printable_types() {
-        row(".", vec![ty], vec![], BuiltinLower::Print);
     }
     table
 }
@@ -556,29 +538,6 @@ mod tests {
                  builtin-name gate against the library word"
             );
         }
-    }
-    #[test]
-    fn builtin_table_has_a_row_per_printable_type_for_print() {
-        // Rule 6: `.` dispatches over 14 printable types, each a `(T -- )` row
-        // lowering a `Print`. Mutation-check: dropping the printable loop or a
-        // `push` in `printable_types` fails this. `Bool` is not among them
-        // (slice 9 R6): it dispatches through the injected library overload.
-        let table = builtin_table();
-        let rows = table.get(".").expect("`.` is a builtin operator");
-        assert_eq!(rows.len(), 14, "14 printable rows");
-        let mut got: Vec<Type> = rows
-            .iter()
-            .map(|r| {
-                assert_eq!(r.outputs, Vec::<Type>::new(), "`.` produces nothing");
-                assert_eq!(r.lower, BuiltinLower::Print);
-                assert_eq!(r.inputs.len(), 1, "`.` is unary");
-                r.inputs[0]
-            })
-            .collect();
-        let mut want = printable_types();
-        got.sort_by_key(|t| t.name());
-        want.sort_by_key(|t| t.name());
-        assert_eq!(got, want);
     }
     // Phase 3 Slice 1: the linear core on bare linear values.
 

@@ -69,6 +69,10 @@ One branch leaves two values (the `then` stack), the other leaves one (the `else
 An `if` can omit the `else` quotation. This is equivalent to providing an empty quotation on the `else` side. Both branches still must agree on stack shape:
 
 ```sooth
+import: intrinsics * ;
+import: core::prelude * ;
+import: hosted::show | . | ;
+
 : print-if-positive ( i64 -- )
   | n |
   0 n lt ~[ n . ] ~[ ] if ;
@@ -92,6 +96,10 @@ For a negative input, the `else` branch does nothing (splice of an empty quotati
 Because each branch is a quotation, branches can contain other `if` words. This is how you build multi-way decision trees:
 
 ```sooth
+import: intrinsics * ;
+import: core::prelude * ;
+import: hosted::show | . | ;
+
 : classify ( i64 -- )
   | n |
   n 0 lt 

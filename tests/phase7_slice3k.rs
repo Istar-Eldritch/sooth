@@ -33,7 +33,11 @@ impl Tree {
 
     fn write(&self, rel: &str, contents: &str) -> PathBuf {
         let path = self.0.join(rel);
-        std::fs::write(&path, contents).unwrap();
+        std::fs::write(
+            &path,
+            format!("{contents}{}", common::printing_import(contents)),
+        )
+        .unwrap();
         path
     }
 }
@@ -102,6 +106,10 @@ fn monomorph_symbols(entry: &Path) -> Vec<String> {
         .lines()
         .filter_map(|l| l.split_whitespace().last())
         .filter(|s| s.starts_with("sooth_mono_"))
+        // P7.S7d: every printing fixture links `hosted::show`, whose per-type
+        // dots monomorphize `core::show`'s `render` and `flush` once each.
+        // Those are the library's, not the subject's.
+        .filter(|s| !s.starts_with("sooth_mono_render__") && !s.starts_with("sooth_mono_flush__"))
         .map(str::to_string)
         .collect();
     symbols.sort();
@@ -290,7 +298,7 @@ fn a_mutual_non_growing_generic_pair_compiles_runs_and_terminates() {
         monomorph_symbols(&entry),
         [
             "sooth_mono_g__m0__t0_i64",
-            "sooth_mono_gt__m3__t0_i64",
+            "sooth_mono_gt__m4__t0_i64",
             "sooth_mono_h__m0__t0_i64"
         ]
     );

@@ -230,9 +230,12 @@ can express either.
 
 The operator words: arithmetic (`add sub mul div mod`), bitwise (`and or xor not shl shr`),
 the comparison primitives (`ueq ult ugt ulte ugte une`, plus `max`/`max-total`), the two
-control primitives (`branch`, `tag`), printing (`.`), and the `>T` conversions.
+control primitives (`branch`, `tag`), and the `>T` conversions.
 Each bottoms out in a machine operation or a type-directed conversion; there is nothing
-in the language to compose them from.
+in the language to compose them from. Printing (`.`) is not among them: it is an
+ordinary `hosted::show` word layered like any other hosted capability -- most
+dots over `core::show`'s `Show`/`Write` traits, but the `str`, `cstr`, and float
+dots ride direct externs.
 
 `drop`: the sole way the stack shrinks by fiat. Every word body must net to its
 declared effect, so any would-be library definition is circular (`: drop ( 'T -- ) ;`

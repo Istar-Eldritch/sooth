@@ -4,6 +4,7 @@
 \ dedicated mechanism.
 
 import: intrinsics * ;
+import: hosted::show | . | ;
 import: core::prelude * ;    \ Bool comes through here, the prelude's own re-export.
 
 \ P7.S3o (R6): `mymax` and `mymax3` restored to `inline` with `'T: Copy Ord`.

@@ -1,4 +1,5 @@
 import: intrinsics * ;
+import: hosted::show | . | ;
 
 type: Shape
 | Circle r f64

@@ -1,0 +1,157 @@
+\ hosted::show -- the print vocabulary, one concrete `.` per printable type
+\ over `core::show`'s `Show`/`Write` pair. P7.S7d retired the compiler's
+\ print intrinsic onto this module, so printing is an ordinary imported
+\ capability now: a program says `import: hosted::show | . | ;` or it cannot
+\ print at all.
+\
+\ Concrete dots only. The generic `: . ['T: Show] ( 'T -- )` parses but its
+\ body is unwriteable today (a locally built `&!StrBuf` does not unify with a
+\ poly callee's declared one, and field accessors are unsupported in a generic
+\ body), so the shape is one same-arity concrete overload per type. Bare
+\ intra-module calls across those overloads do not resolve, so every body goes
+\ through a distinctly named private helper instead.
+\
+\ The newline is a second `write(2)` of `"\n"` through the str path, not an
+\ in-buffer append: the read-modify-write append over one locally built
+\ `StrBuf` hits the borrow-alias records that block the later flush borrow.
+\ Everything is `write(2)`, so program order is transcript order.
+import: intrinsics * ;
+import: core::bool | Bool | ;
+import: core::show | StrBuf Show Write render flush | ;
+import: self::libc | Stdout | ;
+
+\ `write` bound twice here, once per argument shape: `sys-write-str` takes a
+\ string's own bytes, `sys-write-buf` the scratch buffer the float path
+\ formats into. Several Sooth bindings for one C symbol are fine -- the
+\ declared C symbol is what links, and `hosted::libc`'s own `sys-write` is a
+\ third (it is not exported, so this module cannot borrow it).
+extern: sys-write-str ( i32 cstr usize -- isize ) "write" ;
+extern: sys-write-buf ( i32 &!array[u8 64] usize -- isize ) "write" ;
+\ `len` does not accept a `cstr`, so the cstr dot asks C for the bound
+\ (precedent: `examples/strings.sth`).
+extern: sys-strlen ( cstr -- usize ) "strlen" ;
+\ `%g` float formatting: rendering a float in Sooth needs decimal
+\ exponent work `core::show`'s integer path cannot express.
+extern: g-fmt ( &!array[u8 64] usize cstr f64 -- i32 ) "snprintf" ;
+
+export: . ;
+
+\ The one place bytes leave the process for a `str`: exact `len` bytes, no
+\ terminator, no newline. `len` counts embedded NULs, so an interior NUL is
+\ written like any other byte (the `cstr` dot below is the terminator-bound
+\ one).
+: print-str ( str -- )
+  | s | s len | n | 1 >i32 s cstr n sys-write-str drop ;
+
+: newline ( -- ) "\n" print-str ;
+
+: . ( str -- ) print-str ;
+
+: . ( cstr -- )
+  | s | s sys-strlen | n | 1 >i32 s n sys-write-str drop ;
+
+: . ( i64 -- )
+  | v | 0 >u8 64 fill 0 >usize StrBuf | b |
+  v &!b render
+  Stdout | s | &!s &!b flush
+  s drop b drop
+  newline ;
+
+: . ( i8 -- )
+  | v | 0 >u8 64 fill 0 >usize StrBuf | b |
+  v &!b render
+  Stdout | s | &!s &!b flush
+  s drop b drop
+  newline ;
+
+: . ( i16 -- )
+  | v | 0 >u8 64 fill 0 >usize StrBuf | b |
+  v &!b render
+  Stdout | s | &!s &!b flush
+  s drop b drop
+  newline ;
+
+: . ( i32 -- )
+  | v | 0 >u8 64 fill 0 >usize StrBuf | b |
+  v &!b render
+  Stdout | s | &!s &!b flush
+  s drop b drop
+  newline ;
+
+: . ( isize -- )
+  | v | 0 >u8 64 fill 0 >usize StrBuf | b |
+  v &!b render
+  Stdout | s | &!s &!b flush
+  s drop b drop
+  newline ;
+
+: . ( u8 -- )
+  | v | 0 >u8 64 fill 0 >usize StrBuf | b |
+  v &!b render
+  Stdout | s | &!s &!b flush
+  s drop b drop
+  newline ;
+
+: . ( u16 -- )
+  | v | 0 >u8 64 fill 0 >usize StrBuf | b |
+  v &!b render
+  Stdout | s | &!s &!b flush
+  s drop b drop
+  newline ;
+
+: . ( u32 -- )
+  | v | 0 >u8 64 fill 0 >usize StrBuf | b |
+  v &!b render
+  Stdout | s | &!s &!b flush
+  s drop b drop
+  newline ;
+
+: . ( u64 -- )
+  | v | 0 >u8 64 fill 0 >usize StrBuf | b |
+  v &!b render
+  Stdout | s | &!s &!b flush
+  s drop b drop
+  newline ;
+
+: . ( usize -- )
+  | v | 0 >u8 64 fill 0 >usize StrBuf | b |
+  v &!b render
+  Stdout | s | &!s &!b flush
+  s drop b drop
+  newline ;
+
+: . ( Bool -- )
+  | v | 0 >u8 64 fill 0 >usize StrBuf | b |
+  v &!b render
+  Stdout | s | &!s &!b flush
+  s drop b drop
+  newline ;
+
+\ `%g` carries its own newline: snprintf writes both into the scratch buffer,
+\ so the float dots need no second write.
+: print-g ( f64 -- )
+  | v |
+  0 >u8 64 fill 0 >usize StrBuf | b |
+  b &!data | d | | scratch |
+  d 64 >usize
+  "%g\n" cstr
+  v
+  \ `n` is snprintf's return, unbounded against the 64-byte `scratch` in
+  \ principle. It cannot exceed 64 today: the format is the literal "%g\n",
+  \ and `%g` defaults to 6 significant digits, so a rendered `f64` is at
+  \ most ~13 bytes (sign, digits, exponent), well inside the buffer; snprintf
+  \ also only returns negative on an encoding error, which "%g" cannot
+  \ produce.
+  g-fmt >usize | n |
+  \ Clamped to the 64-byte `scratch` regardless of `n`: today's "%g\n"
+  \ format can't produce a return that large (see above), but the clamp
+  \ makes that a today-true fact instead of a load-bearing one -- a
+  \ future format-string change can't turn `n` into an out-of-bounds
+  \ `write(2)` length.
+  n 64 >usize ult ~[ n ] ~[ 64 >usize ] branch | n-clamped |
+  1 >i32 d n-clamped sys-write-buf drop
+  scratch drop ;
+
+: . ( f64 -- ) print-g ;
+
+: . ( f32 -- ) >f64 print-g ;

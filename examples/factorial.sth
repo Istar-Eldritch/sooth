@@ -1,4 +1,5 @@
 import: intrinsics * ;
+import: hosted::show | . | ;
 import: core::prelude * ;
 
 : factorial ( i64 -- i64 )

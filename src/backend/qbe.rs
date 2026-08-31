@@ -7,9 +7,9 @@
 use std::fmt::Write;
 
 use crate::ir::{
-    ArrayLayout, BinOp, BlockId, CmpOp, EnumLayout, Instr, IrFunc, IrModule, IrType, QuotSigId,
-    QuotSigLayout, StaticData, StaticValue, StructLayout, Terminator, Value, ALLOC_SYMBOL,
-    FREE_SYMBOL, OOB_TRAP_SYMBOL, SUBSLICE_TRAP_SYMBOL, TRACE_ALLOC_ENV, WORD_WIDTH,
+    ArrayLayout, BinOp, BlockId, CallKind, CmpOp, EnumLayout, Instr, IrFunc, IrModule, IrType,
+    QuotSigId, QuotSigLayout, StaticData, StaticValue, StructLayout, Terminator, Value,
+    ALLOC_SYMBOL, FREE_SYMBOL, OOB_TRAP_SYMBOL, SUBSLICE_TRAP_SYMBOL, TRACE_ALLOC_ENV, WORD_WIDTH,
 };
 
 /// Reached only from the allocator shim's NULL branch, so unlike
@@ -69,11 +69,6 @@ pub fn emit(ir: &IrModule) -> Result<String, String> {
         enums: &ir.enums,
         quot_sigs: &ir.quot_sigs,
     };
-    out.push_str("data $fmt = { b \"%ld\\n\", b 0 }\n");
-    out.push_str("data $ufmt = { b \"%lu\\n\", b 0 }\n");
-    out.push_str("data $ffmt = { b \"%g\\n\", b 0 }\n");
-    // `%s` for `cstr` printing (a bare NUL-terminated byte pointer).
-    out.push_str("data $sfmt = { b \"%s\", b 0 }\n");
     // The runtime out-of-bounds trap message: a located line + the offending
     // index + the array length, printed to stderr before a nonzero exit.
     out.push_str(
@@ -89,8 +84,8 @@ pub fn emit(ir: &IrModule) -> Result<String, String> {
             "data $subslicefmt = { b \"sooth: subslice out of range (line %ld)\\n  start %lu length %lu exceeds view length %lu\\n\", b 0 }\n",
         );
     }
-    // Both trace lines go through the same `printf` path as `.`, so program
-    // order equals transcript order in a golden.
+    // The two trace lines: buffered stdio, so they flush at exit rather than
+    // interleaving with a program's `write(2)`-ordered `hosted::show` output.
     out.push_str("data $allocfmt = { b \"alloc %ld\\n\", b 0 }\n");
     out.push_str("data $freefmt = { b \"free %ld\\n\", b 0 }\n");
     writeln!(out, "data $tracenv = {{ b \"{TRACE_ALLOC_ENV}\", b 0 }}").unwrap();
@@ -99,8 +94,6 @@ pub fn emit(ir: &IrModule) -> Result<String, String> {
     out.push_str(
         "data $oomfmt = { b \"sooth: out of memory (allocation of %ld bytes failed)\\n\", b 0 }\n",
     );
-    // `str`'s print format; see `Instr::Print`'s `IrType::Str` arm for why `%.*s`.
-    out.push_str("data $strfmt = { b \"%.*s\", b 0 }\n");
     let str_lits = collect_str_literals(&ir.funcs, &ir.statics);
     // Slice 9: emitted in `idx` order, not `HashMap` iteration order -- a
     // module with two or more distinct string literals (previously never
@@ -895,6 +888,21 @@ fn emit_func(
 /// dependency) then `exit(1)`s. It must abort, not fall through, so the block
 /// ends in `hlt`: after `exit` the program is gone, and `hlt` marks the edge
 /// unreachable rather than returning into corrupt state.
+///
+/// Its `dprintf` row (and `emit_oom_trap`'s and `emit_subslice_trap`'s; the
+/// same `...`-last shape on `emit_trace_event`'s `printf` row) writes `...`
+/// *last*, which in QBE means "every
+/// preceding argument is fixed, zero variadic ones" -- the marker is
+/// positional, so `call $dprintf(w 2, l $oobfmt, ..., l %line, …)` is the
+/// form that says the values are variadic. Wrong per C, but currently
+/// unobservable: on amd64_sysv, arm64 and rv64 QBE emits identical code
+/// either way, and `driver.rs` invokes `qbe` with no `-t`, so only the
+/// default amd64_sysv target is ever built. It becomes a real wrong-output
+/// bug on `arm64_apple`, whose ABI passes variadic arguments on the stack
+/// while fixed ones go in registers. Fix the marker position before adding
+/// target selection; note that `Instr::Call`'s extern spelling needs the
+/// opposite fix on that target (a leading `...` spills every argument,
+/// which a non-variadic callee like `strlen` would then read as garbage).
 fn emit_oob_trap(out: &mut String) {
     writeln!(
         out,
@@ -1159,11 +1167,11 @@ fn emit_instr(
             };
             writeln!(out, "\t{} ={w} {m}{ow} {}, {}", val(*v), val(*a), val(*b))
         }
-        Instr::Call(ret, f, args) => {
+        Instr::Call(ret, f, args, callee) => {
             // A struct argument/return is spelled `:S` so QBE applies its
             // by-value C-ABI classification; the temporary is a pointer to
             // the aggregate on both sides.
-            let a: Vec<String> = args
+            let mut a: Vec<String> = args
                 .iter()
                 .map(|x| {
                     format!(
@@ -1173,6 +1181,25 @@ fn emit_instr(
                     )
                 })
                 .collect();
+            // R14: an `extern:` callee's C prototype may be variadic, and a
+            // Sooth extern declaration cannot say where the `...` begins, so
+            // every argument is spelled variadic (the marker is positional and
+            // leads the row). That is what makes QBE count the call's FP
+            // arguments into `%al`, which a variadic C callee reads to decide
+            // whether to spill the xmm registers its `va_arg` then reads back:
+            // under the fixed spelling an `f64` argument arrives as whatever
+            // the register save area happened to hold. A non-variadic callee
+            // ignores `%al`, so the spelling is safe for every extern.
+            //
+            // Compiler-defined calls stay fully fixed. Do not widen the marker
+            // to them: the backend's own diagnostic `printf`/`dprintf` calls
+            // (`emit_oob_trap`, `emit_oom_trap`, `emit_trace_event`) carry the
+            // opposite caveat, and a trailing/leading marker only starts to
+            // matter on a target whose ABI passes variadic arguments
+            // differently (`arm64_apple`).
+            if *callee == CallKind::Extern {
+                a.insert(0, "...".to_string());
+            }
             match ret {
                 Some(r) => {
                     let w = qbe_abi_ty(ty_of(value_types, *r), layouts);
@@ -1227,101 +1254,6 @@ fn emit_instr(
                 None => writeln!(out, "\tcall {}({})", val(*fp), a.join(", ")),
             }
         }
-        // `.` is type-directed on the operand's own `IrType` (same dispatch
-        // shape as `Cmp`/`Shr`): signed decimal, unsigned decimal, `%g` float,
-        // or `true`/`false` for `Bool`.
-        //
-        // Every `$printf` call below writes `...` last, which in QBE means "all
-        // preceding arguments are fixed, zero variadic ones" -- the marker is
-        // positional, `call $printf(l $fmt, ..., w %v)` is the form that says the
-        // value is variadic. Wrong per C, but currently unobservable: on
-        // amd64_sysv, arm64 and rv64 QBE emits identical code either way, and
-        // `driver.rs` invokes `qbe` with no `-t`, so only the default
-        // amd64_sysv target is ever built. It becomes a real wrong-output bug on
-        // `arm64_apple`, whose ABI passes variadic arguments on the stack while
-        // fixed ones go in registers: `printf` would read the stack while these
-        // calls left the value in a register. Fix the marker position before
-        // adding target selection. Same shape in `sooth_oom_trap`'s `dprintf`
-        // and `sooth_trace_event`'s `printf`.
-        Instr::Print(v) => match ty_of(value_types, *v) {
-            // A float always prints as a `d`: an `f32` widens first (`exts`)
-            // since a variadic C call needs the explicit promotion QBE never
-            // does implicitly.
-            IrType::Float { bits: 32 } => {
-                let d = format!("%pf{ext_id}");
-                *ext_id += 1;
-                writeln!(out, "\t{d} =d exts {}", val(*v)).unwrap();
-                writeln!(out, "\tcall $printf(l $ffmt, d {d}, ...)")
-            }
-            IrType::Float { .. } => writeln!(out, "\tcall $printf(l $ffmt, d {}, ...)", val(*v)),
-            // Signed prints `%ld`, unsigned prints `%lu` (the unsigned-decimal
-            // fix: a high-bit `u64` must render as its unsigned value, not
-            // reinterpreted negative). `printf`'s variadic ABI expects a full
-            // 8-byte slot regardless of the value's own width, so a sub-64-bit
-            // operand widens first, by its own signedness (the sign-extend
-            // reads its already-canonical `w` bits, R15; the zero-extend is
-            // exact since sub-word unsigned canonicalization already zeroed
-            // the high bits).
-            IrType::Int { bits: 64, signed } => {
-                let fmt = if signed { "$fmt" } else { "$ufmt" };
-                writeln!(out, "\tcall $printf(l {fmt}, l {}, ...)", val(*v))
-            }
-            IrType::Int { signed, .. } => {
-                let fmt = if signed { "$fmt" } else { "$ufmt" };
-                let ext = if signed { "extsw" } else { "extuw" };
-                let w64 = format!("%pw{ext_id}");
-                *ext_id += 1;
-                writeln!(out, "\t{w64} =l {ext} {}", val(*v)).unwrap();
-                writeln!(out, "\tcall $printf(l {fmt}, l {w64}, ...)")
-            }
-            // `usize` prints unsigned decimal (`%lu`), like a `u64`: the value
-            // fills the `l` register on this target, so no widening is needed.
-            IrType::Usize => writeln!(out, "\tcall $printf(l $ufmt, l {}, ...)", val(*v)),
-            // `isize` prints signed decimal (`%ld`), like an `i64`: same
-            // no-widening reasoning as `usize`, but routed to `$fmt`.
-            IrType::Isize => writeln!(out, "\tcall $printf(l $fmt, l {}, ...)", val(*v)),
-            IrType::Ptr => unreachable!("Ptr is not a printable scalar; checker rejects it"),
-            // R9: `%.*s` with the carried length, not `%s`: R4 promises no
-            // terminator, so the carried length is the only safe bound.
-            // `cstr` below must rely on a terminator, having no length.
-            IrType::Str => {
-                let ptr = format!("%sptr{ext_id}");
-                *ext_id += 1;
-                writeln!(out, "\t{ptr} =l loadl {}", val(*v)).unwrap();
-                let len_addr = format!("%slena{ext_id}");
-                *ext_id += 1;
-                writeln!(out, "\t{len_addr} =l add {}, {STR_LEN_OFFSET}", val(*v)).unwrap();
-                let len = format!("%slen{ext_id}");
-                *ext_id += 1;
-                writeln!(out, "\t{len} =l loadl {len_addr}").unwrap();
-                writeln!(out, "\tcall $printf(l $strfmt, l {len}, l {ptr}, ...)")
-            }
-            // `cstr` is a bare NUL-terminated byte pointer, printed via `%s`.
-            IrType::Cstr => writeln!(out, "\tcall $printf(l $sfmt, l {}, ...)", val(*v)),
-            // `bool` prints through `core::bool`'s own `.` overload, which
-            // eliminates over `True`/`False` and prints via `str`'s `.` --
-            // never through `Instr::Print`. Reaching this arm is a checker or
-            // lowering bug.
-            IrType::Bool => {
-                unreachable!("`Bool` prints through the library `.` overload, not `Instr::Print`")
-            }
-            IrType::OwnedCell(_) => {
-                unreachable!("a cell is not a printable scalar; checker rejects it")
-            }
-            IrType::Struct(_) | IrType::Enum(_) | IrType::Array(_) => {
-                unreachable!("an aggregate is not a printable scalar; checker rejects it (X6/M2)")
-            }
-            IrType::Code | IrType::Quotation(_) | IrType::OwningQuotation(_) => {
-                unreachable!("a quotation/code is not a printable scalar; checker rejects it")
-            }
-            // P7 slice 3c (R2.2/R7): the checker's `.` allowlist deliberately
-            // excludes a slice (printing a view means an element loop and a
-            // separator policy, a library word's decision), so `Instr::Print`
-            // over one is a checker bug, not an input.
-            IrType::Slice(_) => {
-                unreachable!("a slice is not a printable scalar; checker rejects it")
-            }
-        },
         Instr::PtrOffset(dst, base, bytes) => {
             writeln!(out, "\t{} =l add {}, {bytes}", val(*dst), val(*base))
         }
@@ -1478,7 +1410,7 @@ mod tests {
         // characters also collapsed to one underscore.
         let il = emit_src(
             ": shift-x ( i64 -- i64 ) | n | n 1 add ;
-            : main ( -- ) 5 shift-x . ;",
+            : main ( -- ) 5 shift-x drop ;",
         );
         assert!(!il.contains("shift-x"), "raw hyphenated name leaked: {il}");
         assert!(
@@ -1551,7 +1483,7 @@ mod tests {
             "static: N i64 = 10 ;\n\
              static: W u32 = 3 ;\n\
              static: F Bool = True ;\n\
-             : main ( -- ) &N @ . ;",
+             : main ( -- ) &N @ drop ;",
         );
         assert!(il.contains("data $N = { l 10 }\n"), "{il}");
         assert!(il.contains("data $W = { w 3 }\n"), "{il}");
@@ -1568,7 +1500,7 @@ mod tests {
         let il = emit_src(
             "static: T str = \"hi\" ;\n\
              static: E str ;\n\
-             : main ( -- ) \"hi\" . ;",
+             : main ( -- ) \"hi\" drop ;",
         );
         let idx = il
             .lines()
@@ -1608,57 +1540,6 @@ mod tests {
     }
 
     #[test]
-    fn emit_print_uses_printf_and_fmt() {
-        let il = emit_src(": w ( i64 -- ) . ;");
-        assert!(il.contains("data $fmt = { b \"%ld\\n\", b 0 }"));
-        assert!(il.contains("call $printf(l $fmt,"));
-        assert!(il.contains(", ...)"));
-    }
-
-    #[test]
-    fn emit_print_on_float_uses_ffmt_and_d_arg() {
-        // `.` on an `f64` prints via the `%g` float format, passing the value
-        // as a `d`.
-        let il = emit_src(": w ( f64 -- ) . ;");
-        assert!(
-            il.contains("data $ffmt = { b \"%g\\n\", b 0 }"),
-            "unexpected IL: {il}"
-        );
-        assert!(
-            il.contains("call $printf(l $ffmt, d "),
-            "unexpected IL: {il}"
-        );
-    }
-
-    #[test]
-    fn emit_print_on_f32_widens_before_calling_printf() {
-        // `.` on an `f32` widens to `d` (`exts`) before the call, since a
-        // variadic C call needs the explicit promotion QBE never does
-        // implicitly.
-        let il = emit_src(": w ( -- ) 1.5 >f32 . ;");
-        assert!(il.contains("=d exts"), "unexpected IL: {il}");
-        assert!(
-            il.contains("call $printf(l $ffmt, d "),
-            "unexpected IL: {il}"
-        );
-    }
-
-    #[test]
-    fn emit_print_on_unsigned_uses_ufmt() {
-        // `.` on a `u64` prints unsigned decimal (`$ufmt`/`%lu`), the fix for
-        // the high-bit-set misprint-as-negative gap.
-        let il = emit_src(": w ( -- ) 1 >u64 . ;");
-        assert!(
-            il.contains("data $ufmt = { b \"%lu\\n\", b 0 }"),
-            "unexpected IL: {il}"
-        );
-        assert!(
-            il.contains("call $printf(l $ufmt, l "),
-            "unexpected IL: {il}"
-        );
-    }
-
-    #[test]
     fn norm_scalar_ww_follows_word_width_for_both_size_types() {
         // Neither size type carries a literal 64; both derive bits from the
         // `word_width` parameter.
@@ -1693,143 +1574,6 @@ mod tests {
     }
 
     #[test]
-    fn emit_print_on_isize_uses_fmt_signed() {
-        // `.` on an `isize` prints signed decimal (`$fmt`/`%ld`), unlike
-        // `usize`'s `$ufmt`.
-        let il = emit_src(": w ( -- ) 1 >isize . ;");
-        assert!(
-            il.contains("call $printf(l $fmt, l "),
-            "unexpected IL: {il}"
-        );
-    }
-
-    #[test]
-    fn emit_print_on_subword_unsigned_widens_via_extuw() {
-        // A sub-64-bit unsigned operand (`u8`) must zero-extend to a full
-        // 8-byte slot before the variadic call, reusing `$ufmt`.
-        let il = emit_src(": w ( -- ) 200 >u8 . ;");
-        assert!(il.contains("=l extuw"), "unexpected IL: {il}");
-        assert!(
-            il.contains("call $printf(l $ufmt, l "),
-            "unexpected IL: {il}"
-        );
-    }
-
-    #[test]
-    fn emit_print_on_subword_signed_widens_via_extsw() {
-        let il = emit_src(": w ( -- ) 5 >i32 . ;");
-        assert!(il.contains("=l extsw"), "unexpected IL: {il}");
-        assert!(
-            il.contains("call $printf(l $fmt, l "),
-            "unexpected IL: {il}"
-        );
-    }
-
-    /// Regression guard (P7.S3i R3): `.` on a `bool` routes through
-    /// `core::bool`'s own `.` overload, eliminating over `True`/`False` and
-    /// printing via `str`'s `.` — never through a backend `Instr::Print` on a
-    /// bool. The `$boolstrs`/`$true_str`/`$false_str` data symbols and the
-    /// `IrType::Bool` Print arm are therefore dead from source; this probe
-    /// confirms their absence in a driver-path build (the path that resolves
-    /// the import) and is kept as a regression guard against reintroducing the
-    /// fast path.
-    #[test]
-    fn bool_print_routes_through_eliminator_not_boolstrs() {
-        let dir = std::env::temp_dir().join(format!(
-            "sooth-Bool-print-probe-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let entry = dir.join("main.sth");
-        // `import: intrinsics * ;` is needed for `tag`, the intrinsic the bool
-        // eliminator (`bool?`) dispatches over; it resolves as a reserved
-        // Dependency-anchored name with no file lookup, so a temp-dir entry is
-        // fine (packages::resolve_import returns Ok(None) for it).
-        //
-        // `core::bool` comes in by quoted path: `bool`, its constructors and
-        // its `.` overload are ordinary imported names (P7 slice 3i), and a
-        // temp-dir entry has no ancestor manifest to resolve a package name
-        // through.
-        std::fs::write(
-            &entry,
-            format!(
-                ": main ( -- ) True . ;\nimport: intrinsics * ;\nimport: \"{}/lib/core/bool.sth\" b | Bool True False . | ;\n",
-                env!("CARGO_MANIFEST_DIR")
-            ),
-        )
-        .unwrap();
-        let closure = crate::driver::discover_closure(&entry).expect("closure resolves");
-        let mut module = crate::driver::assemble_module(&closure, true).expect("assembles");
-        crate::check::check(&mut module).expect("checks");
-        let ir = crate::ir::lower(&module).unwrap();
-        let il = emit(&ir).unwrap();
-        assert!(
-            !il.contains("$boolstrs"),
-            "$boolstrs data must not be emitted: {il}"
-        );
-        assert!(
-            !il.contains("$true_str"),
-            "$true_str data must not be emitted: {il}"
-        );
-        assert!(
-            !il.contains("$false_str"),
-            "$false_str data must not be emitted: {il}"
-        );
-        // The eliminator prints via `str`'s `.` (`%.*s`), not via `%s`.  Assert
-        // the actual printf call, not just the data symbol: `$strfmt` is emitted
-        // unconditionally so a bare `contains("$strfmt")` would be vacuous.
-        assert!(
-            il.contains("call $printf(l $strfmt"),
-            "Bool print must route through str's `.` (expected $strfmt printf call): {il}"
-        );
-        assert!(
-            !il.contains("call $printf(l $sfmt,"),
-            "Bool print must not use the old `%s` ($sfmt) boolstrs path: {il}"
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn emit_print_of_str_uses_precision_format() {
-        // R9/criterion 8: `.` on a `str` prints via `%.*s`; see `Instr::Print`'s
-        // `IrType::Str` arm for why.
-        let il = emit_src(": w ( -- ) \"hi\" . ;");
-        assert!(
-            il.contains("data $strfmt = { b \"%.*s\", b 0 }"),
-            "unexpected IL: {il}"
-        );
-        assert!(
-            il.contains("call $printf(l $strfmt, l "),
-            "unexpected IL: {il}"
-        );
-    }
-
-    #[test]
-    fn emit_print_of_cstr_uses_string_format() {
-        // R9/criterion 9: `.` on a `cstr` prints via plain `%s` (`$sfmt`),
-        // since it has no carried length to prefer.
-        //
-        // Scoped to `$w`'s own function body: the in-process seed brings
-        // `core::bool` in as source (P7 slice 3i), whose `.` overload prints
-        // through the `str` row and so legitimately emits a `$strfmt` call of
-        // its own elsewhere in the module.
-        let il = emit_src(": w ( -- ) \"hi\" cstr . ;");
-        let w = il
-            .split("export function $w()")
-            .nth(1)
-            .expect("the emitted `w`")
-            .split("\n}")
-            .next()
-            .expect("the body up to its closing brace");
-        assert!(w.contains("call $printf(l $sfmt, l "), "unexpected IL: {w}");
-        assert!(!w.contains("call $printf(l $strfmt"), "unexpected IL: {w}");
-    }
-
-    #[test]
     fn emit_str_literal_writes_uncounted_terminator_and_descriptor_shape() {
         // R6: the static byte data ends with a NUL the descriptor's length
         // word does not count (`STR_LEN_OFFSET` reads that word); "hi" is
@@ -1859,7 +1603,7 @@ mod tests {
         // descriptors through `Instr::StrPtr`, whose `loadl` is hardcoded, so
         // a whole-module `contains` would pass with `Instr::Load`'s width
         // dispatch broken.
-        let il = emit_src(": w ( -- ) 1.5 2.5 max-total . ;");
+        let il = emit_src(": w ( -- ) 1.5 2.5 max-total drop ;");
         let w = il
             .split("export function $w()")
             .nth(1)
@@ -1963,7 +1707,7 @@ mod tests {
 
     #[test]
     fn emit_main_becomes_sooth_main() {
-        let il = emit_src(": main ( -- ) 5 . ;");
+        let il = emit_src(": main ( -- ) 5 drop ;");
         assert!(il.contains("$sooth_main"));
         assert!(!il.contains("$main("));
     }
@@ -2717,7 +2461,7 @@ mod tests {
         // return against NULL and branches to a trap that exits nonzero, so no
         // NULL ever reaches a dereference. `exit(1)`, not `abort`, so a future
         // test observes `Some(1)` rather than death by signal.
-        let il = emit_src(": main ( -- ) 5 . ;");
+        let il = emit_src(": main ( -- ) 5 drop ;");
         let alloc = func_body(&il, "function l $sooth_alloc(l %n)");
         assert!(
             alloc.contains("%isnull =w ceql %p, 0"),
@@ -2753,7 +2497,7 @@ mod tests {
         // empty value counting as unset so a real program using `^` stays silent.
         // It prints through `printf` to stdout, never `dprintf` to stderr: one
         // stdio stream is what makes program order equal transcript order.
-        let il = emit_src(": main ( -- ) 5 . ;");
+        let il = emit_src(": main ( -- ) 5 drop ;");
         assert!(
             il.contains("data $tracenv = { b \"SOOTH_TRACE_ALLOC\", b 0 }"),
             "expected the gating variable's name: {il}"
@@ -2789,7 +2533,7 @@ mod tests {
         // requested and a zero-sized payload never reaches `malloc(0)`, which may
         // return NULL and would fire the trap on a correct program. Each traces
         // its own event, giving the transcript its `alloc`/`free` lines.
-        let il = emit_src(": main ( -- ) 5 . ;");
+        let il = emit_src(": main ( -- ) 5 drop ;");
         assert!(
             il.contains("data $allocfmt = { b \"alloc %ld\\n\", b 0 }")
                 && il.contains("data $freefmt = { b \"free %ld\\n\", b 0 }"),
@@ -2844,7 +2588,7 @@ type: Counter n i64 ;
   new | a |
   &!a 7 >u8 push-byte
   a drop
-  0 Counter struct-copy Counter> . ;
+  0 Counter struct-copy Counter> drop ;
 ";
 
     /// Instruction lines (tab-indented) in an emitted function body: the
@@ -2979,7 +2723,7 @@ type: Counter n i64 ;
         );
         // A slice-free module emits no slice type, so every existing program's
         // QBE text is byte-identical.
-        assert!(!emit_src(": main ( -- ) 1 . ;").contains(&format!("type :{SLICE_TYPE_SYMBOL}")));
+        assert!(!emit_src(": main ( -- ) 1 drop ;").contains(&format!("type :{SLICE_TYPE_SYMBOL}")));
     }
 
     /// P7 slice 3c (R5): the struct-member speller refuses a slice, the same
@@ -3102,5 +2846,33 @@ type: Counter n i64 ;
             il.contains("call %v1(:Q0 %v0)"),
             "the call goes through the value with a `:Q` aggregate arg: {il}"
         );
+    }
+
+    #[test]
+    fn emit_extern_call_with_f64_arg_is_all_args_variadic() {
+        // R14: a Sooth `extern:` names a fixed input row, so it cannot say
+        // where the C prototype's `...` begins. The backend spells extern
+        // calls with the marker leading the row, which is what makes QBE emit
+        // the `%al` setup a variadic C callee reads before spilling the xmm
+        // registers its `va_arg` then reads back; under the fixed spelling the
+        // `d` argument reaches the callee as whatever the register save area
+        // held. A user-word call keeps the fully-fixed spelling (the
+        // `arm64_apple` caveat on the backend's own diagnostic `printf` calls
+        // applies to those).
+        let il = emit_src(
+            r#"extern: g-fmt ( cstr f64 -- i32 ) "snprintf" ;
+            : twice ( i64 -- i64 ) | n | n n add ;
+            : main ( -- ) "%g" cstr 2.5 g-fmt drop 3 twice drop ;"#,
+        );
+        let call = il
+            .lines()
+            .find(|l| l.contains("$snprintf"))
+            .expect("the extern call is emitted");
+        assert_eq!(call.trim(), "%v3 =w call $snprintf(..., l %v1, d %v2)");
+        let user = il
+            .lines()
+            .find(|l| l.contains("call $twice"))
+            .expect("the user-word call is emitted");
+        assert_eq!(user.trim(), "%v5 =l call $twice(l %v4)");
     }
 }

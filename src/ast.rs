@@ -1686,25 +1686,26 @@ pub(crate) fn is_builtin_word_name(name: &str) -> bool {
 }
 
 /// The names `check_term` really does dispatch ahead of the word environment:
-/// `is_builtin_word_name` *minus* the six surface comparisons. Those six are
-/// `lib/` words: they left `BUILTIN_TABLE` in slice 10c and are listed in
-/// `BUILTIN_WORDS` only so `has_self_tail_call` does not read a trailing `lt`
-/// as a self-call.
+/// `is_builtin_word_name` *minus* the six surface comparisons and `.`. Those
+/// seven are `lib/` words: the comparisons left `BUILTIN_TABLE` in slice 10c,
+/// `.` left it in P7.S7d for `hosted::show`. They stay listed in
+/// `BUILTIN_WORDS` so `has_self_tail_call` does not read a trailing `lt` as a
+/// self-call, and so an `extern:` or a local binding may not be spelled as one.
+/// Consequence: `has_self_tail_call` and the mutual-cycle graph
+/// (`src/check/drop_graph.rs`) both skip every builtin-named word by name, so
+/// a user's own word named `.` (or `eq`, `lt`, ...) gets neither the
+/// self-tail loop nor the mutual-cycle diagnostic, same as any other builtin
+/// name.
 ///
 /// Two consumers. P8 S2 (R2): the set the `intrinsics` import gates -- the six
-/// live in `core::cmp`, so gating them would answer an unimported `lt` with
-/// "add `import: intrinsics *`", pointing at the wrong module. P7.S3r (R4): the
-/// set a `trait:` member name may not be spelled as, since an impl body binds
-/// its own member name ahead of module scope and would shadow the builtin
-/// there; excluding the six keeps an `eq`/`lt` member legal, shadowing only a
-/// library word.
-///
-/// `.` is *not* in that exclusion set. It is a genuine table intrinsic (a
-/// `Print` row per printable type, dispatched by `check_operator`) and does not
-/// move to `core`, so a bare `.` with no `intrinsics` import is correctly the
-/// import error.
+/// live in `core::cmp` and `.` in `hosted::show`, so gating them would answer
+/// an unimported `lt` with "add `import: intrinsics *`", pointing at the wrong
+/// module. P7.S3r (R4): the set a `trait:` member name may not be spelled as,
+/// since an impl body binds its own member name ahead of module scope and
+/// would shadow the builtin there; excluding the seven keeps an `eq`/`lt`
+/// member legal, shadowing only a library word.
 pub(crate) fn is_name_dispatched_builtin(name: &str) -> bool {
-    if matches!(name, "eq" | "lt" | "gt" | "lte" | "gte" | "ne") {
+    if matches!(name, "eq" | "lt" | "gt" | "lte" | "gte" | "ne" | ".") {
         return false;
     }
     is_builtin_word_name(name)
@@ -3091,27 +3092,26 @@ mod tests {
     use super::*;
 
     /// P8 S2 (R2): the gate set is `is_builtin_word_name` minus exactly the six
-    /// surface comparisons -- no wider and no narrower. `.` is the case that
-    /// makes the difference load-bearing: both r1 reviews put it in the
-    /// exclusion set, but it is a real `BUILTIN_TABLE` intrinsic that does not
-    /// move to `core`, so gating it is correct and excluding it would let a bare
-    /// `.` through with no import at all.
+    /// surface comparisons and `.` -- no wider and no narrower. P7.S7d put `.`
+    /// in the exclusion set when printing moved to `hosted::show`: gating it
+    /// would answer an unimported `.` with "add `import: intrinsics *`",
+    /// pointing at the wrong module.
     #[test]
-    fn the_gate_set_excludes_exactly_the_six_surface_comparisons() {
-        for name in ["eq", "lt", "gt", "lte", "gte", "ne"] {
+    fn the_gate_set_excludes_exactly_the_six_surface_comparisons_and_the_dot() {
+        for name in ["eq", "lt", "gt", "lte", "gte", "ne", "."] {
             assert!(
                 is_builtin_word_name(name),
                 "`{name}` stays in BUILTIN_WORDS for `has_self_tail_call`"
             );
             assert!(
                 !is_name_dispatched_builtin(name),
-                "`{name}` is a `core` word"
+                "`{name}` is a `lib/` word"
             );
         }
         for name in BUILTIN_WORDS
             .iter()
             .copied()
-            .filter(|n| !matches!(*n, "eq" | "lt" | "gt" | "lte" | "gte" | "ne"))
+            .filter(|n| !matches!(*n, "eq" | "lt" | "gt" | "lte" | "gte" | "ne" | "."))
             .chain([">u8", ">usize"])
         {
             assert!(
@@ -3119,7 +3119,6 @@ mod tests {
                 "`{name}` is name-dispatched"
             );
         }
-        assert!(is_name_dispatched_builtin("."), "`.` is a real intrinsic");
         // Quotation application is its own arm in `check_term`/`poly_call_term`,
         // not a table entry, so this predicate does not cover it and must not be
         // widened to: it is also the set the `intrinsics` import gates (P8 S2 R2),

@@ -14,6 +14,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+mod common;
+
 struct Tree(PathBuf);
 
 impl Tree {
@@ -28,7 +30,11 @@ impl Tree {
 
     fn write(&self, rel: &str, contents: &str) -> PathBuf {
         let path = self.0.join(rel);
-        std::fs::write(&path, contents).unwrap();
+        std::fs::write(
+            &path,
+            format!("{contents}{}", common::printing_import(contents)),
+        )
+        .unwrap();
         path
     }
 }
@@ -42,6 +48,8 @@ impl Drop for Tree {
 fn sooth_build(entry: &Path) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_sooth"))
         .arg("build")
+        .arg("--manifest")
+        .arg(common::fixture_manifest())
         .arg(entry)
         .output()
         .expect("sooth build should spawn")

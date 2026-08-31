@@ -5,6 +5,7 @@
 \ dispatch table, and no `call`. The golden pins both to the same output.
 
 import: intrinsics * ;
+import: hosted::show | . | ;
 
 : main ( -- )
   7 3 fill | arr |

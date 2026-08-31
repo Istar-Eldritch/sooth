@@ -37,7 +37,7 @@ fn self_calls(f: &IrFunc) -> usize {
     f.blocks
         .iter()
         .flat_map(|b| b.instrs.iter())
-        .filter(|i| matches!(i, Instr::Call(_, sym, _) if *sym == f.name))
+        .filter(|i| matches!(i, Instr::Call(_, sym, _, _) if *sym == f.name))
         .count()
 }
 
@@ -123,7 +123,7 @@ fn contradicting_branch_output_is_rejected_at_the_argument_site() {
         "{MYIF}: demo ( i64 Bool -- i64 )\n\
          ~[ dup 10 add ] ~[ drop ] myif ;\n"
     );
-    let err = check_error(&src);
+    let err = check_error(&common::silent_prints(&src));
     assert_eq!(
         err,
         "error: the quotations passed to `myif` leave different stack shapes: \
@@ -140,7 +140,7 @@ fn spliced_self_tail_through_shape_changing_myif_lowers_to_a_back_edge() {
          | n | | acc | n 0 eq ~[ acc ] ~[ acc n add n 1 sub sum-to ] myif ;\n\
          : main ( -- ) 0 10 sum-to . ;\n"
     );
-    let funcs = lowered(&src);
+    let funcs = lowered(&common::silent_prints(&src));
     let sum = func(&funcs, "sum");
     assert_eq!(self_calls(sum), 0, "the recursion is a loop, not a call");
     assert_eq!(back_edges(sum), 1, "the loop needs exactly one back-edge");

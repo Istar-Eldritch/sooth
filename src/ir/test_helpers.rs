@@ -26,9 +26,10 @@ pub(super) fn bool_ir_type(module: &IrModule) -> IrType {
 }
 
 /// A scalar-only resource with a `drop` overload whose body has one
-/// observable effect (a `Print` no synthesized glue ever emits), so "the
-/// override is the destructor" is assertable on instructions.
-pub(super) const FILE_RESOURCE: &str = "type: File fd i64 ; : drop ( File -- ) | f | f File> . ;";
+/// observable effect (an `extern:` call, which no synthesized glue ever
+/// emits), so "the override is the destructor" is assertable on
+/// instructions via `call_symbols`.
+pub(super) const FILE_RESOURCE: &str = "extern: sys-close ( i64 -- i64 ) \"close\" ; type: File fd i64 ; : drop ( File -- ) | f | f File> sys-close drop ;";
 
 /// The Phase 3 Slice 1 linear-mechanics stand-in, retired as a compiler
 /// primitive in Slice 8c: an ordinary one-field struct with a `drop`
@@ -36,8 +37,12 @@ pub(super) const FILE_RESOURCE: &str = "type: File fd i64 ; : drop ( File -- ) |
 /// slice 8b), not by any compiler-known bit. Always the first struct in a
 /// source string that uses it, so every other struct's `StructId` shifts
 /// up by one relative to a spy-free program.
-pub(super) const SPY_DEF: &str =
-    "type: Spy tag i64 ;\n: drop ( Spy -- )  | s | \"drop \" . s Spy> . ;\n";
+///
+/// Its body is silent: these paths seed `core` only, so a print would be an
+/// unresolvable `hosted::show` call (P7.S7d). The drop-order witnesses that
+/// need an observable transcript live in the run-through-the-harness
+/// integration tests, which do import it.
+pub(super) const SPY_DEF: &str = "type: Spy tag i64 ;\n: drop ( Spy -- )  | s | s Spy> drop ;\n";
 
 /// Every symbol an `IrFunc` calls, in emission order: what "the override
 /// ran instead of the glue" is asserted on, rather than a substring of the
@@ -46,7 +51,7 @@ pub(super) fn call_symbols(func: &IrFunc) -> Vec<&str> {
     instrs(func)
         .iter()
         .filter_map(|i| match i {
-            Instr::Call(_, sym, _) => Some(sym.as_str()),
+            Instr::Call(_, sym, _, _) => Some(sym.as_str()),
             // Slice 7a (R13a): an indirect call carries no symbol, so it
             // is reported with a sentinel. Widened *before* any lowering
             // can emit `CallIndirect`, so the combinator-splice units

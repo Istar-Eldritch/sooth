@@ -40,7 +40,7 @@ fn instrs(f: &IrFunc) -> Vec<&Instr> {
 fn self_calls(f: &IrFunc) -> usize {
     instrs(f)
         .iter()
-        .filter(|i| matches!(i, Instr::Call(_, sym, _) if *sym == f.name))
+        .filter(|i| matches!(i, Instr::Call(_, sym, _, _) if *sym == f.name))
         .count()
 }
 
@@ -101,7 +101,7 @@ fn if_locals_do_not_collide_with_user_words_named_cond_or_arm() {
     let src = ": cond ( i64 -- i64 ) 1 add ;\n\
                : then-arm ( i64 -- i64 ) 1 add ;\n\
                : else-arm ( i64 -- i64 ) 1 add ;\n\
-               : main ( -- ) 1 cond then-arm else-arm . ;\n";
+               : main ( -- ) 1 cond then-arm else-arm drop ;\n";
     let tokens = lexer::lex(src).expect("lexing should succeed");
     let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
     check::check(&mut module).expect("check should succeed");
@@ -111,7 +111,7 @@ fn if_locals_do_not_collide_with_user_words_named_cond_or_arm() {
 /// it mints no symbol for it and emits the jump-and-join directly.
 #[test]
 fn a_call_to_if_splices_the_library_definition() {
-    let funcs = lowered(": w ( Bool -- i64 ) ~[ 1 ] ~[ 2 ] if ;\n: main ( -- ) True w . ;\n");
+    let funcs = lowered(": w ( Bool -- i64 ) ~[ 1 ] ~[ 2 ] if ;\n: main ( -- ) True w drop ;\n");
     assert!(
         !funcs.iter().any(|f| f.name.starts_with("if")),
         "no `IrFunc` is minted for `if`"
@@ -358,7 +358,8 @@ fn check_ueq_family_lowers_to_cmpop() {
 /// `sooth_mono_eq__*` `IrFunc` reappears with an `Instr::Call` in `w`.
 #[test]
 fn the_canonical_comparison_and_branch_costs_no_call() {
-    let funcs = lowered(": w ( i64 i64 -- i64 ) eq ~[ 1 ] ~[ 2 ] if ;\n: main ( -- ) 1 2 w . ;\n");
+    let funcs =
+        lowered(": w ( i64 i64 -- i64 ) eq ~[ 1 ] ~[ 2 ] if ;\n: main ( -- ) 1 2 w drop ;\n");
     assert!(
         !funcs
             .iter()
@@ -506,7 +507,7 @@ fn a_self_tail_through_the_library_if_lowers_to_a_back_edge() {
     let funcs = lowered(
         ": sum-to ( i64 i64 -- i64 )\n  \
          | n | | acc | n 0 eq ~[ acc ] ~[ acc n add n 1 sub sum-to ] if ;\n\
-         : main ( -- ) 0 10 sum-to . ;\n",
+         : main ( -- ) 0 10 sum-to drop ;\n",
     );
     let w = func(&funcs, "sum-to");
     assert_eq!(self_calls(w), 0, "the self-call became the back-edge");

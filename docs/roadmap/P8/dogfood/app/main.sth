@@ -1,3 +1,9 @@
+\ No longer compiles as-is post-P7.S7d: `.` is retired off the compiler and
+\ onto `hosted::show`, so this file (and the P8 modules it dogfoods, which
+\ don't exist yet) would also need `import: hosted::show | . | ;` and a
+\ `depends: hosted` entry in this package's `sooth.pkg`, neither of which
+\ exists here. Left un-migrated on purpose -- this is speculative P8
+\ scaffolding, not a compiling program.
 import: intrinsics * ;
 import: core::text t | upper? | ;
 import: collections::vec v ;

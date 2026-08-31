@@ -139,6 +139,7 @@ impl<'a> FuncBuilder<'a> {
             Some(block),
             ALLOC_SYMBOL.to_string(),
             vec![size_v],
+            CallKind::Word,
         ));
         for ((_, value), offset) in captures.iter().zip(&offsets) {
             let slot = self.field_ptr(block, *offset);
@@ -398,19 +399,19 @@ impl<'a> FuncBuilder<'a> {
             // first.
             IrType::OwnedCell(id) => {
                 let symbol = cell_drop_symbol(id);
-                self.push_instr(Instr::Call(None, symbol, vec![v]));
+                self.push_instr(Instr::Call(None, symbol, vec![v], CallKind::Word));
             }
             IrType::Struct(id) if self.structs.layouts[id.index()].is_linear => {
                 let symbol = struct_drop_symbol(id);
-                self.push_instr(Instr::Call(None, symbol, vec![v]));
+                self.push_instr(Instr::Call(None, symbol, vec![v], CallKind::Word));
             }
             IrType::Enum(id) if self.enums.layouts[id.index()].is_linear => {
                 let symbol = enum_drop_symbol(id);
-                self.push_instr(Instr::Call(None, symbol, vec![v]));
+                self.push_instr(Instr::Call(None, symbol, vec![v], CallKind::Word));
             }
             IrType::Array(id) if self.arrays.layouts[id.index()].is_linear => {
                 let symbol = array_drop_symbol(id);
-                self.push_instr(Instr::Call(None, symbol, vec![v]));
+                self.push_instr(Instr::Call(None, symbol, vec![v], CallKind::Word));
             }
             // P7.S3v (R3): dropping an owning closure runs its per-
             // construction-site disposer (R2) on its env block -- disposing
@@ -501,7 +502,7 @@ impl<'a> FuncBuilder<'a> {
         } else {
             None
         };
-        self.push_instr(Instr::Call(ret, inst.symbol.clone(), args));
+        self.push_instr(Instr::Call(ret, inst.symbol.clone(), args, CallKind::Word));
         if let Some(v) = ret {
             self.stack.push(v);
         }
@@ -724,7 +725,7 @@ mod tests {
         // Criterion 9 (R10): a two-output word's body ends in one `Ret` of the
         // synthesized bundle, with both outputs stored into it -- not a single
         // value returned and the other silently dropped.
-        let ir = lower_src(": pair ( i64 -- i64 i64 ) dup ; : main ( -- ) 5 pair . . ;");
+        let ir = lower_src(": pair ( i64 -- i64 i64 ) dup ; : main ( -- ) 5 pair drop drop ;");
         let pair = ir.funcs.iter().find(|f| f.name == "pair").unwrap();
         let IrType::Struct(bundle) = pair.ret.expect("a two-output word returns its bundle") else {
             panic!("expected a struct return, got {:?}", pair.ret);
@@ -748,11 +749,10 @@ mod tests {
         // R11: the caller reads both outputs back out of the returned bundle
         // (two field loads), so its lowering stack matches the stack the
         // checker verified -- the recon-3 desync that used to panic.
-        let ir = lower_src(": pair ( i64 -- i64 i64 ) dup ; : main ( -- ) 5 pair . . ;");
+        let ir = lower_src(": pair ( i64 -- i64 i64 ) dup ; : main ( -- ) 5 pair drop drop ;");
         let main = ir.funcs.iter().find(|f| f.name == "main").unwrap();
         assert_eq!(count(main, |i| matches!(i, Instr::Call(Some(_), ..))), 1);
         assert_eq!(count(main, |i| matches!(i, Instr::FieldLoad(..))), 2);
-        assert_eq!(count(main, |i| matches!(i, Instr::Print(_))), 2);
     }
 
     #[test]
@@ -763,7 +763,7 @@ mod tests {
         // R14 table, not `dupit`.
         let ir = lower_src(
             ": dupit ['T: Copy] ( 'T -- 'T 'T ) dup ;\n\
-             : main ( -- ) 5 dupit . . 5 >u32 dupit . . ;",
+             : main ( -- ) 5 dupit drop drop 5 >u32 dupit drop drop ;",
         );
         assert!(
             ir.funcs.iter().all(|f| f.name != "dupit"),
@@ -799,8 +799,9 @@ mod tests {
         // folds linear (its first field is an owning cell), yet no drop glue is
         // synthesized for it -- the glue would free the cell the caller's
         // unpack has already moved out.
-        let ir =
-            lower_src(": cell-and-tag ( -- ^i64 i64 ) 7 ^ 3 ; : main ( -- ) cell-and-tag . ^> . ;");
+        let ir = lower_src(
+            ": cell-and-tag ( -- ^i64 i64 ) 7 ^ 3 ; : main ( -- ) cell-and-tag drop ^> drop ;",
+        );
         let (idx, layout) = ir
             .structs
             .iter()
@@ -976,7 +977,7 @@ mod tests {
         assert_eq!(
             count(
                 w,
-                |i| matches!(i, Instr::Call(_, sym, _) if sym != &spy_drop)
+                |i| matches!(i, Instr::Call(_, sym, _, _) if sym != &spy_drop)
             ),
             0,
             "the constructor emits no call: {is:?}"
@@ -996,7 +997,7 @@ mod tests {
         let calls: Vec<&String> = instrs(w)
             .iter()
             .filter_map(|i| match i {
-                Instr::Call(None, sym, args) if args.len() == 1 => Some(sym),
+                Instr::Call(None, sym, args, _) if args.len() == 1 => Some(sym),
                 _ => None,
             })
             .collect();
@@ -1158,7 +1159,7 @@ mod tests {
         // check exists for. Minting an empty disposer instead would make that
         // check dead and hide a regression in it.
         let ir = lower_src(
-            ": mk ( -- owning [ -- ] ) [ 1 . ] ;\n\
+            ": mk ( -- owning [ -- ] ) [ 1 drop ] ;\n\
              : main ( -- ) mk call ;",
         );
         assert!(
@@ -1183,7 +1184,7 @@ mod tests {
         // value.
         let ir = lower_src(
             ": mk ( i64 -- [ -- i64 ] ) | n | [ n ] ;\n\
-             : main ( -- ) 5 mk call . ;",
+             : main ( -- ) 5 mk call drop ;",
         );
         assert!(
             !ir.funcs.iter().any(|f| f.name.ends_with("__dispose")),
@@ -1208,7 +1209,7 @@ mod tests {
         // slot, so skipping it must not slide the capture after it up.
         let ir = lower_src(&format!(
             "{SPY_DEF}type: Pair a Spy b Spy ;\n\
-             : mk ( Pair &Spy Spy -- owning [ -- ] ) | a b c | [ a drop b &tag @ . c drop ] ;\n\
+             : mk ( Pair &Spy Spy -- owning [ -- ] ) | a b c | [ a drop b &tag @ drop c drop ] ;\n\
              : main ( -- ) 1 Spy 2 Spy Pair 3 Spy | p s | p &s 4 Spy mk call s drop ;"
         ));
         let disposer = func(&ir, "mk__quot0__dispose");

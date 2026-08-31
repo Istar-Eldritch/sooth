@@ -12,6 +12,8 @@ ownership transfer; "don't touch the buffer while the controller owns it"
 becomes a type error instead of a comment in a driver.
 
 ```factor
+import: intrinsics * ;
+import: hosted::show | . | ;
 import: core::prelude * ;
 
 : gcd ( i64 i64 -- i64 )
@@ -122,19 +124,23 @@ predicates satisfied by a type's own shape; user-declared traits are nominal,
 not structural.
 
 ```factor
-trait: Show['T]
-  : show ( &'T -- ) ;
+\ Named Display, not Show: core::show already owns Show/show for the
+\ printing vocabulary below, with a different (by-value, sink-taking) shape.
+import: hosted::show | . | ;
+
+trait: Display['T]
+  : display ( &'T -- ) ;
 ;
 
-impl: Show for Point
-  : show | p | "(" . p &x @ . "," . p &y @ . ")" . ;
+impl: Display for Point
+  : display | p | "(" . p &x @ . "," . p &y @ . ")" . ;
 ;
 
-: print-larger['T: Order Show] ( &'T &'T -- )
+: print-larger['T: Order Display] ( &'T &'T -- )
   | a b | a b cmp
-  ~[ drop b show ]
-  ~[ drop a show ]
-  ~[ drop a show ]
+  ~[ drop b display ]
+  ~[ drop a display ]
+  ~[ drop a display ]
   Rank? ;
 ```
 
@@ -149,6 +155,8 @@ call overhead. No combinator is compiler-known, not even `if`, which is a
 `core::bool` word over the machine primitives `branch` and `tag`.
 
 ```factor
+import: intrinsics * ;
+import: hosted::show | . | ;
 import: core::combinators | times | ;
 
 : main ( -- )
@@ -164,6 +172,8 @@ selective imports, and transitive dependency resolution.
 verified past a million nodes under a 1 MB stack:
 
 ```factor
+import: hosted::show | . | ;
+
 type: List 
   | Nil 
   | Cons 

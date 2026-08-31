@@ -18,9 +18,12 @@ fn run_src(name: &str, src: &str) -> (String, i32) {
     (stdout, code)
 }
 
-/// `run_src` with stderr too, and the allocation trace optionally enabled: the
-/// trace shares stdout with the program's own output, so the caller reads one
-/// transcript in program order.
+/// `run_src` with stderr too, and the allocation trace optionally enabled.
+/// Post-S7d the streams are split: the program's prints ride unbuffered
+/// `write(2)` while the `alloc`/`free` trace rides buffered stdio flushed at
+/// exit, so the transcript is not one program-order stream (see
+/// `tests/phase0.rs`'s `run_owned_traced_golden` note). Trace-line order
+/// among themselves is still real.
 fn run_src_traced(name: &str, src: &str, trace: bool) -> (String, String, i32) {
     let path = std::env::temp_dir().join(format!("sooth-{name}-{}.sth", std::process::id()));
     common::write_fixture(&path, src).expect("writing temp source should succeed");
@@ -54,7 +57,7 @@ fn check_error(src: &str) -> String {
 /// primitive in Slice 8c: an ordinary one-field struct with a `drop`
 /// overload, so it is linear for the same reason any resource is, not by
 /// any compiler-known bit.
-const SPY_DEF: &str = "type: Spy tag i64 ;\n: drop ( Spy -- )  | s | \"drop \" . s Spy> . ;\n";
+const SPY_DEF: &str = "type: Spy tag i64 ;\n: drop ( Spy -- )  | s | s Spy> drop ;\n";
 
 /// An `import:` line for the committed combinator library by *absolute* path,
 /// so a temp source built under `temp_dir()` resolves it regardless of cwd.
@@ -172,7 +175,7 @@ fn borrow_led_name_is_reserved() {
         ("type: &Thing x i64 ;\n", "type"),
         (": main ( i64 -- ) | &a | ;\n", "local"),
     ] {
-        let err = parse_error(src);
+        let err = parse_error(&common::silent_prints(src));
         assert!(
             err.contains("reserved for the reference syntax"),
             "expected the reservation error for a {kind} name: {err}"
@@ -183,7 +186,7 @@ fn borrow_led_name_is_reserved() {
 #[test]
 fn shadowing_builtin_access_word_is_error() {
     for name in ["@", "!", "+!"] {
-        let err = parse_error(&format!(": {name} ( i64 -- ) . ;\n"));
+        let err = parse_error(&format!(": {name} ( i64 -- ) drop ;\n"));
         assert!(
             err.contains("is a builtin access word"),
             "expected the shadowing rejection for `{name}`: {err}"
@@ -215,7 +218,7 @@ fn borrow_of_moved_local_is_error() {
     // the reference would read freed storage.
     let err = check_error(
         "type: Box c ^i64 ;\n\
-         : main ( -- )\n  7 ^ Box | b |\n  b drop\n  &b &c &^ @ . ;\n",
+         : main ( -- )\n  7 ^ Box | b |\n  b drop\n  &b &c &^ @ drop ;\n",
     );
     assert!(
         err.contains("use after move") && err.contains("local `b` of type `Box`"),
@@ -325,7 +328,7 @@ fn mutable_element_projection_through_shared_reference_is_error() {
     // `&!>` requires a mutable-reference receiver; borrowing the array
     // shared with `&` and then projecting with `&!>` is a receiver-mutability
     // mismatch, not a bounds or type error.
-    let err = check_error(": main ( -- ) 0 4 fill | a | &a 0 &!> 99 ! &a 0 &> @ . ;");
+    let err = check_error(": main ( -- ) 0 4 fill | a | &a 0 &!> 99 ! &a 0 &> @ drop ;");
     assert!(
         err.contains("`&!>` expected `&!array[i64 4]`, found `&array[i64 4]`"),
         "expected the receiver-mutability mismatch naming both types: {err}"
@@ -347,7 +350,7 @@ fn mutable_element_projection_through_mutable_reference_is_accepted() {
 #[test]
 fn store_through_shared_reference_is_error() {
     let err = check_error(
-        "type: V x i64 y i64 ;\n: main ( -- )\n  1 2 V | v |\n  &v &x 5 !\n  v V> . . ;\n",
+        "type: V x i64 y i64 ;\n: main ( -- )\n  1 2 V | v |\n  &v &x 5 !\n  v V> drop drop ;\n",
     );
     assert!(
         err.contains("`!` cannot store through the shared reference `&i64`"),
@@ -541,7 +544,7 @@ fn drop_of_reference_frees_nothing() {
          : main ( -- )\n  7 ^ Box | b |\n  &!b drop\n  &b drop\n  b Box> ^> . ;\n",
         true,
     );
-    assert_eq!(stdout, "alloc 8\nfree 8\n7\n");
+    assert_eq!(stdout, "7\nalloc 8\nfree 8\n");
     assert_eq!(code, 0);
 }
 
@@ -996,7 +999,7 @@ fn move_of_place_borrowed_in_locals_is_error() {
     // trailing use of `r` is what makes the rejection real, not the binding.
     let err = check_error(&format!(
         "{BOX_PRELUDE}\n: main ( -- )\n  7 ^ Box | b |\n  &b | r |\n  b sink\n  \
-         r &c &^ @ . ;\n"
+         r &c &^ @ drop ;\n"
     ));
     assert!(
         err.contains("cannot consume the borrowed local `b` of type `Box`")
@@ -1014,7 +1017,7 @@ fn dispose_of_borrowed_place_is_error() {
     // D5/T2: the mutable-borrow twin of T1, used after the dispose.
     let err = check_error(&format!(
         "{BOX_PRELUDE}\n: main ( -- )\n  7 ^ Box | b |\n  &!b | r |\n  b drop\n  \
-         r &!c &^ @ . ;\n"
+         r &!c &^ @ drop ;\n"
     ));
     assert!(
         err.contains("cannot consume the borrowed local `b` of type `Box`")
@@ -1049,8 +1052,9 @@ fn use_of_borrow_local_after_consume_is_error() {
     // *after* the consume, so it is live at the consume and the consume is
     // rejected. T3/T4 are a mutation pair: same terms, reordered.
     let err = check_error(&format!(
-        "{ACC_PRELUDE}\n: main ( -- )\n  0 4 fill Acc | acc |\n  \
-         &!acc &!arr | f |\n  acc drop\n  f 0 >usize &!> 5 ! ;\n"
+        "{}\n: main ( -- )\n  0 4 fill Acc | acc |\n  \
+         &!acc &!arr | f |\n  acc drop\n  f 0 >usize &!> 5 ! ;\n",
+        common::silent_prints(ACC_PRELUDE)
     ));
     assert!(
         err.contains("cannot consume the borrowed local `acc`"),
@@ -1138,7 +1142,7 @@ fn mutable_borrow_of_name_aliased_place_is_error() {
     // frame slot, so a mutation through `p` would be visible through `q`.
     let err = check_error(
         "type: V x i64 y i64 ;\n\
-         : main ( -- )\n  1 2 V | v |\n  v v | p q |\n  &!p &!x 1 +!\n  q V> . . ;\n",
+         : main ( -- )\n  1 2 V | v |\n  v v | p q |\n  &!p &!x 1 +!\n  q V> drop drop ;\n",
     );
     assert!(
         err.contains("cannot borrow `p` mutably") && err.contains("it is aliased by `q`"),
@@ -1180,7 +1184,7 @@ fn mutable_borrow_of_struct_aliased_by_peeked_field_is_error() {
         "type: V x i64 y i64 ;\n\
          type: S a V b i64 ;\n\
          : main ( -- )\n  1 2 V 3 S | s |\n  s &a | peeked |\n  \
-         &!s &!a &!x 40 +!\n  peeked @ V> . .\n  s drop ;\n",
+         &!s &!a &!x 40 +!\n  peeked @ V> drop drop\n  s drop ;\n",
     );
     assert!(
         err.contains("cannot borrow `s` mutably") && err.contains("it is aliased by `peeked`"),
@@ -1196,7 +1200,7 @@ fn mutable_borrow_of_struct_aliased_by_gotten_field_is_error() {
     let err = check_error(
         "type: S arr array[i64 4] ;\n\
          : main ( -- )\n  0 4 fill S | s |\n  s &arr | items |\n  \
-         &!s &!arr 0 &!> 9 !\n  items 0 &> @ .\n  s drop ;\n",
+         &!s &!arr 0 &!> 9 !\n  items 0 &> @ drop\n  s drop ;\n",
     );
     assert!(
         err.contains("cannot borrow `s` mutably") && err.contains("it is aliased by `items`"),
@@ -1232,7 +1236,7 @@ fn mutable_borrow_aliased_by_if_join_result_is_error() {
     let err = check_error(
         "type: V x i64 y i64 ;\n\
          : main ( -- )\n  1 2 V | v |\n  1 0 eq ~[ v ] ~[ v ] if | p |\n  \
-         &!v &!x 40 +!\n  p V> . . ;\n",
+         &!v &!x 40 +!\n  p V> drop drop ;\n",
     );
     assert!(
         err.contains("cannot borrow `v` mutably") && err.contains("it is aliased by `p`"),
@@ -1249,7 +1253,7 @@ fn mutable_borrow_aliased_by_one_if_arm_only_is_error() {
         "type: V x i64 y i64 ;\n\
          : main ( -- )\n  1 2 V | v |\n  \
          1 0 gt ~[ v ] ~[ v dup swap drop ] if | p |\n  \
-         &!p &!x 99 !\n  v V> . .\n  p V> . . ;\n",
+         &!p &!x 99 !\n  v V> drop drop\n  p V> drop drop ;\n",
     );
     assert!(
         err.contains("cannot borrow `p` mutably")
@@ -1267,7 +1271,7 @@ fn mutable_borrow_aliased_by_the_second_if_arm_only_is_error() {
         "type: V x i64 y i64 ;\n\
          : main ( -- )\n  1 2 V | v |\n  \
          0 0 gt ~[ v dup swap drop ] ~[ v ] if | p |\n  \
-         &!p &!x 99 !\n  v V> . .\n  p V> . . ;\n",
+         &!p &!x 99 !\n  v V> drop drop\n  p V> drop drop ;\n",
     );
     assert!(
         err.contains("cannot borrow `p` mutably") && err.contains("it is aliased by `v`"),
@@ -1283,7 +1287,7 @@ fn mutable_borrow_of_a_merge_of_two_aliased_arms_is_error() {
         "type: V x i64 y i64 ;\n\
          : main ( -- )\n  1 2 V | v |\n  3 4 V | w |\n  \
          1 0 gt ~[ v ] ~[ w ] if | p |\n  \
-         &!p &!x 99 !\n  v V> . .\n  w V> . .\n  p V> . . ;\n",
+         &!p &!x 99 !\n  v V> drop drop\n  w V> drop drop\n  p V> drop drop ;\n",
     );
     assert!(
         err.contains("cannot borrow `p` mutably")
@@ -1302,7 +1306,7 @@ fn mutable_borrow_of_a_place_a_merge_may_denote_is_error() {
         "type: V x i64 y i64 ;\n\
          : main ( -- )\n  1 2 V | v |\n  3 4 V | w |\n  \
          0 0 gt ~[ v ] ~[ w ] if | p |\n  \
-         &!w &!x 99 !\n  p V> drop .\n  w V> drop . ;\n",
+         &!w &!x 99 !\n  p V> drop drop\n  w V> drop drop ;\n",
     );
     assert!(
         err.contains("cannot borrow `w` mutably") && err.contains("it is aliased by `p`"),
@@ -1333,7 +1337,7 @@ fn mutable_borrow_of_a_place_over_duplicated_is_error() {
     let err = check_error(
         "type: V x i64 y i64 ;\n\
          : main ( -- )\n  1 2 V 7 over | a b c |\n  \
-         &!a &!x 99 !\n  a V> . .\n  c V> . .\n  b . ;\n",
+         &!a &!x 99 !\n  a V> drop drop\n  c V> drop drop\n  b drop ;\n",
     );
     assert!(
         err.contains("cannot borrow `a` mutably") && err.contains("it is aliased by `c`"),
@@ -1347,8 +1351,8 @@ fn mutable_borrow_of_an_array_over_duplicated_is_error() {
     let err = check_error(
         "type: V x i64 y i64 ;\n\
          : main ( -- )\n  1 2 V 4 fill 7 over | arr n arr2 |\n  \
-         &!arr 0 &!> &!x 99 !\n  &arr 0 &> @ V> drop .\n  \
-         &arr2 0 &> @ V> drop .\n  n . ;\n",
+         &!arr 0 &!> &!x 99 !\n  &arr 0 &> @ V> drop drop\n  \
+         &arr2 0 &> @ V> drop drop\n  n drop ;\n",
     );
     assert!(
         err.contains("cannot borrow `arr` mutably") && err.contains("it is aliased by `arr2`"),
@@ -1381,7 +1385,7 @@ fn mutable_borrow_of_a_place_a_merged_field_projection_may_denote_is_error() {
          type: S a V b i64 ;\n\
          : main ( -- )\n  1 2 V 7 S | s |\n  3 4 V 8 S | t |\n  \
          0 0 gt ~[ s ] ~[ t ] if &a | inner |\n  \
-         &!t &!a &!x 99 !\n  inner @ V> . .\n  swap drop ;\n",
+         &!t &!a &!x 99 !\n  inner @ V> drop drop\n  swap drop ;\n",
     );
     assert!(
         err.contains("cannot borrow `t` mutably") && err.contains("it is aliased by `inner`"),
@@ -1400,7 +1404,7 @@ fn mutable_borrow_aliased_by_name_used_only_in_a_later_arm_is_error() {
     let err = check_error(
         "type: V x i64 y i64 ;\n\
          : main ( -- )\n  1 2 V | v |\n  v | p |\n  \
-         &!p &!x 99 !\n  1 0 gt ~[ v V> . . ] ~[ 5 5 . . ] if ;\n",
+         &!p &!x 99 !\n  1 0 gt ~[ v V> drop drop ] ~[ 5 5 drop drop ] if ;\n",
     );
     assert!(
         err.contains("cannot borrow `p` mutably") && err.contains("it is aliased by `v`"),
@@ -1446,7 +1450,7 @@ fn mutable_borrow_of_place_aliased_on_the_stack_is_error() {
     // locates it by the site that pushed it.
     let err = check_error(
         "type: V x i64 y i64 ;\n\
-         : main ( -- )\n  1 2 V | v |\n  v\n  &!v &!x 40 +!\n  V> . . ;\n",
+         : main ( -- )\n  1 2 V | v |\n  v\n  &!v &!x 40 +!\n  V> drop drop ;\n",
     );
     assert!(
         err.contains("cannot borrow `v` mutably") && err.contains("a value on the stack"),
@@ -1466,7 +1470,7 @@ fn naming_a_place_while_mutably_borrowed_is_error() {
     let err = check_error(
         "type: V x i64 y i64 ;\n\
          : main ( -- )\n  1 2 V | v |\n  &!v\n  v | p |\n  \
-         &!x 40 +!\n  p V> . . ;\n",
+         &!x 40 +!\n  p V> drop drop ;\n",
     );
     assert!(
         err.contains("cannot name `v`") && err.contains("a mutable borrow of it is still live"),
@@ -1485,7 +1489,7 @@ fn naming_a_place_whose_mutable_borrow_is_bound_is_error() {
     let err = check_error(
         "type: V x i64 y i64 ;\n\
          : main ( -- )\n  1 2 V | v |\n  &!v | r |\n  v | p |\n  \
-         r &!x 40 +!\n  p V> . . ;\n",
+         r &!x 40 +!\n  p V> drop drop ;\n",
     );
     assert!(
         err.contains("cannot name `v`") && err.contains("a mutable borrow of it is still live"),

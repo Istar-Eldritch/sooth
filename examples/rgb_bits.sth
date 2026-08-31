@@ -3,6 +3,7 @@
 \ channel back out via `shr` + `and`.
 
 import: intrinsics * ;
+import: hosted::show | . | ;
 
 : pack ( u8 u8 u8 -- i32 )
   | r g b |

@@ -11,7 +11,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 mod common;
 
 /// A scratch tree of `.sth` files outside any package, so imports resolve by
-/// quoted path and no manifest is involved. Removed on drop.
+/// quoted path, not a package-member path -- these goldens are about the
+/// quoted-path regime. `sooth_build` below does pass `--manifest` (P7.S7d),
+/// but only so the *entry* file can reach `hosted::show`; that manifest
+/// plays no part in how the files in this tree import each other. Removed
+/// on drop.
 struct Tree(PathBuf);
 
 impl Tree {
@@ -40,9 +44,15 @@ impl Drop for Tree {
     }
 }
 
+/// P7.S7d: `--manifest`, so an entry that prints can name `hosted::show`.
+/// It covers the entry only -- a transitively imported file re-derives its own
+/// (anonymous) package, which is exactly the quoted-path regime these goldens
+/// are about, so none of the non-entry fixtures here print.
 fn sooth_build(entry: &Path) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_sooth"))
         .arg("build")
+        .arg("--manifest")
+        .arg(common::fixture_manifest())
         .arg(entry)
         .output()
         .expect("sooth build should spawn")
@@ -306,14 +316,14 @@ fn both_intrinsics_import_shapes_admit_a_builtin_and_a_partial_one_does_not() {
     let wildcard = write_raw(
         &t,
         "wild.sth",
-        "import: intrinsics * ;\n: main ( -- ) 1 2 add . ;\n",
+        "import: intrinsics * ;\nimport: hosted::show | . | ;\n: main ( -- ) 1 2 add . ;\n",
     );
     assert_eq!(build_and_run(&wildcard), "3\n");
 
     let selective = write_raw(
         &t,
         "sel.sth",
-        "import: intrinsics i | add . | ;\n: main ( -- ) 1 2 add . ;\n",
+        "import: intrinsics i | add | ;\nimport: hosted::show | . | ;\n: main ( -- ) 1 2 add . ;\n",
     );
     assert_eq!(build_and_run(&selective), "3\n");
 
@@ -322,7 +332,7 @@ fn both_intrinsics_import_shapes_admit_a_builtin_and_a_partial_one_does_not() {
     let partial = write_raw(
         &t,
         "partial.sth",
-        "import: intrinsics i | . | ;\n: main ( -- ) 1 2 add . ;\n",
+        "import: intrinsics i | drop | ;\nimport: hosted::show | . | ;\n: main ( -- ) 1 2 add . ;\n",
     );
     let err = build_error(&partial);
     assert!(
@@ -395,7 +405,7 @@ fn the_typed_core_arrives_only_by_import() {
     let without = write_raw(
         &t,
         "without.sth",
-        &format!("import: intrinsics * ;\n{BODY}"),
+        &format!("import: intrinsics * ;\nimport: hosted::show | . | ;\n{BODY}"),
     );
     let err = build_error(&without);
     assert!(
@@ -409,7 +419,9 @@ fn the_typed_core_arrives_only_by_import() {
     let with = write_raw(
         &t,
         "with.sth",
-        &format!("import: intrinsics * ;\nimport: core::prelude * ;\n{BODY}"),
+        &format!(
+            "import: intrinsics * ;\nimport: hosted::show | . | ;\nimport: core::prelude * ;\n{BODY}"
+        ),
     );
     let build = Command::new(env!("CARGO_BIN_EXE_sooth"))
         .arg("build")
@@ -443,6 +455,12 @@ fn the_typed_core_arrives_only_by_import() {
 #[test]
 fn the_intrinsic_gate_also_covers_a_polymorphic_body() {
     let t = Tree::new("intrinsic-poly");
+    // `import: intrinsics i | . | ;` names `.` under the `i` qualifier, so a
+    // bare `. .` in `main` is unresolvable post-P7.S7d (`.` moved to
+    // `hosted::show`, no longer an intrinsic). That's deliberate, not stale:
+    // this test's subject is the poly-body intrinsic gate on `dup` inside
+    // `twice`, which fires and aborts the build before word resolution ever
+    // reaches the unrelated, unresolvable `.` calls in `main`.
     let entry = write_raw(
         &t,
         "main.sth",
@@ -470,7 +488,7 @@ fn an_own_word_under_a_gated_builtin_spelling_still_resolves() {
     let entry = write_raw(
         &t,
         "main.sth",
-        "import: intrinsics * ;\n: dup ( -- i64 ) 7 ;\n: main ( -- ) dup . ;\n",
+        "import: intrinsics * ;\nimport: hosted::show | . | ;\n: dup ( -- i64 ) 7 ;\n: main ( -- ) dup . ;\n",
     );
     assert_eq!(build_and_run(&entry), "7\n");
 }

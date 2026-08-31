@@ -7,6 +7,7 @@
 \ golden lives in `tests/phase7_slice5_array_drop.rs`.
 
 import: intrinsics * ;
+import: hosted::show | . | ;
 import: core::prelude * ;
 
 \ Build a 5-element array where each slot holds its own index.

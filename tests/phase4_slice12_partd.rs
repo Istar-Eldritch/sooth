@@ -49,7 +49,7 @@ fn build_and_run(name: &str, src: &str) -> (std::path::PathBuf, String, i32) {
 #[test]
 fn apply_call_argument_is_a_materialized_quotation() {
     let src = format!("{APPLY}: main ( -- ) [ 1 add ] 5 apply . ;\n");
-    let tokens = lexer::lex(&src).expect("lexing should succeed");
+    let tokens = lexer::lex(&common::silent_prints(&src)).expect("lexing should succeed");
     let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
     check::check(&mut module).expect("check should succeed");
     let ir = lower(&module).expect("lowering should succeed");
@@ -69,7 +69,7 @@ fn apply_call_argument_is_a_materialized_quotation() {
         .iter()
         .flat_map(|b| b.instrs.iter())
         .find_map(|i| match i {
-            Instr::Call(_, sym, args) if sym == "apply" => Some(args),
+            Instr::Call(_, sym, args, _) if sym == "apply" => Some(args),
             _ => None,
         })
         .expect("`main` calls `apply` for real: the splice is retired");
@@ -136,7 +136,7 @@ fn tail_recursive_quotation_argument_is_materialized_at_the_back_edge() {
                  n 0 eq ~[ 7 f call ] ~[ f drop [ 2 mul ] n 1 sub go ] if ;\n\
                : main ( -- ) [ 3 mul ] 2 go . ;\n";
 
-    let tokens = lexer::lex(src).expect("lexing should succeed");
+    let tokens = lexer::lex(&common::silent_prints(src)).expect("lexing should succeed");
     let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
     check::check(&mut module).expect("check should succeed");
     let ir = lower(&module).expect("lowering should succeed");

@@ -34,7 +34,11 @@ impl Tree {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).unwrap();
         }
-        std::fs::write(&path, contents).unwrap();
+        std::fs::write(
+            &path,
+            format!("{contents}{}", common::printing_import(contents)),
+        )
+        .unwrap();
         path
     }
 }

@@ -23,6 +23,7 @@
 \ (`&>`/`&!>` then `@`/`!`).
 
 import: intrinsics * ;
+import: hosted::show | . | ;
 import: core::prelude * ;
 
 type: Op

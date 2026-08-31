@@ -338,6 +338,6 @@ fn every_scalar_static_type_round_trips_through_its_storage() {
     );
     // `str` prints with no trailing newline, so `TAG` and the empty `EMPTY`
     // run into the final `0`.
-    assert_eq!(stdout, "True\nFalse\n0\n7\nhi0\n");
+    assert_eq!(stdout, "true\nfalse\n0\n7\nhi0\n");
     assert_eq!(code, 0);
 }

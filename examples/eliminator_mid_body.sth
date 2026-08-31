@@ -3,6 +3,7 @@
 \ tail) and from inside an arm.
 
 import: intrinsics * ;
+import: hosted::show | . | ;
 
 type: Shape
 | Circle r i64

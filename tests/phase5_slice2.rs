@@ -200,19 +200,19 @@ fn result_cross_module_application_resolves_in_either_discovery_order() {
            ~[ ( Ok )  Ok> ]\n\
            ~[ ( Err ) Err> ]\n\
            Result? ;\n\
-         : show-ok ( i64 -- ) Ok to-int . ;\n\
-         : show-err ( i64 -- ) Err to-int . ;\n\
+         : show-ok ( i64 -- i64 ) Ok to-int ;\n\
+         : show-err ( i64 -- i64 ) Err to-int ;\n\
          export: show-ok ;\n\
          export: show-err ;\n",
         result_import("r")
     );
 
     let applier_first = format!(
-        "import: \"use.sth\" u ;\n{}: main ( -- ) 12 u::show-ok -3 u::show-err ;\n",
+        "import: \"use.sth\" u ;\n{}: main ( -- ) 12 u::show-ok . -3 u::show-err . ;\n",
         result_import("r")
     );
     let owner_first = format!(
-        "{}import: \"use.sth\" u ;\n: main ( -- ) 12 u::show-ok -3 u::show-err ;\n",
+        "{}import: \"use.sth\" u ;\n: main ( -- ) 12 u::show-ok . -3 u::show-err . ;\n",
         result_import("r")
     );
 

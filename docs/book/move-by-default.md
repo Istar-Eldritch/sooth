@@ -16,6 +16,9 @@ from the stack, and they do not come back unless the word's effect
 says so:
 
 ```sooth
+import: intrinsics * ;
+import: hosted::show | . | ;
+
 : sum ( i64 i64 -- i64 ) add ;
 : main ( -- ) 3 4 sum . ;
 ```
@@ -29,6 +32,9 @@ in its effect. A word that takes a number, adds one, and returns both
 the original and the sum:
 
 ```sooth
+import: intrinsics * ;
+import: hosted::show | . | ;
+
 : bump ( i64 -- i64 i64 ) | n | n n 1 add ;
 : main ( -- ) 5 bump . . ;
 ```
@@ -72,6 +78,9 @@ the signature or explicitly dropped.
 that makes a value go away on purpose:
 
 ```sooth
+import: intrinsics * ;
+import: hosted::show | . | ;
+
 : discard ( i64 -- ) drop ;
 : main ( -- ) 42 discard 100 . ;
 ```
@@ -97,6 +106,9 @@ The types you have seen so far are all **Copy**: integers, floats,
 twice is ordinary reuse — the compiler copies the bits:
 
 ```sooth
+import: intrinsics * ;
+import: hosted::show | . | ;
+
 : square ( i64 -- i64 ) | x | x x mul ;
 : main ( -- ) 5 square . ;
 ```

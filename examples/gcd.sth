@@ -1,4 +1,5 @@
 import: intrinsics * ;
+import: hosted::show | . | ;
 import: core::prelude * ;
 
 : gcd ( i64 i64 -- i64 )

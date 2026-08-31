@@ -20,7 +20,7 @@ fn check_error(src: &str) -> String {
 
 /// The linear stand-in (a one-field struct with a `drop` overload). Two lines,
 /// so a source prefixed with it shifts every line number up by 2.
-const SPY_DEF: &str = "type: Spy tag i64 ;\n: drop ( Spy -- )  | s | \"drop \" . s Spy> . ;\n";
+const SPY_DEF: &str = "type: Spy tag i64 ;\n: drop ( Spy -- )  | s | s Spy> drop ;\n";
 
 /// `lib/combinators.sth`'s `times`, inlined: `check_error` runs the checker in
 /// process, where an `import:` line never resolves.
@@ -87,7 +87,7 @@ fn core_shuffles_are_polymorphic_over_i64_bool_and_a_struct() {
          1 2 Vec2 &x @ . &y @ . drop ;\n",
         false,
     );
-    assert_eq!(stdout, "5\n5\nTrue\nFalse\n1\n2\n");
+    assert_eq!(stdout, "5\n5\ntrue\nfalse\n1\n2\n");
     assert_eq!(code, 0);
 }
 
@@ -114,7 +114,7 @@ fn two_output_word_outputs_arrive_deepest_first() {
         ": two ( -- i64 Bool ) 1 True ;\n: main ( -- ) two . . ;\n",
         false,
     );
-    assert_eq!(stdout, "True\n1\n");
+    assert_eq!(stdout, "true\n1\n");
     assert_eq!(code, 0);
 }
 
@@ -130,7 +130,7 @@ fn three_output_word_with_an_aggregate_output_runs() {
          : main ( -- ) spread . &y @ . drop . ;\n",
         false,
     );
-    assert_eq!(stdout, "True\n3\n1\n");
+    assert_eq!(stdout, "true\n3\n1\n");
     assert_eq!(code, 0);
 }
 
@@ -146,7 +146,7 @@ fn two_output_word_with_a_linear_output_frees_its_cell_exactly_once() {
         ": cell-and-tag ( -- ^i64 i64 ) 7 ^ 3 ;\n: main ( -- ) cell-and-tag . ^> . ;\n",
         true,
     );
-    assert_eq!(stdout, "alloc 8\n3\nfree 8\n7\n");
+    assert_eq!(stdout, "3\n7\nalloc 8\nfree 8\n");
     assert_eq!(code, 0);
 }
 
@@ -162,7 +162,7 @@ fn copy_bounded_type_variable_word_runs_at_two_concrete_types() {
          : main ( -- ) 5 dupit . . True dupit . . ;\n",
         false,
     );
-    assert_eq!(stdout, "5\n5\nTrue\nTrue\n");
+    assert_eq!(stdout, "5\n5\ntrue\ntrue\n");
     assert_eq!(code, 0);
 }
 
@@ -800,7 +800,7 @@ fn quotation_as_if_condition_is_error() {
     // word, never leaking a `bool` mismatch. Slice 10c: `if` is a `lib/` word,
     // so the rejection is the combinator argument guard's rather than the
     // retired `if` arm's own -- same site, same guarantee, different wording.
-    let err = check_error(": main ( -- ) ~[ add ] ~[ 1 . ] ~[ 2 . ] if ;\n");
+    let err = check_error(": main ( -- ) ~[ add ] ~[ 1 drop ] ~[ 2 drop ] if ;\n");
     assert!(
         err.contains("`if`") && err.contains("a quotation cannot be passed to"),
         "R11if should name `if`, not a Bool mismatch, got: {err}"
@@ -840,7 +840,7 @@ fn linear_bound_inside_a_quotation_body_is_error() {
     // only because the splice is bracketed by `leave_block`; the `call` is where
     // the body's scope ends, so the unconsumed `s` is rejected there.
     let err = check_error(&format!(
-        "{SPY_DEF}: main ( -- ) [ 5 Spy | s | 42 ] call . ;\n"
+        "{SPY_DEF}: main ( -- ) [ 5 Spy | s | 42 ] call drop ;\n"
     ));
     assert!(
         err.contains("linear value `s`") && err.contains("never consumed"),
@@ -995,7 +995,7 @@ fn times_body_consuming_a_linear_local_is_error() {
     // runs N times, so consuming the outer linear `s` would dispose it N times.
     // Named `s`, with the "body runs more than once" wording.
     let err = check_error(&format!(
-        "{TIMES_DEF}{SPY_DEF}: main ( -- ) 5 Spy | s | 0 1000000 ~[ | i | i s drop add ] times . ;\n"
+        "{TIMES_DEF}{SPY_DEF}: main ( -- ) 5 Spy | s | 0 1000000 ~[ | i | i s drop add ] times drop ;\n"
     ));
     assert!(
         err.contains(
@@ -1030,7 +1030,7 @@ fn times_body_changing_the_row_is_error() {
     // Criterion R18c (D6 row-effect equality): `array[ add 1 ]` leaves the row one
     // deeper than it received, so the body's net effect is not identity.
     let err = check_error(&format!(
-        "{TIMES_DEF}: main ( -- ) 0 1000000 ~[ add 1 ] times . ;\n"
+        "{TIMES_DEF}: main ( -- ) 0 1000000 ~[ add 1 ] times drop ;\n"
     ));
     assert!(
         err.contains("the quotation passed to `times` was declared `~[ i64 -- ]`")

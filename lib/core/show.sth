@@ -125,6 +125,72 @@ impl: Show for Bool
     ] if ;
 ;
 
+\ P7.S7d (R6'): the rest of the integer tower, widened onto the same
+\ `append-digits` path. The signed impls widen *before* the sign test: a bare
+\ `n 0 lt` on a narrow operand resolves the literal ambiguously and errors.
+impl: Show for u8
+  : show
+    | n buf |
+    buf n >u64 append-digits ;
+;
+
+impl: Show for u16
+  : show
+    | n buf |
+    buf n >u64 append-digits ;
+;
+
+impl: Show for u32
+  : show
+    | n buf |
+    buf n >u64 append-digits ;
+;
+
+impl: Show for u64
+  : show
+    | n buf |
+    buf n >u64 append-digits ;
+;
+
+impl: Show for i8
+  : show
+    | n buf |
+    n >i64 0 lt ~[
+      buf 45 >u8 append-byte
+      n >i64 >u64 not 1 >u64 add
+    ] ~[
+      n >i64 >u64
+    ] if
+    | mag |
+    buf mag append-digits ;
+;
+
+impl: Show for i16
+  : show
+    | n buf |
+    n >i64 0 lt ~[
+      buf 45 >u8 append-byte
+      n >i64 >u64 not 1 >u64 add
+    ] ~[
+      n >i64 >u64
+    ] if
+    | mag |
+    buf mag append-digits ;
+;
+
+impl: Show for i32
+  : show
+    | n buf |
+    n >i64 0 lt ~[
+      buf 45 >u8 append-byte
+      n >i64 >u64 not 1 >u64 add
+    ] ~[
+      n >i64 >u64
+    ] if
+    | mag |
+    buf mag append-digits ;
+;
+
 \ Bounded consumer words (Ruling 8): a member name is not importable, so a
 \ program reaches `show`/`write` only through one of these.
 : render['T: Show] ( 'T &!StrBuf -- ) show ;

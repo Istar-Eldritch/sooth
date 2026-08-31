@@ -37,7 +37,7 @@ fn len_of_a_str_emits_no_call_native() {
     // out of the descriptor with no `Instr::Call` anywhere in the lowered
     // function, and the native binary prints the right value.
     let src = ": main ( -- )\n  \"hello\" len . ;";
-    let tokens = lexer::lex(src).unwrap();
+    let tokens = lexer::lex(&common::silent_prints(src)).unwrap();
     let mut module = test_support::parse_with_core(&tokens).unwrap();
     check::check(&mut module).unwrap();
     let ir = lower(&module).unwrap();

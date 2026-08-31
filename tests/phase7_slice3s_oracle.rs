@@ -194,7 +194,8 @@ impl Scratch {
             std::env::temp_dir().join(format!("sooth-p7s3o-{}-{tag}-{seq}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("creating temp dir");
         let path = dir.join("prog.sth");
-        std::fs::write(&path, src).expect("writing fixture source");
+        std::fs::write(&path, format!("{src}{}", common::printing_import(src)))
+            .expect("writing fixture source");
         Scratch(path)
     }
 

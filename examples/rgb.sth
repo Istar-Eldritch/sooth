@@ -3,6 +3,7 @@
 \ narrowing. No `/`: unpack only isolates blue, per the slice's Q3 resolution.
 
 import: intrinsics * ;
+import: hosted::show | . | ;
 
 : pack ( i64 i64 i64 -- i32 )
   | r g b |

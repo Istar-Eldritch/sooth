@@ -10,6 +10,7 @@
 \ return ABI), so no hand-written bundle struct is needed.
 
 import: intrinsics * ;
+import: hosted::show | . | ;
 
 type: Stack 
   items array[i64 16] 

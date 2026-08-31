@@ -24,9 +24,13 @@
 use crate::ast::{EnumDecl, Module, Span, WordDef};
 use crate::lexer::Token;
 
-/// The typed core's sources: `core::bool` (the `bool` type, `if`/`unless` and
-/// the bool `.` overload) and `core::cmp` (the six comparisons), embedded rather
-/// than mirrored by hand so a change to either file reaches these paths.
+/// The typed core's sources: `core::bool` (the `bool` type plus `if`/`unless`)
+/// and `core::cmp` (the six comparisons), embedded rather than mirrored by hand
+/// so a change to either file reaches these paths.
+///
+/// Core-only, deliberately: `hosted` is a package these paths never resolve, so
+/// a source seeded here cannot print (P7.S7d retired `.` onto `hosted::show`).
+/// An in-process fixture that needs to consume a value spells `drop`.
 const CORE_SOURCES: [&str; 2] = [
     include_str!("../lib/core/bool.sth"),
     include_str!("../lib/core/cmp.sth"),
@@ -83,6 +87,23 @@ pub fn parse_with_core(tokens: &[(Token, Span)]) -> Result<Module, String> {
     let mut module = module;
     crate::check::check_impl_decls(&mut module)?;
     Ok(module)
+}
+
+/// A committed example checked the way the driver checks it. `check_src`-style
+/// helpers cannot: they seed `core` only, and every printing example imports
+/// `hosted::show` (P7.S7d), which only closure discovery resolves. Shared
+/// between `check.rs`'s and `check/drop_graph.rs`'s test modules so one
+/// mechanism reads a committed example rather than two.
+///
+/// `#[cfg(test)]`, not merely `#[allow(dead_code)]`: it calls
+/// `driver::discover_closure`, which is itself only compiled under
+/// `#[cfg(test)]` (the production entry points call
+/// `discover_closure_audited` directly with their own config).
+#[cfg(test)]
+pub fn check_example(rel: &str) -> Result<(), String> {
+    let closure = crate::driver::discover_closure(std::path::Path::new(rel))?;
+    let mut module = crate::driver::assemble_module(&closure, true)?;
+    crate::check::check(&mut module)
 }
 
 /// A synthetic single-word `WordDef` for `check/`'s unit tests that drive a

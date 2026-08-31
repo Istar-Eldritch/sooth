@@ -56,9 +56,15 @@ pub(crate) fn mangle_static(name: &str, module: u32) -> String {
 
 /// `check::builtin_table`'s keys, mirrored by hand (that table's own
 /// `check_operator::is_operator` list carries the same warning): the
-/// arithmetic/comparison/`max`/`max-total`/`.` names a bare call must reach
+/// arithmetic/comparison/`max`/`max-total` names a bare call must reach
 /// `check_operator`'s operand-type dispatch for, never a static rewrite. Keep
 /// in sync when a table operator is added.
+///
+/// P7.S7d (R4): `.` is deliberately absent too, for the same reason. Printing
+/// is `hosted::show`'s per-type dots now, so a bare `.` must rewrite through
+/// the ordinary own-module/selective-import branches; left listed here, a
+/// selectively imported `.` stays unrewritten expecting a builtin dispatch
+/// that no longer exists and every call site is `unknown word '.'`.
 ///
 /// P8 S2 (R3a): the six comparison *surface* names are deliberately absent.
 /// They are not `BUILTIN_TABLE` keys (their rows moved to the `u`-prefixed
@@ -91,7 +97,6 @@ fn is_operator_dispatch_name(name: &str) -> bool {
             | "une"
             | "max"
             | "max-total"
-            | "."
     )
 }
 
@@ -1242,7 +1247,7 @@ mod tests {
     fn eliminator_call_site_mangles_to_match_the_enum_based_key() {
         let tokens = lex("type: Shape | Circle r i64 | Rect w i64 h i64 ;\n\
              : area ( Shape -- i64 ) ~[ ( Circle ) Circle> ] ~[ ( Rect ) Rect> mul ] Shape? ;\n\
-             : main ( -- ) 3 Circle area . ;\n")
+             : main ( -- ) 3 Circle area drop ;\n")
         .unwrap();
         let mut module = crate::parser::parse(&tokens).unwrap();
         resolve_modules(&mut module, true).unwrap();
@@ -1391,7 +1396,7 @@ mod tests {
     fn operator_named_decl_mangles_in_a_forced_single_module_build() {
         let tokens = lex("type: V x f64 ;\n\
              : div ( V V -- V ) drop ;\n\
-             : main ( -- ) 1.0 V 2.0 V div &x @ swap drop . 9.0 3.0 div . ;\n")
+             : main ( -- ) 1.0 V 2.0 V div &x @ swap drop drop 9.0 3.0 div drop ;\n")
         .unwrap();
         let mut module = crate::parser::parse(&tokens).unwrap();
         resolve_modules(&mut module, true).unwrap();

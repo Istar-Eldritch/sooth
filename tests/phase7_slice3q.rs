@@ -10,6 +10,14 @@
 //! `phase8_slice2.rs`'s with that call removed, and this file declares no
 //! `mod common;` so the mistake cannot be made by accident.
 //!
+//! Two import regimes appear side by side. The negative goldens (an
+//! unimported intrinsic, a shadowed builtin, and their kin) still use the
+//! anonymous quoted-path `Tree`, since a package rejects a quoted-path
+//! import outright and these need that path to exist at all. The positive,
+//! printing goldens instead use `packaged_tree` and import each other as
+//! `self::<module>` (P7.S7d: reaching `hosted::show` needs a real `depends:`
+//! manifest, which a package-member import gets and a quoted path cannot).
+//!
 //! Every golden goes through the real `sooth` binary, and every negative one
 //! pins the exact diagnostic rather than a bare `is_err()`.
 
@@ -18,9 +26,9 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// A scratch tree of `.sth` files outside any package, so imports resolve by
-/// quoted path and no manifest is involved -- except the one golden below
-/// that writes a `sooth.pkg` because it needs `core::prelude` to resolve.
-/// Removed on drop.
+/// quoted path and no manifest is involved. Removed on drop. Several goldens
+/// below instead go through `packaged_tree`, a `Tree` that writes a
+/// `sooth.pkg` and switches its members to `self::<module>` imports.
 struct Tree(PathBuf);
 
 impl Tree {
@@ -47,6 +55,22 @@ impl Drop for Tree {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
     }
+}
+
+/// A scratch tree that is a real package naming this repo's own `lib/`, for
+/// the goldens whose witness is a printed value: P7.S7d put `.` in
+/// `hosted::show`, which only a `depends:` entry resolves. Members import each
+/// other as `self::<module>`, since a package rejects a quoted-path import.
+fn packaged_tree(tag: &str) -> Tree {
+    let t = Tree::new(tag);
+    t.write(
+        "sooth.pkg",
+        &format!(
+            "package: p7s3q ;\nlayer: hosted ;\ndepends: core path \"{root}/lib/core\" ;\ndepends: hosted path \"{root}/lib/hosted\" ;\n",
+            root = env!("CARGO_MANIFEST_DIR")
+        ),
+    );
+    t
 }
 
 fn sooth_build(entry: &Path) -> std::process::Output {
@@ -218,15 +242,15 @@ fn a_local_destructor_coexists_with_a_wildcard_hub_import() {
 /// to the intrinsic admitted through the hub.
 #[test]
 fn a_hub_admitted_intrinsic_and_another_modules_real_word_share_a_name() {
-    let t = Tree::new("cross-module-drop");
+    let t = packaged_tree("cross-module-drop");
     t.write("hub.sth", "import: intrinsics | drop | ;\nexport: drop ;\n");
     t.write(
         "other.sth",
-        "import: intrinsics | . | ;\ntype: Fd n i64 ;\n: drop ( Fd -- ) | h | h Fd> . ;\nexport: Fd drop ;\n",
+        "import: hosted::show | . | ;\ntype: Fd n i64 ;\n: drop ( Fd -- ) | h | h Fd> . ;\nexport: Fd drop ;\n",
     );
     let entry = t.write(
         "main.sth",
-        "import: \"./hub.sth\" a | drop | ;\nimport: \"./other.sth\" b | Fd drop | ;\n: main ( -- ) 1 drop 7 Fd drop ;\n",
+        "import: self::hub a | drop | ;\nimport: self::other b | Fd drop | ;\n: main ( -- ) 1 drop 7 Fd drop ;\n",
     );
     assert_eq!(build_and_run(&entry), "7\n");
 }
@@ -245,7 +269,7 @@ fn a_source_declaring_an_intrinsic_name_still_collides_with_a_local() {
     );
     let entry = t.write(
         "main.sth",
-        "import: \"./hub.sth\" h | dup | ;\nimport: intrinsics | . | ;\n: dup ( i64 -- i64 i64 ) | a | 7 7 ;\n: main ( -- ) 1 dup . . ;\n",
+        "import: \"./hub.sth\" h | dup | ;\n: dup ( i64 -- i64 i64 ) | a | 7 7 ;\n: main ( -- ) 1 dup drop drop ;\n",
     );
     assert_eq!(
         build_error(&entry),
@@ -263,21 +287,21 @@ fn a_source_declaring_an_intrinsic_name_still_collides_with_a_local() {
 /// at all.
 #[test]
 fn an_operator_name_dispatches_the_same_through_a_hub_as_it_does_alone() {
-    let t = Tree::new("operator-solo");
+    let t = packaged_tree("operator-solo");
     let solo = t.write(
         "solo.sth",
-        "import: intrinsics | add sub . | ;\n: add ( i64 i64 -- i64 ) | a b | a b sub ;\n: main ( -- ) 10 3 add . ;\n",
+        "import: intrinsics | add sub | ;\nimport: hosted::show | . | ;\n: add ( i64 i64 -- i64 ) | a b | a b sub ;\n: main ( -- ) 10 3 add . ;\n",
     );
     assert_eq!(build_and_run(&solo), "13\n");
 
-    let t = Tree::new("operator-hub");
+    let t = packaged_tree("operator-hub");
     t.write(
         "hub.sth",
         "import: intrinsics | add sub | ;\n: add ( i64 i64 -- i64 ) | a b | a b sub ;\nexport: add ;\n",
     );
     let entry = t.write(
         "main.sth",
-        "import: \"./hub.sth\" h | add | ;\nimport: intrinsics | . | ;\n: main ( -- ) 10 3 add . ;\n",
+        "import: self::hub h | add | ;\nimport: hosted::show | . | ;\n: main ( -- ) 10 3 add . ;\n",
     );
     assert_eq!(build_and_run(&entry), "13\n");
 }
@@ -288,14 +312,14 @@ fn an_operator_name_dispatches_the_same_through_a_hub_as_it_does_alone() {
 /// cannot call it at all (pre-slice this program is `ungated_intrinsic_error`).
 #[test]
 fn an_overload_on_a_user_type_crosses_a_hub_and_dispatches() {
-    let t = Tree::new("operator-overload");
+    let t = packaged_tree("operator-overload");
     t.write(
         "hub.sth",
         "import: intrinsics | add drop | ;\ntype: Vec2 x i64 y i64 ;\n: add ( Vec2 Vec2 -- Vec2 ) | a b | a Vec2> drop b Vec2> drop add 0 Vec2 ;\nexport: Vec2 add ;\n",
     );
     let entry = t.write(
         "main.sth",
-        "import: \"./hub.sth\" h | Vec2 add | ;\nimport: intrinsics | . drop | ;\n: main ( -- ) 1 2 Vec2 3 4 Vec2 add Vec2> drop . ;\n",
+        "import: self::hub h | Vec2 add | ;\nimport: intrinsics | drop | ;\nimport: hosted::show | . | ;\n: main ( -- ) 1 2 Vec2 3 4 Vec2 add Vec2> drop . ;\n",
     );
     assert_eq!(build_and_run(&entry), "4\n");
 }
@@ -341,15 +365,17 @@ fn two_hubs_re_exporting_one_ordinary_word_still_collide() {
 
 /// B1: the gate set is not enumerable -- it is `BUILTIN_WORDS` plus every
 /// non-empty `>`-prefixed conversion -- so the `export:` accept is a predicate,
-/// not a widened name list. `>i64` crosses the hub; the consumer's own
-/// `import: intrinsics | . | ;` covers the print and nothing else.
+/// not a widened name list. `>i64` crosses the hub; the consumer imports
+/// nothing else from `intrinsics`, so the conversion's admission is the only
+/// thing that can make the call resolve. (The print is `hosted::show`'s since
+/// P7.S7d, which is why this tree is a package.)
 #[test]
 fn a_conversion_intrinsic_re_exports_through_a_hub() {
-    let t = Tree::new("conversion");
+    let t = packaged_tree("conversion");
     t.write("hub.sth", "import: intrinsics | >i64 | ;\nexport: >i64 ;\n");
     let entry = t.write(
         "main.sth",
-        "import: intrinsics | . | ;\nimport: \"./hub.sth\" h | >i64 | ;\n: main ( -- ) 3.5 >i64 . ;\n",
+        "import: hosted::show | . | ;\nimport: self::hub h | >i64 | ;\n: main ( -- ) 3.5 >i64 . ;\n",
     );
     assert_eq!(build_and_run(&entry), "3\n");
 }
@@ -388,18 +414,18 @@ fn a_consumer_of_core_prelude_calls_drop_bare() {
 /// intrinsic), with no diagnostic.
 #[test]
 fn a_hub_admitting_an_intrinsic_still_re_exports_a_real_word_of_the_same_name() {
-    let t = Tree::new("hub-admits-and-redeclares");
+    let t = packaged_tree("hub-admits-and-redeclares");
     t.write(
         "dep.sth",
         "import: intrinsics * ;\n: dup ( i64 -- i64 i64 ) | a | 99 99 ;\nexport: dup ;\n",
     );
     t.write(
         "hub.sth",
-        "import: intrinsics | dup | ;\nimport: \"./dep.sth\" d | dup | ;\nexport: dup ;\n",
+        "import: intrinsics | dup | ;\nimport: self::dep d | dup | ;\nexport: dup ;\n",
     );
     let entry = t.write(
         "main.sth",
-        "import: intrinsics | . | ;\nimport: \"./hub.sth\" h | dup | ;\n: main ( -- ) 5 dup . . ;\n",
+        "import: hosted::show | . | ;\nimport: self::hub h | dup | ;\n: main ( -- ) 5 dup . . ;\n",
     );
     assert_eq!(build_and_run(&entry), "99\n99\n");
 }
@@ -426,7 +452,7 @@ fn a_hub_re_exporting_a_real_word_still_collides_with_a_local_of_the_same_name()
     );
     let entry = t.write(
         "main.sth",
-        "import: intrinsics | . | ;\nimport: \"./hub.sth\" h | dup | ;\n: dup ( i64 -- i64 i64 ) | a | 7 7 ;\n: main ( -- ) 5 dup . . ;\n",
+        "import: intrinsics | drop | ;\nimport: \"./hub.sth\" h | dup | ;\n: dup ( i64 -- i64 i64 ) | a | 7 7 ;\n: main ( -- ) 5 dup drop drop ;\n",
     );
     assert_eq!(
         build_error(&entry),
