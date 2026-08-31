@@ -14480,6 +14480,30 @@ mod tests {
     }
 
     #[test]
+    fn poly_type_str_renders_a_variable_application() {
+        // P7b.S1 (S1-14): `PolyType::App` renders as `'F['T]` -- the
+        // applied variable's own surface spelling, then its arguments.
+        let sig = PolySig {
+            row_in: None,
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            row_out: None,
+            bounds: Vec::new(),
+            ty_var_names: vec!["'F".to_string(), "'T".to_string()],
+            ty_var_spans: Vec::new(),
+            ty_kinds: Vec::new(),
+            len_var_names: Vec::new(),
+            len_var_spans: Vec::new(),
+            row_var_names: Vec::new(),
+        };
+        let app = PolyType::App {
+            head: 0,
+            args: vec![PolyType::Var(1)],
+        };
+        assert_eq!(poly_type_str(&app, &sig), "'F['T]");
+    }
+
+    #[test]
     fn poly_type_str_renders_a_generic_application_with_len_args() {
         // P7.S6a (R3): the `Generic` arm's `len_args` widening -- a
         // length-carrying generic application must print its length

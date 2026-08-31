@@ -270,3 +270,40 @@ fn hkt_annotation_arity_unsatisfiable_by_application_is_error() {
     let err = build_error(&entry);
     assert!(err.contains("is annotated `* -> Len -> *`"), "{err}");
 }
+
+// ---- Phase 4: IR + end-to-end goldens ----
+
+/// Positive golden #1 (W2): `'F['T]` in a signature's input and output
+/// positions -- call-site unification binds `'F := Box`, `'T := i64`, and
+/// IR lowering resolves the application through the lookup-only
+/// `subst_polytype` arm (S1-13).
+#[test]
+fn hkt_signature_application_passes_through_at_concrete_call_site() {
+    let src = "\
+type: Box['T] v 'T ;
+
+: pass['F 'T] ( 'F['T] -- 'F['T] ) ;
+: mk ( i64 -- Box[i64] ) Box ;
+: main ( -- ) 5 mk pass Box> . ;
+";
+    let (_t, entry) = single_file("w2-app-passthrough", src);
+    let out = build_and_run(&entry);
+    assert_eq!(out, "5\n");
+}
+
+/// Positive golden #2 (W1): a generic struct field typed `'F['T]`
+/// monomorphizes to the applied constructor (`Box[i64]`) via S1-8's
+/// instantiation semantics for `App` fields.
+#[test]
+fn hkt_struct_field_monomorphizes_to_the_applied_constructor() {
+    let src = "\
+type: Box['T] v 'T ;
+type: Wrap['F 'T] f 'F['T] t 'T ;
+
+: mk ( i64 -- Wrap[Box i64] ) dup Box swap Wrap ;
+: main ( -- ) 5 mk Wrap> drop Box> . ;
+";
+    let (_t, entry) = single_file("w1-field-monomorphize", src);
+    let out = build_and_run(&entry);
+    assert_eq!(out, "5\n");
+}
