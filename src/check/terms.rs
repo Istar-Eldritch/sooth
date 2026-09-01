@@ -871,6 +871,22 @@ fn check_term(
                     None => {
                         let mints = mint_fallback_candidates(name, ctx);
                         if mints.is_empty() {
+                            // P7b.S2 (S2-16, mono caller): the bare member
+                            // lookup, after the check-time monomorph mints
+                            // (above, which take precedence) and before the
+                            // unchanged unknown-word/intrinsic fallthrough
+                            // below, which still fires on no-match so every
+                            // existing unknown-word golden holds. The member
+                            // word is module-qualified, so the bare name has
+                            // no `env` entry; the lookup keys on the member
+                            // name plus the operand's dispatchable type
+                            // through the whole-program trait/impl tables.
+                            if let Some(next) = resolve_mono_member_call(
+                                name, span, type_args, len_args, &mut stack, ctx, env, scope,
+                                arrays, cells, refs, slices, prov, live, at, poly,
+                            )? {
+                                return Ok(next);
+                            }
                             return Err(match gated {
                                 // P8 S2 (R6a): the name is a real intrinsic
                                 // that nothing else claimed, so the remedy is
@@ -1196,14 +1212,24 @@ fn poly_call_takes_type_args(
         && !crate::ast::is_name_dispatched_builtin(name)
         && !poly.eliminators.contains_key(name)
         && !poly.combinators.contains_key(name)
-        && poly.env.get(name).is_some_and(|candidates| {
+        && (poly.env.get(name).is_some_and(|candidates| {
             !env.contains_key(name)
                 || candidates.iter().any(|sig| {
                     poly_sig_could_match(
                         sig, stack, name, span, ctx, arrays, cells, refs, impls, traits,
                     )
                 })
-        })
+        }) || poly.trait_resolve.traits.iter().any(|t| {
+            // P7b.S2 (S2-16, mono caller): a trait member name takes the
+            // explicit-instantiation spelling too -- the mono member path
+            // (env-miss branch) routes it to the member word's `check_poly
+            // _call`, whose θ seeding is the pinned remedy for a variable
+            // only a quotation's rows mention (`map`'s `'U`). The clause
+            // only widens the allow for names no earlier route claims
+            // (members are never locals/builtins/eliminators, and the
+            // six comparison names are combinators, excluded above).
+            t.members.iter().any(|m| m.name == name)
+        }))
 }
 
 /// P7.S12 (R7.1): the three outcomes of scanning forward from a tagged

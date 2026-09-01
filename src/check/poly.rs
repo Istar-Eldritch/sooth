@@ -10,6 +10,17 @@ use super::*;
 /// own type variables. The *symbol* is deliberately absent: `'T` is still
 /// abstract here, so only the obligation is knowable. `check_poly_call`
 /// resolves it against a concrete `θ` (R8).
+///
+/// P7b.S2 (S2-16/S2-9): `slots` is the call site's operand record -- the
+/// caller-space `PolyType` of each operand the member consumed, in declared
+/// order. This is the member-local→caller-slot binding map's carrier: at
+/// body-check the caller's slots are still abstract (`App{F, [Var T]}`), so
+/// θ_call cannot exist yet; at the resolve loop, where the caller's θ is
+/// concrete, each slot re-grounds through θ and the winning member word's own
+/// sig unifies against the results, producing θ_call per call site. Slots, not
+/// a bare local→slot map, because the winning impl's leftover target slots
+/// (`for Result['T 'E]`'s `'E`) bind from the operand's *shape*, which only
+/// the full slot type carries.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TraitObligation {
     pub span: Span,
@@ -17,6 +28,9 @@ pub(crate) struct TraitObligation {
     pub var: u32,
     pub trait_id: TraitId,
     pub member: String,
+    /// P7b.S2 (S2-16/S2-9): the call site's consumed operand slots, caller
+    /// space, one per declared member input in declared order (see above).
+    pub slots: Vec<PolyType>,
 }
 
 /// P7.S3e (R7): the trait-side context a polymorphic body's walk needs --
@@ -154,6 +168,28 @@ impl TraitResolveCtx<'_> {
             .find(|w| w.name == name && &w.sig == sig)
             .map(|w| w.sites.as_slice())
             .unwrap_or(&[])
+    }
+
+    /// P7b.S2 (S2-9): a member word's own `PolySig`, found by lowering symbol
+    /// name. Every poly word's body walk records a `WordObligations` entry
+    /// keyed by the word's (unmangled) name, so a member word dispatched by a
+    /// bound resolution can find its grounded (S2-6) signature here -- the
+    /// unification source θ_call is built against. `word_symbols` may carry an
+    /// overload `$$N` suffix the recorded name does not, so the lookup strips
+    /// one on a second pass (member synth names are unique, so this is belt
+    /// and braces, not a live route).
+    fn word_sig_of(&self, symbol: &str) -> Option<&PolySig> {
+        self.recorded
+            .iter()
+            .find(|w| w.name == symbol)
+            .map(|w| &w.sig)
+            .or_else(|| {
+                let bare = symbol.split("$$").next()?;
+                self.recorded
+                    .iter()
+                    .find(|w| w.name == bare)
+                    .map(|w| &w.sig)
+            })
     }
 }
 
@@ -1051,6 +1087,19 @@ pub(super) fn poly_term(
 /// qualifier (it narrows *which* trait), the second is not (no candidate's
 /// declared operands match, so naming a trait changes nothing) -- `CandidateFit`
 /// keeps them apart for the caller.
+/// P7b.S2 (S2-16): whether a candidate member's declared inputs fit the
+/// call's operand slots, with the header pre-bound to the candidate's own
+/// bound variable (`var`) -- the same seed the operand check uses, so the
+/// fit test and the check can never disagree about which variable a slot
+/// must carry.
+fn member_fits_operands(inputs: &[PolyType], slots: &[PolySlot], var: u32) -> bool {
+    let mut bindings = vec![(0u32, PolyType::Var(var))];
+    inputs
+        .iter()
+        .zip(slots)
+        .all(|(declared, slot)| unify_member_operand(declared, &slot.pt, &mut bindings))
+}
+
 fn candidate_fitting_the_operands<'a>(
     stack: &[PolySlot],
     candidates: &[(u32, TraitId, &'a TraitMember)],
@@ -1058,14 +1107,19 @@ fn candidate_fitting_the_operands<'a>(
     if candidates.windows(2).all(|w| w[0].0 == w[1].0) {
         return CandidateFit::Ambiguous;
     }
-    let mut fitting = candidates.iter().filter(|(var, _, member)| {
+    // P7b.S2 (S2-16): the fit test is the same one-way unification the single
+    // candidate's operand check uses (`unify_member_operand`, header pre-bound
+    // to the candidate's variable), not the `substitute_member_var` rewrite
+    // equality it had -- the rewrite conflates a member's own locals with the
+    // caller's bound var, so an HKT member's App-headed input could never fit
+    // anything and the disambiguation never had a fair test. The pre-bound
+    // seed keeps candidates on different variables separated: a slot carrying
+    // `'T` cannot fit a candidate dispatched on `'U`.
+    let mut fitting = candidates.iter().filter(|(_var, _, member)| {
         let inputs = &member.sig.inputs;
         stack.len() >= inputs.len() && {
             let base = stack.len() - inputs.len();
-            inputs
-                .iter()
-                .enumerate()
-                .all(|(i, t)| stack[base + i].pt == substitute_member_var(t, *var))
+            member_fits_operands(inputs, &stack[base..], *_var)
         }
     });
     match (fitting.next(), fitting.next()) {
@@ -1081,11 +1135,161 @@ enum CandidateFit<'a> {
     NoFit,
 }
 
+/// P7b.S2 (S2-16, poly caller): one-way unification of a member's *declared*
+/// input `PolyType` (trait space: id 0 is the header, ids 1.. are the
+/// member's own locals) against a caller-space operand slot. The declared
+/// sig is the source -- not the member word's grounded `PolySig`: at
+/// body-check no impl is selected, and the word's sig is ctor-headed (S2-6
+/// dissolved `'F`), so unifying it against an abstract App operand would
+/// wrongly concretize the caller's bound variable.
+///
+/// The header's binding is the dispatch itself: callers seed `bindings` with
+/// `(0, Var(var))` -- the member header variable binds to the caller's
+/// *dispatched* bound variable -- so an App-headed declared input unifies
+/// against a caller `App{h, args}` only when `h` is that variable (W4's
+/// poly-poly reading: plain App-vs-App unification binds the member's header
+/// variable to the caller's bound variable and member locals to the caller's
+/// slot arguments; no `CtorImage` exists yet at body-check). Member locals
+/// bind to the caller's slot arguments; a declared local (non-id-0) heading
+/// an application binds the same way (S2-6's nested-local shape). The seed
+/// is also what keeps multi-candidate fitting variable-separated: a
+/// candidate on `'U` cannot fit a slot carrying `'T`.
+///
+/// Conservative on the rest: a declared `Concrete`/`Array`/len against a
+/// caller variable is a mismatch (binding would concretize the caller's own
+/// variable at body-check, breaking its polymorphism), as is any shape pair
+/// the arms below do not align. Returns `false` for mismatch, mirroring the
+/// structural-equality check this replaces, so the caller raises the same
+/// located `trait_member_operand_error`.
+fn unify_member_operand(
+    declared: &PolyType,
+    found: &PolyType,
+    bindings: &mut Vec<(u32, PolyType)>,
+) -> bool {
+    fn bind(bindings: &mut Vec<(u32, PolyType)>, v: u32, pt: PolyType) -> bool {
+        match bindings.iter_mut().find(|(id, _)| *id == v) {
+            Some((_, prev)) => *prev == pt,
+            None => {
+                bindings.push((v, pt));
+                true
+            }
+        }
+    }
+    match (declared, found) {
+        (PolyType::Var(v), found) => bind(bindings, *v, found.clone()),
+        (PolyType::Concrete(a), PolyType::Concrete(b)) => a == b,
+        (
+            PolyType::App {
+                head: dh,
+                args: dargs,
+            },
+            PolyType::App {
+                head: fh,
+                args: fargs,
+            },
+        ) => {
+            dargs.len() == fargs.len()
+                && bind(bindings, *dh, PolyType::Var(*fh))
+                && dargs
+                    .iter()
+                    .zip(fargs.iter())
+                    .all(|(d, f)| unify_member_operand(d, f, bindings))
+        }
+        (
+            PolyType::Quotation(dins, douts, dinline, _, _),
+            PolyType::Quotation(fins, fouts, finline, _, _),
+        ) => {
+            dinline == finline
+                && dins.len() == fins.len()
+                && douts.len() == fouts.len()
+                && dins
+                    .iter()
+                    .zip(fins)
+                    .all(|(d, f)| unify_member_operand(d, f, bindings))
+                && douts
+                    .iter()
+                    .zip(fouts)
+                    .all(|(d, f)| unify_member_operand(d, f, bindings))
+        }
+        (PolyType::Ref(dr, dm), PolyType::Ref(fr, fm)) => {
+            dm == fm && unify_member_operand(dr, fr, bindings)
+        }
+        (PolyType::OwnedCell(dp), PolyType::OwnedCell(fp)) => {
+            unify_member_operand(dp, fp, bindings)
+        }
+        (PolyType::Array(de, dl), PolyType::Array(fe, fl)) => {
+            // The member grammar declares no length variables (S2-5: locals
+            // are `Star` type variables only), so a declared len must agree
+            // structurally; binding one is out of this slice's scope.
+            dl == fl && unify_member_operand(de, fe, bindings)
+        }
+        _ => declared == found,
+    }
+}
+
+/// P7b.S2 (S2-16, poly caller): render a member's declared output `PolyType`
+/// into the caller's variable space through the unification's binding map.
+/// A declared variable the call's inputs never bound renders as the caller's
+/// bound variable -- the fallback `substitute_member_var` had for every bare
+/// mention (and the only rendering a nullary member's fresh local can get);
+/// bound variables render as what the call bound them to.
+fn render_member_decl(t: &PolyType, bindings: &[(u32, PolyType)], var: u32) -> PolyType {
+    let render = |t: &PolyType| render_member_decl(t, bindings, var);
+    match t {
+        PolyType::Var(v) => bindings
+            .iter()
+            .find(|(id, _)| id == v)
+            .map(|(_, pt)| pt.clone())
+            .unwrap_or_else(|| PolyType::Var(var)),
+        PolyType::App { head, args } => {
+            let rendered_head = match bindings.iter().find(|(id, _)| id == head) {
+                Some((_, PolyType::Var(u))) => *u,
+                _ => var,
+            };
+            PolyType::App {
+                head: rendered_head,
+                args: args.iter().map(render).collect(),
+            }
+        }
+        PolyType::Quotation(ins, outs, inline, _, _) => PolyType::Quotation(
+            ins.iter().map(render).collect(),
+            outs.iter().map(render).collect(),
+            *inline,
+            None,
+            None,
+        ),
+        PolyType::Ref(r, m) => PolyType::Ref(Box::new(render(r)), *m),
+        PolyType::Array(e, l) => PolyType::Array(Box::new(render(e)), l.clone()),
+        PolyType::OwnedCell(p) => PolyType::OwnedCell(Box::new(render(p))),
+        other => other.clone(),
+    }
+}
+
+/// P7b.S2 (S2-2/S2-16): the position of a member's dispatchable input -- the
+/// trait var bare (Star traits, under one `Ref` layer) or heading an
+/// application (HKT traits, again under one `Ref` layer). Mirrors
+/// `declarations.rs`'s S2-2 rule, which the declaration gate enforces, so a
+/// registered member always has one.
+fn dispatchable_input_pos(sig: &PolySig) -> Option<usize> {
+    let head = |t: &PolyType| matches!(t, PolyType::Var(0) | PolyType::App { head: 0, .. });
+    sig.inputs.iter().position(|input| match input {
+        PolyType::Ref(referent, _) => head(referent),
+        other => head(other),
+    })
+}
+
 /// P7.S3e (R7): a trait member's signature is written over the trait's own
 /// single type variable (id 0 in the member's own `PolySig`); dispatching it
 /// through a bound rewrites that variable to the bounded variable of the
 /// *calling* word's signature, so the result is comparable against the walk's
 /// stack directly.
+///
+/// P7b.S2 (S2-16): retained only for the *operand-shape* diagnostics that
+/// render a declared sig over the calling word's variables. The operand check
+/// itself is now `unify_member_operand`'s one-way unification -- the rewrite
+/// conflates every bare variable with the caller's bound var, which for a
+/// member with its own locals (`map`'s `'T`/`'U`) is precisely the F6 bug:
+/// no caller slot could ever compare equal.
 fn substitute_member_var(t: &PolyType, var: u32) -> PolyType {
     match t {
         PolyType::Var(_) => PolyType::Var(var),
@@ -1196,16 +1400,35 @@ pub(super) fn resolve_splice_member_call(
         many => {
             // Disambiguate by concrete operand shape: ground each
             // candidate's input types against the concrete θ and check
-            // which match the live stack.
+            // which match the live stack. P7b.S2 (S2-15.f): a candidate whose
+            // signature is application-headed, or whose grounding hits a
+            // `CtorImage` θ, has no mono grounding here and cannot fit --
+            // skipped, so the guard below reports it if it is the only
+            // candidate, instead of `ground_member_type`'s unreachable arms
+            // panicking on the newly-reachable HKT member shapes.
             let mut fitting: Vec<(u32, TraitId, &TraitMember)> = Vec::new();
             for (v, tid, m) in many {
+                if m.sig
+                    .inputs
+                    .iter()
+                    .chain(&m.sig.outputs)
+                    .any(crate::ast::member_ty_mentions_app)
+                {
+                    continue;
+                }
                 let Some(ty) = subst.ty_of(*v) else { continue };
-                let inputs: Vec<Type> = m
+                let Some(inputs): Option<Vec<Type>> = m
                     .sig
                     .inputs
                     .iter()
-                    .map(|t| crate::ast::ground_member_type(t, ty, arrays, refs))
-                    .collect();
+                    .map(|t| crate::ast::try_ground_member_type(t, ty, arrays, refs))
+                    .collect()
+                else {
+                    // S2-15.f: a `CtorImage` θ grounds no slot here; the
+                    // candidate cannot fit and the guard below reports it if
+                    // it is the only one.
+                    continue;
+                };
                 if stack.len() >= inputs.len() {
                     let base = stack.len() - inputs.len();
                     if inputs.iter().enumerate().all(|(i, want)| {
@@ -1274,22 +1497,51 @@ pub(super) fn resolve_splice_member_call(
             span.line
         ));
     }
+    // P7b.S2 (S2-15.f): the splice path's grounding guards. (a) An
+    // application-headed member signature has no mono grounding at all (the
+    // member's applied arguments are its own locals, S2-6) -- a located error
+    // rather than `ground_member_type`'s unreachable-App panic on the
+    // newly-reachable HKT member shapes. (b) A bound variable the caller's
+    // App unification bound to a `Type::CtorImage` has no type to ground a
+    // member signature against -- `try_ground_member_type`'s `None`, turned
+    // into the located S2-15.f error instead of the silent
+    // misclassification the unchecked Var arm used to flow through.
+    if member_decl
+        .sig
+        .inputs
+        .iter()
+        .chain(&member_decl.sig.outputs)
+        .any(crate::ast::member_ty_mentions_app)
+    {
+        return Err(splice_member_hkt_error(
+            ctx,
+            span,
+            member,
+            &traits[trait_id.index()].name,
+        ));
+    }
     // Ground the member's input/output types against the concrete θ.
     let Some(ty) = subst.ty_of(var) else {
         return Ok(None);
     };
-    let input_types: Vec<Type> = member_decl
-        .sig
-        .inputs
-        .iter()
-        .map(|t| crate::ast::ground_member_type(t, ty, arrays, refs))
-        .collect();
-    let output_types: Vec<Type> = member_decl
-        .sig
-        .outputs
-        .iter()
-        .map(|t| crate::ast::ground_member_type(t, ty, arrays, refs))
-        .collect();
+    let mut ground_slots = |slots: &[PolyType]| -> Result<Vec<Type>, String> {
+        slots
+            .iter()
+            .map(|t| {
+                crate::ast::try_ground_member_type(t, ty, arrays, refs).ok_or_else(|| {
+                    splice_member_ctor_image_error(
+                        ctx,
+                        span,
+                        member,
+                        &traits[trait_id.index()].name,
+                        ty,
+                    )
+                })
+            })
+            .collect()
+    };
+    let input_types: Vec<Type> = ground_slots(&member_decl.sig.inputs)?;
+    let output_types: Vec<Type> = ground_slots(&member_decl.sig.outputs)?;
     // Check operands against the grounded input types.
     let n_in = input_types.len();
     if stack.len() < n_in {
@@ -1318,6 +1570,7 @@ pub(super) fn resolve_splice_member_call(
                     &PolyType::Concrete(*want),
                     &PolyType::Concrete(found.ty),
                     &sig,
+                    i,
                 ));
             }
         }
@@ -1372,6 +1625,384 @@ pub(super) fn resolve_splice_member_call(
     }
     Ok(Some(std::mem::take(stack)))
 }
+/// P7b.S2 (S2-15.f, splice guard a): an application-headed member signature
+/// has no mono grounding at all -- the member's applied arguments are its own
+/// locals (S2-6), and a splice grounds member signatures at concrete types.
+/// Located at the splice call, rather than `ground_member_type`'s
+/// unreachable-App backstop panicking on the newly-reachable HKT shapes.
+fn splice_member_hkt_error(ctx: &Ctx, span: Span, member: &str, trait_name: &str) -> String {
+    let where_ = ctx.rendered_word();
+    format!(
+        "error: trait member `{member}` of `{trait_name}` (line {}, col {}) cannot be dispatched inside a combinator splice in {where_}\n  its signature is application-headed, and a splice grounds member signatures at concrete types, which cannot carry the member's own type arguments\n  call the member from an ordinary word body, or declare the member over the trait's variable alone",
+        span.line,
+        span.col,
+    )
+}
+
+/// P7b.S2 (S2-15.f, splice guard b): a member signature grounded at a bound
+/// variable that carries a bare `Type::CtorImage` -- the image an App
+/// unification bound as a head, which is not itself a type. The S1-15.g twin
+/// for the splice path: a located error instead of the unchecked Var arm's
+/// silent misclassification.
+fn splice_member_ctor_image_error(
+    ctx: &Ctx,
+    span: Span,
+    member: &str,
+    trait_name: &str,
+    ty: Type,
+) -> String {
+    let where_ = ctx.rendered_word();
+    let ctor = match ty {
+        Type::CtorImage(_, name) => name,
+        _ => "a constructor image",
+    };
+    format!(
+        "error: trait member `{member}` of `{trait_name}` in {where_} (line {}, col {}) is grounded against the constructor image `{ctor}`, which is not a type\n  the splice's bound variable carries a bare constructor (an applied head like `'F['T]`), and a member signature cannot ground against it here\n  instantiate the combinator at a complete type (e.g. `comb[Option]`), not at the constructor alone",
+        span.line,
+        span.col,
+        where_ = where_,
+    )
+}
+
+/// P7b.S2 (S2-16, mono caller): resolve a bare member word in a *monomorphic*
+/// body -- the env.get-miss branch's member lookup, sitting after
+/// `mint_fallback_candidates` (check-time monomorph mints take precedence)
+/// and before the unchanged `unknown_word_error`/`ungated_intrinsic_error`
+/// fallthrough, which still fires on no-match so every existing unknown-word
+/// golden holds.
+///
+/// A bare member currently falls through `env.get` as an unknown word: the
+/// implementing word is module-qualified (`synth_member_word_name`), so the
+/// bare member name is in no `env`. The lookup keys on the member name plus
+/// the operand's dispatchable type (S2-12/S2-5), through the whole-program
+/// trait/impl tables: with fully concrete operand types it dispatches via
+/// `find_bound_impl` on the operand's full grounded type -- the existing
+/// `Concrete`/`Generic` arms compare and bind args, no `CtorImage` is
+/// constructed for a mono call (S2-8's dispatch rule).
+///
+/// A generic-impl winner (the member word is a polymorphic word) routes
+/// through `check_poly_call` under the member word's own (synthesized) name:
+/// it unifies the word's grounded S2-6 sig against the concrete slots,
+/// records `(word, θ_call)` as the span-keyed `CallInst` lowering emits --
+/// the mono caller's `span → (symbol, θ_call)` record. A concrete-impl
+/// winner (a monomorphic member word, no θ to mint) checks the slots
+/// against the sig grounded at the target and records `span → symbol` in
+/// `builtin_overloads`, the same pattern an operator overload rides.
+///
+/// No match -- the name is no trait's member -- returns `Ok(None)` and
+/// ordinary dispatch proceeds. A name that *is* a member but dispatches to
+/// nothing, or is claimed by several traits whose impls all fit, is a
+/// located error naming the candidates.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn resolve_mono_member_call(
+    name: &str,
+    span: Span,
+    type_args: &[Type],
+    len_args: &[Len],
+    stack: &mut Vec<Slot>,
+    ctx: &Ctx,
+    env: &HashMap<String, Vec<Overload>>,
+    scope: &mut Scope,
+    arrays: &mut Vec<ArrayDecl>,
+    cells: &mut Vec<OwnedCellDecl>,
+    refs: &mut Vec<RefDecl>,
+    slices: &mut Vec<SliceDecl>,
+    prov: &mut Provenance,
+    live: &Liveness,
+    at: usize,
+    poly: &mut PolyCtx,
+) -> Result<Option<Vec<Slot>>, String> {
+    let traits = poly.trait_resolve.traits;
+    // R12/decision 6, same split as the splice path: a qualified call names a
+    // module alias, never a trait namespace.
+    let (qualifier, member) = match name.split_once("::") {
+        Some((q, m)) => (Some(q), m),
+        None => (None, name),
+    };
+    let qualified_target = match qualifier {
+        Some(q) => match ctx
+            .modules()
+            .and_then(|ms| ms.get(ctx.module() as usize))
+            .and_then(|m| m.imports.get(q))
+        {
+            Some(&target) => Some(target),
+            None => return Ok(None),
+        },
+        None => None,
+    };
+    // Candidate members by name across the whole-program trait registry,
+    // deduped by trait id (a member name may be declared by several traits;
+    // the operand's dispatch decides, as bound dispatch does).
+    let mut candidates: Vec<(TraitId, &TraitMember)> = Vec::new();
+    for (tidx, t) in traits.iter().enumerate() {
+        if qualified_target.is_some_and(|q| t.module != q) {
+            continue;
+        }
+        if let Some(m) = t.members.iter().find(|m| m.name == member) {
+            let tid = TraitId::from_index(tidx);
+            if !candidates.iter().any(|(id, _)| *id == tid) {
+                candidates.push((tid, m));
+            }
+        }
+    }
+    if candidates.is_empty() {
+        return Ok(None);
+    }
+    // Dispatch each candidate on its dispatchable input's operand type (S2-2:
+    // the trait var bare or heading an application, under one `Ref` layer --
+    // ref-ness is an addressing mode, so a ref slot dispatches on its
+    // referent).
+    let mut viable: Vec<(TraitId, &TraitMember, usize)> = Vec::new();
+    for (tid, m) in &candidates {
+        let Some(pos) = dispatchable_input_pos(&m.sig) else {
+            continue;
+        };
+        if stack.len() < m.sig.inputs.len() {
+            continue;
+        }
+        let base = stack.len() - m.sig.inputs.len();
+        let mut operand = stack[base + pos].ty;
+        if matches!(m.sig.inputs[pos], PolyType::Ref(..)) {
+            if let Some((referent, _)) = ref_parts(operand, refs) {
+                operand = referent;
+            }
+        }
+        let mut visited: Vec<(TraitId, Type)> = Vec::new();
+        if let Some((imp_idx, _)) = find_bound_impl(
+            *tid,
+            operand,
+            None,
+            span,
+            ctx,
+            &poly.trait_resolve,
+            arrays,
+            cells,
+            refs,
+            &mut visited,
+        )? {
+            viable.push((*tid, m, imp_idx));
+        }
+    }
+    match viable.len() {
+        0 => {
+            return Err(mono_member_no_dispatch_error(
+                ctx,
+                span,
+                member,
+                &candidates
+                    .iter()
+                    .map(|(tid, _)| traits[tid.index()].name.as_str())
+                    .collect::<Vec<_>>(),
+                &stack.iter().map(|s| s.ty).collect::<Vec<_>>(),
+            ));
+        }
+        1 => {}
+        _ => {
+            return Err(mono_ambiguous_member_error(
+                ctx,
+                span,
+                member,
+                &viable
+                    .iter()
+                    .map(|(tid, _, _)| traits[tid.index()].name.as_str())
+                    .collect::<Vec<_>>(),
+            ));
+        }
+    }
+    let (trait_id, member_decl, imp_idx) = viable[0];
+    let trait_name = &traits[trait_id.index()].name;
+    let imp = &poly.trait_resolve.impls[imp_idx];
+    let Some((_, widx)) = imp.resolved.iter().find(|(mname, _)| *mname == member) else {
+        return Err(unresolved_trait_obligation_error(
+            ctx,
+            span,
+            name,
+            trait_name,
+            member,
+            stack.last().map(|s| s.ty).unwrap_or(Type::I64),
+            span,
+        ));
+    };
+    let word_sym = poly.trait_resolve.word_symbols[*widx].clone();
+    if imp.target.is_concrete() {
+        // Concrete impl: the member word is monomorphic, grounded at the
+        // target (the desugar did it). Check the slots against the grounded
+        // sig and record `span -> symbol` in `builtin_overloads` -- the same
+        // span-keyed lowering record an operator overload rides, which
+        // `lower_call` reads ahead of the name-keyed `env` (the bare member
+        // name has no `env` entry).
+        let target_ty = imp.target.concrete_ty().expect("checked is_concrete above");
+        let input_types: Vec<Type> = member_decl
+            .sig
+            .inputs
+            .iter()
+            .map(|t| crate::ast::ground_member_type(t, target_ty, arrays, refs))
+            .collect();
+        let output_types: Vec<Type> = member_decl
+            .sig
+            .outputs
+            .iter()
+            .map(|t| crate::ast::ground_member_type(t, target_ty, arrays, refs))
+            .collect();
+        let n_in = input_types.len();
+        if stack.len() < n_in {
+            return Err(underflow_error(ctx, span, member, n_in, stack.len()));
+        }
+        let base = stack.len() - n_in;
+        for (i, want) in input_types.iter().enumerate() {
+            let found = stack[base + i];
+            // P7b.S2 (S2-16): a declared `Type::Quotation` parameter is a
+            // materialization boundary, exactly as the ordinary env word-call
+            // path treats one (R8/D4): a `Known` literal fills the slot
+            // materialized (a capturing one through the R15 admission rule,
+            // an in-frame boundary), and an already-erased runtime quotation
+            // value falls through to the ordinary `match_slot` (Exact) below.
+            // The reject beneath keeps covering only slots the member does
+            // not declare as a quotation.
+            let declared = match *want {
+                Type::Quotation(eff) => Some((eff, false)),
+                Type::OwningQuotation(eff) => Some((eff, true)),
+                _ => None,
+            };
+            if let Some((eff, owning)) = declared {
+                if let Some(QuotRef::Known(id)) = found.quot {
+                    stack[base + i] = materialize_quotation_at_boundary(
+                        id, eff, owning, false, name, span, ctx, env, arrays, cells, refs, slices,
+                        prov, scope, poly,
+                    )?;
+                    continue;
+                }
+            }
+            if found.quot.is_some() {
+                return Err(reject_quotation_argument(ctx, span, name));
+            }
+            match match_slot(found, *want) {
+                SlotMatch::Exact | SlotMatch::LiteralSizeType => {}
+                SlotMatch::NeedsSizeConversion => {
+                    return Err(size_conversion_needed_error(ctx, span, name, *want));
+                }
+                SlotMatch::NeedsStrToCstrConversion => {
+                    return Err(str_needs_cstr_conversion_error(ctx, span, name));
+                }
+                SlotMatch::Mismatch => {
+                    return Err(trait_member_operand_error(
+                        ctx,
+                        span,
+                        member,
+                        trait_name,
+                        &PolyType::Concrete(*want),
+                        &PolyType::Concrete(found.ty),
+                        &member_decl.sig,
+                        i,
+                    ));
+                }
+            }
+        }
+        // A polymorphic word consumes its operands exactly as a concrete one
+        // does (`check_poly_call`'s own guard): the same move/borrow
+        // discipline applies to the member word's consumption.
+        for i in base..stack.len() {
+            let origin = consumed_place_conflict(stack[i], &stack[..i], scope, prov, live, at)
+                .or_else(|| {
+                    consumed_place_conflict(stack[i], &stack[i + 1..], scope, prov, live, at)
+                });
+            if let Some(origin) = origin {
+                return Err(consuming_borrowed_value_error(ctx, span, name, origin));
+            }
+        }
+        poly.builtin_overloads.insert(span, word_sym);
+        stack.truncate(base);
+        for ty in &output_types {
+            stack.push(Slot::computed(*ty));
+        }
+        Ok(Some(std::mem::take(stack)))
+    } else {
+        // Generic impl: the member word is polymorphic, its grounded S2-6 sig
+        // the unification source. `check_poly_call` under the word's own
+        // synthesized name does the rest: unification against the concrete
+        // slots, the word's own where-bounds at θ_call, and the span-keyed
+        // `CallInst` (symbol + θ_call) lowering emits.
+        if !poly.env.contains_key(&word_sym) {
+            return Err(mono_member_unroutable_error(
+                ctx, span, member, trait_name, &word_sym,
+            ));
+        }
+        let next = check_poly_call(
+            &word_sym, span, type_args, len_args, stack, ctx, env, scope, arrays, cells, refs,
+            slices, prov, live, at, poly,
+        )?;
+        Ok(Some(next))
+    }
+}
+
+/// P7b.S2 (S2-16, mono caller): the member name exists in the trait registry
+/// but no impl of any declaring trait dispatches on these operands.
+fn mono_member_no_dispatch_error(
+    ctx: &Ctx,
+    span: Span,
+    member: &str,
+    trait_names: &[&str],
+    operands: &[Type],
+) -> String {
+    let ops: Vec<String> = operands.iter().map(|t| t.name().to_string()).collect();
+    format!(
+        "error: `{member}` in {name} (line {}, col {}) is a trait member of {}, but no `impl:` in this program dispatches on these operands\n  the operand types here are `{}`; declare an impl of one of those traits for the operand's type, or import a word that claims this name",
+        span.line,
+        span.col,
+        trait_names.join(", "),
+        ops.join(" "),
+        name = ctx.rendered_word(),
+    )
+}
+
+/// P7b.S2 (S2-16, mono caller): the dispatching impl's member word is not in
+/// this module's poly environment -- a member word lives in the module that
+/// declared the impl, and a mono caller there has no route to it. The poly
+/// bound-dispatch path (whole-program tables) has no such limit; the mono
+/// path routes through the module's own `poly_env`.
+fn mono_member_unroutable_error(
+    ctx: &Ctx,
+    span: Span,
+    member: &str,
+    trait_name: &str,
+    word: &str,
+) -> String {
+    format!(
+        "error: `{member}` of `{trait_name}` in {name} (line {}, col {}) resolves to the member word `{word}`, which is not visible from this module\n  a monomorphic body calls the member word of the impl that declared it; declare the impl in a module this one can see",
+        span.line,
+        span.col,
+        name = ctx.rendered_word(),
+    )
+}
+
+/// P7b.S2 (S2-16, mono caller): several traits declare a member of this
+/// name and an impl of each fits the concrete operand at this call. Not
+/// `ambiguous_trait_member_error`'s case: there the call sits under a
+/// variable carrying both bounds, and the remedy is the poly-bounds one; a
+/// mono body has no bounds to consult -- the dispatch is on the operand's
+/// concrete type, and the module qualifier (R12/decision 6: a qualifier
+/// names a module, never a trait namespace) is what selects the trait whose
+/// impl is meant.
+fn mono_ambiguous_member_error(
+    ctx: &Ctx,
+    span: Span,
+    member: &str,
+    trait_names: &[&str],
+) -> String {
+    let quoted: Vec<String> = trait_names.iter().map(|t| format!("`{t}`")).collect();
+    let listed = if trait_names.len() == 2 {
+        format!("both {}", joined_with_and(&quoted))
+    } else {
+        joined_with_and(&quoted)
+    };
+    format!(
+        "error: `{member}` in {name} (line {}, col {}) is a trait member of {listed}\n  an `impl:` of each claiming trait dispatches on this call's operand; qualify the call with the claiming trait's module (`module::{member}`) to name the one you mean",
+        span.line,
+        span.col,
+        name = ctx.rendered_word(),
+    )
+}
+
 /// P7.S3e (R7/R12): the bound-directed dispatch branch. `Ok(None)` means this
 /// is no trait-member obligation and ordinary dispatch proceeds: no
 /// `Bound::User` on any of this word's type variables declares a member of
@@ -1489,12 +2120,22 @@ fn poly_trait_member_call(
             }
         },
     };
-    let inputs: Vec<PolyType> = member_decl
-        .sig
-        .inputs
-        .iter()
-        .map(|t| substitute_member_var(t, var))
-        .collect();
+    // P7b.S2 (S2-16, poly caller): the operand check is one-way unification
+    // of the trait's *declared* member sig against the caller's slots -- not
+    // structural equality over the `substitute_member_var` rewrite. The
+    // declared sig's App-headed dispatchable input (head = the abstract
+    // header variable) unifies against the caller's App-headed operand slot,
+    // binding the member's header variable to the caller's bound variable and
+    // member locals to the caller's slot arguments; the remaining slots
+    // (member's quotation params, extra inputs) unify positionally. The
+    // member word's grounded `PolySig` is deliberately NOT the source here:
+    // at body-check no impl is selected and the word's sig is ctor-headed
+    // (S2-6 dissolved `'F`), so unifying it would concretize the caller's
+    // bound variable. The success record is the obligation PLUS the call
+    // site's slot record (`TraitObligation::slots`, S2-9's data path); the
+    // mint is deferred to the resolve loop, where the tie-break and θ_call
+    // construction are per call site.
+    let inputs = &member_decl.sig.inputs;
     if stack.len() < inputs.len() {
         return Err(underflow_error(
             ctx,
@@ -1505,28 +2146,36 @@ fn poly_trait_member_call(
         ));
     }
     let base = stack.len() - inputs.len();
-    for (i, expected) in inputs.iter().enumerate() {
-        if &stack[base + i].pt != expected {
+    // The header pre-binds to the dispatched bound variable (see
+    // `unify_member_operand`'s doc): the dispatchable input's App head must
+    // be this variable, and a Star member's bare-var input must be it
+    // exactly -- the old rewrite-equality behavior, now as a binding.
+    let mut bindings: Vec<(u32, PolyType)> = vec![(0u32, PolyType::Var(var))];
+    for (i, (declared, slot)) in inputs.iter().zip(&stack[base..]).enumerate() {
+        if !unify_member_operand(declared, &slot.pt, &mut bindings) {
             return Err(trait_member_operand_error(
                 ctx,
                 span,
                 member,
                 &traits[trait_id.index()].name,
-                expected,
-                &stack[base + i].pt,
+                &substitute_member_var(declared, var),
+                &slot.pt,
                 sig,
+                i,
             ));
         }
     }
+    let site_slots: Vec<PolyType> = stack[base..].iter().map(|s| s.pt.clone()).collect();
     stack.truncate(base);
     for out in &member_decl.sig.outputs {
-        stack.push(PolySlot::new(substitute_member_var(out, var)));
+        stack.push(PolySlot::new(render_member_decl(out, &bindings, var)));
     }
     tctx.obligations.push(TraitObligation {
         span,
         var,
         trait_id,
         member: member.to_string(),
+        slots: site_slots,
     });
     Ok(Some(std::mem::take(stack)))
 }
@@ -6027,6 +6676,7 @@ pub(super) fn check_poly_call(
                     refs,
                     &mut trait_calls,
                     poly.impl_monos,
+                    &subst,
                 )?;
                 None
             }
@@ -6484,6 +7134,7 @@ impl CrossGround<'_> {
                 refs,
                 &mut trait_calls,
                 impl_monos,
+                subst,
             )?;
         }
         // P7.S12 (R1.2/R1.2a): the same grounding `check_poly_call` does for
@@ -6707,6 +7358,7 @@ impl CrossGround<'_> {
                 refs,
                 &mut trait_calls,
                 impl_monos,
+                &subst,
             )?;
         }
         // P7.S12 (R1.2/R1.2a): the same grounding `check_poly_call` does for
@@ -7093,6 +7745,13 @@ fn find_bound_impl(
 /// routing. A candidate whose own `where`-clause bounds fail to discharge at
 /// the concrete instantiation is excluded before selection; if that leaves
 /// no candidate, the existing `unsatisfied_user_bound_error` fires.
+///
+/// P7b.S2 (S2-8/S2-9): a ctor-abstract dispatch (`ty` a `CtorImage`, generic
+/// winner) does not mint here. The per-site composition (re-ground each
+/// obligation's slot record through `caller_subst`, unify each identity
+/// candidate's member word sig) runs in the obligation loop below; `impl_monos`
+/// only ever receives a fully-ground θ_call for a CtorImage winner, never the
+/// selection's argless subst.
 #[allow(clippy::too_many_arguments)]
 fn resolve_user_bound(
     trait_id: TraitId,
@@ -7104,10 +7763,11 @@ fn resolve_user_bound(
     ctx: &Ctx,
     tr: &TraitResolveCtx,
     arrays: &mut Vec<ArrayDecl>,
-    cells: &[OwnedCellDecl],
+    cells: &mut Vec<OwnedCellDecl>,
     refs: &mut Vec<RefDecl>,
     trait_calls: &mut HashMap<Span, String>,
     impl_monos: &mut Vec<(String, Subst)>,
+    caller_subst: &Subst,
 ) -> Result<(), String> {
     let trait_decl = tr.traits.get(trait_id.index()).expect(
         "a bound's `TraitId` indexes the whole-program trait table, so a call site resolving one must be given that table and not a scratch one",
@@ -7116,21 +7776,71 @@ fn resolve_user_bound(
     // also discharges each candidate's own bounds recursively and detects
     // cycles via a path-scoped visited-set.
     let mut visited: Vec<(TraitId, Type)> = Vec::new();
-    let winner = find_bound_impl(
-        trait_id,
-        ty,
-        None,
-        span,
-        ctx,
-        tr,
-        arrays,
-        cells,
-        refs,
-        &mut visited,
-    )?;
+    // P7b.S2 (S2-8): a ctor-abstract dispatch's selection among identity
+    // matches is the compatibility-conditioned tie rule, run per member call
+    // site in the obligation loop below -- NOT `find_bound_impl`'s
+    // specificity order. That order cannot arbitrate here:
+    // `collect_paired_positions` has no arm for a `Type::CtorImage` (a
+    // constructor image is not a type to unfold), so at one every same-ctor
+    // pair of `Generic` patterns is incomparable and `select_most_specific`
+    // would raise the ambiguity error before the per-site rule could
+    // disqualify a pin that disagrees with the grounded operands (S2-8's
+    // "not a match") or prefer the more-pinned compatible candidate. So for
+    // a `CtorImage` ty the identity-matched set is collected directly:
+    // empty keeps the None-branch diagnostics below, a single match is the
+    // winner outright (unchanged), and two or more hand the choice to the
+    // per-site loop, which re-derives the whole list (the nominal winner
+    // here only feeds `is_generic`; every identity match is a `Generic`
+    // pattern, and the CtorImage-selection subst is argless by design).
+    let ctor_ty = matches!(ty, Type::CtorImage(..));
+    let identity_matches: Vec<usize> = if ctor_ty {
+        tr.impls
+            .iter()
+            .enumerate()
+            .filter(|(_, i)| {
+                i.trait_id == trait_id
+                    && match_impl_target(&i.target.pattern, ty, arrays, cells, refs, None).is_some()
+            })
+            .map(|(idx, _)| idx)
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let winner = if identity_matches.len() > 1 {
+        Some((identity_matches[0], Subst::default()))
+    } else {
+        find_bound_impl(
+            trait_id,
+            ty,
+            None,
+            span,
+            ctx,
+            tr,
+            arrays,
+            cells,
+            refs,
+            &mut visited,
+        )?
+    };
     let (imp_idx, subst) = match winner {
         Some((idx, subst)) => (idx, subst),
         None => {
+            // P7b.S2 (S2-8/S2-15.e): the `for 'T` catch-all guard's diagnostic
+            // twin. A bare-var target never matches a `CtorImage` ty (the
+            // matcher's guard), so reaching here with a ctor-abstract operand
+            // and a bare-var impl in the registry means the capture attempt is
+            // the *reason* dispatch failed -- name that, instead of the
+            // generic unsatisfied-bound report that would never mention it.
+            if matches!(ty, Type::CtorImage(..)) {
+                let bare_var = tr.impls.iter().find(|i| {
+                    i.trait_id == trait_id && matches!(i.target.pattern, PolyType::Var(_))
+                });
+                if let Some(imp) = bare_var {
+                    return Err(bare_var_impl_target_capture_error(
+                        ctx, span, name, trait_decl, imp.span, ty,
+                    ));
+                }
+            }
             return Err(unsatisfied_user_bound_error(
                 ctx,
                 span,
@@ -7145,11 +7855,72 @@ fn resolve_user_bound(
     };
     let imp = &tr.impls[imp_idx];
     let is_generic = !imp.target.is_concrete();
+    // P7b.S2 (S2-8/S2-9): a ctor-abstract dispatch -- the operand is a bare
+    // `CtorImage` (the App unification bound the head; the args live in the
+    // obligation's slot record) and the winner is a generic (ctor) target.
+    // The CtorImage-selection subst carries no arg bindings by design, so the
+    // generic-winner mint below would record the degenerate `(word, ∅)` and
+    // the seed loop would monomorph the member word at the empty subst, where
+    // `apply_subst` on `map`'s output `Option[Var('U)]` fails with
+    // `poly_unbound_output_ty_error`. Instead, selection and minting are
+    // **per member call site**: each obligation's slot record re-grounds
+    // through the caller's concrete θ, and each identity-matched candidate's
+    // member word sig unifies against the grounded slots -- the
+    // compatibility-conditioned tie rule -- producing that site's θ_call.
+    let ctor_image_dispatch = is_generic && matches!(ty, Type::CtorImage(..));
+    // The identity-matched, bounds-discharging candidate list, once per
+    // (trait, bound variable, ty) -- `find_bound_impl` ran the identical
+    // selection above and picked the specificity winner; the per-site loop
+    // needs the whole list because a pinned candidate can be disqualified at
+    // one site and serve at another (S2-9: the tie-break is per site).
+    let ctor_candidates: Vec<(usize, usize)> = if ctor_image_dispatch {
+        let mut candidates: Vec<(usize, usize)> = tr
+            .impls
+            .iter()
+            .enumerate()
+            .filter(|(_, i)| {
+                i.trait_id == trait_id
+                    && match_impl_target(&i.target.pattern, ty, arrays, cells, refs, None).is_some()
+            })
+            .map(|(idx, _)| (ctor_pin_count(&tr.impls[idx].target.pattern), idx))
+            .collect();
+        // Most pins first: among compatible candidates more pins are
+        // preferred (the concrete-beats-generic principle, S2-8).
+        candidates.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+        let mut discharged = Vec::new();
+        for (_, idx) in candidates {
+            let imp = &tr.impls[idx];
+            let empty = Subst::default();
+            if candidate_bounds_discharge(
+                idx,
+                imp,
+                &empty,
+                ctx,
+                tr,
+                arrays,
+                cells,
+                refs,
+                &mut visited,
+            )? {
+                discharged.push(idx);
+            }
+        }
+        discharged
+            .iter()
+            .map(|&idx| (ctor_pin_count(&tr.impls[idx].target.pattern), idx))
+            .collect()
+    } else {
+        Vec::new()
+    };
     for ob in tr
         .obligations_of(name, sig)
         .iter()
         .filter(|o| o.trait_id == trait_id && o.var == v)
     {
+        // The winner's own binding for this member (the non-CtorImage arms).
+        // The CtorImage arm re-derives it per candidate instead: identity
+        // selection may hand the site to a *different* impl than the
+        // specificity winner above picked.
         let Some((_, idx)) = imp.resolved.iter().find(|(member, _)| *member == ob.member) else {
             return Err(unresolved_trait_obligation_error(
                 ctx,
@@ -7162,18 +7933,206 @@ fn resolve_user_bound(
             ));
         };
         let word_sym = &tr.word_symbols[*idx];
-        let symbol = if is_generic {
+        let symbol = if ctor_image_dispatch {
+            // S2-9: the per-site composition. Re-ground this call site's slot
+            // record through the caller's concrete θ, then try each
+            // identity-matched candidate's member word sig against the
+            // grounded slots -- incompatible pins disqualify the candidate at
+            // this site (it is not a match); among compatible, the ordering
+            // above already prefers more pins; two candidates with the same
+            // pin count both surviving are S2-8's ambiguity.
+            let site_slots: Vec<Type> = ob
+                .slots
+                .iter()
+                .map(|s| apply_subst(sig, s, caller_subst, name, span, ctx, arrays, cells, refs))
+                .collect::<Result<Vec<_>, _>>()?;
+            let mut picked: Option<(usize, Subst, String)> = None;
+            let mut picked_pins = 0usize;
+            let mut survived: Vec<usize> = Vec::new();
+            for &(_, cidx) in &ctor_candidates {
+                let cimp = &tr.impls[cidx];
+                let Some((_, widx)) = cimp.resolved.iter().find(|(mname, _)| *mname == ob.member)
+                else {
+                    return Err(unresolved_trait_obligation_error(
+                        ctx,
+                        span,
+                        name,
+                        &trait_decl.name,
+                        &ob.member,
+                        ty,
+                        ob.span,
+                    ));
+                };
+                let word_sym = &tr.word_symbols[*widx];
+                let Some(word_sig) = tr.word_sig_of(word_sym) else {
+                    return Err(unresolved_trait_obligation_error(
+                        ctx,
+                        span,
+                        name,
+                        &trait_decl.name,
+                        &ob.member,
+                        ty,
+                        ob.span,
+                    ));
+                };
+                if word_sig.inputs.len() != site_slots.len() {
+                    continue;
+                }
+                let mut theta = Subst::default();
+                let unified = word_sig
+                    .inputs
+                    .iter()
+                    .zip(&site_slots)
+                    .all(|(input, slot)| {
+                        unify_poly_input(
+                            word_sig,
+                            input,
+                            *slot,
+                            word_sym,
+                            ob.span,
+                            ctx,
+                            arrays,
+                            cells,
+                            refs,
+                            &mut theta,
+                            &[],
+                            &[],
+                        )
+                        .is_ok()
+                    });
+                if unified {
+                    // Canonical order at construction (the P7.S3t sort
+                    // invariant -- the mangled symbol depends on it); without
+                    // it two sites could mint two symbols for the same
+                    // (word, θ) and monomorphize the specialization twice.
+                    theta.ty.sort_by_key(|(v, _)| *v);
+                    theta.len.sort_by_key(|(v, _)| *v);
+                    let pins = ctor_pin_count(&cimp.target.pattern);
+                    survived.push(cidx);
+                    if picked.as_ref().is_none_or(|_| pins > picked_pins) {
+                        picked = Some((cidx, theta, word_sym.clone()));
+                        picked_pins = pins;
+                    }
+                }
+            }
+            // S2-8: an identical pin-shape tie is the ambiguity error -- two
+            // identity-matched targets surviving compatibility at one site.
+            let top_tier = survived
+                .iter()
+                .filter(|&&c| ctor_pin_count(&tr.impls[c].target.pattern) == picked_pins)
+                .count();
+            if top_tier > 1 {
+                let maximal: Vec<usize> = survived
+                    .iter()
+                    .copied()
+                    .filter(|&c| ctor_pin_count(&tr.impls[c].target.pattern) == picked_pins)
+                    .collect();
+                let cand_refs: Vec<(&ImplDecl, Subst)> = maximal
+                    .iter()
+                    .map(|&i| (&tr.impls[i], Subst::default()))
+                    .collect();
+                return Err(ambiguity_error(
+                    &trait_decl.name,
+                    ty,
+                    &cand_refs,
+                    &(0..maximal.len()).collect::<Vec<_>>(),
+                    ob.span,
+                ));
+            }
+            let Some((_, theta, word_sym)) = picked else {
+                // Every candidate's member word refused this site's grounded
+                // operands: the located member-call operand error, naming the
+                // site (the obligation span) and the grounded slot types.
+                return Err(ctor_image_member_site_mismatch_error(
+                    ctx,
+                    ob.span,
+                    &ob.member,
+                    &trait_decl.name,
+                    &site_slots,
+                ));
+            };
+            let s = instantiation_symbol(&word_sym, &theta);
+            impl_monos.push((word_sym, theta));
+            s
+        } else if is_generic {
             // P7.S4 (R6): mint the dispatched symbol as the instantiation of
             // the member word at the matched substitution.
             let s = instantiation_symbol(word_sym, &subst);
             impl_monos.push((word_sym.clone(), subst.clone()));
             s
         } else {
+            // A concrete winner keeps the bare symbol path (P7.S4).
             word_sym.clone()
         };
         trait_calls.insert(ob.span, symbol);
     }
     Ok(())
+}
+
+/// P7b.S2 (S2-8): a `Generic` impl-target pattern's pin count -- how many of
+/// the pattern's top-level type arguments are `Concrete` (pinned) rather than
+/// variables. The compatibility-conditioned tie rule prefers more pins among
+/// compatible candidates (the concrete-beats-generic principle); an identical
+/// pin count among candidates that both survive a site's compatibility is the
+/// ambiguity error.
+fn ctor_pin_count(pattern: &PolyType) -> usize {
+    match pattern {
+        PolyType::Generic { args, .. } => args
+            .iter()
+            .filter(|a| matches!(a, PolyType::Concrete(_)))
+            .count(),
+        _ => 0,
+    }
+}
+
+/// P7b.S2 (S2-8/S2-15.e): a bare-variable impl target met a constructor-keyed
+/// dispatch. The matcher refuses the capture (a `for 'T` target can never
+/// ground its member against a constructor image -- S1-15.g), so when the
+/// registry's only candidate for a ctor-abstract operand is bare-var, the
+/// dispatch failure is *this* and the diagnostic names it, located at the
+/// dispatch site and carrying the impl's declaration span as the origin.
+fn bare_var_impl_target_capture_error(
+    ctx: &Ctx,
+    span: Span,
+    callee: &str,
+    trait_decl: &TraitDecl,
+    impl_span: Span,
+    ty: Type,
+) -> String {
+    let callee = crate::resolve::demangle_call(callee);
+    format!(
+        "error: cannot instantiate a bound of `{callee}` with `{ty}` in {name} (line {}, col {})\n  the `impl: {trait} for 'T` declared at line {l}, col {c} cannot capture a constructor-keyed operand: a bare-variable target never matches `{ty}`, which names a constructor rather than a type\n  declare the impl at the constructor it should serve (e.g. `impl: {trait} for {ctor}`)",
+        span.line,
+        span.col,
+        l = impl_span.line,
+        c = impl_span.col,
+        name = ctx.rendered_word(),
+        trait = trait_decl.name,
+        ctor = ty.name(),
+    )
+}
+
+/// P7b.S2 (S2-8/S2-9): every identity-matched candidate's member word refused
+/// this call site's grounded operands (each site re-grounds its slot record
+/// through the caller's θ; a pinned candidate whose pins disagree with the
+/// grounded args is not a match). Located at the member call's own span (the
+/// obligation's), naming the trait, the member, and the grounded operand
+/// types the site actually presented.
+fn ctor_image_member_site_mismatch_error(
+    ctx: &Ctx,
+    span: Span,
+    member: &str,
+    trait_name: &str,
+    site_slots: &[Type],
+) -> String {
+    let operands: Vec<String> = site_slots.iter().map(|t| t.name().to_string()).collect();
+    format!(
+        "error: `{member}` of `{trait_name}` in {name} (line {}, col {}) has no constructor-keyed impl matching these operands\n  the dispatching impl's member signature does not unify against `{}`; a pinned `impl:` target whose pins disagree with the operand is not a match -- check which impl was intended for this constructor",
+        span.line,
+        span.col,
+        operands.join(" "),
+        name = ctx.rendered_word(),
+    )
 }
 
 /// R8: the concrete type a bounded variable was instantiated with has no
@@ -7193,22 +8152,23 @@ fn unsatisfied_user_bound_error(
     refs: &mut Vec<RefDecl>,
 ) -> String {
     let callee = crate::resolve::demangle_call(callee);
+    // P7b.S2 (S2-15.f): the error builder grounds member sigs at a ty that
+    // can be a `CtorImage` (the dispatch just failed on one) or face an
+    // App-headed member slot (an HKT trait's declared signature, which has
+    // no mono representation at all -- S2-6). Both are the non-raising
+    // twin's `None`; the builder falls back to the declared `PolyType`'s own
+    // rendering rather than raising from inside the error it is building.
     let sigs: Vec<String> = trait_decl
         .members
         .iter()
         .map(|m| {
-            let ins: Vec<String> = m
-                .sig
-                .inputs
-                .iter()
-                .map(|t| ground_member_type(t, ty, arrays, refs).name().to_string())
-                .collect();
-            let outs: Vec<String> = m
-                .sig
-                .outputs
-                .iter()
-                .map(|t| ground_member_type(t, ty, arrays, refs).name().to_string())
-                .collect();
+            let mut render =
+                |t: &PolyType| match crate::ast::try_ground_member_type(t, ty, arrays, refs) {
+                    Some(g) => g.name().to_string(),
+                    None => poly_type_str(t, &m.sig),
+                };
+            let ins: Vec<String> = m.sig.inputs.iter().map(&mut render).collect();
+            let outs: Vec<String> = m.sig.outputs.iter().map(render).collect();
             match (ins.is_empty(), outs.is_empty()) {
                 (true, true) => "( -- )".to_string(),
                 (true, false) => format!("( -- {} )", outs.join(" ")),
@@ -7306,6 +8266,16 @@ fn match_impl_target_rec(
             }
         }
         PolyType::Var(v) => {
+            // P7b.S2 (S2-8/S2-15.e): the `for 'T` catch-all guard. A bare-var
+            // target never matches a `CtorImage` ty -- it can never ground its
+            // member against a constructor image anyway (S1-15.g), so letting
+            // it win dispatch by capturing the image would defer the failure
+            // to a worse place. The dedicated diagnostic fires at the dispatch
+            // site (`resolve_user_bound`'s S2-15.e guard), not here: this arm
+            // only makes the non-match.
+            if matches!(ty, Type::CtorImage(..)) {
+                return None;
+            }
             if let Some(prev) = subst.ty_of(*v) {
                 if prev == ty {
                     Some(())
@@ -7389,6 +8359,27 @@ fn match_impl_target_rec(
             len_args,
             name: _,
         } => {
+            // P7b.S2 (S2-8): the CtorImage identity arm. A ctor-abstract
+            // dispatch (the poly resolve path, where θ of an App-headed bound
+            // variable is a bare `Type::CtorImage`) matches a `Generic`
+            // target pattern on **constructor identity alone** -- `(idx,
+            // module)` == the image's `GenericId` -- without comparing args.
+            // The returned subst carries no arg bindings: the member word,
+            // polymorphic over the target's variables and the member's
+            // locals (S2-5/S2-6), unifies its own slots at the member call
+            // from the caller's App-grounded types (S2-9's θ_call). Arg
+            // comparison inside a match is R3-rejected. A `Concrete`-pinned
+            // target's pins are re-checked per member call site, where the
+            // caller's grounded operand args are known (the
+            // compatibility-conditioned tie rule, S2-8).
+            if let Type::CtorImage(gid, _) = ty {
+                let pattern_id = GenericId {
+                    is_enum: *is_enum,
+                    idx: *idx,
+                    module: *module,
+                };
+                return (pattern_id == gid).then_some(());
+            }
             let generics = generics?;
             let found = if *is_enum {
                 let Type::Enum(id, _) = ty else {
@@ -9182,14 +10173,19 @@ fn trait_member_operand_error(
     expected: &PolyType,
     found: &PolyType,
     sig: &PolySig,
+    slot: usize,
 ) -> String {
     let where_ = ctx.rendered_word();
+    // P7b.S2 (S2-16): the error names the slot position -- the declared sig
+    // is unified slot by slot, so the offending position is knowable and the
+    // old position-free wording would leave a multi-input member ambiguous.
     format!(
-        "error: `{member}` of `{trait_name}` in {where_} (line {}, col {}) expects `{}`, found `{}`",
+        "error: `{member}` of `{trait_name}` in {where_} (line {}, col {}) expects `{}`, found `{}` in operand slot {}",
         span.line,
         span.col,
         poly_type_str(expected, sig),
         poly_type_str(found, sig),
+        slot,
     )
 }
 
@@ -10122,6 +11118,424 @@ mod tests {
 
     /// P7.S3e (R7/R17): the obligations the pre-pass recorded, keyed by the
     /// polymorphic word whose body recorded them.
+    /// P7b.S2 (S2-16, poly caller): an HKT member call from a polymorphic
+    /// body unifies the declared member sig against the caller's slots --
+    /// the obligation records the call site's operand slots (the binding
+    /// map's carrier, S2-9), and the resolve loop composes them into
+    /// θ_call, never the empty subst.
+    #[test]
+    fn poly_caller_member_call_records_slot_map_and_composes_theta_call() {
+        let (module, recorded) = checked_like_a_build(
+            "type: Opt['T] | None | Some 'T ;\n\
+             trait: Functor['F: * -> *] :\n\
+             map ( 'F['T] [ 'T -- 'U ] -- 'F['U] ) ;\n\
+             ;\n\
+             impl: Functor for Opt\n\
+             : map swap ~[ ( Some ) Some> swap call Some ] ~[ ( None ) drop drop None ] Opt? ;\n\
+             ;\n\
+             : apply['F: Functor 'T 'U] ( 'F['T] [ 'T -- 'U ] -- 'F['U] ) map ;\n\
+             : main ( -- ) ;\n",
+        )
+        .expect("the fixture checks");
+        // The body walk recorded the member call as an obligation carrying
+        // the call site's operand slots: the App-headed dispatchable operand
+        // (caller space) and the declared quotation slot.
+        let apply = recorded
+            .iter()
+            .find(|w| w.name == "apply")
+            .expect("apply's obligations recorded");
+        assert_eq!(apply.obligations.len(), 1, "{apply:?}");
+        let ob = &apply.obligations[0];
+        assert_eq!(ob.member, "map");
+        assert_eq!(ob.slots.len(), 2, "one slot per declared member input");
+        assert!(
+            matches!(ob.slots[0], PolyType::App { head: 0, .. }),
+            "the dispatchable operand is App-headed in the caller's space: {:?}",
+            ob.slots[0]
+        );
+        // A caller instantiation whose θ grounds the header to a CtorImage
+        // (the App unification binds it from the operand) and every other
+        // variable from a value slot, resolves the obligation through the
+        // CtorImage path: the member word's θ_call -- never the empty subst.
+        let (module, _) = checked_like_a_build(
+            "type: Opt['T] | None | Some 'T ;\n\
+             trait: Functor['F: * -> *] :\n\
+             map ( 'F['T] [ 'T -- 'U ] -- 'F['U] ) ;\n\
+             ;\n\
+             impl: Functor for Opt\n\
+             : map swap ~[ ( Some ) Some> swap call Some ] ~[ ( None ) drop drop None ] Opt? ;\n\
+             ;\n\
+             : apply['F: Functor 'T 'U] ( 'F['T] [ 'T -- 'U ] 'U -- 'F['U] ) rot rot map swap drop ;\n\
+             : main ( -- ) 3 mkopt [ drop True ] True apply drop ;\n\
+             : mkopt ( i64 -- Opt[i64] ) Some ;\n",
+        )
+        .expect("the fixture checks");
+        let monos: Vec<&crate::ast::CallInst> = module
+            .transitive_instantiations
+            .iter()
+            .filter(|inst| inst.callee.contains("map;Functor"))
+            .collect();
+        assert!(!monos.is_empty(), "the member word's θ_call is recorded");
+        for inst in &monos {
+            assert!(
+                !inst.subst.ty.is_empty(),
+                "no empty subst for a CtorImage winner: ({}, {:?})",
+                inst.callee,
+                inst.subst
+            );
+            // Canonical order at construction (the P7.S3t invariant).
+            let ids: Vec<u32> = inst.subst.ty.iter().map(|(v, _)| *v).collect();
+            let mut sorted = ids.clone();
+            sorted.sort();
+            assert_eq!(ids, sorted, "θ_call sorted: {:?}", inst.subst);
+        }
+        // The composed θ_call grounds the member's own variables: 'ctor0 →
+        // i64, 'U → Bool (the member word's union id space).
+        assert_eq!(monos[0].subst.ty[0].1, Type::I64);
+    }
+
+    /// P7b.S2 (S2-16, poly caller): a member operand that does not unify
+    /// against the declared sig stays a located member-call operand error,
+    /// now naming the offending slot position. A pinned member argument
+    /// (`'F[i64]`) against a caller slot carrying its own variable is the
+    /// mismatch: the declared `Concrete` never binds a caller variable at
+    /// body-check (S2-6's pinned-slot reading).
+    #[test]
+    fn poly_caller_member_operand_mismatch_names_the_slot() {
+        let err = check_src(
+            "trait: P2['F: * -> *] : pick ( 'F[i64] -- ) ; ;\n\
+             : caller['F: P2 'T] ( 'F['T] -- ) pick ;\n",
+        )
+        .expect_err("a pinned member arg cannot bind the caller's variable");
+        assert!(
+            err.contains("expects"),
+            "the declared-vs-found shapes are named: {err}"
+        );
+        assert!(
+            err.contains("in operand slot 0"),
+            "the offending slot position is named: {err}"
+        );
+    }
+
+    // P7b.S2 (S2-8/S2-9): the compatibility-conditioned tie rule, end to end
+    // through `resolve_user_bound`'s per-site loop. The fixtures use a
+    // two-variable constructor: a one-variable ctor's pinned spelling
+    // (`for Opt[i64]`) is a complete application, so it parses to a
+    // `Concrete` target and the S2-6 fence rejects App-headed members for it
+    // at parse time -- a pinned HKT impl only exists for a partially-applied
+    // ctor (`for R2[i64]`), whose desugar is the `Generic` pattern with
+    // `Concrete` pins the tie rule arbitrates among. Each fixture drives a
+    // poly caller (`apply`) instantiated at a concrete operand, which
+    // grounds θ('F) to a bare `CtorImage` -- the only place the tie rule
+    // runs (S2-8: the mono path dispatches on the fully concrete operand
+    // through the existing `Concrete`/`Generic` matcher arms instead).
+
+    /// S2-8, incompatible pin disqualified: at an `R2[Bool Bool]` operand
+    /// the pinned candidate (`for R2[i64]`) matches on constructor identity
+    /// alone, but its pin disagrees with the grounded operands and is
+    /// disqualified at the member call site -- the bare `for R2` impl
+    /// serves. Without the compatibility condition the specificity order
+    /// would hand the site to the pinned impl (it is the more specific
+    /// pattern) and the call would die at the pinned member input.
+    #[test]
+    fn ctor_image_dispatch_serves_via_the_unpinned_impl_when_the_pin_disagrees() {
+        let (module, _) = checked_like_a_build(
+            "type: R2['T 'E] | Ok 'T | Err 'E ;\n\
+             trait: Functor['F: * -> * -> *] :\n\
+             consume ( 'F['T 'E] -- ) ;\n\
+             ;\n\
+             impl: Functor for R2\n\
+               : consume drop ;\n\
+             ;\n\
+             impl: Functor for R2[i64]\n\
+               : consume drop ;\n\
+             ;\n\
+             : apply['F: Functor 'T 'E] ( 'F['T 'E] -- ) consume ;\n\
+             : mkokb ( Bool -- R2[Bool Bool] ) Ok ;\n\
+             : main ( -- ) True mkokb apply ;\n",
+        )
+        .expect("the incompatible pin is disqualified; the bare target serves");
+        let monos: Vec<&crate::ast::CallInst> = module
+            .transitive_instantiations
+            .iter()
+            .filter(|inst| inst.callee.contains("consume;Functor"))
+            .collect();
+        assert_eq!(
+            monos.len(),
+            1,
+            "exactly the serving impl's member word mints: {:?}",
+            monos.iter().map(|i| &i.callee).collect::<Vec<_>>()
+        );
+        // The bare `for R2` impl's member word: its desugared target shape
+        // renders `R2['T0 'T1]` (two fresh pattern variables), where the
+        // pinned impl's renders `R2[i64 'T1]`.
+        assert!(
+            monos[0].callee.contains("R2['T0 'T1]"),
+            "the bare `for R2` impl served the site: {}",
+            monos[0].callee
+        );
+    }
+
+    /// S2-8, more pins preferred among compatible: at an `R2[Bool Bool]`
+    /// operand both candidates are compatible (the bare one's pattern
+    /// variables bind, the pinned one's pin matches), and the tie rule hands
+    /// the site to the more-pinned `for R2[Bool]` impl -- the
+    /// concrete-beats-generic principle, conditioned on the pin actually
+    /// unifying with the grounded operands.
+    #[test]
+    fn ctor_image_dispatch_prefers_the_compatible_pinned_impl_over_the_bare_one() {
+        let (module, _) = checked_like_a_build(
+            "type: R2['T 'E] | Ok 'T | Err 'E ;\n\
+             trait: Functor['F: * -> * -> *] :\n\
+             consume ( 'F['T 'E] -- ) ;\n\
+             ;\n\
+             impl: Functor for R2\n\
+               : consume drop ;\n\
+             ;\n\
+             impl: Functor for R2[Bool]\n\
+               : consume drop ;\n\
+             ;\n\
+             : apply['F: Functor 'T 'E] ( 'F['T 'E] -- ) consume ;\n\
+             : mkokb ( Bool -- R2[Bool Bool] ) Ok ;\n\
+             : main ( -- ) True mkokb apply ;\n",
+        )
+        .expect("the compatible pinned candidate wins");
+        let monos: Vec<&crate::ast::CallInst> = module
+            .transitive_instantiations
+            .iter()
+            .filter(|inst| inst.callee.contains("consume;Functor"))
+            .collect();
+        assert_eq!(monos.len(), 1, "one impl serves: {:?}", monos);
+        // The pinned `for R2[Bool]` impl's member word: its desugared target
+        // shape renders `R2[Bool 'T0]` (one pin, one fresh pattern
+        // variable), where the bare impl's renders `R2['T0 'T1]`.
+        assert!(
+            monos[0].callee.contains("R2[Bool 'T0]"),
+            "the pinned `for R2[Bool]` impl served the site: {}",
+            monos[0].callee
+        );
+    }
+
+    /// S2-8, identical pin-shape tie: two one-pin candidates whose pins both
+    /// unify with the grounded operands (`for R2[Bool]` pinning slot 0,
+    /// `for R2['A Bool]` pinning slot 1) both survive compatibility at the
+    /// site -- the ambiguity error, located at the member call (the per-site
+    /// rule's span), not at the caller's instantiation site. The targets are
+    /// not alpha-equivalent (the pins sit in different slots), so both
+    /// register.
+    #[test]
+    fn ctor_image_dispatch_identical_pin_shape_tie_is_ambiguity_error() {
+        let err = check_src(
+            "type: R2['T 'E] | Ok 'T | Err 'E ;\n\
+             trait: Functor['F: * -> * -> *] :\n\
+             consume ( 'F['T 'E] -- ) ;\n\
+             ;\n\
+             impl: Functor for R2[Bool]\n\
+               : consume drop ;\n\
+             ;\n\
+             impl: Functor for R2['A Bool]\n\
+               : consume drop ;\n\
+             ;\n\
+             : apply['F: Functor 'T 'E] ( 'F['T 'E] -- ) consume ;\n\
+             : mkokb ( Bool -- R2[Bool Bool] ) Ok ;\n\
+             : main ( -- ) True mkokb apply ;\n",
+        )
+        .expect_err("two same-tier survivors at one site are the ambiguity");
+        assert!(
+            err.contains("ambiguous `impl:` dispatch for `Functor` at `R2`"),
+            "{err}"
+        );
+        // Both same-tier targets are named, under their user spellings.
+        assert!(err.contains("`R2[Bool]`"), "{err}");
+        assert!(err.contains("`R2['A Bool]`"), "{err}");
+        // Located at the member call inside `apply` (line 11) -- the
+        // per-site rule's span -- not at `main`'s call site (line 13), which
+        // is what the generic specificity order's pre-emption produced
+        // before the compatibility-conditioned rule governed.
+        assert!(err.contains("line 11, col "), "{err}");
+    }
+
+    /// P7b.S2 (S2-16, mono caller): a member name no trait declares falls
+    /// through to the unchanged unknown-word error (existing goldens hold).
+    #[test]
+    fn mono_member_name_unknown_word_falls_through_unchanged() {
+        let err = check_src(
+            "type: Opt['T] | None | Some 'T ;\n\
+             trait: Functor['F: * -> *] :\n\
+             map ( 'F['T] [ 'T -- 'U ] -- 'F['U] ) ;\n\
+             ;\n\
+             : main ( -- ) 3 notamember drop ;\n",
+        )
+        .expect_err("unknown word");
+        assert!(err.contains("unknown word `notamember`"), "{err}");
+    }
+
+    /// P7b.S2 (S2-16, mono caller): the member name exists but no impl of
+    /// any declaring trait dispatches on these operands -- a located error
+    /// naming the candidates, not the generic unknown-word report.
+    #[test]
+    fn mono_member_without_dispatching_impl_is_located_error() {
+        let err = check_src(
+            "type: Opt['T] | None | Some 'T ;\n\
+             type: P2 n i64 ;\n\
+             trait: Functor['F: * -> *] :\n\
+             map ( 'F['T] [ 'T -- 'U ] -- 'F['U] ) ;\n\
+             ;\n\
+             : main ( -- ) 3 P2 [ drop True ] map[i64 Bool] drop ;\n",
+        )
+        .expect_err("no impl of Functor dispatches on P2");
+        assert!(
+            err.contains("is a trait member of"),
+            "the member candidates are named: {err}"
+        );
+        assert!(err.contains("no `impl:`"), "{err}");
+    }
+
+    /// P7b.S2 (S2-16, mono caller): two traits declare a member of the same
+    /// name and an impl of each fits the concrete operand -- the mono
+    /// ambiguity, with its own wording (not the poly-bounds report the
+    /// shared builder renders): the claiming traits are named and the
+    /// remedy is the module qualifier, which is what a mono caller has.
+    #[test]
+    fn mono_member_claimed_by_two_traits_is_located_error_naming_both() {
+        let err = check_src(
+            "trait: A['T] : t1 ( &'T -- ) ; ;\n\
+             trait: B['T] : t1 ( &'T -- ) ; ;\n\
+             type: Point x i64 y i64 ;\n\
+             impl: A for Point\n\
+               : t1 | p | p drop ;\n\
+             ;\n\
+             impl: B for Point\n\
+               : t1 | p | p drop ;\n\
+             ;\n\
+             : main ( -- ) 1 2 Point |p| &p t1 p drop ;\n",
+        )
+        .expect_err("both impls fit the &Point operand");
+        // The mono wording: the claiming traits, then the qualifier remedy.
+        assert!(
+            err.contains("`t1` in `main` (line 10, col 32) is a trait member of both `A` and `B`"),
+            "{err}"
+        );
+        assert!(
+            err.contains("qualify the call with the claiming trait's module"),
+            "{err}"
+        );
+    }
+
+    /// P7b.S2 (S2-16, mono caller): a concrete-impl member may legally
+    /// declare a quotation parameter (S2-3's Quotation arm over a concrete
+    /// target grounds to a real `Type::Quotation`), and a mono caller's
+    /// literal fills it materialized -- the same R8/D4 boundary the ordinary
+    /// env word-call path applies, not the blanket quotation reject.
+    #[test]
+    fn mono_member_concrete_impl_declared_quotation_param_materializes() {
+        check_src(
+            "type: Box['T] v 'T ;\n\
+             trait: Runner['F] : run ( 'F [ i64 -- ] -- ) ; ;\n\
+             impl: Runner for Box[i64]\n\
+               : run swap drop 1 swap call ;\n\
+             ;\n\
+             : mkbox ( i64 -- Box[i64] ) Box ;\n\
+             : main ( -- ) 1 mkbox [ drop ] run ;\n",
+        )
+        .expect("the declared quotation slot materializes the literal");
+    }
+
+    /// P7b.S2 (S2-16, mono caller): the blanket quotation reject survives
+    /// for slots the member does not declare as a quotation -- the
+    /// materialization above is gated strictly on the declared slot's type.
+    #[test]
+    fn mono_member_concrete_impl_undeclared_quotation_arg_is_rejected() {
+        let err = check_src(
+            "type: Box['T] v 'T ;\n\
+             trait: Sizer['F] : size ( 'F i64 -- i64 ) ; ;\n\
+             impl: Sizer for Box[i64]\n\
+               : size drop drop 7 ;\n\
+             ;\n\
+             : mkbox ( i64 -- Box[i64] ) Box ;\n\
+             : main ( -- ) 1 mkbox [ drop ] size drop ;\n",
+        )
+        .expect_err("the i64 slot is not a quotation boundary");
+        assert!(
+            err.contains("a quotation cannot be passed to `size`")
+                && err.contains("in `main` (line 7)"),
+            "{err}"
+        );
+    }
+
+    /// P7b.S2 (S2-10): the cross-call fence is NOT lifted. A named poly-word
+    /// cross-call carrying an App slot still rejects with p8's exact fence
+    /// text (S1-17.i's scope fence, amended R7) -- member calls never reach
+    /// this site (`poly_trait_member_call` fronts them), so the fence
+    /// governs only non-member cross-calls, unchanged.
+    #[test]
+    fn non_member_app_cross_call_still_rejects_with_p8_fence_text() {
+        let err = check_src(
+            "type: Opt['T] | None | Some 'T ;\n\
+             : inner['G 'T] ( 'G['T] -- ) drop ;\n\
+             : outer['G 'T] ( 'G['T] -- ) inner ;\n\
+             : main ( -- ) ;\n",
+        )
+        .expect_err("a poly cross-call with an App slot is fenced");
+        assert!(
+            err.contains("cannot call the polymorphic word `inner`"),
+            "{err}"
+        );
+        assert!(
+            err.contains(
+                "a higher-kinded application in a cross-called polymorphic word is not \
+                 yet supported from a polymorphic body"
+            ),
+            "{err}"
+        );
+    }
+
+    /// P7b.S2 (S2-15.f, splice guard a): an application-headed member called
+    /// inside a combinator splice is a located error, not
+    /// `ground_member_type`'s unreachable-App panic.
+    ///
+    /// What this fixture honestly pins is the body-check half only: an HKT
+    /// member call from a bounded poly body is operand-checked against the
+    /// caller's abstract slots (the first `map` unifies), and the second
+    /// `map`'s missing operands are a located error, never a panic on the
+    /// App-headed signature. The guard itself is currently
+    /// source-unreachable, and deliberately so rather than by an oversight
+    /// this phase could lift: reaching `resolve_splice_member_call` with an
+    /// App-headed member needs an inline combinator carrying the trait's
+    /// `Bound::User`, and such a combinator cannot be declared today -- the
+    /// obligation pre-pass (which runs for user-bounded combinators,
+    /// `check.rs`) requires the member's App-headed operand to unify against
+    /// an App-headed declared slot of the combinator, while the standalone
+    /// combinator check grounds every declared variable at the `i64`
+    /// stand-in, where `apply_subst`'s App arm rejects exactly that slot
+    /// (a bare-variable spelling of the bound fails the other way: the
+    /// member's App head never unifies with a bare-Var operand). Both splice
+    /// guards wait on an HKT-typed combinator signature being standalone-
+    /// checkable; until then this test pins the nearest reachable behavior
+    /// and documents the gap.
+    #[test]
+    fn splice_member_call_of_hkt_member_is_located_error() {
+        let err = check_src(
+            "type: Opt['T] | None | Some 'T ;\n\
+             trait: Functor['F: * -> *] :\n\
+             map ( 'F['T] [ 'T -- 'U ] -- 'F['U] ) ;\n\
+             ;\n\
+             : twice['F: Functor 'T 'U] ( 'F['T] [ 'T -- 'U ] -- 'F['U] ) map map ;\n",
+        )
+        .expect_err("map map needs a second quotation");
+        // The located underflow at the second `map` (line 5) -- the body
+        // check rejects the shape for its own reason, having already unified
+        // the first App-headed operand without panicking.
+        assert!(
+            err.contains("stack effect mismatch in `twice` (line 5)"),
+            "{err}"
+        );
+        assert!(
+            err.contains("`map` needs 2 values, but the stack holds 1"),
+            "{err}"
+        );
+    }
+
     fn obligations_of(src: &str) -> HashMap<String, Vec<TraitObligation>> {
         let (_, recorded) = checked_like_a_build(src).expect("the fixture checks");
         recorded
@@ -16882,6 +18296,102 @@ mod tests {
     }
 
     // P7.S4 (R2): `match_impl_target` unit tests.
+
+    /// P7b.S2 (S2-8): the CtorImage identity arm. A ctor-abstract dispatch
+    /// (`ty` a bare `Type::CtorImage` -- the App unification's head binding)
+    /// matches a `Generic` target pattern on constructor identity alone;
+    /// the subst carries no arg bindings (R3: identity-only matching), the
+    /// member call re-derives the args (S2-9's θ_call).
+    #[test]
+    fn match_impl_target_ctor_image_matches_generic_pattern_on_identity_alone() {
+        let pattern = PolyType::Generic {
+            is_enum: false,
+            idx: 3,
+            module: 1,
+            args: vec![PolyType::Var(0)],
+            len_args: Vec::new(),
+            name: "Box",
+        };
+        let image = Type::CtorImage(
+            GenericId {
+                is_enum: false,
+                idx: 3,
+                module: 1,
+            },
+            "Box",
+        );
+        let subst = match_impl_target(&pattern, image, &[], &[], &[], None).expect("should match");
+        // Identity only: no arg bindings survive the match (R3) -- the
+        // caller's grounded args arrive per member call site (S2-9).
+        assert!(
+            subst.ty.is_empty(),
+            "arg bindings must be absent: {subst:?}"
+        );
+        assert!(subst.len.is_empty());
+    }
+
+    #[test]
+    fn match_impl_target_ctor_image_of_another_ctor_no_match() {
+        let pattern = PolyType::Generic {
+            is_enum: false,
+            idx: 3,
+            module: 1,
+            args: vec![PolyType::Var(0)],
+            len_args: Vec::new(),
+            name: "Box",
+        };
+        let other = Type::CtorImage(
+            GenericId {
+                is_enum: false,
+                idx: 4,
+                module: 1,
+            },
+            "Bag",
+        );
+        assert!(match_impl_target(&pattern, other, &[], &[], &[], None).is_none());
+    }
+
+    /// P7b.S2 (S2-8/S2-15.e): the `for 'T` catch-all guard. A bare-var
+    /// target never matches a `CtorImage` ty -- the capture that would let
+    /// dispatch "win by accident" and die at S1-15.g.
+    #[test]
+    fn match_impl_target_bare_var_pattern_does_not_capture_ctor_image() {
+        let image = Type::CtorImage(
+            GenericId {
+                is_enum: false,
+                idx: 0,
+                module: 0,
+            },
+            "Box",
+        );
+        assert!(match_impl_target(&PolyType::Var(0), image, &[], &[], &[], None).is_none());
+    }
+
+    /// P7b.S2 (S2-8): a pinned `Generic` target pattern's pin count -- the
+    /// compatibility-conditioned tie rule prefers more pins among
+    /// compatible candidates.
+    #[test]
+    fn ctor_pin_count_counts_concrete_top_level_args() {
+        let pinned = PolyType::Generic {
+            is_enum: false,
+            idx: 0,
+            module: 0,
+            args: vec![PolyType::Concrete(Type::I64), PolyType::Var(0)],
+            len_args: Vec::new(),
+            name: "Pair",
+        };
+        let all_var = PolyType::Generic {
+            is_enum: false,
+            idx: 0,
+            module: 0,
+            args: vec![PolyType::Var(0), PolyType::Var(1)],
+            len_args: Vec::new(),
+            name: "Pair",
+        };
+        assert_eq!(ctor_pin_count(&pinned), 1);
+        assert_eq!(ctor_pin_count(&all_var), 0);
+        assert_eq!(ctor_pin_count(&PolyType::Var(0)), 0);
+    }
 
     #[test]
     fn match_impl_target_var_elem_and_len_matches() {

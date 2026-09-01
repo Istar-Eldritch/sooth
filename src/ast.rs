@@ -2070,8 +2070,9 @@ fn member_app_concrete_target_error(dg: &MemberGrounding) -> String {
 /// in plain position or nested (under an array element, a reference, a cell
 /// payload, a generic argument). The concrete desugar's App fence scans
 /// whole member slots with this, since `ground_member_type` (which the
-/// concrete path grounds with) has no way to raise.
-fn member_ty_mentions_app(t: &PolyType) -> bool {
+/// concrete path grounds with) has no way to raise. P7b.S2 (S2-15.f): the
+/// splice path's own guard reuses it, so it is `pub(crate)`.
+pub(crate) fn member_ty_mentions_app(t: &PolyType) -> bool {
     match t {
         PolyType::App { .. } => true,
         PolyType::Array(elem, _) => member_ty_mentions_app(elem),
@@ -2140,12 +2141,67 @@ pub fn ground_member_type(
             let r = ground_member_type(referent, target, arrays, refs);
             intern_ref_type(refs, r, *mutable)
         }
+        // P7b.S2 (S2-3/S2-6): a member's declared quotation parameter
+        // grounds to a real quotation type, its rows grounded at the target
+        // exactly as a bare-var slot is (a row mentioning the trait's
+        // variable is the member's receiver in quotation position). Row
+        // ids are left ungrounded, mirroring `apply_subst`'s Quotation arm
+        // (Slice 10a R9): an interned effect never carries a caller region.
+        PolyType::Quotation(ins, outs, is_inline, _, _) => {
+            let gins = ins
+                .iter()
+                .map(|t| ground_member_type(t, target, arrays, refs))
+                .collect();
+            let gouts = outs
+                .iter()
+                .map(|t| ground_member_type(t, target, arrays, refs))
+                .collect();
+            if *is_inline {
+                inline_quotation_type(gins, gouts)
+            } else {
+                quotation_type(gins, gouts)
+            }
+        }
         PolyType::App { .. } => unreachable!(
             "an App-headed member signature reaches ground_member_type only through the concrete desugar, which fences it first (S2-6: no mono representation for member locals)"
         ),
         _ => unreachable!(
-            "trait member signatures are restricted to concrete/array/reference shapes over 'T (parse_trait_member_effect rejects the rest)"
+            "trait member signatures are restricted to concrete/array/reference/quotation shapes over 'T (parse_trait_member_effect rejects the rest)"
         ),
+    }
+}
+
+/// P7b.S2 (S2-15.f): the **non-raising** twin of `ground_member_type`, for
+/// the paths that ground a member signature at a target that may name a
+/// constructor rather than a type -- a bound variable an `App` unification
+/// bound to a `Type::CtorImage`. The raising form cannot represent failure
+/// (it returns `Type`), and its `Var` arm would flow the image unchecked into
+/// a value-type position -- the exact misclassification `apply_subst`'s
+/// S1-15.g guard rejects. `None` is that condition (and an App-headed member
+/// slot, which has no mono representation at all, S2-6), so a diagnostic
+/// builder grounding a signature it is about to *render* can fall back to a
+/// symbolic rendering instead of raising from inside the error it is building.
+/// The raising form stays on the paths where a real `Type` is required and
+/// the target is known grounded (the concrete desugar).
+pub fn try_ground_member_type(
+    pty: &PolyType,
+    target: Type,
+    arrays: &mut Vec<ArrayDecl>,
+    refs: &mut Vec<RefDecl>,
+) -> Option<Type> {
+    match pty {
+        // S2-15.f: the guard itself -- a bare variable grounded at a
+        // constructor image has no type to name.
+        PolyType::Var(_) if matches!(target, Type::CtorImage(..)) => None,
+        // S2-6's fence, as a `None`: an App-headed member slot never grounds
+        // to a concrete `Type` (member locals are not representable).
+        PolyType::App { .. } => None,
+        // S2-15.f: a quotation slot at a constructor image -- grounding its
+        // rows would flow the image into the effect's value positions, the
+        // exact misclassification S1-15.g rejects. (At a real type the
+        // delegation below grounds the rows, S2-3/S2-6.)
+        PolyType::Quotation(..) if matches!(target, Type::CtorImage(..)) => None,
+        other => Some(ground_member_type(other, target, arrays, refs)),
     }
 }
 
@@ -2798,7 +2854,18 @@ pub fn instantiation_symbol(word: &str, subst: &Subst) -> String {
     }
     let mut parts = Vec::new();
     for (id, ty) in &subst.ty {
-        parts.push(format!("t{id}_{}", sanitize(ty.name())));
+        // P7b.S2 (S2-12): a constructor image is keyed on its `GenericId`, not
+        // its bare name -- same-named ctors in different modules are distinct
+        // constructors (each with its own `impl:`), and rendering `ty.name()`
+        // alone would mint one symbol for both, the documented S1-12 residual
+        // hazard that lifting ctor-target reachability makes reachable. The
+        // name stays in the render for readability; the `(idx, module)`
+        // identity is what makes it distinct.
+        let rendered = match ty {
+            Type::CtorImage(gid, name) => format!("c{}m{}_{name}", gid.idx, gid.module),
+            other => other.name().to_string(),
+        };
+        parts.push(format!("t{id}_{}", sanitize(&rendered)));
     }
     for (id, n) in &subst.len {
         parts.push(format!("n{id}_{n}"));
@@ -5265,6 +5332,137 @@ mod tests {
         let mut subst = Subst::default();
         subst.ty.push((0, Type::I64));
         assert_eq!(instantiation_symbol("id", &subst), "sooth_mono_id__t0_i64");
+    }
+
+    /// P7b.S2 (S2-12): a constructor image in θ is keyed on its `GenericId`,
+    /// not its bare name -- same-named ctors in different modules are
+    /// distinct constructors, each with its own `impl:`, and must mint
+    /// distinct instantiation symbols (the documented S1-12 residual hazard,
+    /// reachable once ctor-target dispatch lifts this slice).
+    #[test]
+    fn instantiation_symbol_keys_ctor_images_on_their_generic_id() {
+        let mut subst = Subst::default();
+        subst.ty.push((
+            0,
+            Type::CtorImage(
+                GenericId {
+                    is_enum: false,
+                    idx: 2,
+                    module: 0,
+                },
+                "Box",
+            ),
+        ));
+        let same_name_other_module = Subst {
+            ty: vec![(
+                0,
+                Type::CtorImage(
+                    GenericId {
+                        is_enum: false,
+                        idx: 2,
+                        module: 1,
+                    },
+                    "Box",
+                ),
+            )],
+            ..Subst::default()
+        };
+        let a = instantiation_symbol("map", &subst);
+        let b = instantiation_symbol("map", &same_name_other_module);
+        assert_ne!(a, b, "same-named ctors in different modules collide: {a}");
+        assert!(
+            a.contains("c2m0_Box"),
+            "the ctor identity rides the symbol: {a}"
+        );
+        assert!(b.contains("c2m1_Box"), "{b}");
+    }
+
+    /// P7b.S2 (S2-15.f): the non-raising grounding twin rejects the shapes
+    /// that must never reach a value-type position -- a bare variable
+    /// grounded at a `CtorImage` (the App-unification head binding), and an
+    /// App-headed member slot (S2-6: no mono representation for member
+    /// locals) -- while every groundable shape still grounds.
+    #[test]
+    fn try_ground_member_type_rejects_ctor_image_target_and_app_slot() {
+        let image = Type::CtorImage(
+            GenericId {
+                is_enum: false,
+                idx: 0,
+                module: 0,
+            },
+            "Box",
+        );
+        let mut arrays = Vec::new();
+        let mut refs = Vec::new();
+        // The S2-15.f guard itself: a bare variable at a CtorImage target.
+        assert_eq!(
+            try_ground_member_type(&PolyType::Var(0), image, &mut arrays, &mut refs),
+            None
+        );
+        // The S2-6 fence, as `None`: an App-headed member slot.
+        assert_eq!(
+            try_ground_member_type(
+                &PolyType::App {
+                    head: 0,
+                    args: vec![PolyType::Var(1)],
+                },
+                Type::I64,
+                &mut arrays,
+                &mut refs,
+            ),
+            None
+        );
+        // Groundable shapes still ground: a bare variable at a real type.
+        assert_eq!(
+            try_ground_member_type(&PolyType::Var(0), Type::I64, &mut arrays, &mut refs),
+            Some(Type::I64)
+        );
+        // And a concrete slot passes through untouched at a CtorImage target.
+        assert_eq!(
+            try_ground_member_type(
+                &PolyType::Concrete(Type::I64),
+                image,
+                &mut arrays,
+                &mut refs
+            ),
+            Some(Type::I64)
+        );
+        // S2-15.f: a quotation slot at a CtorImage target is `None` too --
+        // grounding its rows would flow the image into the effect's value
+        // positions (S1-15.g's misclassification).
+        assert_eq!(
+            try_ground_member_type(
+                &PolyType::Quotation(vec![PolyType::Var(0)], vec![], false, None, None),
+                image,
+                &mut arrays,
+                &mut refs
+            ),
+            None
+        );
+    }
+
+    /// P7b.S2 (S2-3/S2-6): a member's declared quotation parameter grounds
+    /// to a real quotation type with its rows grounded at the target -- a
+    /// row mentioning the trait's variable is the receiver in quotation
+    /// position; concrete rows pass through. `try_ground_member_type` at a
+    /// real type agrees (the non-raising twin delegates).
+    #[test]
+    fn ground_member_type_grounds_a_quotation_slot_at_the_target() {
+        let mut arrays = Vec::new();
+        let mut refs = Vec::new();
+        let slot = PolyType::Quotation(
+            vec![PolyType::Concrete(Type::I64), PolyType::Var(0)],
+            vec![PolyType::Var(0)],
+            false,
+            None,
+            None,
+        );
+        let grounded = ground_member_type(&slot, Type::Usize, &mut arrays, &mut refs);
+        let Type::Quotation(eff) = grounded else {
+            panic!("a quotation slot grounds to a quotation type: {grounded:?}")
+        };
+        assert_eq!(eff.inputs, vec![Type::I64, Type::Usize]);
+        assert_eq!(eff.outputs, vec![Type::Usize]);
     }
 
     fn bare_word(name: &str) -> WordDef {

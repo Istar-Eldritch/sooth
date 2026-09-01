@@ -666,6 +666,15 @@ The remaining runtime witnesses and the full suite green.
   consistent with S2-15.f's non-raising-signature constraint — `ground_member_type`
   returns `Type`, not `Result`). Observable behavior conforms; recorded deliberately,
   not silently (Phase 2 review round).
+- **W2's two recorded deviations.** (1) The golden's call carries the explicit
+  instantiation `map[i64 Bool]` rather than the bare spelling: `map`'s `'U` is bound
+  only by the quotation's rows, and the pre-existing P7.S3t unbound-row-var behavior
+  makes the bare spelling unspellable from a mono caller — the dispatch machinery
+  (CtorImage identity, per-site composition, θ_call) is fully exercised either way.
+  (2) The observable is `true`, proving the mapped inner value is a `Bool` (i.e.
+  `Option[Bool]`), rather than the brief sketch's `some 0` — the exit criterion
+  governs the exact stdout, and the fixture-local printer proves the type-directed
+  dispatch.
 
 ## Anchor status
 

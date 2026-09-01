@@ -383,3 +383,80 @@ impl: P2 for Option['O]
         "{err}"
     );
 }
+
+// ---- Phase 3: dispatch and the member-call path ----
+
+/// Golden (positive #2, W2): `map` over `Option[i64]` with a `[ i64 -- Bool ]`
+/// quotation dispatches to the Option impl and produces `Option[Bool]` --
+/// exit criterion #3's Option half. The observable is the fixture-local
+/// printer (`hosted::show`'s type-directed Bool dot behind an eliminator
+/// unwrap): `true` on stdout proves the mapped inner value IS a `Bool`, which
+/// only a dispatched member call producing `Option[Bool]` can typecheck.
+///
+/// Fixture notes, all pinned by earlier findings: `Option` is a local twin
+/// (the S1-era module-identity wart on imported headers, as in goldens
+/// #6/#7); `mkopt` is the declared-sig helper (F12's ctor-in-`main` idiom);
+/// the call carries the explicit instantiation `map[i64 Bool]` -- `map`'s
+/// `'U` is bound only by the quotation's rows, and a mono caller binds row
+/// variables through the P7.S3t seeded θ (the established remedy for a
+/// variable no input binds), positionally over the member word's own union
+/// id space (`'ctor0` then `'U`).
+#[test]
+fn functor_map_over_option_dispatches_and_produces_option_of_bool() {
+    let src = "\
+import: core::bool | Bool | ;
+type: Opt['T] | None | Some 'T ;
+trait: Functor['F: * -> *] :
+  map ( 'F['T] [ 'T -- 'U ] -- 'F['U] ) ;
+;
+impl: Functor for Opt
+  : map swap ~[ ( Some ) Some> swap call Some ] ~[ ( None ) drop drop None ] Opt? ;
+;
+: showopt ( Opt[Bool] -- )
+  ~[ ( Some ) Some> . ] ~[ ( None ) drop ] Opt? ;
+: mkopt ( i64 -- Opt[i64] ) Some ;
+: main ( -- ) 3 mkopt [ drop True ] map[i64 Bool] showopt ;
+";
+    let (_t, entry) = single_file_hosted("w2-functor-map-option", src);
+    let out = build_and_run(&entry);
+    assert_eq!(out, "true\n");
+}
+
+/// Golden (error #5, S2-15.e): a bare-variable impl target for an HKT trait
+/// cannot capture a constructor-keyed operand. The capture is refused at the
+/// earliest possible point -- the desugar's S2-6/S2-15.e grounding twin
+/// (`member_app_abstract_target_error`): the member's dispatchable input is
+/// application-headed, and a fully-abstract target names no constructor for
+/// the application to dissolve into, so the impl cannot even register. The
+/// dispatch-side twin (the matcher's `for 'T` guard against a `CtorImage`
+/// ty, S2-8) is pinned at unit level in `check/poly.rs`; the two together
+/// are S2-15.e ("the dispatch-side twin is S2-8's `for 'T` guard", S2-6).
+#[test]
+fn bare_var_impl_target_does_not_capture_ctor_image() {
+    let src = "\
+type: Opt['T] | None | Some 'T ;
+trait: Functor['F: * -> *] :
+  map ( 'F['T] [ 'T -- 'U ] -- 'F['U] ) ;
+;
+impl: Functor for 'T
+  : map drop ;
+;
+: main ( -- ) ;
+";
+    let (_t, entry) = single_file("s2-15e-bare-var-capture", src);
+    let err = build_error(&entry);
+    assert!(
+        err.contains(
+            "error: trait member `map` of `Functor` (line 7, col 5) applies the trait \
+             variable `'F`, but the impl target `'T` at line 6, col 19 is not a constructor"
+        ),
+        "{err}"
+    );
+    assert!(
+        err.contains(
+            "a fully-abstract target names no constructor for the application to \
+             dissolve into"
+        ),
+        "{err}"
+    );
+}
