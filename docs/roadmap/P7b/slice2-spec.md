@@ -126,19 +126,19 @@ which is why the obligation carries operand slots rather than a finished substit
 ```mermaid
 flowchart TD
     subgraph BodyCheck["Body check"]
-        P["poly caller: poly_trait_member_call<br/>(poly.rs:2026, fronted :2266)"]
+        P["poly caller: poly_trait_member_call<br/>(poly.rs:2041, fronted :2281)"]
         P -->|"unify declared member sig vs operand slots<br/>(unify_member_operand, poly.rs:1164;<br/>bindings seeded with the header var)"| O
         M["mono caller: env-miss branch (terms.rs:884)<br/>&rarr; resolve_mono_member_call (poly.rs:1697)"]
         M -->|"dispatch on the operand's full grounded type;<br/>record span &rarr; (symbol, θ_call) for lowering"| L["Lowering"]
-        S["splice caller: resolve_splice_member_call (poly.rs:1343)<br/>guarded by try_ground_member_type (ast.rs:2177)"]
+        S["splice caller: resolve_splice_member_call (poly.rs:1343)<br/>guarded by try_ground_member_type (ast.rs:2186)"]
         S --> L
-        O["TraitObligation { slots }<br/>call-site operand record (poly.rs:27)"]
+        O["TraitObligation { slots }<br/>call-site operand record (poly.rs:25)"]
     end
     O --> R
     subgraph Resolve["Resolve loop (per member call site)"]
-        R["resolve_user_bound (poly.rs:7756)"]
-        R --> C["CtorImage ty: collect identity matches on<br/>(idx, module), bypassing find_bound_impl's<br/>specificity order (poly.rs:7780)"]
-        C --> T["compatibility-conditioned tie rule:<br/>incompatible pins = not a match;<br/>more pins preferred (ctor_pin_count :8078);<br/>same-shape tie = ambiguity error"]
+        R["resolve_user_bound (poly.rs:7771)"]
+        R --> C["CtorImage ty: collect identity matches on<br/>(idx, module), bypassing find_bound_impl's<br/>specificity order (poly.rs:7795)"]
+        C --> T["compatibility-conditioned tie rule:<br/>incompatible pins = not a match;<br/>more pins preferred (ctor_pin_count :8093);<br/>same-shape tie = ambiguity error"]
         T --> G["re-ground obligation slots through<br/>the caller's θ; unify declared member sig"]
         G --> MI["mint (word, θ_call), canonically sorted,<br/>into impl_monos — never the empty subst"]
     end
@@ -158,6 +158,11 @@ flowchart TD
 - **F13** (order-dependent field-mismatch after an `inline` word with a `~[` param) is
   dodged by idiom — the pinned non-inline member body (`: map swap ~[ ... ] Opt? ;`) —
   not fixed.
+- **The S2-8 tie rule's pin metric counts top-level pins only** (final-review note):
+  `ctor_pin_count` sums each candidate's top-level `Concrete` arguments, so a nested
+  complete-application pin (`for Pair[Opt[i64] 'X]`) ties as 0 pins and can raise the
+  conservative ambiguity error even when one candidate is more specific. Loud, never a
+  silent wrong pick; no S2 exit criterion needs nested pins — revisit if a use appears.
 - **W3/W4 goldens run over fixture-local type twins**, not lib `core::option` /
   `core::result`, per the S1-era module-identity wart recorded in
   [Open questions](#open-questions); the wart fix is deferred to **P7b.S4**
@@ -168,9 +173,14 @@ flowchart TD
   `poly_env` keys), and same-named ctor env dispatch is module-blind name+input-shape
   first-match (identically-shaped ctors cross-pick). Deferred to **P7b.S5**.
 
+Structure note (CLAUDE.md phase-exit growth-signal re-run, final review): the slice grew
+`parser.rs` (+1406), `check/poly.rs` (+1626), and `ast.rs` (+685) insertions; no 2+ signals
+co-occur (import sets stay homogeneous, no new mixed-axis code, every new function is wired
+into a caller, no forced cycle), so no module split is forced — re-run at P7b.S4's exit.
+
 ## Implementation
 
-Verified against HEAD `1d1a3c6` this session: every symbol below was read at its cited
+Verified against the final-review fix pass: every symbol below was read at its cited
 location, and the full gate passes (`cargo fmt --check`, `cargo clippy -- -D warnings`,
 `cargo test` — 78 suites green; `tests/phase7b_slice2.rs` 17/17,
 `tests/phase7b_slice1.rs` 16/16).
@@ -184,17 +194,17 @@ location, and the full gate passes (`cargo fmt --check`, `cargo clippy -- -D war
 | S2-3 | `member_shape_is_supported` App arm (head = trait var) + App-free-row Quotation arm | `f394b4b` | `parser.rs:378` | error #4 |
 | S2-4 | bare/partial ctor desugar to applied-fresh-var; user spelling rendered; `'ctor*` prefix reserved | `8a97781` | `parser.rs:568`/`:589`/`:872` | #5, #7 |
 | S2-5 | member-word `PolySig` union id space (target vars first, locals appended, real spans) | `8a97781` | `ast.rs` `ImplTarget.ty_var_spans`, `MemberVarMap` | #5 |
-| S2-6 | leading-slot grounding App arm; concrete-target App fenced parser-side (recorded deviation, see [Open questions](#open-questions)) | `8a97781` | `ast.rs:2242` (App arm `:2330`); `fence_member_app_against_concrete_target` `ast.rs:2096` ← `parser.rs:4163` | #3, #7 |
+| S2-6 | leading-slot grounding App arm; concrete-target App fenced parser-side (recorded deviation, see [Open questions](#open-questions)) | `8a97781` | `ast.rs:2242` (App arm `:2296`); `fence_member_app_against_concrete_target` `ast.rs:2096` ← `parser.rs:4163` | #3, #7 |
 | S2-7 | `n ≤ m` arity check inside the grounding arm, at parse time | `8a97781` | `ast.rs:2336` | error #3 |
-| S2-8 | CtorImage identity arm; compatibility-conditioned tie rule per site; `for 'T` catch-all guard | `d88b056` | `poly.rs:8362` (arm), `:7780` (tie), `:8269` (guard) | #8, error #5 |
-| S2-9 | obligation carries operand slots; resolve loop re-grounds and mints canonically-sorted θ_call; empty subst never seeded | `d88b056` | `poly.rs:27` (`TraitObligation.slots`), `:7869` | #2, #4 |
-| S2-10 | cross-call fence **not** lifted; p8 fence text regression-pinned | `d88b056` | test `poly.rs:11468` | unit |
+| S2-8 | CtorImage identity arm; compatibility-conditioned tie rule per site; `for 'T` catch-all guard | `d88b056` | `poly.rs:8377` (arm), `:7795` (tie), `:8284` (guard) | #8, error #5 |
+| S2-9 | obligation carries operand slots; resolve loop re-grounds and mints canonically-sorted θ_call; empty subst never seeded | `d88b056` | `poly.rs:25` (`TraitObligation.slots`), `:7884` | #2, #4 |
+| S2-10 | cross-call fence **not** lifted; p8 fence text regression-pinned | `d88b056` | test `poly.rs:11531` | unit |
 | S2-11 | orphan rule: Generic target homes to the ctor's module; builtin images trait-module-only | `8a97781` | `declarations.rs:491` | #9 |
 | S2-12 | mangling keys ctor images on `GenericId` (`c{idx}m{module}_{name}`) | `d88b056` | `ast.rs:2865` | #10 |
-| S2-13 | zero-field ctor arm unifies with the ambient var (symbolic path replaces the vacuous exact-match gate) | `8a97781` | `poly.rs:5447`; unit test `:13359` | #6 |
-| S2-14 | ledger of kept fences / non-changes (i)–(v) | all | (i) `parser.rs:378`; (ii) App-target fence; (v) `poly.rs:7779`+ `unreachable!` arms stay | — |
-| S2-15 | diagnostics family a–f | `f394b4b`/`8a97781`/`d88b056` | a `declarations.rs:417`; b parser-side both spans; c `ast.rs:2336`; d `parser.rs:3799`ff; e `poly.rs:8269` + `:8088`; f `ast.rs:2177` | errors #1–#5 |
-| S2-16 | poly-caller unification; new mono member-call path; guarded splice path | `d88b056` | `poly.rs:2026` / `:1164` / `:1697` (wired `terms.rs:884`) / `:1343` | #2, #4 |
+| S2-13 | zero-field ctor arm unifies with the ambient var (symbolic path replaces the vacuous exact-match gate) | `8a97781` | `poly.rs:5462`; unit test `:13417` | #6 |
+| S2-14 | ledger of kept fences / non-changes (i)–(v) | all | (i) `parser.rs:378`; (ii) App-target fence; (v) `poly.rs:8816`+ `unreachable!` arms stay | — |
+| S2-15 | diagnostics family a–f | `f394b4b`/`8a97781`/`d88b056` | a `declarations.rs:444`; b parser-side both spans; c `ast.rs:2336`; d `parser.rs:3799`ff; e `poly.rs:8284` + `:8103`; f `ast.rs:2186` | errors #1–#5 |
+| S2-16 | poly-caller unification; new mono member-call path; guarded splice path | `d88b056` | `poly.rs:2041` / `:1164` / `:1697` (wired `terms.rs:884`) / `:1343` | #2, #4 |
 
 ### Goldens (`tests/phase7b_slice2.rs`, all passing)
 
@@ -231,9 +241,9 @@ Errors: #1 `hkt_member_without_dispatchable_input_is_located_error`,
 Non-regression (W6): `applied_target_functor_dispatch_unchanged`,
 `s3t_explicit_instantiation_spelling_unchanged`, plus `tests/phase7b_slice1.rs` green;
 the S2-10 fence baseline is the unit test `non_member_app_cross_call_still_rejects_with_p8_fence_text`
-(`poly.rs:11468`).
+(`poly.rs:11531`).
 
-### Load-bearing anchors at HEAD `1d1a3c6`
+### Load-bearing anchors (re-verified at the final-review fix pass)
 
 The original spec's anchor table pinned pre-implementation lines at `5443a0d`; the
 implementation shifted them. Current positions, verified this session:
@@ -243,15 +253,15 @@ implementation shifted them. Current positions, verified this session:
 | `parse_trait_decl` / header multi-var gate | `parser.rs:3587` / `:3598` |
 | `parse_trait_member_effect` (seeds var 0, gate lifted) | `parser.rs:3760` |
 | `member_shape_is_supported` / App-in-row fence | `parser.rs:378` / `:411` |
-| S2-15.a dispatchability error | `declarations.rs:417` |
-| `ground_member_type` / `try_ground_member_type` / `ground_member_poly` | `ast.rs:2127` / `:2177` / `:2242` |
+| S2-15.a dispatchability error | `declarations.rs:444` |
+| `ground_member_type` / `try_ground_member_type` / `ground_member_poly` | `ast.rs:2127` / `:2186` / `:2242` |
 | `fence_member_app_against_concrete_target` | `ast.rs:2096` (call site `parser.rs:4163`) |
-| `match_impl_target_rec` / CtorImage arm / `for 'T` guard | `poly.rs:8250` / `:8362` / `:8269` |
-| `resolve_user_bound` / tie rule / `ctor_pin_count` | `poly.rs:7756` / `:7780` / `:8078` |
-| `poly_trait_member_call` / `unify_member_operand` / fronting | `poly.rs:2026` / `:1164` / `:2266` |
+| `match_impl_target_rec` / CtorImage arm / `for 'T` guard | `poly.rs:8265` / `:8377` / `:8284` |
+| `resolve_user_bound` / tie rule / `ctor_pin_count` | `poly.rs:7771` / `:7795` / `:8093` |
+| `poly_trait_member_call` / `unify_member_operand` / fronting | `poly.rs:2041` / `:1164` / `:2281` |
 | `resolve_mono_member_call` / env-miss wiring | `poly.rs:1697` / `terms.rs:884` |
-| `TraitObligation` (+ `slots`) | `poly.rs:27` |
-| S2-13 zero-field fix | `poly.rs:5447` (unit test `:13359`) |
+| `TraitObligation` (+ `slots`) | `poly.rs:25` |
+| S2-13 zero-field fix | `poly.rs:5462` (unit test `:13417`) |
 | CtorImage mangling | `ast.rs:2865` |
 | `impl_target_module` Generic arm | `declarations.rs:491` |
 
@@ -260,7 +270,7 @@ implementation shifted them. Current positions, verified this session:
 - **S2-13 / F14 routing.** The plan fixed ctor-var arm unification directly (golden #6).
   The recorded fallback — routing W2 around F14 with a field-carrying shape if the fix
   exceeded slice scope — **never fired**: the fix landed in `8a97781`
-  (`poly.rs:5447`, symbolic path) and golden #6 passes. Kept here so the fallback and
+  (`poly.rs:5462`, symbolic path) and golden #6 passes. Kept here so the fallback and
   its trigger remain on record.
 - ~~**S2-10 cross-call lift breadth.**~~ Resolved by the R7 amendment (260831, after the
   three-lane spec review): the fence is **not lifted** — member calls never reach
@@ -274,7 +284,7 @@ implementation shifted them. Current positions, verified this session:
   returns `Type`, not `Result`). Observable behavior conforms; recorded deliberately,
   not silently (Phase 2 review round). Verified at HEAD: fence at `ast.rs:2096`, called
   from `parser.rs:4163`; the `ground_member_type` App arm is the `unreachable!` backstop.
-- **W2's two recorded deviations.** (1) The golden's call carries the explicit
+- **W2's three recorded deviations.** (1) The golden's call carries the explicit
   instantiation `map[i64 Bool]` rather than the bare spelling: `map`'s `'U` is bound
   only by the quotation's rows, and the pre-existing P7.S3t unbound-row-var behavior
   makes the bare spelling unspellable from a mono caller — the dispatch machinery
@@ -282,7 +292,9 @@ implementation shifted them. Current positions, verified this session:
   (2) The observable is `true`, proving the mapped inner value is a `Bool` (i.e.
   `Option[Bool]`), rather than the brief sketch's `some 0` — the exit criterion
   governs the exact stdout, and the fixture-local printer proves the type-directed
-  dispatch.
+  dispatch. (3) The phase doc's Exit sketch writes the member effect as
+  `~[ i64 -- bool ]`, but `~[`-parameters require `inline` (probe log) and the
+  goldens pass plain `[ ... ]` quotation literals to the non-inline member.
 - **W3/W4 run over fixture-local twins — the S1-era module-identity wart (Phase 4,
   supervisor-approved 260831).** Goldens #3/#4 use local `Result`/`Opt`/`Res` twins
   rather than the lib `core::result`/`core::option` types: a lib-declared generic

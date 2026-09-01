@@ -135,9 +135,9 @@ trait: Functor['F: * -> *] :
 /// single-var gate (S2-1) hands the shape to the HKT-aware dispatchability
 /// rule (S2-2), which rejects it as a located declaration-time error naming
 /// the member and the expected trait-var-headed form. The asserted text is
-/// the spec's pinned S2-15.a line (slice2-spec.md, S2-2) with this fixture's
-/// names/spans substituted; the nested-composite note is NOT part of that
-/// pinned text and this fixture has no composite input, so it must be
+/// the brief's pinned S2-15.a draft (slice2-brief.md, R4) with this
+/// fixture's names/spans substituted; the nested-composite note is NOT part
+/// of that pinned text and this fixture has no composite input, so it must be
 /// absent (it appears only when the inputs actually nest the trait var --
 /// pinned at unit level in `check/declarations.rs`).
 #[test]

@@ -1825,6 +1825,21 @@ pub(super) fn resolve_mono_member_call(
     };
     let word_sym = poly.trait_resolve.word_symbols[*widx].clone();
     if imp.target.is_concrete() {
+        // S2-16 (final-review fix): a concrete target's member sig has no
+        // free variables to bind, so an explicit type/length-argument list
+        // is provably meaningless here -- reject it instead of silently
+        // dropping it. The generic branch below is the one that reads the
+        // list (via `check_poly_call`'s θ seeding); the widened
+        // `poly_call_takes_type_args` clause admits the spelling for member
+        // names on its behalf.
+        if !type_args.is_empty() || !len_args.is_empty() {
+            return Err(no_type_arguments_error(
+                span,
+                name,
+                !type_args.is_empty(),
+                !len_args.is_empty(),
+            ));
+        }
         // Concrete impl: the member word is monomorphic, grounded at the
         // target (the desugar did it). Check the slots against the grounded
         // sig and record `span -> symbol` in `builtin_overloads` -- the same
@@ -11125,7 +11140,7 @@ mod tests {
     /// θ_call, never the empty subst.
     #[test]
     fn poly_caller_member_call_records_slot_map_and_composes_theta_call() {
-        let (module, recorded) = checked_like_a_build(
+        let (_, recorded) = checked_like_a_build(
             "type: Opt['T] | None | Some 'T ;\n\
              trait: Functor['F: * -> *] :\n\
              map ( 'F['T] [ 'T -- 'U ] -- 'F['U] ) ;\n\
@@ -11420,6 +11435,49 @@ mod tests {
         assert!(
             err.contains("qualify the call with the claiming trait's module"),
             "{err}"
+        );
+    }
+
+    /// S2-16 (final-review fix): a mono call resolving through a *concrete*
+    /// impl's member may not carry an explicit type-argument list. The
+    /// widened `poly_call_takes_type_args` clause admits the spelling for
+    /// member names because the generic branch reads it (W2's θ seeding);
+    /// a concrete target's member sig has no free variables to bind, so the
+    /// list is provably meaningless and is rejected, not silently dropped.
+    #[test]
+    fn mono_concrete_member_call_with_explicit_type_args_is_error() {
+        let err = check_src(
+            "type: Opt['T] | None | Some 'T ;\n\
+             trait: Functor['F] : size ( 'F -- i64 ) ; ;\n\
+             impl: Functor for Opt[i64]\n\
+               : size drop 1 ;\n\
+             ;\n\
+             : main ( -- ) 5 Some size[i64] drop ;\n",
+        )
+        .expect_err("explicit type args on a concrete member call");
+        assert!(
+            err.contains("takes no type arguments"),
+            "the meaningless list is rejected: {err}"
+        );
+    }
+
+    /// S2-16 (final-review fix, corner): a user's own mono word that merely
+    /// shares a trait member's name is claimed by the env route first -- the
+    /// route that wins the bare call and cannot read an argument list -- so
+    /// the widened explicit-instantiation clause must not admit the name,
+    /// and the pre-S2-16 rejection stands (the list used to be silently
+    /// dropped into the env call).
+    #[test]
+    fn mono_word_colliding_with_member_name_rejects_explicit_type_args() {
+        let err = check_src(
+            "trait: Functor['F] : size ( 'F -- i64 ) ; ;\n\
+             : size ( i64 -- i64 ) drop 7 ;\n\
+             : main ( -- ) 5 size[i64] . ;\n",
+        )
+        .expect_err("explicit type args on a name the env route claims");
+        assert!(
+            err.contains("takes no type arguments"),
+            "the collision restores the pre-widening rejection: {err}"
         );
     }
 

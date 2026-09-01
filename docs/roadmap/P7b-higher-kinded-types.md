@@ -142,7 +142,11 @@ modules (same-named ctors; the `$$N` overload suffixes are lowering symbols, not
 `poly_env` keys) gets `mono_member_unroutable_error` — mono member routing should resolve
 through the same registry the poly path uses; (b) same-named ctor env dispatch is
 module-blind name+input-shape *first-match*, so identically-shaped ctors in two modules
-cross-pick each other's words (S2's #10 fixture had to disambiguate ctor payloads).
+cross-pick each other's words (S2's #10 fixture had to disambiguate ctor payloads); and
+(c) the nested-receiver member diagnostic hardcodes the example variable `'F` regardless
+of the trait header's actual variable spelling (`declarations.rs`
+`nested_receiver_member_error`) — fixing it interpolates the header variable and updates
+the two pinned goldens.
 **Exit:** a mono caller in a module that can see both impls dispatches a colliding
 member word per its operand's constructor; same-named ctors with identical payload
 shapes resolve by a pinned rule (module scope or qualified spelling), and the #10

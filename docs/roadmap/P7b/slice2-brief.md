@@ -195,7 +195,7 @@ same-named ctors, two modules, one Functor impl each, both dispatched in one pro
 declaration representable, `call` blind;Monad.bind is a later slice's extension).
 (ii) Fully abstract App-headed targets (`for 'F['T]`) keep the fence (m3 shows they
 degrade safely, but the fence's message is better UX and no exit criterion needs
-them). (iii) Quotation-valued outputs stay an S10 slice-7 boundary. (iv) The F10
+them). (iii) Quotation-valued outputs stay an S10 slice-7 boundary. (iv) The F12
 ctor-word wart (`5 Box` in `main`): record, do not fix in S2 — goldens use
 declared-sig helpers, as the S1 goldens already do.
 
@@ -352,5 +352,5 @@ existing responsibilities (parsing traits, grounding members, dispatching bounds
   `call` cannot see through them, quotation-valued outputs are an S10 boundary. A
   later slice extends the quotation-effect machinery; the fence messages captured in
   p9a/p9e are its baseline.
-- **The F10 ctor-word wart** (`5 Box` in `main`): candidate micro-slice; recorded with
+- **The F12 ctor-word wart** (`5 Box` in `main`): candidate micro-slice; recorded with
   a minimal repro.

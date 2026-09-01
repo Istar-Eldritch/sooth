@@ -1219,17 +1219,23 @@ fn poly_call_takes_type_args(
                         sig, stack, name, span, ctx, arrays, cells, refs, impls, traits,
                     )
                 })
-        }) || poly.trait_resolve.traits.iter().any(|t| {
-            // P7b.S2 (S2-16, mono caller): a trait member name takes the
-            // explicit-instantiation spelling too -- the mono member path
-            // (env-miss branch) routes it to the member word's `check_poly
-            // _call`, whose θ seeding is the pinned remedy for a variable
-            // only a quotation's rows mention (`map`'s `'U`). The clause
-            // only widens the allow for names no earlier route claims
-            // (members are never locals/builtins/eliminators, and the
-            // six comparison names are combinators, excluded above).
-            t.members.iter().any(|m| m.name == name)
-        }))
+        }) || (!env.contains_key(name)
+            && poly.trait_resolve.traits.iter().any(|t| {
+                // P7b.S2 (S2-16, mono caller): a trait member name takes the
+                // explicit-instantiation spelling too -- the mono member path
+                // (env-miss branch) routes it to the member word's `check_poly
+                // _call`, whose θ seeding is the pinned remedy for a variable
+                // only a quotation's rows mention (`map`'s `'U`). The clause
+                // only widens the allow for names no earlier route claims
+                // (members are never locals/builtins/eliminators, and the
+                // six comparison names are combinators, excluded above) --
+                // and a plain-`env` word of the same name IS such a claim:
+                // the env route wins the bare call and cannot read an
+                // argument list, so the pre-widening rejection stands for it
+                // (final-review fix; the clause used to admit the colliding
+                // spelling and the env call silently dropped the list).
+                t.members.iter().any(|m| m.name == name)
+            })))
 }
 
 /// P7.S12 (R7.1): the three outcomes of scanning forward from a tagged
