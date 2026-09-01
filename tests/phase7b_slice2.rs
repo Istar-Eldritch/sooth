@@ -460,3 +460,285 @@ impl: Functor for 'T
         "{err}"
     );
 }
+
+// ---- Phase 4: end-to-end goldens and non-regression ----
+
+// The W3/W4 twins. Both witnesses run over fixture-local twins of
+// `core::option`/`core::result` rather than the lib types themselves: a
+// lib-declared generic header cannot take a ctor-keyed `impl:` from a user
+// module yet. The S1-era module-identity convention mints the operand's
+// instantiation at the *naming* module (`resolve_type_or_apply` ->
+// `instantiate_*` with the parsing module, `parser.rs:6862-6880`; memo key
+// `(idx, module, args, lens)`), while the impl target pattern records the
+// header's *declaring* module, and both dispatch paths compare the two for
+// equality (`match_impl_target_rec`'s `Generic` arm; the CtorImage identity
+// match feeds on the same recorded module). Observed verbatim: a mono caller
+// reports "no `impl:` in this program dispatches on these operands"; a poly
+// caller reports "cannot instantiate `'F` ... does not satisfy `Functor`".
+// This is the wart documented at golden #7 (in this file) and deferred to a
+// future ruling (slice2-spec.md, Open questions); committed W2 (golden #2
+// above) set the twin precedent. What W3/W4 prove -- leading-slot
+// displacement and shared-bound dispatch -- is the machinery under test,
+// not the type's provenance.
+
+/// Golden (positive #3, W3): `map` over `Result[i64 i64]` dispatches to the
+/// Result impl and passes `Err` through untouched -- exit criterion #4's
+/// separate-impl half, and the witness that rules out R2(c) (multi-arg ctors
+/// are not fenced). The Ok path prints the *mapped* payload (`1` with
+/// `[ 1 sub ]` applied: `0`); the Err path prints the *original* payload
+/// (`2` -- the map never touched it), so the exact stdout pins both the
+/// dispatch and the pass-through.
+///
+/// The trait is `Functor['F: * -> * -> *]` with member
+/// `map ( 'F['T 'E] [ 'T -- 'U ] -- 'F['U 'E] )`: a `* -> *` Functor's
+/// `'F['T]` cannot unify against a two-argument `Result` operand (App-vs-App
+/// unification requires equal argument counts), so W3's trait declares the
+/// two-parameter kind, as the S2-8 tie-rule unit fixtures do. The Err
+/// pass-through IS the S2-6 leading-slot displacement reading: the output
+/// `'F['U 'E]` displaces slot 0 with `'U` while slot 1 stays the target's
+/// own `'E`. The Err arm destructures before reconstructing
+/// (`Err> swap drop Err`) because an arm-bound variant value cannot escape
+/// the arm that bound it; the quotation between the scrutinee and the
+/// payload is dropped explicitly (the pinned body idiom's `drop drop`, split
+/// around a field-carrying payload). The call carries the explicit
+/// instantiation `map[i64 i64 i64]` over the member word's union id space
+/// (target vars `'ctor0 'ctor1` first, the appended local `'U` last -- the
+/// dispatch machinery is fully exercised either way; this is recorded W2
+/// deviation (1), slice2-spec.md Open questions).
+#[test]
+fn functor_map_over_result_dispatches_to_the_result_impl_and_passes_err_through() {
+    let src = "\
+type: Result['T 'E] | Ok 'T | Err 'E ;
+trait: Functor['F: * -> * -> *] :
+  map ( 'F['T 'E] [ 'T -- 'U ] -- 'F['U 'E] ) ;
+;
+impl: Functor for Result
+  : map swap ~[ ( Ok ) Ok> swap call Ok ] ~[ ( Err ) Err> swap drop Err ] Result? ;
+;
+: showres ( Result[i64 i64] -- )
+  ~[ ( Ok ) Ok> . ] ~[ ( Err ) Err> . ] Result? ;
+: mkok ( i64 -- Result[i64 i64] ) Ok ;
+: mkerr ( i64 -- Result[i64 i64] ) Err ;
+: main ( -- ) 1 mkok [ 1 sub ] map[i64 i64 i64] showres
+  2 mkerr [ 1 sub ] map[i64 i64 i64] showres ;
+";
+    let (_t, entry) = single_file_hosted("w3-functor-map-result", src);
+    let out = build_and_run(&entry);
+    assert_eq!(out, "0\n2\n");
+}
+
+/// Golden (positive #4, W4): `twice` -- a poly body holding ONE shared
+/// `Functor` bound -- calls `map` twice, and the bound dispatches per
+/// constructor at the call sites: the Opt impl serves the `Opt` operand, the
+/// Res impl the `Res` operand (exit criterion #4's shared-bound dogfood,
+/// dispatched through one bound word).
+///
+/// Machinery under test: at `twice`'s body check the member call is
+/// App-vs-App unification against the *declared* sig -- the member's header
+/// variable binds to the caller's bound `'F` and the member's locals to the
+/// caller's slot arguments; no `CtorImage` exists yet. The caller's own
+/// instantiation (bare `twice` calls from mono `main`, theta seeded through
+/// the App arm as a `CtorImage`) grounds the head, and S2-9's per-site
+/// re-grounding rebuilds each site's theta_call from the obligation's slot
+/// record -- one monomorph per (word, theta_call), never the empty subst.
+/// Member calls never reach the S2-10 cross-call fence
+/// (`poly_trait_member_call` fronts them), so this golden only exercises
+/// that the fence is not tripped, not that it fired.
+///
+/// Sketch deltas from the brief's W4, recorded in slice2-spec.md's Open
+/// questions: (1) the sketch's `map map` consumes the quotation parameter on
+/// the first call; plain quotations are `Copy`, so the working form binds it
+/// to a local and re-reads it (`| q | q map q map`). (2) The sketch's one
+/// `Functor['F: * -> *]` over both `Some` and `Ok` is kind-inconsistent (see
+/// golden #3), so the shared trait is `* -> * -> *` and both ctor twins are
+/// two-parameter types -- `Opt`'s `Some` carries both slots and `None`
+/// exercises golden #6's zero-field arm unification against the ambient
+/// variable. (3) Local twins per the W3/W4 note above.
+#[test]
+fn functor_map_through_shared_bound_dispatches_per_constructor_from_poly_body() {
+    let src = "\
+type: Opt['T 'E] | None | Some 'T 'E ;
+type: Res['T 'E] | Ok 'T | Err 'E ;
+trait: Functor['F: * -> * -> *] :
+  map ( 'F['T 'E] [ 'T -- 'U ] -- 'F['U 'E] ) ;
+;
+impl: Functor for Opt
+  : map swap ~[ ( Some ) Some> swap rot call swap Some ] ~[ ( None ) drop drop None ] Opt? ;
+;
+impl: Functor for Res
+  : map swap ~[ ( Ok ) Ok> swap call Ok ] ~[ ( Err ) Err> swap drop Err ] Res? ;
+;
+: twice['F: Functor 'T 'E] ( 'F['T 'E] [ 'T -- 'T ] -- 'F['T 'E] )
+  | q |
+  q map
+  q map ;
+: showopt ( Opt[i64 i64] -- ) ~[ ( Some ) Some> drop . ] ~[ ( None ) drop ] Opt? ;
+: showres ( Res[i64 i64] -- ) ~[ ( Ok ) Ok> . ] ~[ ( Err ) Err> . ] Res? ;
+: mkopt ( i64 -- Opt[i64 i64] ) dup Some ;
+: mkres ( i64 -- Res[i64 i64] ) Ok ;
+: main ( -- ) 1 mkopt [ 1 sub ] twice showopt
+  5 mkres [ 1 sub ] twice showres ;
+";
+    let (_t, entry) = single_file_hosted("w4-shared-bound-twice", src);
+    let out = build_and_run(&entry);
+    // `twice` applies `[ 1 sub ]` twice: the Some payload 1 -> -1, the Ok
+    // payload 5 -> 3. Two different impls served the two calls through the
+    // one bound word.
+    assert_eq!(out, "-1\n3\n");
+}
+
+/// Golden (positive #8): a concrete-pinned impl (`for Opt[i64]`) wins over
+/// the ctor-abstract impl (`for Opt`) at an `Opt[i64]` operand -- extends
+/// p11c's specificity control with the bare-ctor desugar as the generic
+/// side. The operand is fully concrete, so dispatch runs the existing
+/// `Concrete`/`Generic` matcher arms and `select_most_specific` (S2-8's
+/// dispatch rule: the CtorImage arm never sees a mono call); the printed `1`
+/// proves the concrete impl's member served the call (`for Opt` prints 2).
+/// The member is the Star-trait `size`: an application-headed member has no
+/// monomorphic representation against a `Concrete` target (the S2-6 fence),
+/// so the specificity contest at a concrete operand is p11c's Star shape
+/// with the ctor target as the generic side. Local twin per the W3/W4 note
+/// above (golden #7's documented wart).
+#[test]
+fn concrete_impl_wins_over_ctor_impl_by_specificity() {
+    let src = "\
+type: Opt['T] | None | Some 'T ;
+trait: Functor['F] : size ( 'F -- i64 ) ; ;
+impl: Functor for Opt[i64]
+  : size drop 1 ;
+;
+impl: Functor for Opt
+  : size drop 2 ;
+;
+: sized['F: Functor] ( 'F -- i64 ) size ;
+: mkopt ( i64 -- Opt[i64] ) Some ;
+: main ( -- ) 5 mkopt sized . ;
+";
+    let (_t, entry) = single_file_hosted("s2-specificity-concrete-vs-ctor", src);
+    let out = build_and_run(&entry);
+    assert_eq!(out, "1\n");
+}
+
+/// Golden (positive #10, S2-12): two same-named constructors in two modules,
+/// one `Functor` impl each, both dispatched in one program -- a's `Widget`
+/// prints 1, b's prints 2. The two impls' member words share one synthesized
+/// name (`size;Functor;<trait module>;Widget['T0]` -- the shape render
+/// carries no module identity), so `overload_symbols` suffixes them `$$0` /
+/// `$$1`; distinct lowering symbols are what keeps the two dispatches from
+/// monomorphizing to one specialization (which would print the same number
+/// twice -- the S1-12 residual hazard S2-12 closes).
+///
+/// Two pre-existing behaviors the fixture works around (documented, not
+/// hidden): (a) a *mono* caller of these member words gets
+/// `mono_member_unroutable_error` -- the colliding words' `$$N` overload
+/// symbols are not `poly_env` keys (that map is keyed by the bare word
+/// name) -- so the dispatch goes through the poly bounded caller `sized`,
+/// whose bound dispatch is whole-program; (b) the generated-ctor `env`
+/// dispatch is module-blind name+input-shape first-match (the F12 ctor-word
+/// family), so identical payload types would cross-pick across modules --
+/// b's `Widget` carries a `str` payload so each module's ctor call matches
+/// only its own candidate. Each module constructs through a private
+/// declared-sig helper (`mk`, the F12 idiom) and exports only `run`, whose
+/// effect names no private type.
+#[test]
+fn same_named_ctors_in_two_modules_dispatch_distinct_impls() {
+    let t = Tree::new("s2-12-same-named-ctors");
+    t.write(
+        "sooth.pkg",
+        &format!(
+            "package: p7bs2 ;\nlayer: hosted ;\ndepends: core path \"{root}/lib/core\" ;\ndepends: hosted path \"{root}/lib/hosted\" ;\n",
+            root = env!("CARGO_MANIFEST_DIR")
+        ),
+    );
+    t.write(
+        "f.sth",
+        "import: intrinsics * ;\n\
+         trait: Functor['F] : size ( 'F -- i64 ) ; ;\n\
+         : sized['F: Functor] ( 'F -- i64 ) size ;\n\
+         export: Functor sized ;\n",
+    );
+    t.write(
+        "a.sth",
+        "import: intrinsics * ;\nimport: self::f * ;\n\
+         type: Widget['T] v 'T ;\n\
+         impl: Functor for Widget\n  : size drop 1 ;\n;\n\
+         : mk ( i64 -- Widget[i64] ) Widget ;\n\
+         : run ( i64 -- i64 ) mk sized ;\n\
+         export: run ;\n",
+    );
+    t.write(
+        "b.sth",
+        "import: intrinsics * ;\nimport: self::f * ;\n\
+         type: Widget['T] v 'T ;\n\
+         impl: Functor for Widget\n  : size drop 2 ;\n;\n\
+         : mk ( str -- Widget[str] ) Widget ;\n\
+         : run ( str -- i64 ) mk sized ;\n\
+         export: run ;\n",
+    );
+    let entry = t.write(
+        "main.sth",
+        "import: intrinsics * ;\nimport: hosted::show | . | ;\n\
+         import: self::f * ;\nimport: self::a ;\nimport: self::b ;\n\
+         : main ( -- ) 5 a::run . \"x\" b::run . ;\n",
+    );
+    let out = build_and_run(&entry);
+    assert_eq!(out, "1\n2\n");
+}
+
+/// Non-regression (W6, p2): the applied-target Functor control -- an S1-era
+/// applied target (`for Box[i64]`, a `Concrete` pattern) dispatching through
+/// a bounded poly caller at a concrete operand (theta('F) is a concrete
+/// `Struct`, a Star variable -- no CtorImage anywhere) -- is unchanged. The
+/// impl target's own parse mints `Box[i64]`, which is why `5 Box` in `main`
+/// resolves (the F12 ctor-word wart fires only when nothing has named the
+/// instantiation).
+#[test]
+fn applied_target_functor_dispatch_unchanged() {
+    let src = "\
+type: Box['T] v 'T ;
+trait: Functor['F] : size ( 'F -- i64 ) ; ;
+impl: Functor for Box[i64]
+  : size drop 1 ;
+;
+: sized['F: Functor] ( 'F -- i64 ) size ;
+: main ( -- ) 5 Box sized . ;
+";
+    let (_t, entry) = single_file_hosted("w6-applied-target-control", src);
+    let out = build_and_run(&entry);
+    assert_eq!(out, "1\n");
+}
+
+/// Non-regression (W6): the S3t-style explicit instantiation -- theta seeded
+/// from the call site's `[...]` list over a declared quotation parameter,
+/// sorted, and minted (the S1 golden's `pairwise[i64 f64]` shape) -- still
+/// parses, checks, and monomorphs unchanged, in a program that also runs an
+/// S2 member call. The bare-ctor spelling inside an instantiation list
+/// (`twice[Opt i64]`) stays gated (p9g: the shared arity gate), which is why
+/// the HKT-bound word `twice` in golden #4 is called bare.
+#[test]
+fn s3t_explicit_instantiation_spelling_unchanged() {
+    let src = "\
+type: Opt['T] | None | Some 'T ;
+trait: Functor['F: * -> *] :
+  map ( 'F['T] [ 'T -- 'U ] -- 'F['U] ) ;
+;
+impl: Functor for Opt
+  : map swap ~[ ( Some ) Some> swap call Some ] ~[ ( None ) drop drop None ] Opt? ;
+;
+: q['T 'U] ( 'T [ 'T -- 'U ] -- 'U ) call ;
+: mkopt ( i64 -- Opt[i64] ) Some ;
+: showopt ( Opt[i64] -- ) ~[ ( Some ) Some> . ] ~[ ( None ) drop ] Opt? ;
+: main ( -- )
+  1 mkopt [ 1 sub ] map[i64 i64] showopt
+  2 [ 1 sub ] q[i64 i64] . ;
+";
+    let (_t, entry) = single_file_hosted("w6-s3t-explicit-instantiation", src);
+    let out = build_and_run(&entry);
+    // The member call maps 1 -> 0 (prints 0); the explicitly-instantiated
+    // `q[i64 i64]` applies `[ 1 sub ]` to 2 (prints 1).
+    assert_eq!(out, "0\n1\n");
+}
+
+// Non-regression (W6, suite-level): `tests/phase7b_slice1.rs` staying green
+// is the trio's third leg -- covered by the full `cargo test` run, not by a
+// test in this file.

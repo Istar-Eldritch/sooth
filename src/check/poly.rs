@@ -11268,7 +11268,8 @@ mod tests {
         );
         // The bare `for R2` impl's member word: its desugared target shape
         // renders `R2['T0 'T1]` (two fresh pattern variables), where the
-        // pinned impl's renders `R2[i64 'T1]`.
+        // pinned impl's renders `R2[i64 'T0]` (the pin, then the padded
+        // fresh var -- the FIRST var interned in the target builder).
         assert!(
             monos[0].callee.contains("R2['T0 'T1]"),
             "the bare `for R2` impl served the site: {}",

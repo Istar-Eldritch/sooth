@@ -675,6 +675,34 @@ The remaining runtime witnesses and the full suite green.
   `Option[Bool]`), rather than the brief sketch's `some 0` — the exit criterion
   governs the exact stdout, and the fixture-local printer proves the type-directed
   dispatch.
+- **W3/W4 run over fixture-local twins — the S1-era module-identity wart (Phase 4,
+  supervisor-approved 260831).** Goldens #3/#4 use local `Result`/`Opt`/`Res` twins
+  rather than the lib `core::result`/`core::option` types: a lib-declared generic
+  header cannot take a ctor-keyed `impl:` from a user module yet. The wart, precisely:
+  the operand's instantiation is minted at the *naming* module (`resolve_type_or_apply`
+  → `instantiate_*` with the parsing module, `parser.rs:6862-6880`; memo key
+  `(idx, module, args, lens)`), while the impl target pattern records the header's
+  *declaring* module (`parse_impl_target_pattern` → `poly_generic_header`), and both
+  dispatch paths compare the two for equality — `match_impl_target_rec`'s `Generic`
+  arm (`found_module != *module`) and the CtorImage identity match
+  (`unify_poly_input`'s App arm binds θ('F) from `enum_instantiation_of`, which reads
+  the same recorded module). Observed verbatim: a mono caller reports "no `impl:` in
+  this program dispatches on these operands"; a poly caller reports "cannot
+  instantiate `'F` … does not satisfy `Functor`". This is the same convention golden #7
+  documents and routed around; committed W2 (golden #2) set the twin precedent. What
+  W3/W4 prove — leading-slot displacement and shared-bound App-vs-App unification with
+  S2-9's re-grounding — is the machinery under test, not the type's provenance; the
+  wart fix (memo key or module-blind matching) is an S1-era convention change deferred
+  to a future slice/ruling.
+- **W4's sketch deltas (Phase 4).** (1) The brief's `map map` consumes the quotation
+  parameter on the first call; plain quotations are `Copy`, so the working form binds
+  it to a local and re-reads it (`| q | q map q map`). (2) The sketch's one
+  `Functor['F: * -> *]` over both `Some` and `Ok` is kind-inconsistent — a `* -> *`
+  Functor's `'F['T]` cannot unify against a two-argument `Result` operand (App-vs-App
+  unification requires equal argument counts) — so the shared trait is
+  `* -> * -> *` (as the S2-8 tie-rule unit fixtures already are) and both ctor twins
+  are two-parameter types, `Opt`'s `None` exercising golden #6's zero-field arm
+  unification. (3) Local twins per the bullet above.
 
 ## Anchor status
 
