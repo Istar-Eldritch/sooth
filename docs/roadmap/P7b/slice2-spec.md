@@ -160,7 +160,13 @@ flowchart TD
   not fixed.
 - **W3/W4 goldens run over fixture-local type twins**, not lib `core::option` /
   `core::result`, per the S1-era module-identity wart recorded in
-  [Open questions](#open-questions); the wart fix is deferred to a future slice.
+  [Open questions](#open-questions); the wart fix is deferred to **P7b.S4**
+  ([P7b-higher-kinded-types.md](../P7b-higher-kinded-types.md)).
+- **Member-word routing residuals** (exposed by golden #10, documented in its comment):
+  a mono caller of a member word whose synthesized name collides across modules gets
+  `mono_member_unroutable_error` (the `$$N` overload suffixes are lowering symbols, not
+  `poly_env` keys), and same-named ctor env dispatch is module-blind name+input-shape
+  first-match (identically-shaped ctors cross-pick). Deferred to **P7b.S5**.
 
 ## Implementation
 
@@ -193,20 +199,35 @@ location, and the full gate passes (`cargo fmt --check`, `cargo clippy -- -D war
 ### Goldens (`tests/phase7b_slice2.rs`, all passing)
 
 Positive: #1 `hkt_trait_declaration_with_app_and_quotation_member_typechecks` (W1),
-# 2 `functor_map_over_option_dispatches_and_produces_option_of_bool` (W2),
-# 3 `functor_map_over_result_dispatches_to_the_result_impl_and_passes_err_through` (W3),
-# 4 `functor_map_through_shared_bound_dispatches_per_constructor_from_poly_body` (W4),
-# 5 `bare_ctor_impl_target_resolves_and_dispatches`,
-# 6 `zero_field_ctor_unifies_with_ambient_var_in_poly_arm`,
-# 7 `partially_applied_ctor_impl_target_binds_explicit_prefix`,
-# 8 `concrete_impl_wins_over_ctor_impl_by_specificity`,
-# 9 `ctor_impl_in_ctor_module_satisfies_orphan_rule`,
-# 10 `same_named_ctors_in_two_modules_dispatch_distinct_impls`.
+
+# 2 `functor_map_over_option_dispatches_and_produces_option_of_bool` (W2)
+
+# 3 `functor_map_over_result_dispatches_to_the_result_impl_and_passes_err_through` (W3)
+
+# 4 `functor_map_through_shared_bound_dispatches_per_constructor_from_poly_body` (W4)
+
+# 5 `bare_ctor_impl_target_resolves_and_dispatches`
+
+# 6 `zero_field_ctor_unifies_with_ambient_var_in_poly_arm`
+
+# 7 `partially_applied_ctor_impl_target_binds_explicit_prefix`
+
+# 8 `concrete_impl_wins_over_ctor_impl_by_specificity`
+
+# 9 `ctor_impl_in_ctor_module_satisfies_orphan_rule`
+
+# 10 `same_named_ctors_in_two_modules_dispatch_distinct_impls`
+
 Errors: #1 `hkt_member_without_dispatchable_input_is_located_error`,
-# 2 `trait_header_kind_conflicting_with_member_usage_is_error`,
-# 3 `member_app_arity_exceeding_target_ctor_arity_is_error`,
-# 4 `app_inside_member_quotation_row_is_fenced`,
-# 5 `bare_var_impl_target_does_not_capture_ctor_image`.
+
+# 2 `trait_header_kind_conflicting_with_member_usage_is_error`
+
+# 3 `member_app_arity_exceeding_target_ctor_arity_is_error`
+
+# 4 `app_inside_member_quotation_row_is_fenced`
+
+# 5 `bare_var_impl_target_does_not_capture_ctor_image`
+
 Non-regression (W6): `applied_target_functor_dispatch_unchanged`,
 `s3t_explicit_instantiation_spelling_unchanged`, plus `tests/phase7b_slice1.rs` green;
 the S2-10 fence baseline is the unit test `non_member_app_cross_call_still_rejects_with_p8_fence_text`
@@ -277,7 +298,8 @@ implementation shifted them. Current positions, verified this session:
   W3/W4 prove — leading-slot displacement and shared-bound App-vs-App unification with
   S2-9's re-grounding — is the machinery under test, not the type's provenance; the
   wart fix (memo key or module-blind matching) is an S1-era convention change deferred
-  to a future slice/ruling.
+  to a future slice/ruling — now scoped as **P7b.S4**
+  ([P7b-higher-kinded-types.md](../P7b-higher-kinded-types.md)).
 - **W4's sketch deltas (Phase 4).** (1) The brief's `map map` consumes the quotation
   parameter on the first call; plain quotations are `Copy`, so the working form binds
   it to a local and re-reads it (`| q | q map q map`). (2) The sketch's one

@@ -101,6 +101,10 @@ The trait machinery. The impl registry keys on `(TraitId, Constructor)` for HKT 
 trait may declare a type variable with a higher kind and use type-level application in member
 signatures. An `impl:` target names a constructor, and the impl is instantiated per call site
 with the call's concrete type arguments.
+Implemented on branch `p7b-s2` (base `5443a0d`): see [slice2-spec](./P7b/slice2-spec.md) —
+now the condensed implemented reference (rulings R1–R11, witnesses, goldens, and the
+recorded deviations live in the [brief](./P7b/slice2-brief.md) and the spec's Open
+questions).
 **Exit:** `trait: Functor 'F` with `map ( 'F['T] ~[ 'T -- 'U ] -- 'F['U] )` type-checks;
 `impl: Functor for Option` resolves; a call to `map` on `Option[i64]` with `~[ i64 -- bool ]`
 dispatches to the Option impl and produces `Option[bool]`; the same call on `Result[i64 Err]`
@@ -113,6 +117,36 @@ a hand-written inline `map` would produce. P7.S3o has landed (bound dispatch rea
 spliced combinator bodies), so this slice extends a working mechanism.
 **Exit:** `Functor.map` called through a bound on an inline word splices to the same IR as a
 hand-written inline `map` would produce; no call frame; no runtime dispatch.
+
+**P7b.S4 — Declaring-module identity for generic instantiations.**
+Carved out of S2's implementation review (260901). An operand of a lib-declared generic
+type is instantiated at the *naming* module (`resolve_type_or_apply` →
+`instantiate_enum`/`instantiate_struct`, memo key `(idx, module, args, lens)`), while an
+impl-target pattern records the *declaring* module — and both dispatch paths compare the
+two for equality. Consequence: `impl: Functor for Option` in a user module never matches
+an `Option[i64]` operand named in that module, so real `core::option`/`core::result`
+cannot take constructor-keyed impls; S2's W3/W4 goldens run over fixture twins for
+exactly this reason (recorded in the spec's Open questions). The fix — a module-blind
+instantiation identity, or module-blind matching — is an S1-era convention change with
+dedup/monomorph-symbol implications, so it gets its own brief rather than a drive-by.
+**Exit:** `impl: Functor for Option` in a user module dispatches for an `Option[i64]`
+operand named in that module; S2's W3/W4 goldens migrate from fixture twins to the real
+lib types unchanged in behavior; no duplicate monomorphs are introduced by the widened
+identity. S3's dogfood (real `Option`/`Result`/`List` through a shared bound) depends on
+this slice or on twin workarounds.
+
+**P7b.S5 — Member-word routing and env-dispatch residuals.**
+Carved out of S2's golden #10 (260901), two pre-existing conventions the S2 machinery
+exposed: (a) a *mono* caller of a member word whose synthesized name collides across
+modules (same-named ctors; the `$$N` overload suffixes are lowering symbols, not
+`poly_env` keys) gets `mono_member_unroutable_error` — mono member routing should resolve
+through the same registry the poly path uses; (b) same-named ctor env dispatch is
+module-blind name+input-shape *first-match*, so identically-shaped ctors in two modules
+cross-pick each other's words (S2's #10 fixture had to disambiguate ctor payloads).
+**Exit:** a mono caller in a module that can see both impls dispatches a colliding
+member word per its operand's constructor; same-named ctors with identical payload
+shapes resolve by a pinned rule (module scope or qualified spelling), and the #10
+workaround (payload disambiguation) becomes unnecessary.
 
 **Dogfood:** implement `Functor` for `Option`, `Result`, and `List`; write a program that
 `map`s over all three through a shared `Functor` bound; the compiled output matches hand-written
