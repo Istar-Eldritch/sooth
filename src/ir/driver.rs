@@ -80,6 +80,37 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
         .iter()
         .map(|w| (w.name.clone(), w.span))
         .collect();
+    let poly_words: HashMap<&str, &WordDef> = module
+        .words
+        .iter()
+        .filter(|w| w.poly.is_some())
+        .map(|w| (w.name.as_str(), w))
+        .collect();
+    // P7b.S3 (S3-1.d): the pre-pass diversion, run above the lowering env
+    // build so both the per-word `FuncBuilder` pass and the dedup/emission
+    // stretch only ever read an already-complete map. Every instantiation
+    // whose callee is a combinator (an `inline` trait member on a generic
+    // target is one) is diverted here by its instantiation symbol: the env
+    // and emission loops skip it (no `IrFunc`, no env entry), and
+    // `lower_resolved_word_call` splices the member body with this
+    // instantiation's own per-θ tables installed for the bracket's duration.
+    let combinator_instantiations: HashMap<String, CallInst> = module
+        .instantiations
+        .values()
+        .chain(&module.transitive_instantiations)
+        .chain(module.splice_records.values())
+        .filter(|inst| {
+            poly_words
+                .get(inst.callee.as_str())
+                .is_some_and(|w| crate::check::is_combinator(w))
+        })
+        .map(|inst| {
+            (
+                crate::ast::instantiation_symbol(&inst.callee, &inst.subst),
+                inst.clone(),
+            )
+        })
+        .collect();
     let mut structs_forced: Vec<StructDecl> = module.structs.to_vec();
     for id in drop_overloads.keys() {
         structs_forced[id.index()].has_drop_overload = true;
@@ -247,6 +278,8 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
             EnvPlan::None,
             &module.splice_records,
             &module.splice_trait_calls,
+            &module.splice_enum_words,
+            &combinator_instantiations,
             &member_uid_seeds,
             // Mirrors `check.rs`'s `word_idx * INLINE_UID_STRIDE` seed:
             // both walk `module.words` in the same order (this loop
@@ -270,12 +303,6 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
     // so the substituted effect carries concrete array types with concrete
     // `N` and the body lowers with no length-variable handling (length
     // polymorphism is discharged here).
-    let poly_words: HashMap<&str, &WordDef> = module
-        .words
-        .iter()
-        .filter(|w| w.poly.is_some())
-        .map(|w| (w.name.as_str(), w))
-        .collect();
     // P7.S4 (R6): add each monomorph's symbol to the lowering env so a
     // `trait_calls` dispatch to a generic-impl member-word monomorph can
     // resolve its arity. A poly word is excluded from the initial env (it
@@ -287,6 +314,11 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
         .chain(&module.transitive_instantiations)
     {
         let symbol = crate::ast::instantiation_symbol(&inst.callee, &inst.subst);
+        // P7b.S3 (S3-1.d): a diverted combinator instantiation mints no
+        // `IrFunc`, so it gets no env entry either.
+        if combinator_instantiations.contains_key(&symbol) {
+            continue;
+        }
         let word = poly_words[inst.callee.as_str()];
         let sig = word
             .poly
@@ -331,6 +363,11 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
         .chain(module.splice_records.values())
     {
         let symbol = crate::ast::instantiation_symbol(&inst.callee, &inst.subst);
+        // P7b.S3 (S3-1.d): a diverted combinator instantiation is spliced at
+        // its dispatch sites, never emitted as a function.
+        if combinator_instantiations.contains_key(&symbol) {
+            continue;
+        }
         if emitted.insert(symbol.clone()) {
             distinct.push((symbol, inst));
         }
@@ -391,6 +428,8 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
             EnvPlan::None,
             &module.splice_records,
             &module.splice_trait_calls,
+            &module.splice_enum_words,
+            &combinator_instantiations,
             // The real map, not an empty one: a composed instantiation's body
             // is exactly where the generic path reaches a member re-splice, so
             // an empty map here would leave P7.S8's R1 inert on that path.
@@ -771,6 +810,64 @@ mod tests {
             uids.iter().copied().min(),
             Some(seed),
             "the first uid minted inside the member body is its seed itself, not `seed + k`"
+        );
+    }
+
+    /// P7b.S3 (S3-1.d): an `inline` member's instantiation is diverted, not
+    /// emitted. Present on the checker's instantiation records with a
+    /// combinator callee -- exactly the population the lowering pre-pass
+    /// builds `combinator_instantiations` from -- and absent from the emitted
+    /// funcs: the `Arity` env loop and the emission loop's `distinct` list
+    /// both skip every diverted symbol, so no `IrFunc` and no env entry ever
+    /// exist for it, while the program still lowers (the splice consumed it).
+    #[test]
+    fn an_inline_members_instantiation_is_diverted_not_emitted() {
+        let src = "trait: Sized['S] :\n\
+             size inline ( 'S -- i64 ) ;\n\
+             ;\n\
+             type: Box['T] v 'T ;\n\
+             impl: Sized for Box['T]\n\
+             : size drop 1 ;\n\
+             ;\n\
+             : usesize['S: Sized] ( 'S -- i64 ) size ;\n\
+             : mkbox ( i64 -- Box[i64] ) Box ;\n\
+             : main ( -- ) 3 mkbox usesize drop ;\n";
+        let tokens = lex(src).unwrap();
+        let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
+        check(&mut module).unwrap();
+        let member = module
+            .words
+            .iter()
+            .find(|w| w.is_trait_member && w.declares_inline)
+            .expect("the impl member word is a module word")
+            .name
+            .clone();
+        let diverted: Vec<String> = module
+            .instantiations
+            .values()
+            .chain(&module.transitive_instantiations)
+            .chain(module.splice_records.values())
+            .filter(|inst| inst.callee == member)
+            .map(|inst| crate::ast::instantiation_symbol(&inst.callee, &inst.subst))
+            .collect();
+        assert!(
+            !diverted.is_empty(),
+            "the member's instantiation is recorded -- the population \
+             `combinator_instantiations` is built from"
+        );
+        let ir = crate::ir::lower(&module).expect("the diverted splice lowers");
+        for sym in &diverted {
+            assert!(
+                ir.funcs.iter().all(|f| &f.name != sym),
+                "a diverted instantiation mints no IrFunc: {sym}"
+            );
+        }
+        assert!(
+            ir.funcs
+                .iter()
+                .any(|f| f.name.starts_with("sooth_mono_usesize")),
+            "the non-inline caller's own monomorph is still emitted, so the \
+             absence above is the diversion, not a failed build"
         );
     }
 

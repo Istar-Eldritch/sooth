@@ -325,6 +325,8 @@ pub(super) fn inline_combinator(
     poly: &mut PolyCtx,
     granted: &HashSet<String>,
     tail: bool,
+    seed: Option<&Subst>,
+    member_splice: bool,
 ) -> Result<Vec<Slot>, String> {
     let name = comb.word.name.as_str();
     // P7.S3o (R1/R2): `check_poly_combinator_args` and the monomorphic
@@ -351,7 +353,7 @@ pub(super) fn inline_combinator(
     let poly_subst = if let Some(sig) = comb.word.poly.as_ref() {
         Some(check_poly_combinator_args(
             sig, span, &stack, name, ctx, env, arrays, cells, refs, slices, prov, scope, poly,
-            granted, tail,
+            granted, tail, seed,
         )?)
     } else {
         let tail_slots = tail_called_param_slots(name, poly.combinators.tail());
@@ -426,7 +428,22 @@ pub(super) fn inline_combinator(
                 return Err(reject_quotation_argument(ctx, span, name));
             } else {
                 match match_slot(found, *want) {
-                    SlotMatch::Exact | SlotMatch::LiteralSizeType => {}
+                    SlotMatch::Exact => {}
+                    // P7b.S3 (S3-1.c): the splice binds these slots as the
+                    // body's locals, so a coerced literal must carry the
+                    // declared size type into the body -- a local drops the
+                    // `literal` flag and a bare `i64` would then mismatch.
+                    // Deviation note (S2): this rewrite runs for EVERY
+                    // monomorphic combinator's argument check, member splice
+                    // or not -- wider than the spec's "path A byte-identical"
+                    // ruling. Deliberate: the mutation is exactly the
+                    // coercion `match_slot` already granted, so an ordinary
+                    // combinator's literal-size operand resolves identically
+                    // (unit-pinned by `literal_size_operand_through_an_
+                    // ordinary_combinator_still_resolves`).
+                    SlotMatch::LiteralSizeType => {
+                        stack[base + i].ty = *want;
+                    }
                     SlotMatch::NeedsSizeConversion => {
                         return Err(size_conversion_needed_error(ctx, span, name, *want));
                     }
@@ -500,6 +517,11 @@ pub(super) fn inline_combinator(
     // cannot collide with a caller local or, under transitive inlining, an
     // outer combinator's locals already in scope. Lowering renames identically
     // (`ir`), so a passed-down literal's captured name stays lexical.
+    // P7b.S3 (S3-1.c): a member splice mints its uid with the ordinary
+    // discipline -- fresh per splice, so two splices of one member body at
+    // two θ write disjoint `(uid, span)` records (S3-1.e). Lowering's
+    // `splice_trait_calls`-routed member splice mints identically, so the
+    // two sides' uid sequences stay in step.
     let uid = prov.inline_uid;
     prov.inline_uid += 1;
     // P7.S3o (R1/R2): mark that we are inside a splice so `check_poly_call`
@@ -519,7 +541,15 @@ pub(super) fn inline_combinator(
     poly.combinator_sig = comb.word.poly.as_deref().cloned();
     poly.combinator_subst = poly_subst.clone();
     poly.combinator_name = Some(name.to_string());
-    let renamed = crate::ast::alpha_rename_locals(comb.terms, uid);
+    // A member splice renames with the member scheme, exactly as lowering's
+    // `splice_combinator_body` does: the member frame and its body's first
+    // nested combinator splice share one uid, so a shared suffix scheme would
+    // collide their same-named locals.
+    let renamed = if member_splice {
+        crate::ast::alpha_rename_member_locals(comb.terms, uid)
+    } else {
+        crate::ast::alpha_rename_locals(comb.terms, uid)
+    };
     let depth = scope.depth();
     let saved_marker = if self_tail {
         let saved = prov.self_tail_combinator.take();
@@ -603,6 +633,7 @@ fn check_poly_combinator_args(
     poly: &mut PolyCtx,
     granted: &HashSet<String>,
     tail: bool,
+    seed: Option<&Subst>,
 ) -> Result<Subst, String> {
     let tail_slots = tail_called_param_slots(name, poly.combinators.tail());
     let n = sig.inputs.len();
@@ -622,7 +653,13 @@ fn check_poly_combinator_args(
     // `LiteralSizeType`) and would otherwise lose on becoming `'T: Copy Ord`
     // library words: a bare `5` carries `i64`, so unifying it first pins `'T`
     // to `i64` and the `usize` operand then reads as a conflict.
-    let mut subst = Subst::default();
+    // P7b.S3 (S3-1.c): an impl-derived seed (`find_bound_impl`'s own `Subst`
+    // for the winning impl) starts θ, so the member splice and the impl
+    // selection agree on the target's variables by construction. `None` at
+    // every non-member call site, so path A is byte-identical. A seeded
+    // binding that operand unification contradicts is a located conflict
+    // error (`unify_poly_input`'s Var arm), never an overwrite.
+    let mut subst = seed.cloned().unwrap_or_default();
     let mut deferred_literals: Vec<(usize, &PolyType)> = Vec::new();
     for (i, pin) in sig.inputs.iter().enumerate() {
         if poly_input_is_quotation(pin) {
@@ -695,7 +732,112 @@ fn check_poly_combinator_args(
             continue;
         }
         let found = stack[base + i];
-        let concrete = apply_subst(sig, pin, &subst, name, span, ctx, arrays, cells, refs)?;
+        // P7b.S3 (S3-1.c): a member signature can declare a variable only its
+        // quotation parameter's *output* binds (`map`'s `'U` in
+        // `[ 'T -- 'U ]`). Pass 1 never unifies quotation pins, so grounding
+        // fails on the unbound variable. Recovery: ground the pin's inputs
+        // alone (they are bound by pass 1), walk the caller literal against
+        // them with an open exit row to learn its actual outputs, unify the
+        // declared outputs against those to bind the leftover variables, and
+        // retry. Ordinary combinators never reach this: their first grounding
+        // succeeds.
+        //
+        // Honesty notes (S1). This recovery is a *speculative probe*: the
+        // literal walk below is a real `check_literal_against_declared_
+        // effect` pass, so it writes the per-splice poly tables
+        // (`splice_records` and friends) and can mutate the type registries
+        // (interned quotation/array shapes) on a body that is walked again
+        // when the grounding retry succeeds -- the same harmless-duplicate
+        // trade the argument-check walk above this function already makes.
+        // Every inner failure (`map_err(|_| e.clone())`) is deliberately
+        // swallowed into the ORIGINAL grounding error `e`: the probe exists
+        // only to rescue the output-only-variable shape, so any probe
+        // failure means the shape was something else and `e` (the unbound-
+        // variable grounding failure at the member's own signature) is the
+        // diagnosis that names the real problem; surfacing the probe's
+        // internal error would blame the caller's literal for a signature-
+        // shaped miss. Not narrowed to specific error classes: the probe has
+        // no way to distinguish "literal genuinely broken" from "literal
+        // fine at some other grounding" without completing the very
+        // grounding that failed.
+        let concrete = match apply_subst(sig, pin, &subst, name, span, ctx, arrays, cells, refs) {
+            Ok(t) => t,
+            Err(e) => {
+                // Member splices only (`seed` is the S3-1.c hop's marker): an
+                // ordinary combinator with an output-only variable stays
+                // uncallable (P7.S11 golden 5).
+                if seed.is_none() {
+                    return Err(e);
+                }
+                let (
+                    PolyType::Quotation(pins, pouts, pin_inline, _, _),
+                    Some(QuotOperand::Literal(id)),
+                ) = (pin, resolve_quotation_operand(found))
+                else {
+                    return Err(e);
+                };
+                let ground_ins: Vec<Type> = pins
+                    .iter()
+                    .map(|p| apply_subst(sig, p, &subst, name, span, ctx, arrays, cells, refs))
+                    .collect::<Result<_, _>>()
+                    .map_err(|_| e.clone())?;
+                let probe_ty = if *pin_inline {
+                    crate::ast::inline_quotation_type(ground_ins, Vec::new())
+                } else {
+                    crate::ast::quotation_type(ground_ins, Vec::new())
+                };
+                let probe_eff = crate::ast::is_quotation_type(probe_ty)
+                    .expect("a freshly interned quotation type is a quotation type");
+                let actual = check_literal_against_declared_effect(
+                    id,
+                    probe_eff,
+                    *pin_inline,
+                    &[],
+                    name,
+                    span,
+                    ctx,
+                    env,
+                    arrays,
+                    cells,
+                    refs,
+                    slices,
+                    prov,
+                    scope,
+                    poly,
+                    granted,
+                    LiteralBoundary {
+                        shape_changing: true,
+                        is_arm: false,
+                        caller_tail: false,
+                        finalize: false,
+                        owning: false,
+                    },
+                    None,
+                )
+                .map_err(|_| e.clone())?;
+                if actual.len() != pouts.len() {
+                    return Err(e);
+                }
+                for (pt, slot) in pouts.iter().zip(&actual) {
+                    unify_poly_input(
+                        sig,
+                        pt,
+                        slot.ty,
+                        name,
+                        span,
+                        ctx,
+                        arrays,
+                        cells,
+                        refs,
+                        &mut subst,
+                        &[],
+                        &[],
+                    )
+                    .map_err(|_| e.clone())?;
+                }
+                apply_subst(sig, pin, &subst, name, span, ctx, arrays, cells, refs)?
+            }
+        };
         // Slice 10a (R1): `apply_subst` grounds an ordinary quotation parameter
         // to `Type::Quotation` and (phase 2) a `~` parameter to
         // `Type::InlineQuotation`; the accessor accepts both, so this let-else
@@ -803,6 +945,22 @@ mod tests {
     use super::*;
     use crate::lexer::lex;
 
+    /// P7b.S3 (S2 deviation): the monomorphic argument loop's
+    /// `LiteralSizeType` slot rewrite applies to every combinator, not only
+    /// the member-splice path the spec cut it for. An ordinary (non-member)
+    /// `inline` word taking a size-typed operand still accepts a bare
+    /// literal: the coerced slot carries the declared type into the spliced
+    /// body, where it is bound as a local and re-checked against the
+    /// declared outputs.
+    #[test]
+    fn literal_size_operand_through_an_ordinary_combinator_still_resolves() {
+        let src = ": keep inline ( usize -- usize ) ;\n: main ( -- ) 5 keep drop ;";
+        let tokens = lex(src).unwrap();
+        let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
+        crate::check::check(&mut module)
+            .expect("a literal coerces to the declared size type through an ordinary splice");
+    }
+
     #[test]
     fn quotation_taking_word_mints_no_symbol() {
         // Slice 12 (R-A1, M-A): recognition is declared, not inferred. An
@@ -859,6 +1017,7 @@ mod tests {
             module: 0,
             span: Span::default(),
             declared_globals: None,
+            is_trait_member: false,
         };
         assert!(
             !w.effect

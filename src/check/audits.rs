@@ -767,6 +767,7 @@ mod tests {
             module: 0,
             span: Span::default(),
             declared_globals: None,
+            is_trait_member: false,
         };
         let out = mk(
             vec![PolyType::Var(0)],
@@ -831,6 +832,7 @@ mod tests {
             module: 0,
             span: Span::default(),
             declared_globals: None,
+            is_trait_member: false,
         };
         let inl = crate::ast::inline_quotation_type(vec![Type::I64], Vec::new());
         let err = audit_word_quotation_positions(&mk(inl), &[], &[], &[]).unwrap_err();

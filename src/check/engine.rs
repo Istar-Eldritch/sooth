@@ -201,6 +201,12 @@ pub(super) struct Provenance {
     /// `splice_trait_calls` key. Saved and restored so nested materializations
     /// and the enclosing context are unaffected.
     pub(super) in_materialized_quot: bool,
+    /// P7b.S3 (S3-1.c): the word indices of the trait members whose bodies
+    /// are currently being spliced at a call site, outermost first. A bound
+    /// dispatch back to any of them is a member-splice cycle: the hop falls
+    /// through to the grounded-record path and lowering's splice-budget
+    /// guard reports it, exactly as before S3-1.c.
+    pub(super) member_splice_stack: Vec<usize>,
 }
 
 impl Provenance {
@@ -1211,6 +1217,7 @@ pub(super) fn infer_probe_body(
     let mut variant_fields = HashMap::new();
     let mut splice_recs = HashMap::new();
     let mut splice_trait_recs = HashMap::new();
+    let mut splice_enum_recs = HashMap::new();
     let mut impl_monos = Vec::new();
     let poly_env = PolyEnv::new();
     let combinators = CombinatorEnv::default();
@@ -1227,6 +1234,7 @@ pub(super) fn infer_probe_body(
         splice_records: &mut splice_recs,
         impl_monos: &mut impl_monos,
         splice_trait_calls: &mut splice_trait_recs,
+        splice_enum_words: &mut splice_enum_recs,
         combinator_sig: None,
         combinator_subst: None,
         combinator_name: None,
@@ -2067,6 +2075,7 @@ mod tests {
                 module: 0,
                 span: Span::default(),
                 declared_globals: None,
+                is_trait_member: false,
             };
             let ctx = word_ctx(&w, &[], &[], &[], None, &CombinatorIndex::new(), None);
             let mut arrays = Vec::new();

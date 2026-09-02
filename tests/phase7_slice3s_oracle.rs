@@ -59,41 +59,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// Every `call <target>` edge in `binary`'s disassembly, keyed by the caller
-/// symbol whose body the call appears in. `objdump -d` annotates a call's
-/// target address with the symbol name in `<...>` when one exists, so this
-/// needs no knowledge of the calling convention or the mangling scheme.
-fn call_graph(binary: &Path) -> HashMap<String, Vec<String>> {
-    let out = Command::new("objdump")
-        .arg("-d")
-        .arg(binary)
-        .output()
-        .expect("objdump should run");
-    let text = String::from_utf8_lossy(&out.stdout);
-    let mut graph: HashMap<String, Vec<String>> = HashMap::new();
-    let mut current = String::new();
-    for line in text.lines() {
-        if let Some(header) = line.strip_suffix(">:") {
-            if let Some((_, name)) = header.rsplit_once('<') {
-                current = name.to_string();
-                graph.entry(current.clone()).or_default();
-            }
-            continue;
-        }
-        if !line.contains("call") {
-            continue;
-        }
-        if let Some((_, rest)) = line.rsplit_once('<') {
-            if let Some(target) = rest.strip_suffix('>') {
-                graph
-                    .entry(current.clone())
-                    .or_default()
-                    .push(target.to_string());
-            }
-        }
-    }
-    graph
-}
+use common::call_graph;
 
 /// The dispatch targets transitively reachable from `entry` by following
 /// `graph`'s call edges (BFS, cycle-safe via `seen`): the monomorphized
@@ -175,8 +141,8 @@ import: core::prelude * ;
 : main ( -- )
   2 5 mymax .
   2 5 9 mymax3 .
-  2.0 5.0 mymax .
-  2.0 5.0 9.0 mymax3 . ;
+  2.5 5.5 mymax .
+  2.5 5.5 9.5 mymax3 . ;
 "
     )
 }
@@ -255,10 +221,14 @@ fn inline_mymax_mymax3_matches_noninline_baseline() {
     );
 
     // The fixture calls both words at two types, so the output has four
-    // lines: mymax i64, mymax3 i64, mymax f64, mymax3 f64.
+    // lines: mymax i64, mymax3 i64, mymax f64, mymax3 f64. The f64 operands
+    // are fractional on purpose (P7b.S3 review, S5): `5.5`/`9.5` are values
+    // only the f64 path can print, so the two-types reach is witnessed by
+    // stdout itself, not by monomorph symbols a diverted `inline` combinator
+    // no longer mints.
     assert_eq!(
-        baseline_stdout, "5\n9\n5\n9\n",
-        "the fixture should print max(2,5)=5, max(2,5,9)=9, max(2.0,5.0)=5, max(2.0,5.0,9.0)=9"
+        baseline_stdout, "5\n9\n5.5\n9.5\n",
+        "the fixture should print max(2,5)=5, max(2,5,9)=9, max(2.5,5.5)=5.5, max(2.5,5.5,9.5)=9.5"
     );
 
     // The harness must find dispatch targets, or it is diffing nothing.
@@ -299,13 +269,11 @@ fn inline_mymax_mymax3_matches_noninline_baseline() {
          harness cannot tell a comparison-direction miscompile from a correct build"
     );
 
-    // R10: two types — both i64 and f64 comparison monomorphs are reached.
-    assert!(
-        baseline_targets.iter().any(|t| t.contains("i64")),
-        "the dispatch targets must include an i64 monomorph: {baseline_targets:?}"
-    );
-    assert!(
-        baseline_targets.iter().any(|t| t.contains("f64")),
-        "the dispatch targets must include an f64 monomorph: {baseline_targets:?}"
-    );
+    // R10 (amended by P7b.S3, S3-1.d): the comparison monomorphs used to be
+    // the two-types witness, but a diverted `inline` combinator instantiation
+    // (`gt` at i64 and f64) mints no symbol on either side now -- the
+    // two-types reach is witnessed behaviourally by the stdout assertion
+    // above, whose `5.5`/`9.5` lines only an f64 comparison path produces
+    // (the migrated form of the deleted i64/f64 monomorph-presence checks),
+    // and the swap controls keep the comparison identity observable.
 }

@@ -77,6 +77,24 @@ pub(crate) fn empty_splice_trait_calls() -> &'static HashMap<(u32, Span), String
     EMPTY.get_or_init(HashMap::new)
 }
 
+/// P7b.S3 (S3-1.e): the splice-enum-words companion of
+/// `empty_splice_trait_calls`, handed to every lowering path with no spliced
+/// combinator-body enum sites (destructor synthesis, unit tests, and every
+/// program whose combinators touch no generic enum).
+pub(crate) fn empty_splice_enum_words() -> &'static HashMap<(u32, Span), crate::ast::EnumId> {
+    static EMPTY: std::sync::OnceLock<HashMap<(u32, Span), crate::ast::EnumId>> =
+        std::sync::OnceLock::new();
+    EMPTY.get_or_init(HashMap::new)
+}
+
+/// P7b.S3 (S3-1.d): the diverted-combinator-instantiation companion of
+/// `empty_splice_records`, for lowering paths that never lower a bound
+/// dispatch to an `inline` member on a generic target.
+pub(crate) fn empty_combinator_instantiations() -> &'static HashMap<String, CallInst> {
+    static EMPTY: std::sync::OnceLock<HashMap<String, CallInst>> = std::sync::OnceLock::new();
+    EMPTY.get_or_init(HashMap::new)
+}
+
 /// P7.S8 (R2): the member-seed companion of `empty_splice_trait_calls`. A
 /// member splice reached from a path with no seed map reuses the enclosing
 /// splice's uid, which is today's behaviour on any path that already hands

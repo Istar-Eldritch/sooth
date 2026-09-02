@@ -2404,6 +2404,7 @@ mod tests {
             module: 0,
             span: Span::default(),
             declared_globals: None,
+            is_trait_member: false,
         };
         let mut module = Module {
             words: vec![mk_word],
@@ -2422,6 +2423,7 @@ mod tests {
             transitive_instantiations: Vec::new(),
             splice_records: std::collections::HashMap::new(),
             splice_trait_calls: std::collections::HashMap::new(),
+            splice_enum_words: std::collections::HashMap::new(),
             builtin_overloads: HashMap::new(),
             resolved_fields: HashMap::new(),
             resolved_variant_fields: HashMap::new(),
@@ -2473,6 +2475,7 @@ mod tests {
                 module,
                 span: Span::default(),
                 declared_globals: None,
+                is_trait_member: false,
             }
         }
         fn module_with(words: Vec<WordDef>, modules: Vec<ModuleInfo>) -> Module {
@@ -2493,6 +2496,7 @@ mod tests {
                 transitive_instantiations: Vec::new(),
                 splice_records: std::collections::HashMap::new(),
                 splice_trait_calls: std::collections::HashMap::new(),
+                splice_enum_words: std::collections::HashMap::new(),
                 builtin_overloads: HashMap::new(),
                 resolved_fields: HashMap::new(),
                 resolved_variant_fields: HashMap::new(),
@@ -2783,6 +2787,7 @@ mod tests {
                     module: 0,
                 },
                 declared_globals: None,
+                is_trait_member: false,
             }
         }
         fn word(name: &str, module: u32) -> WordDef {
@@ -3009,6 +3014,7 @@ mod tests {
                 module,
                 span: Span::default(),
                 declared_globals: None,
+                is_trait_member: false,
             }
         }
         fn poly_word(name: &str, module: u32, arity: usize) -> WordDef {
@@ -3037,6 +3043,7 @@ mod tests {
                 module,
                 span: Span::default(),
                 declared_globals: None,
+                is_trait_member: false,
             }
         }
 

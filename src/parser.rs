@@ -1554,6 +1554,7 @@ pub fn parse(tokens: &[(Token, Span)]) -> Result<Module, String> {
         transitive_instantiations: Vec::new(),
         splice_records: HashMap::new(),
         splice_trait_calls: HashMap::new(),
+        splice_enum_words: std::collections::HashMap::new(),
         builtin_overloads: HashMap::new(),
         resolved_fields: HashMap::new(),
         generics,
@@ -3219,6 +3220,7 @@ impl<'t> Parser<'t> {
             module: self.module,
             span: name_span,
             declared_globals,
+            is_trait_member: false,
         })
     }
 
@@ -4187,6 +4189,7 @@ impl<'t> Parser<'t> {
                     module: self.module,
                     span: member_span,
                     declared_globals: None,
+                    is_trait_member: true,
                 },
             ))
         } else {
@@ -4255,6 +4258,7 @@ impl<'t> Parser<'t> {
                     module: self.module,
                     span: member_span,
                     declared_globals: None,
+                    is_trait_member: true,
                 },
             ))
         }
@@ -11934,6 +11938,79 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["i64"]
         );
+    }
+
+    /// P7b.S3 (S3-2): the synthesized member word carries
+    /// `is_trait_member == true`; an ordinary word defined alongside it does
+    /// not. No reader consults the field yet -- this pins the marker itself,
+    /// not any behaviour it gates.
+    #[test]
+    fn synth_member_word_carries_is_trait_member_marker() {
+        let module = parse_src(
+            "trait: Show['T] : show ( &'T -- i64 ) ; ;\n\
+             impl: Show for i64\n\
+               : show | p | p drop 7 ;\n\
+             ;\n\
+             : plain ( -- i64 ) 1 ;\n",
+        )
+        .unwrap();
+        let synth = module
+            .words
+            .iter()
+            .find(|w| w.name == "show;Show;0;i64")
+            .expect("the member body is spliced in as a top-level word");
+        assert!(synth.is_trait_member);
+        let ordinary = module
+            .words
+            .iter()
+            .find(|w| w.name == "plain")
+            .expect("the ordinary word is still parsed");
+        assert!(!ordinary.is_trait_member);
+    }
+
+    /// P7b.S3 (S3-2): a member word declared `inline` carries both the
+    /// marker and `declares_inline` -- the two flags are independent, so a
+    /// test asserting one must not accidentally pass because the other was
+    /// set instead.
+    #[test]
+    fn synth_member_word_inline_carries_both_marker_and_declares_inline() {
+        let module = parse_src(
+            "trait: Ord['T] : cmp inline ( 'T 'T -- i64 ) ; ;\n\
+             impl: Ord for i64\n\
+               : cmp | a b | a b sub ;\n\
+             ;",
+        )
+        .unwrap();
+        let synth = module
+            .words
+            .iter()
+            .find(|w| w.name == "cmp;Ord;0;i64")
+            .expect("the member body is spliced in as a top-level word");
+        assert!(synth.is_trait_member);
+        assert!(synth.declares_inline);
+    }
+
+    /// P7b.S3 (S3-2): the generic-target branch of `parse_impl_member_body`
+    /// also sets `is_trait_member == true` on the synthesized member word.
+    /// Tested independently from the concrete-target case above so reverting
+    /// either branch alone is caught -- a pair covered in one half only has
+    /// shipped here before.
+    #[test]
+    fn synth_member_word_generic_target_carries_is_trait_member_marker() {
+        let module = parse_src(
+            "trait: Show['T] : show ( &'T -- ) ; ;\n\
+             impl: Show for array['T 4]\n\
+               : show | p | p drop ;\n\
+             ;",
+        )
+        .unwrap();
+        let synth = module
+            .words
+            .iter()
+            .find(|w| w.name.contains("show;Show;"))
+            .expect("the member body is spliced in as a top-level word");
+        assert!(synth.is_trait_member);
+        assert!(synth.poly.is_some(), "generic target stays polymorphic");
     }
 
     /// P7.S3s-follow: the concrete-target branch of `parse_impl_member_body`
