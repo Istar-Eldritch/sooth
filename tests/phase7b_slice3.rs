@@ -380,22 +380,23 @@ fn hkt_member_splices_through_an_inline_bound_caller() {
 #[test]
 fn two_splices_of_one_member_at_two_thetas_resolve_independently() {
     let src = "\
+type: P v i64 w i64 ;
 type: Opt['T 'E] | None | Some 'T 'E ;
 trait: Take['F: * -> * -> *] :
-  take inline ( 'F['T 'E] 'T -- 'T ) ;
+  take inline ( 'F['T 'E] 'E -- 'E ) ;
 ;
 impl: Take for Opt
-  : take | o d | o ~[ ( Some ) Some> drop d drop ] ~[ ( None ) drop d ] Opt? ;
+  : take | o d | o ~[ ( Some ) Some> swap drop d drop ] ~[ ( None ) drop d ] Opt? ;
 ;
-: take2 inline['F: Take 'T 'E] ( 'F['T 'E] 'T -- 'T ) take ;
+: take2 inline['F: Take 'T 'E] ( 'F['T 'E] 'E -- 'E ) take ;
 : mk1 ( i64 i64 -- Opt[i64 i64] ) Some ;
-: mk2 ( i64 u8 -- Opt[i64 u8] ) Some ;
+: mk2 ( P i64 -- Opt[P i64] ) Some ;
 : main ( -- ) 1 2 mk1 7 take2 .
-  4 3 >u8 mk2 9 take2 . ;
+  1 2 P 4 mk2 9 take2 . ;
 ";
     let (_t, _binary, stdout) = build_run_keep("p4-two-thetas", src);
     assert_eq!(
-        stdout, "1\n4\n",
+        stdout, "2\n4\n",
         "each splice must resolve its enum sites at its own theta"
     );
 }

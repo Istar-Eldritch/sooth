@@ -20377,18 +20377,19 @@ mod tests {
     #[test]
     fn two_splices_at_two_thetas_record_two_different_enum_ids() {
         let (module, _) = checked_like_a_build(
-            "type: Opt['T 'E] | None | Some 'T 'E ;\n\
+            "type: P v i64 w i64 ;\n\
+             type: Opt['T 'E] | None | Some 'T 'E ;\n\
              trait: Take['F: * -> * -> *] :\n\
-             take inline ( 'F['T 'E] 'T -- 'T ) ;\n\
+             take inline ( 'F['T 'E] 'E -- 'E ) ;\n\
              ;\n\
              impl: Take for Opt\n\
-             : take | o d | o ~[ ( Some ) Some> drop d drop ] ~[ ( None ) drop d ] Opt? ;\n\
+             : take | o d | o ~[ ( Some ) Some> swap drop d drop ] ~[ ( None ) drop d ] Opt? ;\n\
              ;\n\
-             : take2 inline['F: Take 'T 'E] ( 'F['T 'E] 'T -- 'T ) take ;\n\
+             : take2 inline['F: Take 'T 'E] ( 'F['T 'E] 'E -- 'E ) take ;\n\
              : mk1 ( i64 i64 -- Opt[i64 i64] ) Some ;\n\
-             : mk2 ( i64 u8 -- Opt[i64 u8] ) Some ;\n\
+             : mk2 ( P i64 -- Opt[P i64] ) Some ;\n\
              : main ( -- ) 1 2 mk1 7 take2 drop\n\
-             4 3 >u8 mk2 9 take2 drop ;\n",
+             1 2 P 4 mk2 9 take2 drop ;\n",
         )
         .expect("the two-theta fixture checks");
         assert!(

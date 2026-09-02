@@ -1423,7 +1423,9 @@ fn splice_enum_site(
     let uid = prov.splice_uid?;
     let enum_id_at = |slots: &[Type]| {
         slots.iter().find_map(|t| match t {
-            Type::Enum(id, _) => Some(*id),
+            // A destructure's input is the *variant* type, a ctor's output
+            // the enum -- both carry the operative id.
+            Type::Enum(id, _) | Type::Variant(id, _, _) => Some(*id),
             _ => None,
         })
     };
