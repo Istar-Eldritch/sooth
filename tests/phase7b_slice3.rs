@@ -361,7 +361,28 @@ fn hkt_member_splices_through_an_inline_bound_caller() {
         "an `inline` caller mints no frame; nm found: {caller:?}"
     );
 
-    // Clause 4: the non-inline twin mints and calls the member monomorphs.
+    // Clause 4 twin. A single-MEMBER-axis twin (`functor_fixture(false,
+    // true)`, row 7 HKT) is NOT constructible today -- measured: a non-inline
+    // HKT member reached from an inline caller fails grounding its
+    // output-only `'U` against the CtorImage-bound `'F`
+    // (`ground_member_sig_via_theta` has no output-only recovery; only the
+    // S3-1.c hop's seeded path does). Pinned below so this confound flips
+    // loudly when the row starts building; until then the clause 4 twin cuts
+    // both axes.
+    {
+        let (_t_rej, entry) = single_file_hosted("p3-hkt-row7", &functor_fixture(false, true));
+        let build = Command::new(env!("CARGO_BIN_EXE_sooth"))
+            .arg("build")
+            .arg(&entry)
+            .output()
+            .expect("sooth build should spawn");
+        let stderr = String::from_utf8_lossy(&build.stderr).into_owned();
+        assert!(
+            !build.status.success() && stderr.contains("grounded against the constructor image"),
+            "row 7 HKT is a known rejection today; if it builds, promote it to \
+             the single-axis clause 4 twin here: {stderr}"
+        );
+    }
     let (_t2, twin, twin_stdout) = build_run_keep("p3-hkt-twin", &functor_fixture(false, false));
     assert_eq!(twin_stdout, "-1\n3\n");
     let twin_syms = symbols(&twin);
@@ -369,35 +390,113 @@ fn hkt_member_splices_through_an_inline_bound_caller() {
         twin_syms.iter().any(|s| is_map_member_symbol(s)),
         "control: the non-inline twin mints member symbols; nm: {twin_syms:?}"
     );
+
+    // Clause 5's positive twin: byte-identical to the golden but for the
+    // CALLER's `inline` keyword only (row 4 HKT builds). The non-inline poly
+    // caller keeps its own monomorph frame, which is what makes the
+    // `sooth_mono_twice*` absence above an assertion about splicing rather
+    // than about a string never minted at all.
+    let (_t3, caller_ctl, ctl_stdout) =
+        build_run_keep("p3-hkt-caller-frame-control", &functor_fixture(true, false));
+    assert_eq!(ctl_stdout, "-1\n3\n");
+    let ctl_syms = symbols(&caller_ctl);
+    assert!(
+        ctl_syms.iter().any(|s| s.starts_with("sooth_mono_twice")),
+        "control: a non-inline poly caller keeps its `twice` frame; nm: {ctl_syms:?}"
+    );
+}
+
+/// The P#4 fixture, cut by the caller's `inline` keyword only (the member is
+/// always `inline`): two splices of one member body at two θ.
+fn take_fixture(caller_inline: bool) -> String {
+    let caller = if caller_inline {
+        ": take2 inline['F: Take 'T 'E] ( 'F['T 'E] 'E -- 'E ) take ;"
+    } else {
+        ": take2['F: Take 'T 'E] ( 'F['T 'E] 'E -- 'E ) take ;"
+    };
+    format!(
+        "type: P v i64 w i64 ;\n\
+         type: Opt['T 'E] | None | Some 'T 'E ;\n\
+         trait: Take['F: * -> * -> *] :\n\
+           take inline ( 'F['T 'E] 'E -- 'E ) ;\n\
+         ;\n\
+         impl: Take for Opt\n\
+           : take | o d | o ~[ ( Some ) Some> swap drop d drop ] ~[ ( None ) drop d ] Opt? ;\n\
+         ;\n\
+         {caller}\n\
+         : mk1 ( i64 i64 -- Opt[i64 i64] ) Some ;\n\
+         : mk2 ( P i64 -- Opt[P i64] ) Some ;\n\
+         : main ( -- ) 1 2 mk1 7 take2 .\n\
+           1 2 P 4 mk2 9 take2 . ;\n"
+    )
+}
+
+/// The two symbol shapes the `Take::take` member can mint, mirroring
+/// `is_size_member_symbol` (both are required or the assertion is vacuous for
+/// the generic-target shape).
+fn is_take_member_symbol(s: &str) -> bool {
+    s.contains("take.3b.Take") || s.starts_with("sooth_mono_take_Take")
 }
 
 /// Golden P#4: two splices of one member body at two θ resolve their enum
 /// sites independently -- without per-splice (`(uid, span)`) resolution this
 /// is a miscompile (both splices share one bare-key family layout), not a
-/// rejection, so the golden runs and checks stdout. The
+/// rejection, so the golden runs and checks stdout (clause 1, the
+/// load-bearing clause: mutation check 1 fails here). The
 /// two-different-`EnumId`s assertion lives in the in-process unit tests
-/// (`check.rs`), since this harness cannot see `Module` state.
+/// (`check/poly.rs`), since this harness cannot see `Module` state. Clauses
+/// 2/3/5 are carried too: the member and the `inline` caller both splice, so
+/// neither mints a symbol nor takes a call edge.
 #[test]
 fn two_splices_of_one_member_at_two_thetas_resolve_independently() {
-    let src = "\
-type: P v i64 w i64 ;
-type: Opt['T 'E] | None | Some 'T 'E ;
-trait: Take['F: * -> * -> *] :
-  take inline ( 'F['T 'E] 'E -- 'E ) ;
-;
-impl: Take for Opt
-  : take | o d | o ~[ ( Some ) Some> swap drop d drop ] ~[ ( None ) drop d ] Opt? ;
-;
-: take2 inline['F: Take 'T 'E] ( 'F['T 'E] 'E -- 'E ) take ;
-: mk1 ( i64 i64 -- Opt[i64 i64] ) Some ;
-: mk2 ( P i64 -- Opt[P i64] ) Some ;
-: main ( -- ) 1 2 mk1 7 take2 .
-  1 2 P 4 mk2 9 take2 . ;
-";
-    let (_t, _binary, stdout) = build_run_keep("p4-two-thetas", src);
+    let (_t, binary, stdout) = build_run_keep("p4-two-thetas", &take_fixture(true));
+
+    // Clause 1.
     assert_eq!(
         stdout, "2\n4\n",
         "each splice must resolve its enum sites at its own theta"
+    );
+
+    // Clause 2: neither member symbol shape is present.
+    let syms = symbols(&binary);
+    let member: Vec<&String> = syms.iter().filter(|s| is_take_member_symbol(s)).collect();
+    assert!(
+        member.is_empty(),
+        "an `inline` member mints no symbol; nm found: {member:?}"
+    );
+
+    // Clause 3: no call edge to either shape, reachable from `sooth_main`.
+    let reached = reachable_from_main(&binary);
+    let called: Vec<&String> = reached
+        .iter()
+        .filter(|s| is_take_member_symbol(s))
+        .collect();
+    assert!(
+        called.is_empty(),
+        "no call edge to the member from `sooth_main`: {called:?}"
+    );
+
+    // Clause 5: `take2` declares `inline`, so its own frame is absent too
+    // (the W__m0 recipe: a poly caller mints no `take2__m0` in either
+    // flavour, so the load-bearing half is the monomorph's absence).
+    let caller: Vec<&String> = syms
+        .iter()
+        .filter(|s| *s == "take2__m0" || s.starts_with("sooth_mono_take2"))
+        .collect();
+    assert!(
+        caller.is_empty(),
+        "an `inline` caller mints no frame; nm found: {caller:?}"
+    );
+
+    // Clause 5's positive control: byte-identical but for the caller's
+    // `inline` keyword. The non-inline caller keeps its monomorph frame,
+    // making the absence above non-vacuous.
+    let (_t2, ctl, ctl_stdout) = build_run_keep("p4-caller-frame-control", &take_fixture(false));
+    assert_eq!(ctl_stdout, "2\n4\n");
+    let ctl_syms = symbols(&ctl);
+    assert!(
+        ctl_syms.iter().any(|s| s.starts_with("sooth_mono_take2")),
+        "control: a non-inline poly caller keeps its `take2` frame; nm: {ctl_syms:?}"
     );
 }
 
@@ -432,9 +531,22 @@ fn inline_member_on_generic_target_splices_from_a_non_inline_poly_caller() {
         "no call edge to the member from `sooth_main`: {called:?}"
     );
 
-    // Clause 4 control: the caller keeps its own monomorph frame.
+    // Clause 5's exemption, witnessed: the caller keeps its own monomorph
+    // frame (that is this golden's point).
     assert!(
         syms.iter().any(|s| s.starts_with("sooth_mono_usesize")),
         "the non-inline caller keeps its frame; nm: {syms:?}"
+    );
+
+    // Clause 4 control proper: a byte-identical program but for the member's
+    // `inline` keyword mints the member monomorph -- the positive twin that
+    // makes the load-bearing absence assertion above non-vacuous.
+    let (_t2, twin, twin_stdout) =
+        build_run_keep("p5-row4-member-twin", &sized_box_fixture(false, false));
+    assert_eq!(twin_stdout, "1\n");
+    let twin_syms = symbols(&twin);
+    assert!(
+        twin_syms.iter().any(|s| is_size_member_symbol(s)),
+        "control: the non-inline member twin mints its monomorph; nm: {twin_syms:?}"
     );
 }

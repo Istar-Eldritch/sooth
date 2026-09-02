@@ -453,7 +453,15 @@ impl<'a> FuncBuilder<'a> {
             if let Some(sym_name) = self.splice_trait_calls.get(&(uid, span)).cloned() {
                 // S3-1.c: this record was written by the checker's hop, whose
                 // splice minted a fresh uid -- mirror it (see
-                // `splice_combinator_body`).
+                // `splice_combinator_body`). Spelling alignment (S4): a
+                // combinator member's record always carries the member's
+                // SYNTH name (`WordDef::name`) -- both the hop and the
+                // re-entry fall-through write it -- so the `combinators`
+                // lookup and the `member_splice_names` cycle gate below
+                // compare like with like even when `overload_symbols`
+                // `$$`-suffixes the member's symbol. A non-combinator
+                // member's record carries the env *symbol* instead and falls
+                // through to `lower_resolved_word_call`.
                 if !self.member_tables_installed
                     && self.combinators.get(&sym_name).is_some()
                     && !self.member_splice_names.contains(&sym_name)
@@ -1080,6 +1088,72 @@ impl<'a> FuncBuilder<'a> {
 mod tests {
     use super::*;
     use crate::ir::test_helpers::*;
+
+    /// P7b.S3 (S3-1.e): `lower_call`'s enum-site resolution is a three-arm
+    /// fall-through -- the per-splice `(uid, span)` record first, then the
+    /// span-keyed per-instantiation `enum_words`, then the bare-key family
+    /// entry. Driven directly with three registered unit-variant enums so
+    /// each arm's answer is distinguishable by the constructed value's
+    /// `IrType::Enum` id.
+    #[test]
+    fn lower_enum_site_prefers_per_splice_then_enum_words_then_bare_key() {
+        let enums = enums_of("type: A | MkA ;\ntype: B | MkB ;\ntype: C | MkC ;\n: main ( -- ) MkA drop MkB drop MkC drop ;");
+        let id_a = enum_id(&enums, "A");
+        let id_b = enum_id(&enums, "B");
+        let id_c = enum_id(&enums, "C");
+        let env: HashMap<String, Arity> = HashMap::new();
+        let structs = Structs::default();
+        let arrays = Arrays::default();
+        let cells = Cells::default();
+        let refs = Refs::default();
+        let resolve: Resolver = &|_name: &str| unreachable!("a unit ctor is not a call");
+        let span = Span::default();
+        let mut per_splice: HashMap<(u32, Span), crate::ast::EnumId> = HashMap::new();
+        per_splice.insert((7, span), id_b);
+        let empty_splice: HashMap<(u32, Span), crate::ast::EnumId> = HashMap::new();
+        let mut per_inst: HashMap<Span, crate::ast::EnumId> = HashMap::new();
+        per_inst.insert(span, id_c);
+        let empty_inst: HashMap<Span, crate::ast::EnumId> = HashMap::new();
+        let built = |splice: &HashMap<(u32, Span), crate::ast::EnumId>,
+                     inst: &HashMap<Span, crate::ast::EnumId>|
+         -> IrType {
+            let mut b = empty_builder(
+                &env,
+                resolve,
+                Registries {
+                    structs: &structs,
+                    enums: &enums,
+                    arrays: &arrays,
+                    cells: &cells,
+                    refs: &refs,
+                    slices: empty_slices(),
+                    statics: empty_statics(),
+                },
+            );
+            b.splice_enum_words = splice;
+            b.enum_words = inst;
+            b.splice_uid_stack.push(7);
+            b.lower_call("MkA", span, false)
+                .expect("a unit-variant ctor lowers");
+            let v = *b.stack.last().expect("the ctor pushed its value");
+            b.value_types[v.0 as usize]
+        };
+        assert_eq!(
+            built(&per_splice, &per_inst),
+            IrType::Enum(id_b),
+            "arm 1: the per-splice (uid, span) record wins"
+        );
+        assert_eq!(
+            built(&empty_splice, &per_inst),
+            IrType::Enum(id_c),
+            "arm 2: a per-splice miss falls through to the span-keyed enum_words"
+        );
+        assert_eq!(
+            built(&empty_splice, &empty_inst),
+            IrType::Enum(id_a),
+            "arm 3: both misses fall through to the bare-key family entry"
+        );
+    }
 
     #[test]
     fn quotation_literal_emits_no_instr_and_records_body() {

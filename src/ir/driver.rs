@@ -816,6 +816,64 @@ mod tests {
         );
     }
 
+    /// P7b.S3 (S3-1.d): an `inline` member's instantiation is diverted, not
+    /// emitted. Present on the checker's instantiation records with a
+    /// combinator callee -- exactly the population the lowering pre-pass
+    /// builds `combinator_instantiations` from -- and absent from the emitted
+    /// funcs: the `Arity` env loop and the emission loop's `distinct` list
+    /// both skip every diverted symbol, so no `IrFunc` and no env entry ever
+    /// exist for it, while the program still lowers (the splice consumed it).
+    #[test]
+    fn an_inline_members_instantiation_is_diverted_not_emitted() {
+        let src = "trait: Sized['S] :\n\
+             size inline ( 'S -- i64 ) ;\n\
+             ;\n\
+             type: Box['T] v 'T ;\n\
+             impl: Sized for Box['T]\n\
+             : size drop 1 ;\n\
+             ;\n\
+             : usesize['S: Sized] ( 'S -- i64 ) size ;\n\
+             : mkbox ( i64 -- Box[i64] ) Box ;\n\
+             : main ( -- ) 3 mkbox usesize drop ;\n";
+        let tokens = lex(src).unwrap();
+        let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
+        check(&mut module).unwrap();
+        let member = module
+            .words
+            .iter()
+            .find(|w| w.is_trait_member && w.declares_inline)
+            .expect("the impl member word is a module word")
+            .name
+            .clone();
+        let diverted: Vec<String> = module
+            .instantiations
+            .values()
+            .chain(&module.transitive_instantiations)
+            .chain(module.splice_records.values())
+            .filter(|inst| inst.callee == member)
+            .map(|inst| crate::ast::instantiation_symbol(&inst.callee, &inst.subst))
+            .collect();
+        assert!(
+            !diverted.is_empty(),
+            "the member's instantiation is recorded -- the population \
+             `combinator_instantiations` is built from"
+        );
+        let ir = crate::ir::lower(&module).expect("the diverted splice lowers");
+        for sym in &diverted {
+            assert!(
+                ir.funcs.iter().all(|f| &f.name != sym),
+                "a diverted instantiation mints no IrFunc: {sym}"
+            );
+        }
+        assert!(
+            ir.funcs
+                .iter()
+                .any(|f| f.name.starts_with("sooth_mono_usesize")),
+            "the non-inline caller's own monomorph is still emitted, so the \
+             absence above is the diversion, not a failed build"
+        );
+    }
+
     /// P7.S10 (R4.4): error propagation, beside `lower`'s own driver code. A
     /// real recursive `impl: Ord` -- the same shape as the golden -- drives
     /// `lower_resolved_word_call`'s budget guard to `Err`, and this asserts

@@ -433,6 +433,14 @@ pub(super) fn inline_combinator(
                     // body's locals, so a coerced literal must carry the
                     // declared size type into the body -- a local drops the
                     // `literal` flag and a bare `i64` would then mismatch.
+                    // Deviation note (S2): this rewrite runs for EVERY
+                    // monomorphic combinator's argument check, member splice
+                    // or not -- wider than the spec's "path A byte-identical"
+                    // ruling. Deliberate: the mutation is exactly the
+                    // coercion `match_slot` already granted, so an ordinary
+                    // combinator's literal-size operand resolves identically
+                    // (unit-pinned by `literal_size_operand_through_an_
+                    // ordinary_combinator_still_resolves`).
                     SlotMatch::LiteralSizeType => {
                         stack[base + i].ty = *want;
                     }
@@ -733,6 +741,25 @@ fn check_poly_combinator_args(
         // declared outputs against those to bind the leftover variables, and
         // retry. Ordinary combinators never reach this: their first grounding
         // succeeds.
+        //
+        // Honesty notes (S1). This recovery is a *speculative probe*: the
+        // literal walk below is a real `check_literal_against_declared_
+        // effect` pass, so it writes the per-splice poly tables
+        // (`splice_records` and friends) and can mutate the type registries
+        // (interned quotation/array shapes) on a body that is walked again
+        // when the grounding retry succeeds -- the same harmless-duplicate
+        // trade the argument-check walk above this function already makes.
+        // Every inner failure (`map_err(|_| e.clone())`) is deliberately
+        // swallowed into the ORIGINAL grounding error `e`: the probe exists
+        // only to rescue the output-only-variable shape, so any probe
+        // failure means the shape was something else and `e` (the unbound-
+        // variable grounding failure at the member's own signature) is the
+        // diagnosis that names the real problem; surfacing the probe's
+        // internal error would blame the caller's literal for a signature-
+        // shaped miss. Not narrowed to specific error classes: the probe has
+        // no way to distinguish "literal genuinely broken" from "literal
+        // fine at some other grounding" without completing the very
+        // grounding that failed.
         let concrete = match apply_subst(sig, pin, &subst, name, span, ctx, arrays, cells, refs) {
             Ok(t) => t,
             Err(e) => {
@@ -917,6 +944,22 @@ fn check_poly_combinator_args(
 mod tests {
     use super::*;
     use crate::lexer::lex;
+
+    /// P7b.S3 (S2 deviation): the monomorphic argument loop's
+    /// `LiteralSizeType` slot rewrite applies to every combinator, not only
+    /// the member-splice path the spec cut it for. An ordinary (non-member)
+    /// `inline` word taking a size-typed operand still accepts a bare
+    /// literal: the coerced slot carries the declared type into the spliced
+    /// body, where it is bound as a local and re-checked against the
+    /// declared outputs.
+    #[test]
+    fn literal_size_operand_through_an_ordinary_combinator_still_resolves() {
+        let src = ": keep inline ( usize -- usize ) ;\n: main ( -- ) 5 keep drop ;";
+        let tokens = lex(src).unwrap();
+        let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
+        crate::check::check(&mut module)
+            .expect("a literal coerces to the declared size type through an ordinary splice");
+    }
 
     #[test]
     fn quotation_taking_word_mints_no_symbol() {

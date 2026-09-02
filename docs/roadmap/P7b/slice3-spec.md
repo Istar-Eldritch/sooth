@@ -168,6 +168,12 @@ symbol (`check/poly.rs:1587-1620`), it has the winning impl and, through
 - Call `inline_combinator` with the caller's live `stack` and this call's `span`, instead
   of writing `splice_trait_calls[(uid, span)]`. Everything path A guarantees is inherited:
   fresh uid, θ from the live operands, alpha-rename, the full `(uid, span)` record family.
+  *(Amended at Phase 3 exit — deviation 2: the hop **also** writes
+  `splice_trait_calls[(uid, span)] = words[idx].name`, the member's synth name. That entry
+  is not an impl-symbol resolution but lowering's routing record: `lower_call`'s
+  `(uid, span)` read routes the site into its own combinator splice
+  (`ir/func_builder/calls.rs`, the `splice_combinator_body` hit). See the Phase 3 outcome
+  note.)*
 - **Signature cost, named because it is the bulk of the diff.** `resolve_splice_member_call`
   takes `(name, span, stack, ctx, arrays, refs, poly, prov)`; `inline_combinator`
   additionally needs `env`, `cells`, `slices`, `scope`, `granted`, `tail`. Ruling: widen
@@ -311,7 +317,14 @@ That, and nothing more exotic, is R1.5's representation limit. So:
   `ir/func_builder/calls.rs:370-378`); stripping either inside a splice would regress a
   mechanism that is not enum-specific. No standalone pass
   populates it, and the abstract-walk raise sites are untouched (they keep firing for the
-  pre-pass case S3-1.f leaves them).
+  pre-pass case S3-1.f leaves them). The redirect is gated on `prov.splice_uid` plus
+  generated-enum-word membership alone — not on genericness — so the redirected
+  population includes **non-generic** enum sites in ordinary (non-member) combinator
+  bodies. That is equivalent under the read order: lowering consults the per-splice
+  record first and falls through to the span-keyed `enum_words` and then the bare key,
+  and a non-generic family has exactly one `EnumId`, so the per-splice record holds the
+  very id the bare-key lookup would have served — the redirect changes which table
+  serves the site, never which id is served.
 - `lower_call`'s enum-word arm (`ir/func_builder/calls.rs:787`) consults
   `splice_enum_words[(splice_uid_stack.last(), span)]` **before** the span-keyed
   `self.enum_words`, falling through to it and then to the bare-key monomorphic path on a
@@ -825,7 +838,9 @@ Phase 3 opens with **two measurements**, both of which can change the shape belo
    section.
 
 - **Unit tests:** a member call at a splice site is intercepted by `inline_combinator`
-  rather than resolving a symbol (`splice_trait_calls` gains **no** entry for it); the
+  rather than resolving an impl symbol (`splice_trait_calls` gains the member's **synth
+  name** — lowering's routing record, per the S3-1.c amendment above — never
+  `word_symbols[idx]` and never the impl's own symbol); the
   combinator entry is found by the member's synth name and not by `word_symbols[idx]`
   (a fixture with two same-named words, so `overload_symbols`' `$$` suffixing makes the
   two keys differ — the test fails if the lookup keys on the symbol); the impl `Subst`
@@ -893,6 +908,64 @@ Phase 3 opens with **two measurements**, both of which can change the shape belo
   instantiation's monomorph again and drop its `combinator_instantiations` entry — and
   confirm **P#5** fails on the monomorph-symbol-absence assertion. Without it the
   mono-caller half is unwitnessed, since P#3/P#4 both run through inline callers.
+
+**Phase 3 outcome (recorded at phase exit, mirroring S3-7's Phase 2 note).**
+
+- **Deviation 1 — fresh per-splice uid mint on BOTH sides.** Mutation 1's first cut
+  exposed a seed-uid collision: two splices of one member body reusing the member's P7.S8
+  seed uid collide on the `(uid, span)` key family. Ruling as implemented: the check-side
+  member splice mints its uid with the ordinary fresh discipline
+  (`check/combinators.rs`, the `prov.inline_uid` mint), and lowering's
+  `splice_trait_calls`-routed member splice mirrors it (`fresh_uid` in
+  `ir/func_builder/calls.rs`'s `splice_combinator_body`), so the two sides' uid sequences
+  stay in step. The mint is bracketed by a save/restore that keeps P7.S8's R1/R2 premise
+  (`uid / INLINE_UID_STRIDE == word idx` for seeded member namespaces) intact — the R1/R2
+  test (`a_member_words_check_time_seed_is_its_word_index_times_the_stride`) is untouched
+  and still passes.
+- **Deviation 2 — the hop's routing record.** `splice_trait_calls[(uid, span)]` carries
+  the member's **synth name** (`WordDef::name`) on the S3-1.c hop, amending the original
+  "gains no entry" wording (see the S3-1.c bullet). Load-bearing for lowering: without the
+  record, `lower_call`'s `(uid, span)` route into `splice_combinator_body`
+  (`ir/func_builder/calls.rs:451-462`) never fires and the site falls through to the
+  bare-name env lookup, which panics. The same spelling is used on the re-entry
+  fall-through (a cycling `declares_inline` member records the synth name, not
+  `word_symbols[idx]`), so lowering's `member_splice_names` cycle gate and combinator
+  lookup compare like with like even under a `$$`-suffixed symbol.
+- **Deviation 3 — two S3-1.c side effects wider than the ruling's letter.** (a) The
+  output-only-variable recovery in `check_poly_combinator_args`: a member sig may bind a
+  variable only in a quotation parameter's output (`map`'s `'U`), which pass-1 grounding
+  cannot reach, so the seeded (member-only) path probes the caller literal with an open
+  exit row and retries; the probe swallows its internal errors into the original
+  grounding error and re-walks a body that the successful retry walks again (documented
+  in place). (b) The monomorphic argument loop's `LiteralSizeType` slot rewrite applies
+  to every combinator, not only member splices — the spec said path A stays
+  byte-identical, and this is the one measured divergence: a coerced literal now carries
+  its declared size type into any spliced body (unit-pinned:
+  `literal_size_operand_through_an_ordinary_combinator_still_resolves`).
+- **S3-1.f ruling: (1), the preferred one, measured and held.** The pre-pass keeps
+  walking member combinator bodies with `is_combinator_splice: false` for
+  `word.is_trait_member` (`check.rs`, the single set site); the walk completes, the gate
+  is unchanged for non-member combinators, and `tests/phase7_slice12.rs`'s R1.5
+  construction fixture stays as-is. P#6 is therefore **not written**.
+- **Mutation checks, measured.** (1) Stubbing S3-1.e's lowering read of
+  `splice_enum_words`: P#4 fails its **stdout** clause (two θ share one bare-key family
+  layout — a miscompile, not a rejection). (2) Reverting S3-1.c's hop alone: all five
+  goldens fail (the recorded symbol routes into a splice with no per-splice re-walk and
+  no `splice_enum_words` entries). (3) Reverting S3-1.d's diversion alone: P#5 fails on
+  the monomorph-symbol-absence assertion.
+- **S3-12 confirmation (the census's open grep).** `discover_transitive_instantiations`
+  threads `splice_records` as an explicit `&mut` parameter and has **no**
+  `splice_enum_words` companion — confirmed by grep at phase exit: the fixpoint walks
+  `splice_records` to mint further monomorphs, while `splice_enum_words` is terminal
+  `(uid, span) -> EnumId` data that mints nothing and is read only by lowering. The
+  omission is safe.
+- **Row 7 HKT is a rejection, not a splice (found while building P#3's twins).** A
+  *non-inline* HKT member reached from an inline caller (`functor_fixture(false, true)`)
+  fails grounding its output-only variable against the CtorImage-bound head
+  (`ground_member_sig_via_theta` has no output-only recovery; only the S3-1.c hop's
+  seeded path does). P#3 pins the rejection so the confounded clause-4 twin
+  (`(false, false)`) is promoted to a single-axis twin the day the row builds. Row 4 HKT
+  (`(true, false)`) builds and serves as P#3's single-axis clause-5 control.
 
 ### Phase 4 — Goldens, controls and non-regression
 
