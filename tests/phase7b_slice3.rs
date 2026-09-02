@@ -1,9 +1,15 @@
 //! P7b.S3 exit goldens: the zero-cost splice of a trait member reached
 //! through a bound. Phase 2 covers the splice-*caller* path (S3-6 .. S3-10)
 //! and lands two positives: P#1, the exit witness, and P#2, the row-7 shape
-//! S3-8 exists for. Harness style from `tests/phase7b_slice2.rs`
-//! (`single_file_hosted`), with the binary *kept* after the run because
-//! S3-13's clauses 2-5 are assertions about the emitted binary.
+//! S3-8 exists for. Phase 3 routes members onto the splice path and adds
+//! P#3-P#5. Phase 4 closes the file out: C#1-C#4 (the non-inline monomorph
+//! control and three non-regression goldens carried from the brief's p0/p1/
+//! p7/p8 probes) and E#1-E#4 (the surviving rejections: S3-6's witnessable
+//! fallback hole, the materialized-quotation fence, the struct route to
+//! `Functor`, and a non-member combinator's R1.5 gate). Harness style from
+//! `tests/phase7b_slice2.rs` (`single_file_hosted`), with the binary *kept*
+//! after the run because S3-13's clauses 2-5 are assertions about the
+//! emitted binary.
 
 mod common;
 
@@ -548,5 +554,246 @@ fn inline_member_on_generic_target_splices_from_a_non_inline_poly_caller() {
     assert!(
         twin_syms.iter().any(|s| is_size_member_symbol(s)),
         "control: the non-inline member twin mints its monomorph; nm: {twin_syms:?}"
+    );
+}
+
+// ---- Phase 4: controls and non-regression ----
+
+/// Run a build expected to fail and return its stderr, mirroring
+/// `tests/phase7b_slice2.rs`'s `build_error`.
+fn build_error(entry: &Path) -> String {
+    let build = Command::new(env!("CARGO_BIN_EXE_sooth"))
+        .arg("build")
+        .arg(entry)
+        .output()
+        .expect("sooth build should spawn");
+    assert!(!build.status.success(), "build should have failed");
+    String::from_utf8(build.stderr).expect("stderr should be utf8")
+}
+
+/// Control C#1 (the p0/m4 control): a **non**-inline member still mints its
+/// monomorph symbol regardless of caller flavour -- ledger item 1. Uses
+/// matrix row 8 (`sized_box_fixture(false, false)`, a non-inline member on a
+/// generic target from a non-inline caller): the shape every S3 positive
+/// golden's clause 4 twin already exercises inline, pulled out as its own
+/// standing adversary so the absence assertions in P#1/P#3-P#5 are provably
+/// non-vacuous even read in isolation from those goldens.
+#[test]
+fn non_inline_member_still_mints_its_monomorph_symbol() {
+    let (_t, binary, stdout) = build_run_keep("c1-p0-control", &sized_box_fixture(false, false));
+    assert_eq!(stdout, "1\n");
+
+    let syms = symbols(&binary);
+    assert!(
+        syms.iter().any(|s| is_size_member_symbol(s)),
+        "a non-inline member mints its monomorph regardless of caller flavour; nm: {syms:?}"
+    );
+    let reached = reachable_from_main(&binary);
+    assert!(
+        reached.iter().any(|s| is_size_member_symbol(s)),
+        "the monomorph is reachable from `sooth_main`: {reached:?}"
+    );
+}
+
+/// Non-regression C#2 (p0): S2's W4 shared-bound golden
+/// (`tests/phase7b_slice2.rs`'s
+/// `functor_map_through_shared_bound_dispatches_per_constructor_from_poly_body`),
+/// re-run byte-identical on this tree. Both the member (`map`) and the
+/// caller (`twice`) stay non-inline, so this is `functor_fixture(false,
+/// false)` -- the pre-S3 shape S3 must leave untouched: one shared `Functor`
+/// bound dispatching per constructor from a poly body.
+#[test]
+fn s2_shared_bound_golden_unchanged() {
+    let (_t, _binary, stdout) =
+        build_run_keep("c2-s2-shared-bound", &functor_fixture(false, false));
+    assert_eq!(stdout, "-1\n3\n");
+}
+
+/// Non-regression C#3 (p1/p7): the MEMORY-note control -- a concrete-target
+/// `inline` member reached from a non-inline caller -- still builds, runs,
+/// and splices (no `size;Sized` symbol minted), exactly as p1/p7 measured
+/// before this slice touched anything. This is the fixture the now-retired
+/// "inline member panics at lowering" note was wrong about (F1); S3 must not
+/// regress the case that was already working.
+#[test]
+fn concrete_target_inline_member_unchanged() {
+    let src = "\
+trait: Sized['S] :
+  size inline ( 'S -- i64 ) ;
+;
+type: Boxi v i64 ;
+impl: Sized for Boxi
+  : size drop 7 ;
+;
+: usesize['S: Sized] ( 'S -- i64 ) size ;
+: main ( -- ) 3 Boxi usesize . ;
+";
+    let (_t, binary, stdout) = build_run_keep("c3-p1-concrete-inline", src);
+    assert_eq!(stdout, "7\n");
+
+    let syms = symbols(&binary);
+    let member: Vec<&String> = syms.iter().filter(|s| is_size_member_symbol(s)).collect();
+    assert!(
+        member.is_empty(),
+        "a concrete-target inline member still mints no symbol; nm: {member:?}"
+    );
+}
+
+/// The two symbol shapes a splicing `Ord::cmp`-family surface comparison can
+/// take, mirroring `is_size_member_symbol`/`is_take_member_symbol`.
+fn is_lt_member_symbol(s: &str) -> bool {
+    s.contains("lt.3b.Ord") || s.starts_with("sooth_mono_lt_Ord")
+}
+
+/// Non-regression C#4 (p8): `core::cmp`'s `lt inline ['T: Ord]`
+/// (`lib/core/cmp.sth:145`) is the precedent S3 builds on -- a poly `inline`
+/// word with a user bound, spliced via the `poly.combinators` interception
+/// that records no instantiation. S3 widens the *member* dispatch path onto
+/// that same interception; this pins that the interception itself, already
+/// live for ordinary bounded combinators, is undisturbed: `lt` still mints
+/// no symbol at a poly call site.
+#[test]
+fn core_cmp_lt_still_splices() {
+    let src = "\
+import: core::prelude | Bool Ord lt | ;
+: mylt['T: Copy Ord] ( 'T 'T -- Bool ) lt ;
+: main ( -- ) 1 2 mylt . 2 1 mylt . ;
+";
+    let (_t, binary, stdout) = build_run_keep("c4-p8-core-cmp-lt", src);
+    assert_eq!(stdout, "true\nfalse\n");
+
+    let syms = symbols(&binary);
+    let member: Vec<&String> = syms.iter().filter(|s| is_lt_member_symbol(s)).collect();
+    assert!(
+        member.is_empty(),
+        "core::cmp's `lt inline` still splices via the `poly.combinators` interception; nm: {member:?}"
+    );
+}
+
+// ---- Phase 4: error goldens ----
+
+/// Error E#1: S3-6's fallback hole, pinned closed at its point of use.
+/// Deliberately targets the *witnessable* trigger -- an Arrow-kinded
+/// variable with **no user bound** (`['F]`, never `['F: SomeTrait]`) -- so
+/// the word is still callable and its first splice site can observe a
+/// broken body. (The no-impl trigger is unwitnessable by construction: with
+/// no impl anywhere, no operand can discharge the bound, so the word is
+/// never spliced and nothing can observe the skip -- ledger item 2.) `bad`'s
+/// standalone check is skipped (no `Bound::User` for `'F` at all, so
+/// `arrow_stand_in` finds no stand-in), so the call to the unknown word
+/// `bogus_word` inside its body is caught only once `bad` is actually
+/// spliced at `main`'s call site -- and an unreferenced twin of the same
+/// word (not shown here; probed separately) builds clean, proving the
+/// rejection is deferred to the splice, not raised at the declaration.
+#[test]
+fn unbounded_arrow_variable_inline_word_is_rejected_at_its_splice_site() {
+    let src = "\
+type: Opt['T] | None | Some 'T ;
+: bad inline['F] ( 'F['T] -- 'F['T] ) bogus_word ;
+: mk ( i64 -- Opt[i64] ) Some ;
+: main ( -- ) 3 mk bad drop ;
+";
+    let (_t, entry) = single_file_hosted("e1-unbounded-arrow-var", src);
+    let err = build_error(&entry);
+    assert!(
+        err.contains("unknown word `bogus_word`"),
+        "the broken body must still be checked at its first splice site: {err}"
+    );
+}
+
+/// Error E#2 (ledger item 6): bound dispatch inside a materialized quotation
+/// stays rejected. A materialized quotation lowers to its own `IrFunc` with
+/// an empty `splice_uid_stack`, so no `(uid, span)` key resolves there --
+/// S3 widens the splice path but does not touch this fence, so it earns a
+/// regression golden rather than an assumption. `foo`'s body materializes
+/// `[ a b cmp drop ]` (captures escape the combinator's own scope, forcing
+/// materialization) and dispatches the bound `Ord` member `cmp` inside it.
+#[test]
+fn bound_member_in_a_materialized_quotation_still_rejects() {
+    let src = "\
+import: core::prelude | Ord | ;
+type: Thunk q [ -- ] ;
+: foo inline ['T: Copy Ord] ( 'T 'T -- )
+  | a b |
+  [ a b cmp drop ] Thunk drop ;
+: main ( -- ) 1 2 foo ;
+";
+    let (_t, entry) = single_file_hosted("e2-materialized-quot-member", src);
+    let err = build_error(&entry);
+    assert!(
+        err.contains("bound dispatch in materialized quotations is unsupported"),
+        "{err}"
+    );
+    assert!(err.contains("`cmp`"), "names the member: {err}");
+    assert!(err.contains("`foo`"), "names the combinator: {err}");
+}
+
+/// Error E#3 (F6): the struct route to `Functor` stays closed, independently
+/// of S3 and identically with or without `inline` on the member. `Box>` on
+/// the generic type `Box['ctor0]` is rejected before any splice/dispatch
+/// question is reached -- pre-existing, and S3 cannot route around it
+/// because (per F6) every *writable* `Functor` body is enum-eliminating,
+/// i.e. exactly the shape R1.5 fences, so the struct route was never an
+/// alternative body idiom S3 needed to keep open.
+#[test]
+fn struct_route_to_functor_still_rejects_identically() {
+    let body = |kw: &str| {
+        format!(
+            "\
+type: Box['T] v 'T ;
+trait: Functor['F: * -> *] :
+  map {kw}( 'F['T] [ 'T -- 'U ] -- 'F['U] ) ;
+;
+impl: Functor for Box
+  : map swap Box> swap call Box ;
+;
+: mk ( i64 -- Box[i64] ) Box ;
+: main ( -- ) 5 mk [ 1 sub ] map[i64 i64] Box> . ;
+"
+        )
+    };
+    let (_t1, entry_inline) = single_file_hosted("e3-struct-route-inline", &body("inline "));
+    let err_inline = build_error(&entry_inline);
+    let (_t2, entry_plain) = single_file_hosted("e3-struct-route-plain", &body(""));
+    let err_plain = build_error(&entry_plain);
+
+    let expected = "`Box>` is not permitted on a generic type `Box['ctor0]`";
+    assert!(err_inline.contains(expected), "{err_inline}");
+    assert!(err_plain.contains(expected), "{err_plain}");
+    assert_eq!(
+        err_inline, err_plain,
+        "the struct route rejects identically with or without `inline`"
+    );
+}
+
+/// Error E#4: S3-1.f's surviving R1.5 gate. Under the ruling as implemented
+/// (Phase 3 measurement 2, the preferred branch: `is_combinator_splice:
+/// false` for `is_trait_member` combinators), the *only* narrowing R1.5
+/// gained is `is_trait_member` -- so a **non-member** combinator
+/// (`wrap_it`, an ordinary `inline` word, not a trait member) constructing a
+/// generic enum still ungrounded at its own type variable is untouched by
+/// S3 and rejects exactly as `tests/phase7_slice12.rs`'s
+/// `combinator_constructing_ungrounded_generic_enum_is_rejected` pins.
+/// `bar` is a genuinely separate trait member (`Foo::bar`, concrete target,
+/// unrelated to `wrap_it`'s own generic construction) so this fixture
+/// exercises the *combinator*-body gate, not the member-splice path S3
+/// added.
+#[test]
+fn generic_enum_in_a_non_member_combinator_body_still_rejects() {
+    let src = "\
+type: Pair['A] | Nil | One 'A ;
+trait: Foo['T] : bar inline ( 'T -- 'T ) ; ;
+impl: Foo for i64
+  : bar | x | x ;
+;
+: wrap_it inline ['T: Foo] ( 'T -- Pair['T] ) bar One ;
+: main ( -- ) 1 wrap_it drop ;
+";
+    let (_t, entry) = single_file_hosted("e4-non-member-r15", src);
+    let err = build_error(&entry);
+    assert!(
+        err.contains("constructs `Pair`")
+            && err.contains("this combinator's own splice determines"),
+        "a non-member combinator body stays gated by R1.5, unchanged by S3: {err}"
     );
 }

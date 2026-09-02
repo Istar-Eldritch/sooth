@@ -1072,3 +1072,57 @@ Re-verified against HEAD `403618f` while writing this spec.
   { "phase": 4, "focus": "Goldens, controls and non-regression in tests/phase7b_slice3.rs: control C#1, the non-inline monomorph presence control that makes the absence assertions non-vacuous; non-regression C#2-C#4 on S2's shared-bound golden, the concrete-target inline member, and core::cmp's lt interception; error goldens E#1-E#4 for the standalone-skip hole, the materialized-quotation fence, the unchanged struct-route rejection, and R1.5's surviving unground-theta gates. Required mutation check: re-apply the m4 adversary (checker gates lifted, lowering forced onto the non-splice arm for member calls) against the FINAL goldens and confirm P#1/P#3/P#5 fail on their nm/objdump clauses while their stdout clause passes -- no other mutation in this slice exercises S3-13 clauses 2, 3 and 5. E#1 targets the fallback's witnessable trigger (an Arrow-kinded variable with NO user bound, still callable); the no-impl trigger is unwitnessable by construction and is recorded as such in ledger item 2. CLAUDE.md phase-exit growth-signal re-run on check/poly.rs; retire the stale MEMORY note about inline members panicking at lowering.", "effort": "M", "difficulty": "M" }
 ]
 ```
+
+## Closing (Phase 4 exit)
+
+**Growth-signal re-run (`check/poly.rs`, CLAUDE.md phase-exit check).** The file is
+20735 lines (11565 source, tests from `:11566`), up 1052 net over the slice
+(+1161/−109). Verdict: **defer again, no split** — the balance did not move.
+Import divergence still does not fire (the non-test imports are unchanged:
+`RefCell`, `Ordering`, `GenericTypes`, one `use super::*`; S3 added none). S3-1's
+one new table, `splice_enum_words`, lives on `Module`/`Ctx` and is *read* by
+lowering, not by new poly.rs machinery; its four poly.rs mentions are all in one
+unit-test region (`:20474-20488`). S3-1.c deliberately *reused* the existing
+combinator splice path (`inline_combinator`) instead of adding a second splice
+mechanism, so no new responsibility landed and no would-be-circular split is
+forced. The same 3-of-5 recorded at S2 stand, and the two available cuts remain
+the ones rejected there (a layer-shaped `poly/diagnostics.rs`; an
+`poly/eliminator.rs` that severs a mutual recursion). Re-run at P7b.S4's exit.
+
+**MEMORY correction (F1).** The standing note "an inline trait member panics at
+lowering" is retired. The landed shape: `WordDef::is_trait_member` marks
+synthesized member words (S3-2); an `inline` member on a *generic* impl target is
+routed onto the ordinary combinator splice path at check time
+(`resolve_splice_member_call` → `inline_combinator`, S3-1.c), its per-θ
+instantiations are diverted from the lowering env/emission and spliced at their
+dispatch sites (S3-1.d), enum sites inside the splice resolve through the
+`(uid, span)`-keyed `splice_enum_words` (S3-1.e), and R1.5 is narrowed by the
+marker rather than lifted (S3-1.f, preferred ruling: `is_combinator_splice:
+false` for member combinators). Members splice from every caller flavour; a
+member *without* `inline` still monomorphizes from every caller flavour (C#1).
+
+**m4 mutation check, measured (Phase 4).** Adversary applied as a temporary
+uncommitted edit and fully reverted: check side, the S3-1.c hop narrowed to
+concrete impl targets only (`&& imp.target.is_concrete()` at the
+`declares_inline && !re_entry` gate, `check/poly.rs:1747`), so a generic-target
+member falls through to the `check_poly_call` monomorph record; lowering side,
+the S3-1.d divert filter neutralized and the env-insert loop widened to chain
+`splice_records`, so those monomorphs mint real `IrFunc`s and env entries. (A
+blanket gate-off is *not* a viable m4: it desyncs the check/lowering uid streams
+through `core::cmp`'s concrete-target members and ICEs every hosted build.)
+Results against the final goldens, stdout clause first:
+
+| Golden | clause 1 (stdout) | first failing clause |
+| --- | --- | --- |
+| P#1 `inline_member_splices_into_an_inline_bound_caller` | passed | clause 2 (`nm`): `sooth_mono_size_Sized_0_Box__T0___m0__t0_i64` present |
+| P#3 `hkt_member_splices_through_an_inline_bound_caller` | **failed** — build rejects with `splice_member_ctor_image_error` ("grounded against the constructor image `Opt`") | clause 1 |
+| P#4 `two_splices_of_one_member_at_two_thetas_resolve_independently` | passed | clause 2 (`nm`): both `sooth_mono_take_Take_0_Opt…` monomorphs present |
+| P#5 `inline_member_on_generic_target_splices_from_a_non_inline_poly_caller` | passed | clause 2 (`nm`): monomorph present |
+
+P#3 deviates from the spec's prediction (nm/objdump): the non-splice arm cannot
+ground an HKT member's output-only variable at all (the row-7-HKT rejection,
+Phase 3's finding), so under m4 the fixture dies at build — the mutation is
+still killed, one clause earlier than predicted. All controls (C#1–C#4) and
+error goldens (E#1–E#4) pass under the mutation, confirming the kill is carried
+by the splice goldens alone. After the revert the full suite is green and
+`git diff` shows no `src/` residue.
