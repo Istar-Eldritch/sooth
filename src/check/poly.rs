@@ -507,6 +507,78 @@ pub(super) fn ground_into_word_scoped_registries<T>(
     Ok((value, local))
 }
 
+/// P7b.S3 (S3-6): the `Type::CtorImage` stand-in for an Arrow-kinded variable
+/// `v` -- the constructor target of the **first** `impl:` of `v`'s user bound,
+/// in declaration order. `None` when there is nothing to stand in for: `v`
+/// carries no `Bound::User` (its bound is `Copy`, or it has none), the bound's
+/// trait has no `impl:` in this program, or no impl of it targets a
+/// constructor. A concrete-target impl is skipped rather than accepted: an
+/// Arrow-kinded variable can only ever be satisfied by a constructor, so a
+/// concrete target is not a candidate stand-in for it.
+///
+/// Declaration order is the whole determinism claim: `impls` is the
+/// whole-program registry in source order, and the first matching entry is
+/// pinned by a unit test, so which representative instance a body is checked
+/// against does not drift with unrelated edits.
+fn arrow_stand_in(
+    v: u32,
+    sig: &PolySig,
+    impls: &[ImplDecl],
+    generics: Option<&RefCell<GenericTypes>>,
+) -> Option<Type> {
+    let tid = sig.bounds.iter().find_map(|(bv, b)| match (bv, b) {
+        (bv, Bound::User(tid)) if *bv == v => Some(*tid),
+        _ => None,
+    })?;
+    // The variable's declared kind fixes the constructor arity a stand-in
+    // must have: applying a 2-parameter constructor at a 1-argument slot is
+    // not a `Result` failure downstream, it is an index panic inside field
+    // substitution -- so an arity-mismatched impl (legal in itself: S2's
+    // `impl: Functor for Res` dogfood) is not a candidate representative,
+    // and the *first fitting* impl in declaration order is.
+    let (want_ty, want_len) = match sig.ty_kinds.get(v as usize) {
+        Some(crate::ast::Kind::Arrow { domains, .. }) => (
+            domains
+                .iter()
+                .filter(|d| !matches!(d, crate::ast::Kind::Len))
+                .count(),
+            domains
+                .iter()
+                .filter(|d| matches!(d, crate::ast::Kind::Len))
+                .count(),
+        ),
+        _ => return None,
+    };
+    let generics = &generics?.borrow();
+    let gid = impls
+        .iter()
+        .filter(|i| i.trait_id == tid)
+        .find_map(|i| match &i.target.pattern {
+            PolyType::Generic {
+                is_enum,
+                idx,
+                module,
+                ..
+            } => {
+                let gid = GenericId {
+                    is_enum: *is_enum,
+                    idx: *idx,
+                    module: *module,
+                };
+                let (tys, lens) = if *is_enum {
+                    let d = &generics.enums[*idx as usize];
+                    (d.ty_var_names.len(), d.len_var_names.len())
+                } else {
+                    let d = &generics.structs[*idx as usize];
+                    (d.ty_var_names.len(), d.len_var_names.len())
+                };
+                (tys == want_ty && lens == want_len).then_some(gid)
+            }
+            _ => None,
+        })?;
+    Some(crate::ast::ctor_image_type(generics, gid))
+}
+
 /// R14-R17: check a polymorphic combinator standalone by instantiating its
 /// signature at concrete stand-in types and running the ordinary concrete
 /// checker on the body. `i64` is Copy/Ord/numeric, so a body that only moves,
@@ -552,8 +624,42 @@ pub(super) fn check_poly_combinator_standalone(
     const STANDALONE_LEN: u32 = 4;
     let span = word_span(word);
     let mut subst = Subst::default();
+    // P7b.S3 (S3-6, gate G1): an Arrow-kinded variable gets a *constructor*
+    // stand-in, not `Type::I64`. `i64` is not a constructor, so an App-headed
+    // declared slot (`'F['T 'E]`) had no representable stand-in operand at
+    // all and `apply_subst`'s App arm rightly refused it. Seeded with the
+    // `CtorImage` of the first `impl:` of the variable's user bound in
+    // declaration order, the slot grounds to a real monomorph and the body is
+    // checked against a representative instance -- stronger than the `i64`
+    // stand-in, and deterministic.
+    let mut stand_in_ctor = false;
     for v in 0..sig.ty_var_names.len() as u32 {
-        subst.ty.push((v, Type::I64));
+        let arrow = matches!(
+            sig.ty_kinds.get(v as usize),
+            Some(crate::ast::Kind::Arrow { .. })
+        );
+        let ty = match arrow {
+            false => Type::I64,
+            true => match arrow_stand_in(v, sig, poly.trait_resolve.impls, generics) {
+                Some(t) => {
+                    stand_in_ctor = true;
+                    t
+                }
+                // The named hole (ledger item 2): the bound has no `impl:` in
+                // this program, the Arrow variable carries no user bound at
+                // all, or every impl of the bound arity-mismatches the
+                // Arrow kind so `arrow_stand_in` finds no viable stand-in
+                // (pinned by `arity_mismatched_first_impl_is_not_the_stand_in`).
+                // The standalone check is skipped and the word is checked only
+                // at its splice sites. The no-impl half is unwitnessable by
+                // construction (with no impl, no call site can discharge the
+                // bound, so the word is never spliced); the no-user-bound half
+                // is still callable, and error golden E#1 pins that its broken
+                // body is rejected at its first splice site.
+                None => return Ok(()),
+            },
+        };
+        subst.ty.push((v, ty));
     }
     for ln in 0..sig.len_var_names.len() as u32 {
         subst.len.push((ln, STANDALONE_LEN));
@@ -563,11 +669,19 @@ pub(super) fn check_poly_combinator_standalone(
     // effect's rows, an array element, a referent, a cell payload), which
     // grounds normally below. Checked before any grounding starts, so it
     // never depends on whether grounding would have succeeded.
-    for pty in &sig.inputs {
-        if matches!(
-            pty,
-            PolyType::Generic { .. } | PolyType::GenericVariant { .. }
-        ) {
+    //
+    // P7b.S3 (S3-9): skipped for a synthesized trait member word. Its inputs
+    // are *always* this shape once the `impl:` target is generic (S2-6's
+    // bare-ctor desugar binds the trait's header variable to the whole target
+    // pattern), so the refusal rejects every generic-target member out of
+    // hand -- gate G4. The refusal is unchanged for every other word.
+    for pty in sig.inputs.iter() {
+        if !word.is_trait_member
+            && matches!(
+                pty,
+                PolyType::Generic { .. } | PolyType::GenericVariant { .. }
+            )
+        {
             let reject_ctx = word_ctx(
                 word,
                 structs,
@@ -585,7 +699,7 @@ pub(super) fn check_poly_combinator_standalone(
             ));
         }
     }
-    let ((inputs, outputs), mut local) = ground_into_word_scoped_registries(
+    let grounded = ground_into_word_scoped_registries(
         generics,
         structs,
         enums,
@@ -635,7 +749,33 @@ pub(super) fn check_poly_combinator_standalone(
             }
             Ok((inputs, outputs))
         },
-    )?;
+    );
+    // P7b.S3 (S3-6): the rescue, first class -- a **grounding** failure
+    // against the stand-in's constructor. The stand-in is a representative,
+    // not a proof obligation: a word whose body is fine at some other impl's
+    // constructor must not be rejected because the first impl in declaration
+    // order does not fit it. Structural, not text-matched: this is the
+    // signature-grounding step, so any failure of it while a `CtorImage`
+    // stand-in is in play is that class by construction. With the `i64`
+    // stand-in (`stand_in_ctor == false`) the `?` is byte-identical to before.
+    //
+    // Honest about the shape of this arm (Phase 2 review fix): the `Err(_)`
+    // is positional and blanket, not classified by cause -- it rescues
+    // *anything* the closure above can raise, not provably only a
+    // `CtorImage`-mismatch. The closure calls `apply_subst` once per
+    // declared input/output slot, so a single Arrow variable carrying a
+    // `CtorImage` stand-in arms this rescue for every slot's grounding, not
+    // only the one(s) that actually mention that variable. Measured (see
+    // `class_one_grounding_failure_is_skipped`): no legally-parsed fixture
+    // was found that makes this arm's `Err` branch fire at all, given
+    // `arrow_stand_in`'s own arity-fit check and the shared kind check that
+    // rejects a bare Arrow-bound variable outright -- so today it is an
+    // untriggered blanket, not a narrow one.
+    let ((inputs, outputs), mut local) = match grounded {
+        Ok(v) => v,
+        Err(_) if stand_in_ctor => return Ok(()),
+        Err(e) => return Err(e),
+    };
     // P7.S11 (R4): if signature grounding minted a monomorph, its generated
     // constructor/destructure sigs are not yet in `env` -- `env` was built
     // from `module.structs`/`module.enums` before the word loop, and the
@@ -729,7 +869,26 @@ pub(super) fn check_poly_combinator_standalone(
     poly.combinator_sig = saved_comb_sig;
     poly.combinator_subst = saved_comb_subst;
     poly.combinator_name = saved_comb_name;
-    result
+    // P7b.S3 (S3-6): the rescue, second class -- a body failure the stand-in's
+    // arbitrary constructor can *cause*, identified by the tag its raise site
+    // stamped ([`STAND_IN_GROUNDING_TAG`]), never by the message's wording.
+    // Every other body failure is impl-independent -- arity/underflow,
+    // linearity, an unknown word, a borrow or move violation, an undischarged
+    // bound -- and stays a hard error. A rescued word is not silently
+    // accepted: it is re-checked at every splice site, so a genuinely broken
+    // body fails at its first splice.
+    // Measured (see `class_two_member_call_is_not_silently_rescued` and the
+    // fence's doc): for member calls the retained App-headed fence fires
+    // before any tagged raise can, so this tag has no live member-call
+    // producer today; it is defense-in-depth pending Phase 3's S3-1.c/S3-7
+    // deletion of the fence.
+    match result {
+        Err(e) if stand_in_ctor => match strip_stand_in_tag(e) {
+            (true, _) => Ok(()),
+            (false, e) => Err(e),
+        },
+        other => other,
+    }
 }
 
 /// R7: check a polymorphic word's body once, over a virtual stack of
@@ -1346,10 +1505,16 @@ pub(super) fn resolve_splice_member_call(
     span: Span,
     stack: &mut Vec<Slot>,
     ctx: &Ctx,
+    env: &HashMap<String, Vec<Overload>>,
+    scope: &mut Scope,
     arrays: &mut Vec<ArrayDecl>,
+    cells: &mut Vec<OwnedCellDecl>,
     refs: &mut Vec<RefDecl>,
+    slices: &mut Vec<SliceDecl>,
     poly: &mut PolyCtx,
     prov: &mut Provenance,
+    live: &Liveness,
+    at: usize,
 ) -> Result<Option<Vec<Slot>>, String> {
     let Some(sig) = poly.combinator_sig.clone() else {
         return Ok(None);
@@ -1401,23 +1566,45 @@ pub(super) fn resolve_splice_member_call(
         many => {
             // Disambiguate by concrete operand shape: ground each
             // candidate's input types against the concrete θ and check
-            // which match the live stack. P7b.S2 (S2-15.f): a candidate whose
-            // signature is application-headed, or whose grounding hits a
-            // `CtorImage` θ, has no mono grounding here and cannot fit --
-            // skipped, so the guard below reports it if it is the only
-            // candidate, instead of `ground_member_type`'s unreachable arms
-            // panicking on the newly-reachable HKT member shapes.
+            // which match the live stack.
+            //
+            // P7b.S3 (S3-7): a candidate θ does not ground is **recorded with
+            // its reason** and excluded from `fitting`, never silently
+            // `continue`d. S2-15.f's two bare `continue`s (an App-headed
+            // signature; a `try_ground_member_type` `None`) existed only to
+            // route around `ground_member_type`'s unreachable arms, and a
+            // silent drop is the failure mode that would leave a
+            // two-candidate program reporting "no candidate fits" -- or worse,
+            // dispatching to the other impl -- on exactly the shapes this
+            // slice adds. If `fitting` ends up empty the error now names every
+            // candidate *and why each failed to ground*, which is strictly
+            // more information than the shape list alone.
             let mut fitting: Vec<(u32, TraitId, &TraitMember)> = Vec::new();
+            let mut ungroundable: Vec<(&str, String)> = Vec::new();
             for (v, tid, m) in many {
+                let trait_name = traits[tid.index()].name.as_str();
                 if m.sig
                     .inputs
                     .iter()
                     .chain(&m.sig.outputs)
                     .any(crate::ast::member_ty_mentions_app)
                 {
+                    ungroundable.push((
+                        trait_name,
+                        "its signature is application-headed, and the member's own type arguments have no grounding at this splice".to_string(),
+                    ));
                     continue;
                 }
-                let Some(ty) = subst.ty_of(*v) else { continue };
+                let Some(ty) = subst.ty_of(*v) else {
+                    ungroundable.push((
+                        trait_name,
+                        format!(
+                            "the splice's θ leaves `{}` unbound",
+                            sig.ty_var_names[*v as usize]
+                        ),
+                    ));
+                    continue;
+                };
                 let Some(inputs): Option<Vec<Type>> = m
                     .sig
                     .inputs
@@ -1425,9 +1612,14 @@ pub(super) fn resolve_splice_member_call(
                     .map(|t| crate::ast::try_ground_member_type(t, ty, arrays, refs))
                     .collect()
                 else {
-                    // S2-15.f: a `CtorImage` θ grounds no slot here; the
-                    // candidate cannot fit and the guard below reports it if
-                    // it is the only one.
+                    ungroundable.push((
+                        trait_name,
+                        format!(
+                            "`{}` is bound to `{}`, which grounds no member slot",
+                            sig.ty_var_names[*v as usize],
+                            ty.name()
+                        ),
+                    ));
                     continue;
                 };
                 if stack.len() >= inputs.len() {
@@ -1460,7 +1652,13 @@ pub(super) fn resolve_splice_member_call(
                             )
                         })
                         .collect();
-                    return Err(no_candidate_fits_operands_error(ctx, span, member, &shapes));
+                    return Err(no_candidate_fits_operands_error(
+                        ctx,
+                        span,
+                        member,
+                        &shapes,
+                        &ungroundable,
+                    ));
                 }
                 [one] => *one,
                 _ => {
@@ -1522,8 +1720,22 @@ pub(super) fn resolve_splice_member_call(
         ));
     }
     // Ground the member's input/output types against the concrete θ.
+    //
+    // P7b.S3 (S3-7): the single-candidate twin of the disambiguation loop's
+    // recorded exclusions. θ leaving the bound variable unbound used to
+    // return `Ok(None)`, letting the call fall through to ordinary dispatch
+    // and surface as an unknown word at a span that explains nothing. It is a
+    // located error naming the member, the trait and the variable instead --
+    // the sibling of `splice_member_ctor_image_error`, which covers the case
+    // where θ *does* bind the variable but only to a bare constructor.
     let Some(ty) = subst.ty_of(var) else {
-        return Ok(None);
+        return Err(splice_member_unbound_var_error(
+            ctx,
+            span,
+            member,
+            &traits[trait_id.index()].name,
+            &sig.ty_var_names[var as usize],
+        ));
     };
     let mut ground_slots = |slots: &[PolyType]| -> Result<Vec<Type>, String> {
         slots
@@ -1585,11 +1797,33 @@ pub(super) fn resolve_splice_member_call(
     // here; the member call is re-checked at each real splice site where θ is
     // concrete.
     if let Some(uid) = prov.splice_uid {
-        let trait_decl = &poly.trait_resolve.traits[trait_id.index()];
-        let Some(imp) = poly.trait_resolve.impls.iter().find(|i| {
-            i.trait_id == trait_id
-                && match_impl_target(&i.target.pattern, ty, &[], &[], &[], None).is_some()
-        }) else {
+        let trait_decl = &traits[trait_id.index()];
+        // P7b.S3 (S3-8, gate G3): route the impl lookup through
+        // `find_bound_impl` rather than a bare `find` over
+        // `match_impl_target(..., &[], &[], &[], None)`. With empty registries
+        // and `generics: None` a `Generic` target pattern can never match a
+        // monomorph operand -- recovering the monomorph's header identity is
+        // exactly what the live `GenericTypes` registry is for -- so an
+        // `inline` caller rejected what the non-inline one accepted. Going
+        // through the shared resolver also brings R6 candidate-bound
+        // discharge, R7 cycle detection and R3 most-specific selection, so
+        // the two callers cannot dispatch to different impls. The returned
+        // `Subst` is the impl's own substitution, which S3-1.c will need as
+        // `inline_combinator`'s seed; Phase 2 does not consume it yet.
+        let tr = poly.trait_resolve;
+        let found = find_bound_impl(
+            trait_id,
+            ty,
+            None,
+            span,
+            ctx,
+            &tr,
+            arrays,
+            cells,
+            refs,
+            &mut Vec::new(),
+        )?;
+        let Some((imp_idx, _impl_subst)) = found else {
             return Err(unsatisfied_user_bound_error(
                 ctx,
                 span,
@@ -1601,6 +1835,7 @@ pub(super) fn resolve_splice_member_call(
                 refs,
             ));
         };
+        let imp = &tr.impls[imp_idx];
         let symbol = imp
             .resolved
             .iter()
@@ -1617,7 +1852,62 @@ pub(super) fn resolve_splice_member_call(
                 span,
             ));
         };
-        poly.splice_trait_calls.insert((uid, span), symbol.clone());
+        let symbol = symbol.clone();
+        // P7b.S3 (S3-8, matrix row 7): a *generic* impl target's member word
+        // is polymorphic -- it mints no `IrFunc` and has no `env` entry, so
+        // handing its bare symbol to lowering's ordinary resolved-call path
+        // panics (`checked resolved call exists`). A monomorph has to be
+        // recorded instead, which is what `check_poly_call` does: it unifies
+        // the member word's grounded S2-6 sig against these concrete slots
+        // and writes the per-splice `CallInst` (symbol + θ_call). The same
+        // route `resolve_mono_member_call`'s generic-impl branch takes, so
+        // the inline and non-inline callers agree on the monomorph.
+        //
+        // A member that is itself a **combinator** is excluded: it is
+        // spliced, not called, and lowering decides that by looking
+        // `sym_name` up in its own name-keyed combinator table
+        // (`lower_resolved_word_call`). Keying the check-side decision the
+        // same way is what keeps the two sides from disagreeing.
+        // P7b.S3 (S3-1.c hazard, Phase 2 review fix): keyed on `symbol`
+        // today, which is `overload_symbols`' output -- unique per name
+        // only until a name collision forces its `$$`-suffixed variant, at
+        // which point this lookup and `poly.combinators`' own key must
+        // still agree by construction, not by coincidence. S3-1.c
+        // (Phase 3) replaces this with a key derived from
+        // `TraitResolveCtx::words[idx]` instead, sidestepping the
+        // suffixing hazard rather than relying on it staying aligned.
+        let member_is_combinator = poly.combinators.get(&symbol).is_some();
+        if !member_is_combinator && !tr.impls[imp_idx].target.is_concrete() {
+            if !poly.env.contains_key(&symbol) {
+                return Err(mono_member_unroutable_error(
+                    ctx,
+                    span,
+                    member,
+                    &trait_decl.name,
+                    &symbol,
+                ));
+            }
+            let next = check_poly_call(
+                &symbol,
+                span,
+                &[],
+                &[],
+                stack,
+                ctx,
+                env,
+                scope,
+                arrays,
+                cells,
+                refs,
+                slices,
+                prov,
+                live,
+                at,
+                poly,
+            )?;
+            return Ok(Some(next));
+        }
+        poly.splice_trait_calls.insert((uid, span), symbol);
     }
     // Consume operands, produce outputs.
     stack.truncate(base);
@@ -1631,6 +1921,20 @@ pub(super) fn resolve_splice_member_call(
 /// locals (S2-6), and a splice grounds member signatures at concrete types.
 /// Located at the splice call, rather than `ground_member_type`'s
 /// unreachable-App backstop panicking on the newly-reachable HKT shapes.
+///
+/// P7b.S3 (S3-7, measured drift): the spec ruled this deleted, with S2-6
+/// leading-slot grounding through θ replacing it. Grounding an App-headed
+/// member sig here needs the caller-space obligation slots and per-site
+/// unification that S3-1.c's splice-caller hop lands (Phase 3), so the fence
+/// is *kept* until then. Measured (Phase 2 review fix), this is not a dead
+/// backstop: S3-6's `CtorImage` stand-in lets an App-headed member reach
+/// `resolve_splice_member_call` from a combinator's own standalone check
+/// (`ground_slots`'s caller), and this fence is what actually fires there,
+/// unconditionally and untagged -- see `class_two_member_call_is_not_
+/// silently_rescued`. It is not gated on `stand_in_ctor`, so an App-headed
+/// member call is a hard error today whether or not a rescue is in play;
+/// S3-1.c's caller-space theta-grounding (Phase 3) is what finally deletes
+/// it, per the callee it replaces `ground_slots` with.
 fn splice_member_hkt_error(ctx: &Ctx, span: Span, member: &str, trait_name: &str) -> String {
     let where_ = ctx.rendered_word();
     format!(
@@ -1640,11 +1944,46 @@ fn splice_member_hkt_error(ctx: &Ctx, span: Span, member: &str, trait_name: &str
     )
 }
 
+/// P7b.S3 (S3-7): θ does not bind the splice's bound variable at all, so
+/// there is nothing to ground the member signature against. The bare-unbound
+/// sibling of `splice_member_ctor_image_error` (which covers θ binding the
+/// variable to a constructor that does not complete). Not tagged with
+/// [`STAND_IN_GROUNDING_TAG`]: the standalone check seeds *every* declared
+/// variable, so an unbound one is not something a stand-in's arbitrary
+/// constructor choice can cause.
+fn splice_member_unbound_var_error(
+    ctx: &Ctx,
+    span: Span,
+    member: &str,
+    trait_name: &str,
+    var: &str,
+) -> String {
+    format!(
+        "error: trait member `{member}` of `{trait_name}` in {where_} (line {}, col {}) cannot be dispatched: the splice's substitution leaves `{var}` unbound\n  a member call is grounded through the variable its bound sits on, so that variable must be determined by the call site's operands",
+        span.line,
+        span.col,
+        where_ = ctx.rendered_word(),
+    )
+}
+
 /// P7b.S2 (S2-15.f, splice guard b): a member signature grounded at a bound
 /// variable that carries a bare `Type::CtorImage` -- the image an App
 /// unification bound as a head, which is not itself a type. The S1-15.g twin
 /// for the splice path: a located error instead of the unchecked Var arm's
 /// silent misclassification.
+///
+/// P7b.S3 (S3-7, measured drift): still raised from the same unchanged
+/// `ground_slots` closure it always was -- nothing here narrowed. Measured
+/// (Phase 2 review fix): `ground_slots` is only reached for a member sig
+/// that mentions the bound variable in *neither* App-headed nor bare form
+/// (an App-headed member is fenced earlier by `splice_member_hkt_error`,
+/// and a bare mention is rejected at the shared kind check before any body
+/// is checked at all), so no legally-parsed member signature was found,
+/// after measurement, that reaches this builder through a `CtorImage`
+/// mismatch. It is kept, tagged with [`STAND_IN_GROUNDING_TAG`], as
+/// defense-in-depth rather than a proven-live path; Phase 3's S3-1.c
+/// caller-space grounding is the point at which this and `ground_slots`
+/// are slated for deletion regardless of this measurement.
 fn splice_member_ctor_image_error(
     ctx: &Ctx,
     span: Span,
@@ -1657,7 +1996,7 @@ fn splice_member_ctor_image_error(
         Type::CtorImage(_, name) => name,
         _ => "a constructor image",
     };
-    format!(
+    STAND_IN_GROUNDING_TAG.to_string() + &format!(
         "error: trait member `{member}` of `{trait_name}` in {where_} (line {}, col {}) is grounded against the constructor image `{ctor}`, which is not a type\n  the splice's bound variable carries a bare constructor (an applied head like `'F['T]`), and a member signature cannot ground against it here\n  instantiate the combinator at a complete type (e.g. `comb[Option]`), not at the constructor alone",
         span.line,
         span.col,
@@ -2132,7 +2471,13 @@ fn poly_trait_member_call(
                         )
                     })
                     .collect();
-                return Err(no_candidate_fits_operands_error(ctx, span, member, &shapes));
+                return Err(no_candidate_fits_operands_error(
+                    ctx,
+                    span,
+                    member,
+                    &shapes,
+                    &[],
+                ));
             }
         },
     };
@@ -9951,7 +10296,8 @@ pub(super) fn poly_ctor_image_as_type_error(
     ctor_name: &str,
 ) -> String {
     let callee = crate::resolve::demangle_call(callee);
-    format!(
+    STAND_IN_GROUNDING_TAG.to_string()
+        + &format!(
         "error: `{callee}` in {name} (line {line}) uses type variable `{var}` at line {line}, col {col} as a plain type, but it is bound to the constructor `{ctor_name}` at line {bline}, col {bcol}\n  a constructor is not a type until applied to arguments: `{var}[...]`",
         name = ctx.rendered_word(),
         line = span.line,
@@ -9959,6 +10305,34 @@ pub(super) fn poly_ctor_image_as_type_error(
         bline = binding_span.line,
         bcol = binding_span.col,
     )
+}
+
+/// P7b.S3 (S3-6): the marker a raise site stamps on a diagnostic whose cause
+/// *can* be the standalone check's arbitrary choice of stand-in constructor
+/// -- a grounding failure against that constructor. The standalone check
+/// rescues a tagged failure (the word is re-checked at every splice site,
+/// where θ is real) and lets every other failure class through as a hard
+/// error: arity/underflow, linearity, an unknown word, a borrow or move
+/// violation, an undischarged bound are all impl-independent.
+///
+/// The discriminator is a token the **raise site** owns, not the diagnostic's
+/// prose: matching on wording would make every message text load-bearing and
+/// would silently widen as messages are edited. The tag is stripped by
+/// `strip_stand_in_tag` before a diagnostic reaches a user, so it is never
+/// part of a golden's asserted text.
+///
+/// The tagged set is deliberately the smallest one that covers the stand-in's
+/// own arbitrariness. Widening it is a measurement, not a default.
+pub(super) const STAND_IN_GROUNDING_TAG: &str = "\u{1}p7bs3-stand-in\u{1}";
+
+/// Whether `err` carries [`STAND_IN_GROUNDING_TAG`], and the message without
+/// it. Every escape route for a diagnostic runs through this, so a tag can
+/// never leak into rendered output.
+pub(super) fn strip_stand_in_tag(err: String) -> (bool, String) {
+    match err.strip_prefix(STAND_IN_GROUNDING_TAG) {
+        Some(rest) => (true, rest.to_string()),
+        None => (false, err),
+    }
 }
 
 /// R7 twin of `linear_local_unconsumed_error` for the polymorphic body
@@ -10150,6 +10524,7 @@ fn no_candidate_fits_operands_error(
     span: Span,
     member: &str,
     candidates: &[(&str, &str, String)],
+    ungroundable: &[(&str, String)],
 ) -> String {
     let where_ = ctx.rendered_word();
     let each: Vec<String> = candidates
@@ -10160,13 +10535,25 @@ fn no_candidate_fits_operands_error(
         .iter()
         .map(|(t, v, inputs)| format!("`{t}` on {v} expects `{inputs}`"))
         .collect();
-    format!(
+    let mut msg = format!(
         "error: `{member}` is required by {} in {where_} (line {}, col {})\n  note: the operands at this call match none of their declared shapes: {}",
         joined_with_and(&each),
         span.line,
         span.col,
         joined_with_and(&shapes)
-    )
+    );
+    // P7b.S3 (S3-7): a candidate θ could not ground was excluded before the
+    // operand match ran at all, so "the operands match none of their shapes"
+    // is not the whole story for it. Naming the reason is the difference
+    // between this and the `continue` it replaced.
+    if !ungroundable.is_empty() {
+        let reasons: Vec<String> = ungroundable
+            .iter()
+            .map(|(t, why)| format!("`{t}` could not be grounded here: {why}"))
+            .collect();
+        msg.push_str(&format!("\n  note: {}", joined_with_and(&reasons)));
+    }
+    msg
 }
 
 fn joined_with_and(items: &[String]) -> String {
@@ -11558,21 +11945,18 @@ mod tests {
     /// member call from a bounded poly body is operand-checked against the
     /// caller's abstract slots (the first `map` unifies), and the second
     /// `map`'s missing operands are a located error, never a panic on the
-    /// App-headed signature. The guard itself is currently
-    /// source-unreachable, and deliberately so rather than by an oversight
-    /// this phase could lift: reaching `resolve_splice_member_call` with an
-    /// App-headed member needs an inline combinator carrying the trait's
-    /// `Bound::User`, and such a combinator cannot be declared today -- the
-    /// obligation pre-pass (which runs for user-bounded combinators,
-    /// `check.rs`) requires the member's App-headed operand to unify against
-    /// an App-headed declared slot of the combinator, while the standalone
-    /// combinator check grounds every declared variable at the `i64`
-    /// stand-in, where `apply_subst`'s App arm rejects exactly that slot
-    /// (a bare-variable spelling of the bound fails the other way: the
-    /// member's App head never unifies with a bare-Var operand). Both splice
-    /// guards wait on an HKT-typed combinator signature being standalone-
-    /// checkable; until then this test pins the nearest reachable behavior
-    /// and documents the gap.
+    /// App-headed signature. This fixture's `twice` is deliberately
+    /// *non*-`inline`, so it never reaches `check_poly_combinator_standalone`
+    /// at all -- the rationale once here ("the guard is source-unreachable
+    /// because the standalone check grounds every variable at the `i64`
+    /// stand-in") is stale: S3-6 gave an Arrow-kinded variable a `CtorImage`
+    /// stand-in instead, and an `inline` combinator carrying the trait's
+    /// `Bound::User` over such a variable *can* be declared today (see
+    /// `class_two_member_call_is_not_silently_rescued`), which reaches
+    /// `resolve_splice_member_call` and hits `splice_member_hkt_error`
+    /// (S3-7) before this test's body-check guard would. What this fixture
+    /// still pins, for the non-combinator path, is unchanged: the second
+    /// `map`'s underflow is a located error, not a panic.
     #[test]
     fn splice_member_call_of_hkt_member_is_located_error() {
         let err = check_src(
@@ -19679,6 +20063,336 @@ mod tests {
             checked.arrays.len(),
             live_array_len,
             "nor the body's array, on the route the declared-output array test does not cover"
+        );
+    }
+
+    /// P7b.S3 Phase 2 fixtures: a Functor trait over two structurally
+    /// identical single-parameter enums, `Opt` implemented first and `Opt2`
+    /// second, in that source order.
+    fn functor_two_impls_src(extra: &str) -> String {
+        format!(
+            "type: Opt['T] | None | Some 'T ;\n\
+             type: Opt2['T] | None2 | Some2 'T ;\n\
+             trait: Functor['F: * -> *] :\n\
+             map ( 'F['T] [ 'T -- 'U ] -- 'F['U] ) ;\n\
+             ;\n\
+             impl: Functor for Opt\n\
+             : map swap ~[ ( Some ) Some> swap call Some ] ~[ ( None ) drop drop None ] Opt? ;\n\
+             ;\n\
+             impl: Functor for Opt2\n\
+             : map swap ~[ ( Some2 ) Some2> swap call Some2 ] ~[ ( None2 ) drop drop None2 ] Opt2? ;\n\
+             ;\n\
+             {extra}\n\
+             : main ( -- ) ;\n"
+        )
+    }
+
+    /// P7b.S3 (S3-6): the Arrow-kinded standalone stand-in is the `CtorImage`
+    /// of the *first* impl of the variable's user bound, in declaration
+    /// order -- pinned, so which representative a body is checked against
+    /// does not drift with unrelated edits. `Opt` is declared and implemented
+    /// before `Opt2`, so `Opt` it is.
+    #[test]
+    fn standalone_stand_in_binds_arrow_var_to_first_impls_ctor_image() {
+        let (module, _) = checked_like_a_build(&functor_two_impls_src(
+            ": apply['F: Functor 'T 'U] ( 'F['T] [ 'T -- 'U ] -- 'F['U] ) map ;",
+        ))
+        .expect("the fixture checks");
+        let apply = module
+            .words
+            .iter()
+            .find(|w| w.name == "apply")
+            .expect("apply exists");
+        let sig = apply.poly.as_deref().expect("apply is polymorphic");
+        let f = sig
+            .ty_var_names
+            .iter()
+            .position(|n| n == "'F")
+            .expect("'F declared") as u32;
+        assert!(
+            matches!(
+                sig.ty_kinds.get(f as usize),
+                Some(crate::ast::Kind::Arrow { .. })
+            ),
+            "sanity: 'F is Arrow-kinded"
+        );
+        let generics = RefCell::new(module.generics.clone());
+        let stand_in = arrow_stand_in(f, sig, &module.impls, Some(&generics));
+        match stand_in {
+            Some(Type::CtorImage(_, name)) => assert_eq!(
+                name, "Opt",
+                "the stand-in is the FIRST impl's constructor in declaration order"
+            ),
+            other => panic!("expected a CtorImage stand-in, got {other:?}"),
+        }
+    }
+
+    /// P7b.S3 (S3-6): the no-impl fallback. An Arrow-kinded bound with no
+    /// `impl:` in the program has no constructor to stand in for, so the
+    /// standalone check is skipped without erroring (the word is checked at
+    /// its splice sites, of which an impl-less bound can have none).
+    #[test]
+    fn arrow_bound_without_impl_skips_standalone_without_error() {
+        let res = check_src(
+            "type: Opt['T] | None | Some 'T ;\n\
+             trait: Functor['F: * -> *] :\n\
+             map ( 'F['T] [ 'T -- 'U ] -- 'F['U] ) ;\n\
+             ;\n\
+             : apply inline['F: Functor 'T 'U] ( 'F['T] [ 'T -- 'U ] -- 'F['U] ) map ;\n\
+             : main ( -- ) ;\n",
+        );
+        assert!(res.is_ok(), "skipped, not erred: {res:?}");
+    }
+
+    /// P7b.S3 (S3-6): a first-in-declaration-order impl whose constructor
+    /// arity does not match the variable's declared kind (`Res['T 'E]` under
+    /// `'F: * -> *` -- legal in itself, S2's shared-bound dogfood) is not
+    /// chosen as the stand-in; the first *fitting* impl (`Opt`) is. Applying
+    /// the mismatched constructor would not even be a rescuable `Err`: it is
+    /// an index panic inside field substitution, so the fit check is
+    /// structural and up front.
+    #[test]
+    fn arity_mismatched_first_impl_is_not_the_stand_in() {
+        let (module, _) = checked_like_a_build(
+            "type: Res['T 'E] | Ok 'T | Err 'E ;\n\
+             type: Opt['T] | None | Some 'T ;\n\
+             trait: Functor['F: * -> *] :\n\
+             map ( 'F['T] [ 'T -- 'U ] -- 'F['U] ) ;\n\
+             ;\n\
+             impl: Functor for Res\n\
+             : map swap ~[ ( Ok ) Ok> swap call Ok ] ~[ ( Err ) Err> swap drop Err ] Res? ;\n\
+             ;\n\
+             impl: Functor for Opt\n\
+             : map swap ~[ ( Some ) Some> swap call Some ] ~[ ( None ) drop drop None ] Opt? ;\n\
+             ;\n\
+             : apply['F: Functor 'T 'U] ( 'F['T] [ 'T -- 'U ] -- 'F['U] ) map ;\n\
+             : main ( -- ) ;\n",
+        )
+        .expect("the fixture checks");
+        let apply = module
+            .words
+            .iter()
+            .find(|w| w.name == "apply")
+            .expect("apply exists");
+        let sig = apply.poly.as_deref().expect("apply is polymorphic");
+        let f = sig
+            .ty_var_names
+            .iter()
+            .position(|n| n == "'F")
+            .expect("'F declared") as u32;
+        let generics = RefCell::new(module.generics.clone());
+        match arrow_stand_in(f, sig, &module.impls, Some(&generics)) {
+            Some(Type::CtorImage(_, name)) => assert_eq!(
+                name, "Opt",
+                "the 2-parameter `Res` is skipped; the first FITTING impl is the stand-in"
+            ),
+            other => panic!("expected a CtorImage stand-in, got {other:?}"),
+        }
+    }
+
+    /// P7b.S3 (S3-6): the rescue fires ONLY for the failure classes the
+    /// stand-in's arbitrary constructor can cause. An arity error (an extra
+    /// `drop` past what the declared effect leaves) is impl-independent and
+    /// stays a hard error -- and the internal grounding tag never reaches
+    /// the rendered message.
+    ///
+    /// Measured (Phase 2 review fix): the pre-S3-6 abstract poly walk
+    /// (`check_poly_body`, R7) runs on every combinator before
+    /// `check_poly_combinator_standalone` is ever invoked, and it already
+    /// rejects a symbolic stack-depth mismatch like this one on its own --
+    /// so this fixture never reaches the standalone check's concrete
+    /// `check_word` call, let alone its rescue match arms, and this test
+    /// cannot by itself discriminate "the rescue declined to fire" from
+    /// "the rescue was never reached." It is kept because it is still the
+    /// correct behavior to pin (a `bad` combinator must be rejected, tag or
+    /// no tag) and because no impl-independent failure category was found,
+    /// after measurement, that survives the abstract walk to reach the
+    /// standalone check's own body pass for an Arrow-bound member call --
+    /// every member mention with an App-headed slot hits
+    /// `splice_member_hkt_error` first (untagged, unconditional -- see
+    /// that function's doc), which is what `class_one_grounding_failure_
+    /// is_skipped` and `class_two_member_call_is_not_silently_rescued`
+    /// below measure directly.
+    #[test]
+    fn standalone_arity_error_is_not_rescued() {
+        let res = check_src(&functor_two_impls_src(
+            ": bad inline['F: Functor 'T] ( 'F['T] -- 'F['T] ) drop drop ;",
+        ));
+        let err = res.expect_err("an impl-independent body error stays hard");
+        assert!(
+            !err.contains('\u{1}'),
+            "no internal tag byte in a rendered diagnostic: {err:?}"
+        );
+        assert!(
+            err.contains("bad"),
+            "the error names the failing word: {err}"
+        );
+    }
+
+    /// P7b.S3 (S3-6) Phase 2 measurement: class 1 ("the rescue, first
+    /// class" at `check_poly_combinator_standalone`'s `grounded` match) is
+    /// a blanket over the combinator's *own* declared-effect grounding, not
+    /// gated on a tag. Measured attempt to trigger it with a legally
+    /// parsed fixture: every route tried --
+    /// - a bare (unapplied) Arrow-bound variable in the combinator's own
+    ///   signature is rejected at the shared kind check before `check_module`
+    ///   ever reaches grounding ("a higher-kinded variable never appears
+    ///   bare"), for a word signature and a trait member signature alike;
+    /// - every declared length variable is pre-seeded (`STANDALONE_LEN`)
+    ///   before grounding starts, so an unbound-length failure cannot occur;
+    /// - `arrow_stand_in`'s own fit check (`want_ty`/`want_len`) only ever
+    ///   selects a candidate impl whose constructor arity structurally
+    ///   matches the bound's own kind, so the App arm's length-domain
+    ///   defense (`poly_app_len_domain_unsupported_error`) cannot fire from
+    ///   a stand-in this function picked itself.
+    ///
+    /// No legally-parsed program was found, after measurement, that reaches
+    /// this blanket with a genuine grounding failure -- it is retained as
+    /// defense-in-depth, not because a witness exists. This test pins that
+    /// absence: a combinator whose own signature *is* App-headed over a
+    /// fitting stand-in still checks clean.
+    #[test]
+    fn class_one_grounding_failure_is_skipped() {
+        let res = check_src(&functor_two_impls_src(
+            ": apply inline['F: Functor 'T] ( 'F['T] -- 'F['T] ) ;",
+        ));
+        assert!(
+            res.is_ok(),
+            "a fitting stand-in's App-headed grounding of the combinator's own \
+             effect does not fail: {res:?}"
+        );
+    }
+
+    /// P7b.S3 (S3-6) Phase 2 measurement: class 2 ("the rescue, second
+    /// class", tagged with [`STAND_IN_GROUNDING_TAG`]) exists to rescue a
+    /// body failure the stand-in's *arbitrary constructor choice* can
+    /// cause. Measured: a combinator body that bare-calls an Arrow-bound
+    /// trait member whose signature mentions the bound variable at all
+    /// (which, per the same kind check `class_one_grounding_failure_is_
+    /// skipped` documents, means it is *always* App-headed -- a bare
+    /// mention is unparseable) hits `splice_member_hkt_error` first, inside
+    /// `resolve_splice_member_call`, before `ground_slots` -- the tagged
+    /// closure that would raise `splice_member_ctor_image_error` -- ever
+    /// runs. `splice_member_hkt_error` is unconditional (S3-7, not gated on
+    /// `stand_in_ctor`), so class 2's tag is never reached this way either.
+    ///
+    /// This is a hard error today, with no tag, for a combinator over any
+    /// Arrow-bound trait whose member the body actually calls -- pinned
+    /// here rather than asserted as "rescued," because it measurably is
+    /// not.
+    #[test]
+    fn class_two_member_call_is_not_silently_rescued() {
+        let res = check_src(&functor_two_impls_src(
+            ": apply inline['F: Functor 'T 'U] ( 'F['T] [ 'T -- 'U ] -- 'F['U] ) map ;",
+        ));
+        let err = res.expect_err("an App-headed member call is fenced, not rescued");
+        assert!(
+            !err.contains('\u{1}'),
+            "no internal tag byte in a rendered diagnostic: {err:?}"
+        );
+        assert!(
+            err.contains("cannot be dispatched inside a combinator splice"),
+            "the fence, not a rescue, is what fires: {err}"
+        );
+    }
+
+    /// P7b.S3 (S3-8): the splice path and `resolve_user_bound` pick the SAME
+    /// impl for a two-fitting-impl program. `Box['T]` is declared before the
+    /// concrete-pinned `Box[i64]`; a first-match `find` would take the
+    /// generic one at a `Box[i64]` operand, while `find_bound_impl`'s R3
+    /// most-specific selection takes the concrete pin -- the rule the
+    /// non-splice caller already follows (S2's p11c golden).
+    #[test]
+    fn splice_path_selects_the_most_specific_impl_not_the_first_match() {
+        let (module, _) = checked_like_a_build(
+            "trait: Sized['S] :\n\
+             size inline ( 'S -- i64 ) ;\n\
+             ;\n\
+             type: Box['T] v 'T ;\n\
+             impl: Sized for Box['T]\n\
+             : size drop 1 ;\n\
+             ;\n\
+             impl: Sized for Box[i64]\n\
+             : size drop 2 ;\n\
+             ;\n\
+             : usesize inline['S: Sized] ( 'S -- i64 ) size ;\n\
+             : mkbox ( i64 -- Box[i64] ) Box ;\n\
+             : main ( -- ) 3 mkbox usesize drop ;\n",
+        )
+        .expect("the fixture checks");
+        let picked: Vec<&String> = module.splice_trait_calls.values().collect();
+        assert!(
+            !picked.is_empty(),
+            "the splice-caller hop recorded the member symbol"
+        );
+        assert!(
+            picked.iter().all(|s| s.contains("Box[i64]")),
+            "the splice path picks the concrete pin, as resolve_user_bound does: {picked:?}"
+        );
+    }
+
+    /// P7b.S3 (S3-8): a candidate whose `where` bound fails to discharge is
+    /// not selected on the splice path. `Box[P]`'s element is a struct, not
+    /// Ord, so the sole impl's `where 'T: Ord` fails and the splice site
+    /// reports the unsatisfied bound instead of dispatching through it (the
+    /// pre-S3-8 bare `find` had no R6 discharge at all).
+    #[test]
+    fn undischarged_where_bound_is_not_selected_on_the_splice_path() {
+        let res = check_src(
+            "trait: Sized['S] :\n\
+             size inline ( 'S -- i64 ) ;\n\
+             ;\n\
+             type: P v i64 ;\n\
+             type: Box['T] v 'T ;\n\
+             impl: Sized for Box['T] where 'T: Ord\n\
+             : size drop 1 ;\n\
+             ;\n\
+             : usesize inline['S: Sized] ( 'S -- i64 ) size ;\n\
+             : mkbox ( -- Box[P] ) 5 P Box ;\n\
+             : main ( -- ) mkbox usesize drop ;\n",
+        );
+        let err = res.expect_err("the undischarged candidate is not selected");
+        assert!(
+            err.contains("does not satisfy `Sized`"),
+            "the error names the unsatisfied-bound shape, not just the trait name: {err}"
+        );
+    }
+
+    /// P7b.S3 (S3-10): the poly pre-pass records a member combinator, so
+    /// `TraitResolveCtx::word_sig_of` hits for its synthesized name -- the
+    /// lookup that stopped erroring at the `word_sig_of(word_sym)` call m2
+    /// localized.
+    #[test]
+    fn word_sig_of_hits_for_a_recorded_member_combinator() {
+        let (module, recorded) = checked_like_a_build(
+            "trait: Sized['S] :\n\
+             size inline ( 'S -- i64 ) ;\n\
+             ;\n\
+             type: Box['T] v 'T ;\n\
+             impl: Sized for Box['T]\n\
+             : size drop 1 ;\n\
+             ;\n\
+             : usesize inline['S: Sized] ( 'S -- i64 ) size ;\n\
+             : mkbox ( i64 -- Box[i64] ) Box ;\n\
+             : main ( -- ) 3 mkbox usesize drop ;\n",
+        )
+        .expect("the fixture checks");
+        let member = module
+            .words
+            .iter()
+            .find(|w| w.is_trait_member)
+            .expect("the synthesized member word exists");
+        let tr = TraitResolveCtx {
+            traits: &module.traits,
+            impls: &module.impls,
+            word_symbols: &[],
+            recorded: &recorded,
+            enum_sites_recorded: &[],
+        };
+        assert!(
+            tr.word_sig_of(&member.name).is_some(),
+            "the pre-pass recorded `{}` so its grounded sig is findable",
+            member.name
         );
     }
 }

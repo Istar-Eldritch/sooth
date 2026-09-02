@@ -524,11 +524,24 @@ pub fn check(module: &mut Module) -> Result<(), String> {
     check_module(module).map(|_| ())
 }
 
+/// The one boundary every checker diagnostic crosses on its way out, and so
+/// the one place P7b.S3's `STAND_IN_GROUNDING_TAG` is guaranteed stripped: a
+/// tagged builder is reachable from real call sites too, not only from the
+/// standalone check that consumes the tag, and a marker byte must never reach
+/// rendered output.
+fn strip_diagnostic_tags(err: String) -> String {
+    poly::strip_stand_in_tag(err).1
+}
+
 /// `check`, plus the trait obligations R17's pre-pass collected -- the one
 /// artifact of a check run that is otherwise invisible from outside, since
 /// nothing stores it on `Module` (a resolved obligation rides `CallInst`
 /// instead).
 fn check_module(module: &mut Module) -> Result<Vec<WordObligations>, String> {
+    check_module_inner(module).map_err(strip_diagnostic_tags)
+}
+
+fn check_module_inner(module: &mut Module) -> Result<Vec<WordObligations>, String> {
     // R1: recognized ahead of `check_types` so the ordering hazard against
     // `check_recursion` (run inside `check_types`) never arises.
     let drop_overloads = find_drop_overloads(&module.words, &module.structs)?;
@@ -827,14 +840,25 @@ fn check_module(module: &mut Module) -> Result<Vec<WordObligations>, String> {
         // variable-bearing-application gate ("grounding a generic over its own
         // type variable is not yet implemented"), which is also what R1.5's
         // own fixture falls back to when the R1.5 gate is stubbed out -- R1.5
-        // sharpens that message, it does not add a safety net. Revisit the
-        // skip if that restriction is lifted. Widening it to
+        // sharpens that message, it does not add a safety net.
+        //
+        // P7b.S3 (S3-10, gate G5): that revisit. `is_trait_member` is exempt
+        // from the skip -- a synthesized member word carries no
+        // `Bound::User` of its own (the bound it implements is the trait's,
+        // not a `where` clause), so an `inline` member was never recorded and
+        // `TraitResolveCtx::word_sig_of` had no signature to hand a bound
+        // resolution. The skip is byte-identical for every non-member
+        // combinator, which is what keeps the measured-red widening below out
+        // of reach. Widening it to
         // `sig.bounds.is_empty()` is not the way: measured, that pulls
         // `lib/core.sth`'s Copy-bounded loop combinators (`filter`, `each`,
         // `fold`, `times`, `while`) into this pre-pass, where they do not
         // check standalone -- 40+ tests red, the first being `filter`'s index
         // into its own generic-length array.
-        if is_combinator(word) && !sig.bounds.iter().any(|(_, b)| matches!(b, Bound::User(_))) {
+        if is_combinator(word)
+            && !word.is_trait_member
+            && !sig.bounds.iter().any(|(_, b)| matches!(b, Bound::User(_)))
+        {
             continue;
         }
         let mut obligations = Vec::new();

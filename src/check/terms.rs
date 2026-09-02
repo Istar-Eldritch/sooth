@@ -838,9 +838,10 @@ fn check_term(
             // `check_poly_combinator_standalone` (i64 stand-in); when unset,
             // `resolve_splice_member_call` returns `Ok(None)` and ordinary
             // dispatch proceeds unchanged.
-            if let Some(stack) =
-                resolve_splice_member_call(name, span, &mut stack, ctx, arrays, refs, poly, prov)?
-            {
+            if let Some(stack) = resolve_splice_member_call(
+                name, span, &mut stack, ctx, env, scope, arrays, cells, refs, slices, poly, prov,
+                live, at,
+            )? {
                 return Ok(stack);
             }
             // R1/R2: one name can carry several candidates. A single one is
