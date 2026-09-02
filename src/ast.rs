@@ -97,6 +97,15 @@ pub struct Module {
     /// `lower_resolved_word_call` rather than `lower_poly_call`. Empty for a
     /// program whose combinators call no bare trait member.
     pub splice_trait_calls: std::collections::HashMap<(u32, Span), String>,
+    /// P7b.S3 (S3-1.e): per-splice generated-enum-word resolutions, keyed by
+    /// `(inline_uid, body_span)` — the operative `EnumId` a spliced combinator
+    /// body's own enum construction/destructure/elimination site resolved to
+    /// at that splice's concrete θ. Mirrors `splice_records`/
+    /// `splice_trait_calls` (same key shape, same per-splice scoping); a
+    /// span-keyed record would collide when one body is spliced at two θ.
+    /// Terminal data: unlike `splice_records` it mints nothing and is walked
+    /// by nothing (in particular not by `discover_transitive_instantiations`).
+    pub splice_enum_words: std::collections::HashMap<(u32, Span), EnumId>,
     /// Phase 4 slice 8a phase 2 (R7): the call sites that resolved to a user
     /// overload of a builtin-named word (e.g. `add` on two `Vec2`), keyed by the
     /// call site's `Span`, valued by the resolved callee's Sooth name. A
@@ -4015,6 +4024,7 @@ mod tests {
             transitive_instantiations: Vec::new(),
             splice_records: std::collections::HashMap::new(),
             splice_trait_calls: std::collections::HashMap::new(),
+            splice_enum_words: std::collections::HashMap::new(),
             builtin_overloads: std::collections::HashMap::new(),
             resolved_fields: std::collections::HashMap::new(),
             resolved_variant_fields: std::collections::HashMap::new(),
@@ -4169,6 +4179,7 @@ mod tests {
             transitive_instantiations: Vec::new(),
             splice_records: std::collections::HashMap::new(),
             splice_trait_calls: std::collections::HashMap::new(),
+            splice_enum_words: std::collections::HashMap::new(),
             builtin_overloads: std::collections::HashMap::new(),
             resolved_fields: std::collections::HashMap::new(),
             resolved_variant_fields: std::collections::HashMap::new(),
@@ -4247,6 +4258,7 @@ mod tests {
             transitive_instantiations: Vec::new(),
             splice_records: std::collections::HashMap::new(),
             splice_trait_calls: std::collections::HashMap::new(),
+            splice_enum_words: std::collections::HashMap::new(),
             builtin_overloads: std::collections::HashMap::new(),
             resolved_fields: std::collections::HashMap::new(),
             resolved_variant_fields: std::collections::HashMap::new(),

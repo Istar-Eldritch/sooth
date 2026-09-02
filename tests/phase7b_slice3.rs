@@ -285,3 +285,155 @@ fn non_inline_member_on_a_generic_target_from_an_inline_caller() {
         "a non-inline member on a generic target monomorphizes; nm: {syms:?}"
     );
 }
+
+/// The p4 HKT fixture (spec S3-3), P#3's program: `Opt`/`Res`, an
+/// Arrow-kinded `Functor` bound, and one `twice` caller dispatching `map`
+/// through both impls. `member_inline`/`caller_inline` cut the twins.
+fn functor_fixture(member_inline: bool, caller_inline: bool) -> String {
+    let member = if member_inline { "map inline" } else { "map" };
+    let caller = if caller_inline {
+        ": twice inline['F: Functor 'T 'E] ( 'F['T 'E] [ 'T -- 'T ] -- 'F['T 'E] )"
+    } else {
+        ": twice['F: Functor 'T 'E] ( 'F['T 'E] [ 'T -- 'T ] -- 'F['T 'E] )"
+    };
+    format!(
+        "type: Opt['T 'E] | None | Some 'T 'E ;\n\
+         type: Res['T 'E] | Ok 'T | Err 'E ;\n\
+         trait: Functor['F: * -> * -> *] :\n\
+           {member} ( 'F['T 'E] [ 'T -- 'U ] -- 'F['U 'E] ) ;\n\
+         ;\n\
+         impl: Functor for Opt\n\
+           : map swap ~[ ( Some ) Some> swap rot call swap Some ] ~[ ( None ) drop drop None ] Opt? ;\n\
+         ;\n\
+         impl: Functor for Res\n\
+           : map swap ~[ ( Ok ) Ok> swap call Ok ] ~[ ( Err ) Err> swap drop Err ] Res? ;\n\
+         ;\n\
+         {caller}\n\
+           | q |\n\
+           q map\n\
+           q map ;\n\
+         : showopt ( Opt[i64 i64] -- ) ~[ ( Some ) Some> drop . ] ~[ ( None ) drop ] Opt? ;\n\
+         : showres ( Res[i64 i64] -- ) ~[ ( Ok ) Ok> . ] ~[ ( Err ) Err> . ] Res? ;\n\
+         : mkopt ( i64 -- Opt[i64 i64] ) dup Some ;\n\
+         : mkres ( i64 -- Res[i64 i64] ) Ok ;\n\
+         : main ( -- ) 1 mkopt [ 1 sub ] twice showopt\n\
+           5 mkres [ 1 sub ] twice showres ;\n"
+    )
+}
+
+fn is_map_member_symbol(s: &str) -> bool {
+    s.contains("map") && (s.contains("Functor") || s.starts_with("sooth_mono_map"))
+}
+
+/// Golden P#3 (the slice's exit criterion): the HKT member (`map inline` on
+/// an Arrow-kinded bound) splices through an `inline` caller. Full S3-13
+/// contract, clauses 1-5, with the non-inline twin as clause 4's control.
+#[test]
+fn hkt_member_splices_through_an_inline_bound_caller() {
+    let (_t, binary, stdout) = build_run_keep("p3-hkt", &functor_fixture(true, true));
+
+    // Clause 1: both impls dispatched from one `twice`, correct values.
+    assert_eq!(stdout, "-1\n3\n");
+
+    // Clause 2: no member symbol, no monomorph.
+    let syms = symbols(&binary);
+    let member: Vec<&String> = syms.iter().filter(|s| is_map_member_symbol(s)).collect();
+    assert!(
+        member.is_empty(),
+        "an `inline` HKT member mints no symbol; nm found: {member:?}"
+    );
+
+    // Clause 3: no call edge reachable from `sooth_main`.
+    let reached = reachable_from_main(&binary);
+    let called: Vec<&String> = reached.iter().filter(|s| is_map_member_symbol(s)).collect();
+    assert!(
+        called.is_empty(),
+        "no call edge to the member from `sooth_main`: {called:?}"
+    );
+
+    // Clause 5: the inline caller's own frame is absent.
+    let caller: Vec<&String> = syms
+        .iter()
+        .filter(|s| *s == "twice__m0" || s.starts_with("sooth_mono_twice"))
+        .collect();
+    assert!(
+        caller.is_empty(),
+        "an `inline` caller mints no frame; nm found: {caller:?}"
+    );
+
+    // Clause 4: the non-inline twin mints and calls the member monomorphs.
+    let (_t2, twin, twin_stdout) = build_run_keep("p3-hkt-twin", &functor_fixture(false, false));
+    assert_eq!(twin_stdout, "-1\n3\n");
+    let twin_syms = symbols(&twin);
+    assert!(
+        twin_syms.iter().any(|s| is_map_member_symbol(s)),
+        "control: the non-inline twin mints member symbols; nm: {twin_syms:?}"
+    );
+}
+
+/// Golden P#4: two splices of one member body at two θ resolve their enum
+/// sites independently -- without per-splice (`(uid, span)`) resolution this
+/// is a miscompile (both splices share one bare-key family layout), not a
+/// rejection, so the golden runs and checks stdout. The
+/// two-different-`EnumId`s assertion lives in the in-process unit tests
+/// (`check.rs`), since this harness cannot see `Module` state.
+#[test]
+fn two_splices_of_one_member_at_two_thetas_resolve_independently() {
+    let src = "\
+type: Opt['T 'E] | None | Some 'T 'E ;
+trait: Take['F: * -> * -> *] :
+  take inline ( 'F['T 'E] 'T -- 'T ) ;
+;
+impl: Take for Opt
+  : take | o d | o ~[ ( Some ) Some> drop d drop ] ~[ ( None ) drop d ] Opt? ;
+;
+: take2 inline['F: Take 'T 'E] ( 'F['T 'E] 'T -- 'T ) take ;
+: mk1 ( i64 i64 -- Opt[i64 i64] ) Some ;
+: mk2 ( i64 u8 -- Opt[i64 u8] ) Some ;
+: main ( -- ) 1 2 mk1 7 take2 .
+  4 3 >u8 mk2 9 take2 . ;
+";
+    let (_t, _binary, stdout) = build_run_keep("p4-two-thetas", src);
+    assert_eq!(
+        stdout, "1\n4\n",
+        "each splice must resolve its enum sites at its own theta"
+    );
+}
+
+/// Golden P#5 (matrix row 4), S3-1.d's witness: the same `inline` member on a
+/// generic target reached through a **non-inline** poly caller. Clauses 1-4;
+/// clause 5 exempt (the caller keeps its frame -- that is the point). The
+/// load-bearing half: the member's monomorph symbol is now absent while the
+/// program still runs.
+#[test]
+fn inline_member_on_generic_target_splices_from_a_non_inline_poly_caller() {
+    let (_t, binary, stdout) = build_run_keep("p5-row4", &sized_box_fixture(true, false));
+
+    // Clause 1.
+    assert_eq!(stdout, "1\n");
+
+    // Clause 2: the member's monomorph is absent (present pre-S3-1.d, F9).
+    let syms = symbols(&binary);
+    let member: Vec<&String> = syms.iter().filter(|s| is_size_member_symbol(s)).collect();
+    assert!(
+        member.is_empty(),
+        "a diverted `inline` member instantiation mints no monomorph; nm: {member:?}"
+    );
+
+    // Clause 3: no call edge from `sooth_main`.
+    let reached = reachable_from_main(&binary);
+    let called: Vec<&String> = reached
+        .iter()
+        .filter(|s| is_size_member_symbol(s))
+        .collect();
+    assert!(
+        called.is_empty(),
+        "no call edge to the member from `sooth_main`: {called:?}"
+    );
+
+    // Clause 4 control: the caller keeps its own monomorph frame.
+    assert!(
+        syms.iter().any(|s| s.starts_with("sooth_mono_usesize")),
+        "the non-inline caller keeps its frame; nm: {syms:?}"
+    );
+}

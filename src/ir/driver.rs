@@ -80,6 +80,40 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
         .iter()
         .map(|w| (w.name.clone(), w.span))
         .collect();
+    // θ is ground, so the substituted effect carries concrete array types
+    // with concrete `N` and the body lowers with no length-variable handling
+    // (length polymorphism is discharged in the emission loop below).
+    let poly_words: HashMap<&str, &WordDef> = module
+        .words
+        .iter()
+        .filter(|w| w.poly.is_some())
+        .map(|w| (w.name.as_str(), w))
+        .collect();
+    // P7b.S3 (S3-1.d): the pre-pass diversion, run above the lowering env
+    // build so both the per-word `FuncBuilder` pass and the dedup/emission
+    // stretch only ever read an already-complete map. Every instantiation
+    // whose callee is a combinator (an `inline` trait member on a generic
+    // target is one) is diverted here by its instantiation symbol: the env
+    // and emission loops skip it (no `IrFunc`, no env entry), and
+    // `lower_resolved_word_call` splices the member body with this
+    // instantiation's own per-θ tables installed for the bracket's duration.
+    let combinator_instantiations: HashMap<String, CallInst> = module
+        .instantiations
+        .values()
+        .chain(&module.transitive_instantiations)
+        .chain(module.splice_records.values())
+        .filter(|inst| {
+            poly_words
+                .get(inst.callee.as_str())
+                .is_some_and(|w| crate::check::is_combinator(w))
+        })
+        .map(|inst| {
+            (
+                crate::ast::instantiation_symbol(&inst.callee, &inst.subst),
+                inst.clone(),
+            )
+        })
+        .collect();
     let mut structs_forced: Vec<StructDecl> = module.structs.to_vec();
     for id in drop_overloads.keys() {
         structs_forced[id.index()].has_drop_overload = true;
@@ -247,6 +281,8 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
             EnvPlan::None,
             &module.splice_records,
             &module.splice_trait_calls,
+            &module.splice_enum_words,
+            &combinator_instantiations,
             &member_uid_seeds,
             // Mirrors `check.rs`'s `word_idx * INLINE_UID_STRIDE` seed:
             // both walk `module.words` in the same order (this loop
@@ -270,12 +306,6 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
     // so the substituted effect carries concrete array types with concrete
     // `N` and the body lowers with no length-variable handling (length
     // polymorphism is discharged here).
-    let poly_words: HashMap<&str, &WordDef> = module
-        .words
-        .iter()
-        .filter(|w| w.poly.is_some())
-        .map(|w| (w.name.as_str(), w))
-        .collect();
     // P7.S4 (R6): add each monomorph's symbol to the lowering env so a
     // `trait_calls` dispatch to a generic-impl member-word monomorph can
     // resolve its arity. A poly word is excluded from the initial env (it
@@ -287,6 +317,11 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
         .chain(&module.transitive_instantiations)
     {
         let symbol = crate::ast::instantiation_symbol(&inst.callee, &inst.subst);
+        // P7b.S3 (S3-1.d): a diverted combinator instantiation mints no
+        // `IrFunc`, so it gets no env entry either.
+        if combinator_instantiations.contains_key(&symbol) {
+            continue;
+        }
         let word = poly_words[inst.callee.as_str()];
         let sig = word
             .poly
@@ -331,6 +366,11 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
         .chain(module.splice_records.values())
     {
         let symbol = crate::ast::instantiation_symbol(&inst.callee, &inst.subst);
+        // P7b.S3 (S3-1.d): a diverted combinator instantiation is spliced at
+        // its dispatch sites, never emitted as a function.
+        if combinator_instantiations.contains_key(&symbol) {
+            continue;
+        }
         if emitted.insert(symbol.clone()) {
             distinct.push((symbol, inst));
         }
@@ -391,6 +431,8 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
             EnvPlan::None,
             &module.splice_records,
             &module.splice_trait_calls,
+            &module.splice_enum_words,
+            &combinator_instantiations,
             // The real map, not an empty one: a composed instantiation's body
             // is exactly where the generic path reaches a member re-splice, so
             // an empty map here would leave P7.S8's R1 inert on that path.

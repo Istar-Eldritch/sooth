@@ -805,6 +805,7 @@ pub(crate) fn assemble_module(closure: &Closure, always_mangle: bool) -> Result<
         transitive_instantiations: Vec::new(),
         splice_records: HashMap::new(),
         splice_trait_calls: HashMap::new(),
+        splice_enum_words: std::collections::HashMap::new(),
         builtin_overloads: HashMap::new(),
         resolved_fields: HashMap::new(),
         resolved_variant_fields: HashMap::new(),

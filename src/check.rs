@@ -173,6 +173,11 @@ struct PolyCtx<'a> {
     /// probes a body through `infer_probe_body`; the module-level table on
     /// the main path.
     splice_trait_calls: &'a mut HashMap<(u32, Span), String>,
+    /// P7b.S3 (S3-1.e): per-splice generated-enum-word resolutions, written
+    /// by the concrete walk's candidate arm and `check_eliminator_call` when
+    /// `prov.splice_uid` is `Some` and the site resolves a generated enum
+    /// word. Scratch (discarded) on the probe paths, module-level otherwise.
+    splice_enum_words: &'a mut HashMap<(u32, Span), EnumId>,
     /// P7.S3o Phase 3: the combinator's own `PolySig` and concrete θ, set
     /// during both the standalone check (i64 stand-in) and the splice walk
     /// (concrete θ from `check_poly_combinator_args`). When set, a bare trait
@@ -719,6 +724,7 @@ fn check_module_inner(module: &mut Module) -> Result<Vec<WordObligations>, Strin
         transitive_instantiations: _,
         splice_records: _,
         splice_trait_calls: _,
+        splice_enum_words: _,
         builtin_overloads: _,
         resolved_fields: _,
         resolved_variant_fields: _,
@@ -783,6 +789,10 @@ fn check_module_inner(module: &mut Module) -> Result<Vec<WordObligations>, Strin
     // bare member calls resolve against the concrete splice θ, then relayed
     // to the module for lowering.
     let mut splice_trait_calls: HashMap<(u32, Span), String> = HashMap::new();
+    // P7b.S3 (S3-1.e): per-splice generated-enum-word resolutions, written in
+    // the concrete path-A walk when a spliced body's own enum site resolves
+    // at this splice's θ, then relayed to the module for lowering.
+    let mut splice_enum_words: HashMap<(u32, Span), EnumId> = HashMap::new();
     // Slice 8a phase 2 (R7): the builtin-name overload dispatch sites, filled
     // as each monomorphic body's operator calls resolve, then relayed to the
     // module for lowering (empty for the whole corpus, so its lowering is
@@ -886,7 +896,7 @@ fn check_module_inner(module: &mut Module) -> Result<Vec<WordObligations>, Strin
                 traits,
                 obligations: &mut obligations,
                 enum_sites: &mut enum_sites,
-                is_combinator_splice: is_combinator(word),
+                is_combinator_splice: is_combinator(word) && !word.is_trait_member,
             },
             &mut CrossCtx {
                 env: &poly_env,
@@ -929,6 +939,7 @@ fn check_module_inner(module: &mut Module) -> Result<Vec<WordObligations>, Strin
         traits,
         impls,
         word_symbols: &symbols,
+        words,
         recorded: &trait_obligations,
         enum_sites_recorded: &word_enum_sites,
     };
@@ -960,6 +971,7 @@ fn check_module_inner(module: &mut Module) -> Result<Vec<WordObligations>, Strin
                 let mut scratch_variant_fields: HashMap<Span, (EnumId, usize, usize)> =
                     HashMap::new();
                 let mut scratch_trait_calls: HashMap<(u32, Span), String> = HashMap::new();
+                let mut scratch_enum_words: HashMap<(u32, Span), EnumId> = HashMap::new();
                 let mut poly = PolyCtx {
                     env: &poly_env,
                     insts: &mut scratch,
@@ -972,6 +984,7 @@ fn check_module_inner(module: &mut Module) -> Result<Vec<WordObligations>, Strin
                     impl_monos: &mut scratch_monos,
                     splice_records: &mut scratch_splice,
                     splice_trait_calls: &mut scratch_trait_calls,
+                    splice_enum_words: &mut scratch_enum_words,
                     combinator_sig: None,
                     combinator_subst: None,
                     combinator_name: None,
@@ -1008,6 +1021,7 @@ fn check_module_inner(module: &mut Module) -> Result<Vec<WordObligations>, Strin
                 trait_resolve,
                 splice_records: &mut splice_records,
                 splice_trait_calls: &mut splice_trait_calls,
+                splice_enum_words: &mut splice_enum_words,
                 combinator_sig: None,
                 combinator_subst: None,
                 combinator_name: None,
@@ -1116,6 +1130,7 @@ fn check_module_inner(module: &mut Module) -> Result<Vec<WordObligations>, Strin
     module.instantiations = insts;
     module.splice_records = splice_records;
     module.splice_trait_calls = splice_trait_calls;
+    module.splice_enum_words = splice_enum_words;
     module.builtin_overloads = builtin_overloads;
     module.resolved_fields = resolved_fields;
     module.resolved_variant_fields = resolved_variant_fields;
@@ -2411,6 +2426,17 @@ fn check_eliminator_call(
     let scrutinee_family_matches = ctx.with_enum_decl_or_generic(id, |d| {
         d.is_some_and(|d| generic_surface_name(&d.name) == generic_surface_name(&gate_name))
     });
+    // P7b.S3 (S3-1.e): inside a combinator splice, record the operative id
+    // this elimination narrowed to under the per-splice `(uid, span)` key. A
+    // concrete body never needed a record (the id is on the scrutinee), but
+    // under a splice the bare-key fall-through at lowering hands every splice
+    // the same family-wide id, which is wrong the moment one body is spliced
+    // at two θ.
+    if scrutinee_family_matches {
+        if let Some(uid) = prov.splice_uid {
+            poly.splice_enum_words.insert((uid, span), id);
+        }
+    }
     if !scrutinee_family_matches {
         return Err(type_mismatch_error(
             ctx,

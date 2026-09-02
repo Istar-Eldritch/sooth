@@ -227,7 +227,87 @@ impl<'a> FuncBuilder<'a> {
     /// ever needs the loop form, that is not this slice; `terms_tail_call_self`
     /// is the predicate that would decide it.
     fn lower_resolved_word_call(&mut self, sym_name: &str) -> Result<(), String> {
-        if let Some(entry) = self.combinators.get(sym_name) {
+        if self.combinators.get(sym_name).is_some() {
+            return self.splice_combinator_body(sym_name, None, false);
+        }
+        // P7b.S3 (S3-1.d): a `trait_calls` dispatch to a *diverted* combinator
+        // instantiation -- an `inline` member on a generic target, reached
+        // from a non-inline poly caller. The emission loop minted no `IrFunc`
+        // for it, so the env path below would panic; instead the member body
+        // is spliced with this instantiation's own per-θ tables installed for
+        // the bracket's duration. The recovery key is `inst.callee` -- the
+        // member's synth name, the same key `combinators` and
+        // `member_uid_seeds` already share.
+        let diverted = self.combinator_instantiations;
+        if let Some(inst) = diverted.get(sym_name) {
+            let key = inst.callee.clone();
+            return self.splice_combinator_body(&key, Some(inst), false);
+        }
+        let (in_arity, out_arity, ret_ty, callee) = {
+            let a = self
+                .env
+                .get(sym_name)
+                .expect("checked resolved call exists");
+            (a.in_arity, a.out_arity, a.ret_ty, a.callee)
+        };
+        let split = self.stack.len() - in_arity;
+        let args = self.stack.split_off(split);
+        let bundle = match ret_ty {
+            Some(IrType::Struct(id)) if self.structs.layouts[id.index()].bundle => Some(id),
+            _ => None,
+        };
+        let ret = if out_arity == 1 || bundle.is_some() {
+            Some(self.fresh_value(ret_ty.unwrap_or(IrType::I64)))
+        } else {
+            None
+        };
+        let sym = (self.resolve)(sym_name);
+        self.push_instr(Instr::Call(ret, sym, args, callee));
+        if let Some(v) = ret {
+            self.stack.push(v);
+        }
+        if let Some(id) = bundle {
+            self.unpack_bundle(id);
+        }
+        Ok(())
+    }
+
+    /// P7b.S3 (S3-1.d): a recorded poly call whose instantiation was diverted
+    /// by the pre-pass (an `inline` callee) has no `IrFunc` and no
+    /// `poly_arities` entry -- splice it through the diverted-instantiation
+    /// route instead of emitting a call to a symbol that no longer exists.
+    fn dispatch_poly_call(&mut self, inst: &CallInst) -> Result<(), String> {
+        let symbol = crate::ast::instantiation_symbol(&inst.callee, &inst.subst);
+        if self.combinator_instantiations.contains_key(&symbol) {
+            return self.lower_resolved_word_call(&symbol);
+        }
+        self.lower_poly_call(inst);
+        Ok(())
+    }
+
+    /// The P7.S8 R1 uid bracket, extracted so the S3-1.d diverted path shares
+    /// it. `sym_name` keys `combinators`/`member_uid_seeds` (the member's
+    /// synth name); `inst` is `Some` for a diverted instantiation, whose own
+    /// span-keyed `enum_words`/`trait_calls`/`poly_calls` are installed for
+    /// the bracket's duration and restored on exit, so the spliced body's
+    /// sites resolve at that instantiation's θ.
+    /// `fresh_uid` marks a splice whose check-side twin was an
+    /// `inline_combinator` call (the S3-1.c hop): both sides then mint the
+    /// uid with the ordinary fresh discipline, keeping the `(uid, span)` key
+    /// sequences in step and giving two splices at two θ disjoint keys.
+    /// `false` keeps the P7.S8 seeded namespace for splices with no
+    /// check-side twin (a depth-0 concrete dispatch, the diverted path).
+    fn splice_combinator_body(
+        &mut self,
+        sym_name: &str,
+        inst: Option<&'a CallInst>,
+        fresh_uid: bool,
+    ) -> Result<(), String> {
+        let entry = self
+            .combinators
+            .get(sym_name)
+            .expect("a spliced symbol (or a diverted instantiation's callee) is a combinator");
+        {
             // P7.S10 (R1.1/R1.4): a recursive `impl:` member -- one whose
             // body dispatches back to a member resolved via bound dispatch,
             // directly or through another member -- re-splices here without
@@ -261,56 +341,63 @@ impl<'a> FuncBuilder<'a> {
                 }
                 return Err(msg);
             }
-            let uid = match self.member_uid_seeds.get(sym_name) {
-                Some(&seed) => seed,
-                None => self.splice_uid_stack.last().copied().unwrap_or(0),
+            let uid = if fresh_uid {
+                let u = self.inline_uid;
+                self.inline_uid += 1;
+                u
+            } else {
+                match self.member_uid_seeds.get(sym_name) {
+                    Some(&seed) => seed,
+                    None => self.splice_uid_stack.last().copied().unwrap_or(0),
+                }
             };
             let body = crate::ast::alpha_rename_member_locals(&entry.terms, uid);
             let locals_depth = self.locals.len();
             let caller_inline_uid = self.inline_uid;
-            self.inline_uid = uid;
+            if !fresh_uid {
+                self.inline_uid = uid;
+            }
             self.splice_uid_stack.push(uid);
             if self.member_splice_depth == 0 {
                 self.member_splice_outermost = Some(sym_name.to_string());
             }
             self.member_splice_depth += 1;
-            self.lower_terms(&body, false)?;
+            self.member_splice_names.push(sym_name.to_string());
+            // S3-1.d: install the diverted instantiation's own per-θ tables
+            // for the bracket's duration (the `ir/func_builder/mod.rs`
+            // env-install precedent, here scoped and restored), so the
+            // spliced body's enum sites, bound dispatches and generic calls
+            // resolve at that instantiation's θ rather than the enclosing
+            // word's.
+            let saved_tables = inst.map(|inst| {
+                (
+                    std::mem::replace(&mut self.enum_words, &inst.enum_words),
+                    std::mem::replace(&mut self.trait_calls, &inst.trait_calls),
+                    std::mem::replace(&mut self.poly_calls, &inst.poly_calls),
+                )
+            });
+            let saved_installed = self.member_tables_installed;
+            self.member_tables_installed = inst.is_some();
+            let lowered = self.lower_terms(&body, false);
+            self.member_tables_installed = saved_installed;
+            if let Some((enum_words, trait_calls, poly_calls)) = saved_tables {
+                self.enum_words = enum_words;
+                self.trait_calls = trait_calls;
+                self.poly_calls = poly_calls;
+            }
+            lowered?;
+            self.member_splice_names.pop();
             self.member_splice_depth -= 1;
             if self.member_splice_depth == 0 {
                 self.member_splice_outermost = None;
             }
             self.splice_uid_stack.pop();
-            self.inline_uid = caller_inline_uid;
+            if !fresh_uid {
+                self.inline_uid = caller_inline_uid;
+            }
             self.locals.truncate(locals_depth);
-            return Ok(());
+            Ok(())
         }
-        let (in_arity, out_arity, ret_ty, callee) = {
-            let a = self
-                .env
-                .get(sym_name)
-                .expect("checked resolved call exists");
-            (a.in_arity, a.out_arity, a.ret_ty, a.callee)
-        };
-        let split = self.stack.len() - in_arity;
-        let args = self.stack.split_off(split);
-        let bundle = match ret_ty {
-            Some(IrType::Struct(id)) if self.structs.layouts[id.index()].bundle => Some(id),
-            _ => None,
-        };
-        let ret = if out_arity == 1 || bundle.is_some() {
-            Some(self.fresh_value(ret_ty.unwrap_or(IrType::I64)))
-        } else {
-            None
-        };
-        let sym = (self.resolve)(sym_name);
-        self.push_instr(Instr::Call(ret, sym, args, callee));
-        if let Some(v) = ret {
-            self.stack.push(v);
-        }
-        if let Some(id) = bundle {
-            self.unpack_bundle(id);
-        }
-        Ok(())
     }
 
     pub(in crate::ir) fn lower_call(
@@ -349,7 +436,7 @@ impl<'a> FuncBuilder<'a> {
         // ordinary combinator splice introduces no second grounding, and a
         // bound member call inside a combinator's quotation argument has no
         // `splice_trait_calls` entry to fall through to.
-        if self.member_splice_depth == 0 {
+        if self.member_splice_depth == 0 || self.member_tables_installed {
             if let Some(sym_name) = self.trait_calls.get(&span).cloned() {
                 return self.lower_resolved_word_call(&sym_name);
             }
@@ -364,6 +451,15 @@ impl<'a> FuncBuilder<'a> {
         // per-instantiation trait call does.
         if let Some(&uid) = self.splice_uid_stack.last() {
             if let Some(sym_name) = self.splice_trait_calls.get(&(uid, span)).cloned() {
+                // S3-1.c: this record was written by the checker's hop, whose
+                // splice minted a fresh uid -- mirror it (see
+                // `splice_combinator_body`).
+                if !self.member_tables_installed
+                    && self.combinators.get(&sym_name).is_some()
+                    && !self.member_splice_names.contains(&sym_name)
+                {
+                    return self.splice_combinator_body(&sym_name, None, true);
+                }
                 return self.lower_resolved_word_call(&sym_name);
             }
         }
@@ -424,8 +520,7 @@ impl<'a> FuncBuilder<'a> {
         // `env.get(name).expect(...)` would panic: a polymorphic callee has
         // no name-keyed `env` entry.
         if let Some(inst) = self.poly_calls.get(&span).cloned() {
-            self.lower_poly_call(&inst);
-            return Ok(());
+            return self.dispatch_poly_call(&inst);
         }
         // P7.S3o (R1/R2): inside a combinator splice, read the per-splice
         // instantiation record instead of the span-keyed `instantiations`
@@ -433,13 +528,11 @@ impl<'a> FuncBuilder<'a> {
         // The current splice's `inline_uid` is the top of `splice_uid_stack`.
         if let Some(&uid) = self.splice_uid_stack.last() {
             if let Some(inst) = self.splice_records.get(&(uid, span)).cloned() {
-                self.lower_poly_call(&inst);
-                return Ok(());
+                return self.dispatch_poly_call(&inst);
             }
         }
         if let Some(inst) = self.instantiations.get(&span).cloned() {
-            self.lower_poly_call(&inst);
-            return Ok(());
+            return self.dispatch_poly_call(&inst);
         }
         match name {
             // R13: `call`-of-literal fusion. Pop the phantom quotation `Value`,
@@ -784,7 +877,17 @@ impl<'a> FuncBuilder<'a> {
                 // and its variant kind/index kept (family-invariant). A miss
                 // in either map falls through to the bare-key monomorphic
                 // path unchanged rather than panicking.
-                if let Some(&found) = self.enum_words.get(&span) {
+                // P7b.S3 (S3-1.e): a spliced combinator body's own enum site
+                // resolves through the per-splice `(uid, span)` record first
+                // -- the span-keyed `enum_words` below serves a monomorph
+                // body's per-instantiation sites, and the bare-key family
+                // lookup after it is last-write-wins across monomorphs, so
+                // neither can tell two splices of one body at two θ apart.
+                let per_splice = self
+                    .splice_uid_stack
+                    .last()
+                    .and_then(|&uid| self.splice_enum_words.get(&(uid, span)).copied());
+                if let Some(&found) = per_splice.as_ref().or(self.enum_words.get(&span)) {
                     if let Some(&ew) = self.enums.words.get(name) {
                         // All three arms are reached: `check::poly` records an
                         // `enum_sites` entry for a constructor

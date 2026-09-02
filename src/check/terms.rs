@@ -803,7 +803,7 @@ fn check_term(
                         );
                         return inline_combinator(
                             &chosen, span, stack, ctx, env, arrays, cells, refs, slices, prov,
-                            scope, poly, &granted, tail,
+                            scope, poly, &granted, tail, None, false,
                         );
                     }
                     None if fall_through_to_env => {}
@@ -838,9 +838,34 @@ fn check_term(
             // `check_poly_combinator_standalone` (i64 stand-in); when unset,
             // `resolve_splice_member_call` returns `Ok(None)` and ordinary
             // dispatch proceeds unchanged.
+            // P7b.S3 (S3-1.c): `granted`/`tail` are threaded so an `inline`
+            // member routes onto `inline_combinator` -- computed the same way
+            // the `poly.combinators` hit above computes them.
+            let member_granted = releasable_into(
+                scope,
+                base_depth,
+                outer_releasable,
+                &siblings[at + 1..],
+                live,
+                at,
+            );
             if let Some(stack) = resolve_splice_member_call(
-                name, span, &mut stack, ctx, env, scope, arrays, cells, refs, slices, poly, prov,
-                live, at,
+                name,
+                span,
+                &mut stack,
+                ctx,
+                env,
+                scope,
+                arrays,
+                cells,
+                refs,
+                slices,
+                poly,
+                prov,
+                live,
+                at,
+                &member_granted,
+                tail,
             )? {
                 return Ok(stack);
             }
@@ -903,15 +928,25 @@ fn check_term(
             };
             let chosen = match candidates {
                 [only] => {
-                    // Slice 10c: reaching here on a name that is *also* an
-                    // always-spliced word means the fall-through above fired
-                    // (no polymorphic candidate admits these operands). Record
-                    // the site so lowering emits a real call to this word;
-                    // without the record `lower_call` still finds the name in
-                    // its combinator env and splices the library definition,
-                    // so the checker and the backend would disagree about
-                    // which `lt` a `Vec2 Vec2 lt` site means.
-                    if poly.combinators.contains_key(name) {
+                    // P7b.S3 (S3-1.e): inside a combinator splice, a generated
+                    // enum word's resolution is recorded per `(uid, span)` --
+                    // the span-keyed `builtin_overloads` (and the bare-key
+                    // family lookup that serves an unrecorded site) are
+                    // last-write-wins across splices at two θ. A redirect,
+                    // mirroring `check_poly_call`'s `splice_records` one; the
+                    // non-enum records below stay untouched even in a splice.
+                    if let Some((uid, id)) = splice_enum_site(name, only, ctx, prov) {
+                        poly.splice_enum_words.insert((uid, span), id);
+                    } else if poly.combinators.contains_key(name) {
+                        // Slice 10c: reaching here on a name that is *also* an
+                        // always-spliced word means the fall-through above
+                        // fired (no polymorphic candidate admits these
+                        // operands). Record the site so lowering emits a real
+                        // call to this word; without the record `lower_call`
+                        // still finds the name in its combinator env and
+                        // splices the library definition, so the checker and
+                        // the backend would disagree about which `lt` a
+                        // `Vec2 Vec2 lt` site means.
                         poly.builtin_overloads.insert(span, only.symbol.clone());
                     }
                     only
@@ -924,7 +959,15 @@ fn check_term(
                     });
                     let chosen =
                         hit.ok_or_else(|| no_overload_matches_error(ctx, span, name, candidates))?;
-                    poly.builtin_overloads.insert(span, chosen.symbol.clone());
+                    // S3-1.e: the same redirect as the single-candidate arm.
+                    match splice_enum_site(name, chosen, ctx, prov) {
+                        Some((uid, id)) => {
+                            poly.splice_enum_words.insert((uid, span), id);
+                        }
+                        None => {
+                            poly.builtin_overloads.insert(span, chosen.symbol.clone());
+                        }
+                    }
                     chosen
                 }
             };
@@ -1360,6 +1403,48 @@ pub(super) fn eliminator_arm_names_no_eliminator_error(
 /// follows the existing env-overload discipline (first-wins on a genuine
 /// collision, no ambiguity check); this fallback must not invent a stricter
 /// rule than a present `env` entry would have had.
+/// P7b.S3 (S3-1.e): inside a combinator splice (`prov.splice_uid` is `Some`),
+/// the operative `EnumId` of a chosen candidate that is a *generated enum
+/// word* -- `(name, symbol)` membership in `enum_generated_sigs` (ctors) or
+/// `variant_generated_sigs` (destructures) over the extended type slices, the
+/// same source `mint_fallback_candidates` reads. Membership, not sig shape: an
+/// `Overload` carries only `sig` + `symbol` and a user word's sig can also
+/// output an enum. The id itself is read off the *chosen* candidate's own
+/// generated sig (the ctor-output read `nullary_variant_idx` already uses):
+/// the ctor carries it in its output, the destructure in its input -- two
+/// monomorphs of one family share `(name, symbol)`, so the table's own id
+/// would be the wrong one.
+fn splice_enum_site(
+    name: &str,
+    chosen: &Overload,
+    ctx: &Ctx,
+    prov: &Provenance,
+) -> Option<(u32, EnumId)> {
+    let uid = prov.splice_uid?;
+    let enum_id_at = |slots: &[Type]| {
+        slots.iter().find_map(|t| match t {
+            Type::Enum(id, _) => Some(*id),
+            _ => None,
+        })
+    };
+    let id = ctx.with_extended_type_slices(|_, enums| {
+        if enum_generated_sigs(enums)
+            .into_iter()
+            .any(|(n, symbol, _)| n == name && symbol == chosen.symbol)
+        {
+            return enum_id_at(&chosen.sig.outputs);
+        }
+        if variant_generated_sigs(enums)
+            .into_iter()
+            .any(|(n, symbol, _)| n == name && symbol == chosen.symbol)
+        {
+            return enum_id_at(&chosen.sig.inputs);
+        }
+        None
+    })?;
+    Some((uid, id))
+}
+
 fn mint_fallback_candidates(name: &str, ctx: &Ctx) -> Vec<Overload> {
     ctx.with_extended_type_slices(|structs, enums| {
         let mut out = Vec::new();

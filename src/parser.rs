@@ -1554,6 +1554,7 @@ pub fn parse(tokens: &[(Token, Span)]) -> Result<Module, String> {
         transitive_instantiations: Vec::new(),
         splice_records: HashMap::new(),
         splice_trait_calls: HashMap::new(),
+        splice_enum_words: std::collections::HashMap::new(),
         builtin_overloads: HashMap::new(),
         resolved_fields: HashMap::new(),
         generics,

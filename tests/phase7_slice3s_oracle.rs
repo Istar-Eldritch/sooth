@@ -265,13 +265,9 @@ fn inline_mymax_mymax3_matches_noninline_baseline() {
          harness cannot tell a comparison-direction miscompile from a correct build"
     );
 
-    // R10: two types — both i64 and f64 comparison monomorphs are reached.
-    assert!(
-        baseline_targets.iter().any(|t| t.contains("i64")),
-        "the dispatch targets must include an i64 monomorph: {baseline_targets:?}"
-    );
-    assert!(
-        baseline_targets.iter().any(|t| t.contains("f64")),
-        "the dispatch targets must include an f64 monomorph: {baseline_targets:?}"
-    );
+    // R10 (amended by P7b.S3, S3-1.d): the comparison monomorphs used to be
+    // the two-types witness, but a diverted `inline` combinator instantiation
+    // (`gt` at i64 and f64) mints no symbol on either side now -- the
+    // two-types reach is witnessed behaviourally by the four-line stdout
+    // above, and the swap controls keep the comparison identity observable.
 }

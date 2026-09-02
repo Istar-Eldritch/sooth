@@ -386,6 +386,8 @@ fn synthesize_struct_destructor_override(
         EnvPlan::None,
         empty_splice_records(),
         empty_splice_trait_calls(),
+        crate::ir::empty_splice_enum_words(),
+        crate::ir::empty_combinator_instantiations(),
         empty_member_uid_seeds(),
         0,
         empty_member_spans(),

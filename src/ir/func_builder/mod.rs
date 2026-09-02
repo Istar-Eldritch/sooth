@@ -383,6 +383,25 @@ pub(super) struct FuncBuilder<'a> {
     /// member call inside a spliced combinator body, mirroring how
     /// `trait_calls` is read for non-combinator poly words.
     splice_trait_calls: &'a HashMap<(u32, Span), String>,
+    /// P7b.S3 (S3-1.e): per-splice generated-enum-word resolutions, keyed by
+    /// `(inline_uid, body_span)` → the operative `EnumId` that splice's θ
+    /// resolved the site to. Read through `splice_uid_stack` before the
+    /// span-keyed `enum_words` (which serves a monomorph body's sites) and
+    /// the bare-key family lookup (last-write-wins across monomorphs).
+    splice_enum_words: &'a HashMap<(u32, Span), EnumId>,
+    /// P7b.S3 (S3-1.d): combinator instantiations diverted out of the
+    /// emission loop, keyed by instantiation symbol. A `trait_calls` dispatch
+    /// landing on one splices the member body (with the instantiation's own
+    /// per-θ tables installed for the bracket) instead of calling a monomorph
+    /// that was never emitted.
+    combinator_instantiations: &'a HashMap<String, CallInst>,
+    /// P7b.S3 (S3-1.d): whether the *innermost* active member splice
+    /// installed a diverted instantiation's own tables. R1b's depth gate
+    /// exists because the enclosing word's span-keyed `trait_calls` is the
+    /// wrong table inside a member re-splice; an installed table is that
+    /// splice's *own* θ, so the gate stands aside for it. Saved/restored per
+    /// bracket, so a nested plain member splice gates again.
+    member_tables_installed: bool,
     /// P7.S3o (R1/R2): the stack of active splice `inline_uid`s, pushed on
     /// combinator-splice entry and popped on exit. `last()` is the current
     /// splice's uid; `None` (empty stack) means we are not inside a splice.
@@ -412,6 +431,13 @@ pub(super) struct FuncBuilder<'a> {
     /// ordinary splice nesting; it only goes stale once a member re-splice
     /// reintroduces a second grounding within the same instance.
     member_splice_depth: u32,
+    /// P7b.S3 (S3-1.c): the synth names of the members whose bodies are
+    /// currently being spliced, outermost first -- the lowering mirror of the
+    /// checker's `Provenance::member_splice_stack`. A `splice_trait_calls`
+    /// hit on a member already on this stack is the checker's re-entry
+    /// fall-through (a member-splice cycle): route it through the seeded
+    /// bracket, whose budget guard reports the recursion.
+    member_splice_names: Vec<String>,
     /// P7.S10 (R3.2): the symbol whose member splice took
     /// `member_splice_depth` from 0 to 1 -- the *outermost* member being
     /// spliced, which is what the budget guard's diagnostic names and looks
@@ -487,10 +513,14 @@ impl<'a> FuncBuilder<'a> {
             inline_uid: 0,
             splice_records: empty_splice_records(),
             splice_trait_calls: empty_splice_trait_calls(),
+            splice_enum_words: crate::ir::empty_splice_enum_words(),
+            combinator_instantiations: crate::ir::empty_combinator_instantiations(),
             splice_uid_stack: Vec::new(),
+            member_tables_installed: false,
             member_uid_seeds: empty_member_uid_seeds(),
             member_spans: empty_member_spans(),
             member_splice_depth: 0,
+            member_splice_names: Vec::new(),
             member_splice_outermost: None,
             materialized: Vec::new(),
         }
@@ -955,6 +985,8 @@ pub(super) fn lower_word_parts(
     env_plan: EnvPlan,
     splice_records: &HashMap<(u32, Span), CallInst>,
     splice_trait_calls: &HashMap<(u32, Span), String>,
+    splice_enum_words: &HashMap<(u32, Span), EnumId>,
+    combinator_instantiations: &HashMap<String, CallInst>,
     member_uid_seeds: &HashMap<String, u32>,
     // Mirrors the checker's `word_idx * crate::check::INLINE_UID_STRIDE` seed
     // (see that const's doc comment): the two splice-uid sequences must agree
@@ -988,6 +1020,8 @@ pub(super) fn lower_word_parts(
     b.combinators = combinators;
     b.splice_records = splice_records;
     b.splice_trait_calls = splice_trait_calls;
+    b.splice_enum_words = splice_enum_words;
+    b.combinator_instantiations = combinator_instantiations;
     b.member_uid_seeds = member_uid_seeds;
     b.member_spans = member_spans;
     // R11: the declared output row's `IrType`s, so a tail branch join can find
@@ -1133,6 +1167,8 @@ pub(super) fn lower_word_parts(
         combinators,
         splice_records,
         splice_trait_calls,
+        splice_enum_words,
+        combinator_instantiations,
         member_uid_seeds,
         member_spans,
     )?);
@@ -1160,6 +1196,8 @@ pub(super) fn lower_materialized(
     combinators: &crate::check::CombinatorIndex,
     splice_records: &HashMap<(u32, Span), CallInst>,
     splice_trait_calls: &HashMap<(u32, Span), String>,
+    splice_enum_words: &HashMap<(u32, Span), EnumId>,
+    combinator_instantiations: &HashMap<String, CallInst>,
     member_uid_seeds: &HashMap<String, u32>,
     member_spans: &HashMap<String, Span>,
 ) -> Result<Vec<IrFunc>, String> {
@@ -1210,6 +1248,8 @@ pub(super) fn lower_materialized(
             },
             splice_records,
             splice_trait_calls,
+            splice_enum_words,
+            combinator_instantiations,
             member_uid_seeds,
             // A materialized quotation gets its own `IrFunc` with a fresh uid
             // space (mirrors the checker: `in_materialized_quot` rejects a
