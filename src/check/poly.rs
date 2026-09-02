@@ -693,6 +693,7 @@ pub(super) fn check_poly_combinator_standalone(
         module: word.module,
         span: word.span,
         declared_globals: word.declared_globals.clone(),
+        is_trait_member: word.is_trait_member,
     };
     let mut dropped = Vec::new();
     // P7.S3o Phase 3: thread the combinator's own `PolySig` and the i64

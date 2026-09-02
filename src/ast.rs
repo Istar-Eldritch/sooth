@@ -1824,6 +1824,12 @@ pub struct WordDef {
     /// additive regression guarantee). `Some(vec![])` is not representable: a
     /// bare `global:` with no entry is a located parse error.
     pub declared_globals: Option<Vec<GlobalEntry>>,
+    /// P7b.S3 (S3-2): set only at the synthesized trait-member word's
+    /// construction site (`parse_impl_member_body`); `false` for every
+    /// ordinary word. No reader yet -- a structural discriminator for a
+    /// later phase to key checker/lowering behaviour on, in place of a
+    /// name convention.
+    pub is_trait_member: bool,
 }
 
 /// Phase 7 slice 2 (D1/D4): one `static:` module-level declaration -- a
@@ -5478,6 +5484,7 @@ mod tests {
             module: 0,
             span: Span::default(),
             declared_globals: None,
+            is_trait_member: false,
         }
     }
 

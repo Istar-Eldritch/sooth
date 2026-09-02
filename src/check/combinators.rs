@@ -859,6 +859,7 @@ mod tests {
             module: 0,
             span: Span::default(),
             declared_globals: None,
+            is_trait_member: false,
         };
         assert!(
             !w.effect

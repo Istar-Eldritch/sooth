@@ -120,5 +120,6 @@ pub fn bare_word(name: &str, module: u32) -> WordDef {
         module,
         span: Span::default(),
         declared_globals: None,
+        is_trait_member: false,
     }
 }

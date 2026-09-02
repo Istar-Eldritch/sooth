@@ -2,7 +2,9 @@
 // taking a blanket one: a test binary including this module may use only a
 // subset, but a helper nothing uses at all should still be reported.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// P8.S2 (R7): the one manifest every file-based fixture resolves `core`
@@ -338,4 +340,43 @@ pub fn assert_pinned_to_combinators_lib(hand_copy: &str, renames: &[(&str, &str)
         lib.contains(&normalized),
         "hand-copied times/times-helper has drifted from lib/core/combinators.sth\n  copy (normalized): {normalized}\n  lib (normalized):  {lib}"
     );
+}
+
+/// P7.S3 (S3-13): every `call <target>` edge in `binary`'s disassembly, keyed
+/// by the caller symbol whose body the call appears in. `objdump -d`
+/// annotates a call's target address with the symbol name in `<...>` when one
+/// exists, so this needs no knowledge of the calling convention or the
+/// mangling scheme. Moved here from `phase7_slice3s_oracle.rs` (elevate rule:
+/// a second consumer needs it).
+#[allow(dead_code)]
+pub fn call_graph(binary: &Path) -> HashMap<String, Vec<String>> {
+    let out = Command::new("objdump")
+        .arg("-d")
+        .arg(binary)
+        .output()
+        .expect("objdump should run");
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut graph: HashMap<String, Vec<String>> = HashMap::new();
+    let mut current = String::new();
+    for line in text.lines() {
+        if let Some(header) = line.strip_suffix(">:") {
+            if let Some((_, name)) = header.rsplit_once('<') {
+                current = name.to_string();
+                graph.entry(current.clone()).or_default();
+            }
+            continue;
+        }
+        if !line.contains("call") {
+            continue;
+        }
+        if let Some((_, rest)) = line.rsplit_once('<') {
+            if let Some(target) = rest.strip_suffix('>') {
+                graph
+                    .entry(current.clone())
+                    .or_default()
+                    .push(target.to_string());
+            }
+        }
+    }
+    graph
 }

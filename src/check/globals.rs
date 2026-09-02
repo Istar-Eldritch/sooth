@@ -363,6 +363,7 @@ mod tests {
             module,
             span: span(1),
             declared_globals: None,
+            is_trait_member: false,
         }
     }
 

@@ -2404,6 +2404,7 @@ mod tests {
             module: 0,
             span: Span::default(),
             declared_globals: None,
+            is_trait_member: false,
         };
         let mut module = Module {
             words: vec![mk_word],
@@ -2473,6 +2474,7 @@ mod tests {
                 module,
                 span: Span::default(),
                 declared_globals: None,
+                is_trait_member: false,
             }
         }
         fn module_with(words: Vec<WordDef>, modules: Vec<ModuleInfo>) -> Module {
@@ -2783,6 +2785,7 @@ mod tests {
                     module: 0,
                 },
                 declared_globals: None,
+                is_trait_member: false,
             }
         }
         fn word(name: &str, module: u32) -> WordDef {
@@ -3009,6 +3012,7 @@ mod tests {
                 module,
                 span: Span::default(),
                 declared_globals: None,
+                is_trait_member: false,
             }
         }
         fn poly_word(name: &str, module: u32, arity: usize) -> WordDef {
@@ -3037,6 +3041,7 @@ mod tests {
                 module,
                 span: Span::default(),
                 declared_globals: None,
+                is_trait_member: false,
             }
         }
 

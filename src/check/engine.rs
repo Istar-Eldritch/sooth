@@ -2067,6 +2067,7 @@ mod tests {
                 module: 0,
                 span: Span::default(),
                 declared_globals: None,
+                is_trait_member: false,
             };
             let ctx = word_ctx(&w, &[], &[], &[], None, &CombinatorIndex::new(), None);
             let mut arrays = Vec::new();
