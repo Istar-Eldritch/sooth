@@ -26,14 +26,12 @@ tree-sitter build -o sooth.so
 ## Neovim wiring
 
 This repo doesn't install anything into your Neovim config automatically.
-What's set up on this machine:
+The Neovim config at `~/code/dotfiles/home/.config/nvim/init.lua` loads this
+checkout's built `sooth.so` and `queries/highlights.scm` directly with core
+`vim.treesitter`; it also maps `.sth` to the `sooth` filetype and starts the
+parser. nvim-treesitter does not manage this local grammar.
 
-- `~/.local/share/nvim/site/parser/sooth.so` symlinked to this directory's
-  built `sooth.so`.
-- `~/.config/nvim/queries/sooth` symlinked to `queries/`.
-- `~/.config/nvim/init.lua` maps the `.sth` extension to filetype `sooth`
-  and calls `vim.treesitter.start()` on it (nvim-treesitter's own
-  plugin/setup is unused here; this is plain core `vim.treesitter`).
+Rebuild `sooth.so` after changing the grammar, then restart Neovim.
 
 If `#match?` predicates are ever added to `highlights.scm`: don't. Neovim
 compiles `#match?` patterns as Vim "very magic" (`\v`) regex, where a bare
