@@ -2,7 +2,7 @@
 //! goldens: parse/desugar core -- spelling support, the `Bind`-prepend
 //! desugar, positional mints, and the duplicate/poly-name rejects.
 
-use sooth::{lexer, test_support};
+use sooth::{check, lexer, test_support};
 
 mod common;
 
@@ -32,6 +32,12 @@ fn run_src(name: &str, src: &str) -> (String, i32) {
 fn parse_error(src: &str) -> String {
     let tokens = lexer::lex(src).expect("lexing should succeed");
     test_support::parse_with_core(&tokens).expect_err("parsing should fail")
+}
+
+fn check_error(src: &str) -> String {
+    let tokens = lexer::lex(src).expect("lexing should succeed");
+    let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
+    check::check(&mut module).expect_err("check should fail")
 }
 
 // ---- R3: all-named slots match their explicit `| ... |` twin ----
@@ -340,4 +346,111 @@ fn parse_worddef_output_slot_name_stays_doc_only_expected() {
     let module = test_support::parse_with_core(&lexer::lex(": f ( i64 -- x : i64 ) ;\n").unwrap())
         .expect("worddef with a named output slot should parse");
     assert_eq!(module.words[0].effect.outputs[0].name.as_deref(), Some("x"));
+}
+
+// ---- R14: slot names obey the inherited local rules ----
+
+#[test]
+fn slot_local_named_like_word_is_callable_collision_error() {
+    // The desugar binds `add` as an ordinary local (`callable_local_error`,
+    // `src/check.rs:1235`); a slot named like a callable is exactly as
+    // illegal as a hand-written `| add |`.
+    let err = check_error(": f ( add : i64 -- i64 ) add ;\n");
+    assert!(
+        err.contains("local `add` in `f` collides with the callable name `add`"),
+        "unexpected message: {err}"
+    );
+}
+
+#[test]
+fn slot_local_rebound_by_body_block_is_rebind_error() {
+    // The desugar's leading `Bind(["a"])` puts `a` in scope before the body
+    // runs; a body-level `| a |` then rebinds it while still live
+    // (`rebound_local_error`, `src/check.rs:2936`).
+    let err = check_error(": f ( a : i64 -- i64 ) | a | a ;\n");
+    assert!(
+        err.contains("`a` is already bound in `f`"),
+        "unexpected message: {err}"
+    );
+}
+
+#[test]
+fn slot_local_named_like_variant_is_x12_parameter_error() {
+    // X12 (`src/check/word_entry.rs:33-38`) rejects a parameter name equal to
+    // a registered variant name; the desugared slot is a parameter for its
+    // purposes.
+    let err = check_error("type: E | V | ;\n: f ( V : i64 -- i64 ) drop ;\n");
+    assert!(err.contains("parameter `V`"), "unexpected message: {err}");
+    assert!(
+        err.contains("collides with the variant name `V`"),
+        "unexpected message: {err}"
+    );
+}
+
+#[test]
+fn slot_local_unused_named_slot_is_linear_leak_error() {
+    // `^i64` is linear (an owned cell): a named slot the body never consumes
+    // fails the bound-but-unused check (`Scope::leave`,
+    // `src/check/engine.rs:557-570`), naming the slot.
+    let err = check_error(": f ( x : ^i64 -- ) ;\n");
+    assert!(
+        err.contains("linear value `x` is never consumed in `f`"),
+        "unexpected message: {err}"
+    );
+
+    // `array[i64 4]` is Copy: an unused named slot of that type imposes no
+    // use obligation and still compiles.
+    let tokens = lexer::lex(": f ( x : array[i64 4] -- ) ;\n").expect("lexing should succeed");
+    let mut module = test_support::parse_with_core(&tokens).expect("parsing should succeed");
+    check::check(&mut module).expect("an unused Copy-typed named slot should compile");
+}
+
+// ---- R16: the desugared leading Bind never fires the entry-arity diagnostic ----
+
+#[test]
+fn slot_sugar_never_fires_entry_arity_diagnostic_expected() {
+    let (stdout, code) = run_src(
+        "slot-sugar-entry-arity-corpus",
+        ": f ( a: i64 b: i64 -- i64 ) a b add ;\n\
+: g ( a: i64 i64 -- i64 ) | b | a b add ;\n\
+: main ( -- ) 3 4 f . 3 4 g . ;\n",
+    );
+    assert_eq!(stdout, "7\n7\n");
+    assert_eq!(code, 0);
+
+    // Control: a hand-written over-arity `| a b |` on a 1-input word still
+    // trips the entry-arity diagnostic (`src/check/word_entry.rs:200-213`) --
+    // the desugar's exemption is not a blanket suppression of the check.
+    let err = check_error(": w ( i64 -- i64 ) | a b | a ;\n");
+    assert!(
+        err.contains("locals bind 2 value(s), but only 1 input(s) are declared"),
+        "unexpected message: {err}"
+    );
+}
+
+// ---- R17: a desugared leading Bind lowers identically on the self-tail path ----
+
+#[test]
+fn slot_sugar_tail_call_matches_explicit_twin_expected() {
+    // The spec cites the leading-Bind split in `lower_self_tail_combinator`
+    // (src/ir/func_builder/calls.rs:100-135); that branch fires only for a
+    // quotation-typed leading Bind, which the sugar can never produce (a
+    // quotation-typed slot forces the poly path, where R11 rejects the name).
+    // This fixture is the strongest reachable witness: a named-slot inline
+    // self-tail word whose desugared leading Bind flows through the shared
+    // tail walk (see also `param_binds`, src/check/drop_graph.rs:62).
+    let (sugar_out, sugar_code) = run_src(
+        "slot-sugar-self-tail",
+        ": down inline ( n: i64 -- i64 ) n 0 gt ~[ n 1 sub down ] ~[ n ] if ;\n\
+: main ( -- ) 5 down . ;\n",
+    );
+    let (twin_out, twin_code) = run_src(
+        "slot-sugar-self-tail-twin",
+        ": down inline ( i64 -- i64 ) | n | n 0 gt ~[ n 1 sub down ] ~[ n ] if ;\n\
+: main ( -- ) 5 down . ;\n",
+    );
+    assert_eq!(sugar_out, "0\n");
+    assert_eq!(sugar_code, 0);
+    assert_eq!(sugar_out, twin_out);
+    assert_eq!(sugar_code, twin_code);
 }
