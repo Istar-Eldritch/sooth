@@ -2426,17 +2426,6 @@ fn check_eliminator_call(
     let scrutinee_family_matches = ctx.with_enum_decl_or_generic(id, |d| {
         d.is_some_and(|d| generic_surface_name(&d.name) == generic_surface_name(&gate_name))
     });
-    // P7b.S3 (S3-1.e): inside a combinator splice, record the operative id
-    // this elimination narrowed to under the per-splice `(uid, span)` key. A
-    // concrete body never needed a record (the id is on the scrutinee), but
-    // under a splice the bare-key fall-through at lowering hands every splice
-    // the same family-wide id, which is wrong the moment one body is spliced
-    // at two θ.
-    if scrutinee_family_matches {
-        if let Some(uid) = prov.splice_uid {
-            poly.splice_enum_words.insert((uid, span), id);
-        }
-    }
     if !scrutinee_family_matches {
         return Err(type_mismatch_error(
             ctx,
@@ -2445,6 +2434,15 @@ fn check_eliminator_call(
             expected_family,
             scrutinee.ty,
         ));
+    }
+    // P7b.S3 (S3-1.e): inside a combinator splice, record the operative id
+    // this elimination narrowed to under the per-splice `(uid, span)` key. A
+    // concrete body never needed a record (the id is on the scrutinee), but
+    // under a splice the bare-key fall-through at lowering hands every splice
+    // the same family-wide id, which is wrong the moment one body is spliced
+    // at two θ.
+    if let Some(uid) = prov.splice_uid {
+        poly.splice_enum_words.insert((uid, span), id);
     }
     let (enum_variants, enum_decl_name) = ctx.with_enum_decl_or_generic(id, |d| {
         let d = d.expect("the family check above already confirmed `id` names a real decl");

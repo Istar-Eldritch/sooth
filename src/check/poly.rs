@@ -20323,6 +20323,30 @@ mod tests {
     /// hard -- which is what `class_one_grounding_failure_is_skipped` and
     /// `class_two_member_call_is_rescued_for_recheck_at_the_splice`
     /// below measure directly.
+    /// P7b.S3 (S3-6): the no-leak invariant `STAND_IN_GROUNDING_TAG`'s doc
+    /// and `check.rs`'s `strip_diagnostic_tags` both assert. The row-7 HKT
+    /// fixture (non-inline member, `inline` caller) raises the *tagged*
+    /// `splice_member_ctor_image_error` at a real splice site, where it is a
+    /// hard error rather than a rescue -- so the tag is on the raise and the
+    /// only thing between it and the user is the `check_module` boundary.
+    #[test]
+    fn a_tagged_raise_reaches_check_module_output_untagged() {
+        let src = functor_two_impls_src(
+            ": twice inline['F: Functor 'T] ( 'F['T] [ 'T -- 'T ] -- 'F['T] ) | q | q map q map ;\n\
+             : mk ( i64 -- Opt[i64] ) Some ;\n\
+             : go ( -- ) 1 mk [ ] twice drop ;",
+        );
+        let err = check_src(&src).expect_err("the row-7 HKT splice is rejected");
+        assert!(
+            err.contains("grounded against the constructor image"),
+            "the fixture reaches the tagged raise site: {err}"
+        );
+        assert!(
+            !err.contains('\u{1}'),
+            "no tag byte survives the `check_module` boundary: {err:?}"
+        );
+    }
+
     #[test]
     fn standalone_arity_error_is_not_rescued() {
         let res = check_src(&functor_two_impls_src(

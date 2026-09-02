@@ -462,6 +462,12 @@ impl<'a> FuncBuilder<'a> {
                 // `$$`-suffixes the member's symbol. A non-combinator
                 // member's record carries the env *symbol* instead and falls
                 // through to `lower_resolved_word_call`.
+                // The `!member_tables_installed` conjunct is deliberately
+                // unwitnessed: the state it guards is reachable only from a
+                // *nested* member splice, and nested member dispatch on a
+                // member's own generic operand is rejected at check time
+                // today (spec closing, Phase 3 measurement 1). A clean
+                // mutation kill here is that, not a bug.
                 if !self.member_tables_installed
                     && self.combinators.get(&sym_name).is_some()
                     && !self.member_splice_names.contains(&sym_name)

@@ -942,6 +942,13 @@ Phase 3 opens with **two measurements**, both of which can change the shape belo
   byte-identical, and this is the one measured divergence: a coerced literal now carries
   its declared size type into any spliced body (unit-pinned:
   `literal_size_operand_through_an_ordinary_combinator_still_resolves`).
+- **Deviation 4 — the class-1 rescue stays an untagged positional blanket.** Class 2's
+  rescue is tag-gated (`STAND_IN_GROUNDING_TAG`), but class 1 (`Err(_) if stand_in_ctor =>
+  return Ok(())` at `check_poly_combinator_standalone`'s declared-slot grounding) is a
+  positional blanket over *every* grounding failure at that position. Measured, no
+  legally-parsed fixture reaches it with a genuine failure — it is latent in practice.
+  Retained as defense-in-depth rather than narrowed: narrowing an unreachable path cannot
+  be validated in either direction, so the narrowing would ship untested.
 - **S3-1.f ruling: (1), the preferred one, measured and held.** The pre-pass keeps
   walking member combinator bodies with `is_combinator_splice: false` for
   `word.is_trait_member` (`check.rs`, the single set site); the walk completes, the gate
@@ -983,7 +990,10 @@ The full suite in `tests/phase7b_slice3.rs`, harness style from `tests/phase7b_s
   Re-apply m4's shape — lift the checker gates but leave lowering monomorphizing the member
   (concretely: force `lower_resolved_word_call` to take the non-splice arm for member calls)
   — and confirm **P#1, P#3 and P#5 all fail on their `nm`/`objdump` clauses while their
-  stdout clause still passes** (clause 5 is exercised by P#1/P#3, the inline-caller pair).
+  stdout clause still passes**. Clause 5 is *not* exercised by this mutation (measured:
+  under m4 P#1 dies at clause 2 and P#3 at clause 1, so neither ever evaluates its
+  clause-5 assertion); clause 5's predicates are proven live by each golden's own in-test
+  positive twin instead.
   No other mutation in this spec exercises clauses 2/3/5; F9
   is the whole reason those clauses exist, and an unexercised assertion about a *missing*
   string is the placebo this repo has been bitten by before. Record which clause each
@@ -1100,6 +1110,21 @@ dispatch sites (S3-1.d), enum sites inside the splice resolve through the
 marker rather than lifted (S3-1.f, preferred ruling: `is_combinator_splice:
 false` for member combinators). Members splice from every caller flavour; a
 member *without* `inline` still monomorphizes from every caller flavour (C#1).
+
+**Phase 3 measurement 1, recorded (the bracket-composition question).** Whether
+S3-1.d's bracket-scoped install/restore of a diverted instantiation's
+`enum_words`/`trait_calls` composes with the P7.S8 uid bracket under *nested* member
+splices is **moot today, not answered structurally**: a member body whose nested trait
+member call dispatches on the member's own generic operand is rejected at check time
+(measured — an `omap` member body calling `ival` on an `Opt`-bound element raises the
+unknown-word error naming `ival` inside `omap`; the checker resolves no second
+trait-member lookup from inside a member body). Only the concrete
+nested case builds, and it resolves statically without a second diverted install, so no
+program can construct the nesting the question is about. This is also why
+`ir/func_builder/calls.rs`'s `!member_tables_installed` conjunct at the
+`combinators.get(&sym_name).is_some() && !member_splice_names.contains(&sym_name)` check
+has no test witness under mutation: the state it guards is only reachable from a nested
+member splice. Marked as deliberately unwitnessed at the call site.
 
 **m4 mutation check, measured (Phase 4).** Adversary applied as a temporary
 uncommitted edit and fully reverted: check side, the S3-1.c hop narrowed to

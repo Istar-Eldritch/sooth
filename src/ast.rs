@@ -1834,10 +1834,15 @@ pub struct WordDef {
     /// bare `global:` with no entry is a located parse error.
     pub declared_globals: Option<Vec<GlobalEntry>>,
     /// P7b.S3 (S3-2): set only at the synthesized trait-member word's
-    /// construction site (`parse_impl_member_body`); `false` for every
-    /// ordinary word. No reader yet -- a structural discriminator for a
-    /// later phase to key checker/lowering behaviour on, in place of a
-    /// name convention.
+    /// construction site (`parse_impl_member_body`, both the concrete and
+    /// the generic `impl:`-target arm); `false` for every ordinary word. The
+    /// structural discriminator the checker and lowering key member
+    /// behaviour on, in place of a name convention: it exempts a member from
+    /// R1.5's combinator standalone-check skip and narrows that walk's
+    /// `is_combinator_splice` gate (`check.rs`), suppresses S3-9's R3
+    /// refusal of a top-level `Generic` input (`check/poly.rs`), and selects
+    /// the S3-1.c/S3-1.d member-splice routing (`check/poly.rs`,
+    /// `ir/driver.rs`).
     pub is_trait_member: bool,
 }
 

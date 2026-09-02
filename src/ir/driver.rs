@@ -80,9 +80,6 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
         .iter()
         .map(|w| (w.name.clone(), w.span))
         .collect();
-    // θ is ground, so the substituted effect carries concrete array types
-    // with concrete `N` and the body lowers with no length-variable handling
-    // (length polymorphism is discharged in the emission loop below).
     let poly_words: HashMap<&str, &WordDef> = module
         .words
         .iter()

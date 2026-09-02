@@ -1403,6 +1403,31 @@ pub(super) fn eliminator_arm_names_no_eliminator_error(
 /// follows the existing env-overload discipline (first-wins on a genuine
 /// collision, no ambiguity check); this fallback must not invent a stricter
 /// rule than a present `env` entry would have had.
+fn mint_fallback_candidates(name: &str, ctx: &Ctx) -> Vec<Overload> {
+    ctx.with_extended_type_slices(|structs, enums| {
+        let mut out = Vec::new();
+        let struct_skip = struct_generated_sigs(ctx.structs()).len();
+        for (n, symbol, sig) in struct_generated_sigs(structs).into_iter().skip(struct_skip) {
+            if n == name {
+                out.push(Overload { sig, symbol });
+            }
+        }
+        let enum_skip = enum_generated_sigs(ctx.enums()).len();
+        for (n, symbol, sig) in enum_generated_sigs(enums).into_iter().skip(enum_skip) {
+            if n == name {
+                out.push(Overload { sig, symbol });
+            }
+        }
+        let variant_skip = variant_generated_sigs(ctx.enums()).len();
+        for (n, symbol, sig) in variant_generated_sigs(enums).into_iter().skip(variant_skip) {
+            if n == name {
+                out.push(Overload { sig, symbol });
+            }
+        }
+        out
+    })
+}
+
 /// P7b.S3 (S3-1.e): inside a combinator splice (`prov.splice_uid` is `Some`),
 /// the operative `EnumId` of a chosen candidate that is a *generated enum
 /// word* -- `(name, symbol)` membership in `enum_generated_sigs` (ctors) or
@@ -1445,31 +1470,6 @@ fn splice_enum_site(
         None
     })?;
     Some((uid, id))
-}
-
-fn mint_fallback_candidates(name: &str, ctx: &Ctx) -> Vec<Overload> {
-    ctx.with_extended_type_slices(|structs, enums| {
-        let mut out = Vec::new();
-        let struct_skip = struct_generated_sigs(ctx.structs()).len();
-        for (n, symbol, sig) in struct_generated_sigs(structs).into_iter().skip(struct_skip) {
-            if n == name {
-                out.push(Overload { sig, symbol });
-            }
-        }
-        let enum_skip = enum_generated_sigs(ctx.enums()).len();
-        for (n, symbol, sig) in enum_generated_sigs(enums).into_iter().skip(enum_skip) {
-            if n == name {
-                out.push(Overload { sig, symbol });
-            }
-        }
-        let variant_skip = variant_generated_sigs(ctx.enums()).len();
-        for (n, symbol, sig) in variant_generated_sigs(enums).into_iter().skip(variant_skip) {
-            if n == name {
-                out.push(Overload { sig, symbol });
-            }
-        }
-        out
-    })
 }
 
 /// P7.S11-follow (Part 3): whether `top` is a tagged quotation literal that

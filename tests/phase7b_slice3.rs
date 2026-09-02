@@ -682,9 +682,11 @@ import: core::prelude | Bool Ord lt | ;
 /// standalone check is skipped (no `Bound::User` for `'F` at all, so
 /// `arrow_stand_in` finds no stand-in), so the call to the unknown word
 /// `bogus_word` inside its body is caught only once `bad` is actually
-/// spliced at `main`'s call site -- and an unreferenced twin of the same
-/// word (not shown here; probed separately) builds clean, proving the
-/// rejection is deferred to the splice, not raised at the declaration.
+/// spliced at `main`'s call site. The located context names the *caller*,
+/// and the unreferenced twin below
+/// (`unbounded_arrow_variable_inline_word_unreferenced_builds_clean`) builds
+/// clean -- together, the rejection is deferred to the splice, not raised at
+/// the declaration.
 #[test]
 fn unbounded_arrow_variable_inline_word_is_rejected_at_its_splice_site() {
     let src = "\
@@ -699,6 +701,27 @@ type: Opt['T] | None | Some 'T ;
         err.contains("unknown word `bogus_word`"),
         "the broken body must still be checked at its first splice site: {err}"
     );
+    // The located context is the *caller*, not `bad`'s own declaration -- a
+    // declaration-time raise would satisfy the message assertion identically.
+    assert!(
+        err.contains("in `main`"),
+        "the rejection must be located at the splice site, not the declaration: {err}"
+    );
+}
+
+/// E#1's twin: the same broken `inline['F]` word, never called. Nothing
+/// splices it, so nothing checks its body and the program builds clean --
+/// the other half of "rejected at its splice site".
+#[test]
+fn unbounded_arrow_variable_inline_word_unreferenced_builds_clean() {
+    let src = "\
+type: Opt['T] | None | Some 'T ;
+: bad inline['F] ( 'F['T] -- 'F['T] ) bogus_word ;
+: mk ( i64 -- Opt[i64] ) Some ;
+: main ( -- ) 3 mk drop ;
+";
+    let (_t, _binary, stdout) = build_run_keep("e1-unbounded-arrow-var-twin", src);
+    assert_eq!(stdout, "");
 }
 
 /// Error E#2 (ledger item 6): bound dispatch inside a materialized quotation
