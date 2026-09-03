@@ -10,7 +10,8 @@
 //!   variant         := Word (Word Word)*
 //!   externdef       := 'extern:' Word '(' effect ')' Str ';'
 //!   effect   := slot* '--' slot*
-//!   slot     := Word (':' Word)?
+//!   slot     := name? Word
+//!   name     := Word ':'          \ spaced `a :`; glued `a:` is one Word token ending in ':'
 //!   binding  := '|' Word+ '|'
 //!   term     := Int | Word | binding | if
 //!   if       := 'if' term* ('else' term*)? 'end'
@@ -2226,6 +2227,59 @@ fn bound_in_effect_error(name: &str, span: Span) -> String {
     )
 }
 
+/// Named-slot-locals sugar (R2): a single word token holding exactly one
+/// non-trailing `:` (`a:i64`) in slot position. A trailing `:` is R1's glued
+/// split, not this error, and a `::`-qualified type name never has exactly
+/// one `:`.
+fn glued_slot_name_needs_space_error(text: &str, span: Span) -> String {
+    let (name, rest) = text
+        .split_once(':')
+        .expect("caller guarantees exactly one `:`");
+    format!(
+        "error: `{text}` at line {}, col {} looks like a named slot with no space after `:`; write `{name} : {rest}`",
+        span.line, span.col
+    )
+}
+
+/// Named-slot-locals sugar (R1): the glued trailing-colon spelling only
+/// makes sense when the sliced-off name half could plausibly be a body-block
+/// bind (`| ... |` only ever binds a single `Token::Word`); a name half that
+/// does not re-lex, standalone, to exactly one `Word` token can never be
+/// referenced by any body term, so minting it as a slot name would silently
+/// swallow the slot's argument rather than naming it -- at base `403618f`
+/// this was already an error (`resolve_type_or_apply` on the un-split
+/// token), so this restores a reject rather than introducing one. Re-lexing
+/// (rather than special-casing `is_int_literal`/`is_float_literal`) also
+/// catches a standalone `\`, which the lexer reads as a line comment
+/// (`src/lexer.rs:203-211`) and which would otherwise silently mint an
+/// unreachable local.
+fn glued_slot_name_not_a_word_error(text: &str, name: &str, span: Span) -> String {
+    format!(
+        "error: `{text}` reads as a slot named `{name}`, but `{name}` is not a name a body block could bind at line {}, col {}",
+        span.line, span.col
+    )
+}
+
+/// Named-slot-locals sugar (R11): a poly-effect slot position has no legal
+/// spelling with a `:`, so any word followed by one (spaced or glued) is
+/// always an attempted slot name.
+fn poly_slot_name_not_supported_error(span: Span) -> String {
+    format!(
+        "error: slot names are not supported in polymorphic effects at line {}, col {}",
+        span.line, span.col
+    )
+}
+
+/// Named-slot-locals sugar (R12): two input slots in one word-definition
+/// effect sharing a name. `TypedSlot` carries no per-slot span, so the error
+/// cites the word definition's own span.
+fn duplicate_slot_name_error(name: &str, word_name: &str, span: Span) -> String {
+    format!(
+        "error: slot name `{name}` is declared more than once in `{word_name}` (defined at line {}, col {})",
+        span.line, span.col
+    )
+}
+
 /// R16 (phase 2): a qualified reference to a name that exists in the target
 /// module but is not on its `export:` list. Distinct wording from an unknown
 /// name (which has its own error, `resolve_type`'s `unknown type` and
@@ -3211,6 +3265,11 @@ impl<'t> Parser<'t> {
         };
         let body = self.parse_terms("`;`", |tok| matches!(tok, Token::Semicolon))?;
         self.expect(Token::Semicolon)?;
+        // Named-slot-locals sugar (R3/R4/R12): runs after the body is fully
+        // parsed and only here -- `effect.inputs` is empty for a poly word
+        // (its names live nowhere, `PolyType` carries none), so this is a
+        // no-op for one.
+        let body = Self::desugar_slot_locals(&effect, body, &name, self.enums, name_span)?;
         Ok(WordDef {
             name,
             effect,
@@ -3222,6 +3281,102 @@ impl<'t> Parser<'t> {
             declared_globals,
             is_trait_member: false,
         })
+    }
+
+    /// Named-slot-locals sugar: collect every name any `TermKind::Bind` in
+    /// `terms` binds, nested quotations included (R6) -- the freshness scan's
+    /// view of "bound anywhere in the body", mirroring the walk
+    /// `crate::ast::alpha_rename_locals` already does over `Bind`/`Quotation`.
+    fn collect_bound_names(terms: &[Term], names: &mut std::collections::HashSet<String>) {
+        for term in terms {
+            match &term.kind {
+                TermKind::Bind(ns) => names.extend(ns.iter().cloned()),
+                TermKind::Quotation(inner, _, _) => Self::collect_bound_names(inner, names),
+                _ => {}
+            }
+        }
+    }
+
+    /// Named-slot-locals sugar (R3/R4/R5/R6/R7/R12): extract `effect`'s
+    /// input-slot names, reject a duplicate (R12: input slots only), and --
+    /// when at least one is named -- prepend a `Bind` term binding every
+    /// slot from the deepest named one to the top, minting a fresh positional
+    /// name (R6) for each unnamed slot in that run and immediately
+    /// re-pushing it (R5) so unnamed slots keep their original relative
+    /// stack order. A slot named `array` (R13) is unaffected: the desugar
+    /// only ever reads `TypedSlot.name`, never clears it. `span` is the word
+    /// definition's own span (`TypedSlot` carries none of its own, Open
+    /// Questions).
+    fn desugar_slot_locals(
+        effect: &StackEffect,
+        body: Vec<Term>,
+        word_name: &str,
+        enums: &[EnumDecl],
+        span: Span,
+    ) -> Result<Vec<Term>, String> {
+        let mut seen = std::collections::HashSet::new();
+        for slot in &effect.inputs {
+            if let Some(name) = &slot.name {
+                if !seen.insert(name.clone()) {
+                    return Err(duplicate_slot_name_error(name, word_name, span));
+                }
+            }
+        }
+        let Some(deepest_named) = effect.inputs.iter().position(|s| s.name.is_some()) else {
+            // R18: no named input slot anywhere -- byte-identical to today.
+            return Ok(body);
+        };
+        let run = &effect.inputs[deepest_named..];
+        // R6: the freshness set a mint candidate must clear -- every name
+        // bound anywhere in the body, the word's own name, every other
+        // input-slot name, and every enum variant name in the module.
+        let mut fresh = std::collections::HashSet::new();
+        fresh.insert(word_name.to_string());
+        for slot in &effect.inputs {
+            if let Some(n) = &slot.name {
+                fresh.insert(n.clone());
+            }
+        }
+        for e in enums {
+            for v in &e.variants {
+                fresh.insert(v.name.clone());
+            }
+        }
+        Self::collect_bound_names(&body, &mut fresh);
+
+        let mut names = Vec::with_capacity(run.len());
+        let mut mints: Vec<String> = Vec::new();
+        for (offset, slot) in run.iter().enumerate() {
+            match &slot.name {
+                Some(n) => names.push(n.clone()),
+                None => {
+                    let idx = deepest_named + offset;
+                    let mut k = idx;
+                    let mint = loop {
+                        let candidate = format!("__slot{k}");
+                        if !fresh.contains(&candidate) {
+                            break candidate;
+                        }
+                        k += 1;
+                    };
+                    fresh.insert(mint.clone());
+                    names.push(mint.clone());
+                    mints.push(mint);
+                }
+            }
+        }
+        let mut prefix = vec![Term {
+            kind: TermKind::Bind(names),
+            span,
+        }];
+        for mint in mints {
+            prefix.push(Term {
+                kind: TermKind::Call(mint, Vec::new(), Vec::new()),
+                span,
+            });
+        }
+        prefix.extend(body);
+        Ok(prefix)
     }
 
     /// P7.S6 (R6): parse the optional bound bracket `[ 'T: Copy 'U: Ord ]` that
@@ -4770,6 +4925,28 @@ impl<'t> Parser<'t> {
                 }
             }
         }
+        // R11: a poly-effect slot position has no legal spelling with a
+        // `:` -- every variable-bearing form (`'T`, `&'T`, `^'T`, ...) has
+        // already returned above, so a word containing no `'` that is
+        // followed by `:` (spaced) or ends with `:` (glued) here is always
+        // an attempted slot name, never a legal type.
+        // Not for `builder.forbid_bounds` (an `impl:` target): that route
+        // shares this reader for a bare/concrete target pattern with no
+        // slot-name concept at all, and the token right after the target
+        // can legitimately be the impl body's own leading `:` (Non-goals:
+        // impl member bodies are structurally excluded from this sugar).
+        if !builder.forbid_bounds {
+            if let Some((Token::Word(w), span)) = self.peek() {
+                let (w, span) = (w.clone(), *span);
+                if !w.contains('\'') {
+                    let glued = w.len() > 1 && w.ends_with(':');
+                    let spaced = matches!(self.tokens.get(self.pos + 1), Some((Token::Word(c), _)) if c == ":");
+                    if glued || spaced {
+                        return Err(poly_slot_name_not_supported_error(span));
+                    }
+                }
+            }
+        }
         let ty = self.parse_type_expr()?;
         Ok(RawTy::Concrete(ty))
     }
@@ -5601,6 +5778,33 @@ impl<'t> Parser<'t> {
                 name: Some(text),
                 ty,
             })
+        } else if text.len() > 1 && text.ends_with(':') && !text[..text.len() - 1].contains(':') {
+            // R1: the glued trailing-colon slot-name spelling (`a: i64`),
+            // mirroring the glued `'T:` split in `parse_optional_bound_bracket`.
+            // The name half must itself be `:`-free -- a qualified-name-shaped
+            // token (`q::Point:`, or the degenerate `::`) is not a plausible
+            // slot name, so it falls through to `resolve_type_or_apply` and
+            // dies as an unknown-type error instead of minting a slot named
+            // `:` or `q::Point`.
+            let name = text[..text.len() - 1].to_string();
+            let is_plain_word = matches!(
+                crate::lexer::lex(&name).as_deref(),
+                Ok([(Token::Word(_), _)])
+            );
+            if !is_plain_word {
+                return Err(glued_slot_name_not_a_word_error(&text, &name, span));
+            }
+            let ty = self.parse_type_expr()?;
+            Ok(TypedSlot {
+                name: Some(name),
+                ty,
+            })
+        } else if text.len() > 1 && text.matches(':').count() == 1 && !text.starts_with(':') {
+            // R2: a single non-trailing `:` is a fully-glued slot-name
+            // attempt (`a:i64`); a `::`-qualified type name never has
+            // exactly one `:`, and a leading-colon token (`:i64`) names
+            // nothing — both fall through to the resolver below.
+            Err(glued_slot_name_needs_space_error(&text, span))
         } else {
             let ty = self.resolve_type_or_apply(&text, span)?;
             Ok(TypedSlot { name: None, ty })
@@ -14890,5 +15094,136 @@ mod tests {
             ),
             "{err}"
         );
+    }
+
+    // ---- Named-slot-locals sugar (Phase 1): desugar shapes ----
+
+    #[test]
+    fn parse_worddef_slot_sugar_prepends_bind_in_slot_order_expected() {
+        let module = parse_src(": f ( a: i64 b: i64 -- i64 ) a b add ;").unwrap();
+        assert!(
+            matches!(&module.words[0].body[0].kind, TermKind::Bind(names) if names == &vec!["a".to_string(), "b".to_string()]),
+            "expected a leading `Bind([\"a\", \"b\"])`, got {:?}",
+            module.words[0].body[0].kind
+        );
+    }
+
+    #[test]
+    fn parse_worddef_slot_sugar_top_contiguous_named_zero_mints_expected() {
+        let module = parse_src(": f ( i64 a: i64 b: i64 -- i64 ) a b add ;").unwrap();
+        assert!(
+            matches!(&module.words[0].body[0].kind, TermKind::Bind(names) if names == &vec!["a".to_string(), "b".to_string()]),
+            "the named slots are the top-contiguous run: zero mints, got {:?}",
+            module.words[0].body[0].kind
+        );
+        // No re-push `Call` before the original body: the second term is the
+        // user's own first body term.
+        assert!(
+            matches!(&module.words[0].body[1].kind, TermKind::Call(name, ..) if name == "a"),
+            "expected zero mint re-pushes, got {:?}",
+            module.words[0].body[1].kind
+        );
+    }
+
+    #[test]
+    fn parse_worddef_slot_sugar_out_of_order_mints_and_repushes_expected() {
+        let module = parse_src(": f ( a: i64 i64 -- i64 ) | b | a b add ;").unwrap();
+        assert!(
+            matches!(&module.words[0].body[0].kind, TermKind::Bind(names) if names == &vec!["a".to_string(), "__slot1".to_string()]),
+            "expected the unnamed slot to mint `__slot1`, got {:?}",
+            module.words[0].body[0].kind
+        );
+        assert!(
+            matches!(&module.words[0].body[1].kind, TermKind::Call(name, ..) if name == "__slot1"),
+            "expected an immediate re-push of the mint, got {:?}",
+            module.words[0].body[1].kind
+        );
+    }
+
+    #[test]
+    fn parse_worddef_slot_sugar_mint_bumped_on_body_collision_expected() {
+        let module = parse_src(": f ( a: i64 i64 -- i64 ) | __slot1 | a __slot1 add ;").unwrap();
+        assert!(
+            matches!(&module.words[0].body[0].kind, TermKind::Bind(names) if names == &vec!["a".to_string(), "__slot2".to_string()]),
+            "the user body already binds `__slot1`, so the mint should bump to `__slot2`, got {:?}",
+            module.words[0].body[0].kind
+        );
+    }
+
+    #[test]
+    fn parse_worddef_slot_sugar_leaves_slot_names_populated_expected() {
+        let module = parse_src(": f ( a: i64 i64 -- i64 ) | b | a b add ;").unwrap();
+        assert_eq!(module.words[0].effect.inputs[0].name.as_deref(), Some("a"));
+        assert_eq!(module.words[0].effect.inputs[1].name, None);
+    }
+
+    #[test]
+    fn parse_slot_degenerate_double_colon_falls_through_to_unknown_type_expected() {
+        let err = parse_src(": f ( :: i64 -- ) drop ;").unwrap_err();
+        assert!(err.contains("unknown type"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn parse_slot_qualified_name_shaped_glued_colon_falls_through_to_unknown_type_expected() {
+        let err = parse_src(": f ( q::Point: i64 -- ) drop ;").unwrap_err();
+        assert!(err.contains("unknown type"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn parse_slot_leading_colon_glued_falls_through_to_unknown_type_expected() {
+        let err = parse_src(": f ( :i64 -- ) drop ;").unwrap_err();
+        assert!(err.contains("unknown type"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn parse_slot_glued_numeric_name_half_is_error() {
+        let err = parse_src(": f ( 1: i64 -- i64 ) 5 ;").unwrap_err();
+        assert!(
+            err.contains("`1:` reads as a slot named `1`"),
+            "unexpected message: {err}"
+        );
+        assert!(
+            err.contains("not a name a body block could bind"),
+            "unexpected message: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_slot_glued_float_name_half_is_error() {
+        let err = parse_src(": f ( 1.5: i64 -- i64 ) 5 ;").unwrap_err();
+        assert!(
+            err.contains("`1.5:` reads as a slot named `1.5`"),
+            "unexpected message: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_slot_glued_negative_int_name_half_is_error() {
+        let err = parse_src(": f ( -1: i64 -- i64 ) 5 ;").unwrap_err();
+        assert!(
+            err.contains("`-1:` reads as a slot named `-1`"),
+            "unexpected message: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_slot_glued_line_comment_name_half_is_error() {
+        // A standalone `\` re-lexes to a line comment (zero tokens), not a
+        // `Word` -- the twin `| \ |` is a parse error and a bare `\` in a
+        // body comments out the rest of the line, so the name half can never
+        // be spelled or referenced.
+        let err = parse_src(": f ( \\: i64 -- i64 ) drop ;").unwrap_err();
+        assert!(
+            err.contains("`\\:` reads as a slot named `\\`"),
+            "unexpected message: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_slot_glued_ordinary_name_still_parses_expected() {
+        // Control: an ordinary glued name still re-lexes to exactly one
+        // `Word` token, so the gate leaves it alone.
+        let module = parse_src(": f ( a: i64 -- i64 ) a ;").unwrap();
+        assert_eq!(module.words[0].effect.inputs[0].name.as_deref(), Some("a"));
     }
 }

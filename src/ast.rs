@@ -2959,9 +2959,11 @@ pub struct Clause {
     pub span: Span,
 }
 
-/// A checked stack effect, e.g. `( i64 i64 -- i64 )`. A slot may carry a name
-/// (`a:i64`) as caller-facing documentation, but a slot bound by `| … |` stays a
-/// bare type so a name is never written twice.
+/// A checked stack effect, e.g. `( i64 i64 -- i64 )`. In a word definition, a
+/// named input slot (`a : i64` or glued `a: i64`) desugars to a local bound to
+/// that slot's value before the body runs (`parse_worddef`); an unnamed input
+/// slot stays on the stack. Extern and output slot names stay doc-only — no
+/// binding, no behaviour change from an unnamed slot.
 #[derive(Debug, Default)]
 pub struct StackEffect {
     pub inputs: Vec<TypedSlot>,

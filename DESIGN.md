@@ -30,16 +30,17 @@ constraints are unchanged (small enough to hold in one head, legible compiler, s
 Concatenative, Forth-flavoured, with two non-negotiable ergonomics that Forth
 lacks: statically-checked stack effects and named locals.
 
-`gcd`, to fix the shape. `| a b |` binds the top items left-to-right in the same
-order as the effect comment, and a word calls itself directly (no `recurse`). A
-binding is a term, not just an entry declaration: `| names |` is legal at any point
-in a body, popping that many values off the stack where it appears, with its extent
-running to the end of the enclosing block (a word body or a quotation body)
-rather than the whole word:
+`gcd`, to fix the shape. The inputs get their names inline, in the effect comment
+itself — `( a: int b: int -- int )` binds `a` to the deeper slot and `b` to the
+top before the body runs — and a word calls itself directly (no `recurse`). The
+`| … |` block is the other spelling and the more general one: a binding is a
+term, not just an entry declaration, legal at any point in a body, popping that
+many values off the stack where it appears, with its extent running to the end
+of the enclosing block (a word body or a quotation body) rather than the whole
+word:
 
 ```forth
-: gcd ( int int -- int )
-  | a b |
+: gcd ( a: int b: int -- int )
   b 0 eq 
   ~[ a ] 
   ~[ b  a b mod  gcd ] 
@@ -48,13 +49,13 @@ rather than the whole word:
 ```
 
 Locals are opt-in, not the default. If you prefer the stack, `dup`/`swap`/`drop` most
-one- or two-value words stay point-free (`square`, below, is just `dup mul`). You ceach for
-`| … |` when shuffling would read worse than names, typically three-plus live
+one- or two-value words stay point-free (`square`, below, is just `dup mul`). You reach for
+names when shuffling would read worse than names, typically three-plus live
 values reused out of order, like a formula:
 
 ```forth
-: lerp ( int int int -- int )   \ a + (b - a) * t
-  | a b t | b a sub t mul a add ;
+: lerp ( a: int b: int t: int -- int )   \ a + (b - a) * t
+  b a sub t mul a add ;
 ```
 
 `gcd` above sits on the line: two values, each reused and reordered in the recursive
@@ -75,23 +76,25 @@ mode (a silent underflow producing a wrong number at runtime) becomes a compile
 error.
 
 ```forth
-: oops ( int -- int )
-  | a | a a add add ;
+: oops ( a: int -- int )
+  a a add add ;
 ```
 
-```
-error: stack effect mismatch in `oops`
-  declared ( int -- int ), but body has net effect ( int -- ⊥ )
-  a a add add
-          ^ `add` needs 2 values, stack holds 1 here (one `add` too many)
+```text
+error: stack effect mismatch in `oops` (line 2)
+  `add` needs 2 values, but the stack holds 1
+  note: declared ( int -- int )
 ```
 
-Types and names live in different places, never both at once: the effect comment
-carries the boundary **types** (`( int int -- int )`), and `| … |` introduces the
-**names** the body uses. Naming a slot in the effect comment (`( a:int … )`) is an
-alternative to binding it, useful as caller-facing documentation for a word that
-juggles on the stack instead of naming; a slot that is bound by `| … |` stays a bare
-type, so a name is never written twice.
+The effect comment carries the boundary **types** (`( int int -- int )`); a word's
+inputs get their **names** either there, inline (`( a : int int -- int )`), or from
+a body-level `| … |` block — and the two compose, including out of order, so an
+inline name and a block can bind different slots of the same word. An inline input
+name is not documentation: it binds a local for that slot before the body runs.
+Output slots and `extern:` slots are the exception — a name there stays doc-only,
+since neither has a body to bind into. Inline naming has no reach into a
+polymorphic effect: a slot name on either side of a `'T`-bearing effect is a hard
+reject, not sugar (see `docs/named-slot-locals-spec.md`).
 
 ## The linear spine
 
@@ -124,8 +127,7 @@ take it and hand it back, which in a stack language is just normal data flow
 (`size-of ( File -- File int )` returns the File):
 
 ```forth
-: report ( str -- )
-  | path |
+: report ( path: str -- )
   path open-read         \ ( -- File )         acquire ownership
   size-of                \ ( File -- File int ) hands the File back
   print                  \ ( File int -- File ) print consumes the int
@@ -140,12 +142,16 @@ library words layered on top. Forgetting to dispose is **not** silently patched 
 it is a compile error:
 
 ```forth
-: leak-file ( str -- )
-  | path |
+: leak-file ( path: str -- )
   path open-read
   size-of
-  print ;                \ error: `print` leaves a File on the stack, but ( str -- )
-                         \ declares no output. Close it, `drop` it, or return it.
+  print ;
+```
+
+```text
+error: stack effect mismatch in `leak-file` (line 4)
+  body leaves 1 values, but ( … ) declares 0 outputs
+  note: declared ( str -- )
 ```
 
 A forgotten resource surfaces through the same stack-effect check that catches a
@@ -217,8 +223,9 @@ word over this floor, demoted one slice at a time as the machinery beneath it la
 
 The grammar that makes anything else definable: word and type declarations
 (`: ... ;` with its effect comment, `type:`, `extern:`), the module declarations
-(`import:`/`export:`), and locals (`| names |`, with block extent to the end of the
-enclosing body).
+(`import:`/`export:`), and locals — the inline effect spelling (`a: T`, which
+desugars to the block) and the block itself (`| names |`, with block extent to
+the end of the enclosing body).
 
 Structural dispatch: the generated eliminator word, the sole eliminator for enums. An
 arm is checked against the variant its tag names, coverage is exhaustive, and there is
@@ -378,7 +385,7 @@ rows, no borrow analysis needed to write the compiler in it.
 
 - **Scope**: craft language, not a product. Legibility, hold-in-head size, joy of building.
 - **Signature idea**: linear (use exactly once) by default, `dup` is the explicit copy, `drop` is the checked destructor.
-- **Surface**: concatenative, Forth-lineage, checked stack effects, `| named locals |`.
+- **Surface**: concatenative, Forth-lineage, checked stack effects, named locals — inline in the effect (`a: T`, the default spelling for entry slots) or a `| names |` block (mid-body binding, quotations, impl members; the only spelling in polymorphic effects, where inline names are a reject).
 - **Control flow**: `if`/`unless` are `core::bool` words over `branch`/`tag` primitives; generated eliminator word (`Shape?`) for enums; `cond` combinator for multi-way. No loop keywords. Detail: [control flow](./docs/design/control-flow.md).
 - **Iteration**: quotations + `call` are the sole primitive; combinators are library words, inlined at call sites; self-tail-recursion is a guaranteed constant-stack transform (tail self-call → jump). Detail: [control flow](./docs/design/control-flow.md).
 - **Type system**: small. Concrete types + ADTs + minimal row polymorphism + `Copy` marker. No full HM, no refinement/SMT, no effect rows, no dependent types.

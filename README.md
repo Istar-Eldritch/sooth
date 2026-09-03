@@ -16,11 +16,10 @@ import: intrinsics * ;
 import: hosted::show | . | ;
 import: core::prelude * ;
 
-: gcd ( i64 i64 -- i64 )
-  | a b |
-  b 0 eq 
-  ~[ a ] 
-  ~[ b a b mod gcd ] 
+: gcd ( a: i64 b: i64 -- i64 )
+  b 0 eq
+  ~[ a ]
+  ~[ b a b mod gcd ]
   if
 ;
 
@@ -35,17 +34,20 @@ A concatenative language with two ergonomics Forth lacks: statically-checked
 stack effects and named locals. Every word declares its effect (`( int int --
 int )`), the compiler verifies the body against it, and a stack underflow
 becomes a compile error, the signature failure mode of Forth, caught at
-compile time rather than as a wrong number at runtime.
+compile time rather than as a wrong number at runtime. Input slots can carry
+their names right in the effect — `( a: i64 b: i64 -- i64 )` binds `a` and
+`b` as locals before the body runs; a body-level `| ... |` block remains for
+mid-body binding and for the places inline names can't go (quotations, impl
+members, polymorphic effects).
 
 ```factor
-: oops ( i64 -- i64 )
-  | a | a a add add 
+: oops ( a: i64 -- i64 )
+  a a add add
 ;
 
-\ error: stack effect mismatch in `oops`
-\   declared ( i64 -- i64 ), but body has net effect ( i64 -- ⊥ )
-\   a a add add
-\           ^ `add` needs 2 values, stack holds 1 here
+\ error: stack effect mismatch in `oops` (line 2)
+\   `add` needs 2 values, but the stack holds 1
+\   note: declared ( i64 -- i64 )
 ```
 
 The type system is deliberately small: concrete monomorphic types, ADTs,
@@ -103,7 +105,7 @@ extern: open     ( cstr i64 -- i64 )              "open" ;
 extern: close-fd ( i64 -- i64 )                   "close" ;
 
 type: Fd n i64 ;
-: drop ( Fd -- ) | h | h Fd> close-fd drop ;
+: drop ( h: Fd -- ) h Fd> close-fd drop ;
 
 type: File fd Fd ;          \ derived glue disposes Fd through its own drop
 : close ( File -- ) drop ;
@@ -181,14 +183,13 @@ type: List
     next ^List 
 ;
 
-: push-front ( List i64 -- List )
-  | rest v | v rest ^ Cons ;
+: push-front ( rest: List v: i64 -- List )
+  v rest ^ Cons ;
 
-: build ( i64 List -- List )
-  | n acc | 
-  n 0 eq 
-  ~[ acc ] 
-  ~[ n 1 sub acc n push-front build ] 
+: build ( n: i64 acc: List -- List )
+  n 0 eq
+  ~[ acc ]
+  ~[ n 1 sub acc n push-front build ]
   if
 ;
 
