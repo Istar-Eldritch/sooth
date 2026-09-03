@@ -10,7 +10,7 @@
 //! so no impl matched); S4-1 keys the mint on the declaring module and the
 //! probes measured both shapes flipping to the exact pins below. Later
 //! phases extend this file: Phase 3 adds the single-mint identity goldens
-//! (P4, T6 -- their `nm` clause is why the harness keeps the binary),
+//! (P4, T6 -- only P4 carries the `nm` clause),
 //! Phase 4 the fence goldens (S5 marker, twin-impl ambiguity, variant tag).
 //! Harness style from `tests/phase7b_slice3.rs`.
 
@@ -65,7 +65,8 @@ fn single_file_hosted(tag: &str, src: &str) -> (Tree, PathBuf) {
 }
 
 /// Build, run, and keep the binary: `(binary, stdout)`. The binary is
-/// deleted with the `Tree`; Phase 3's identity goldens read its symbols.
+/// deleted with the `Tree`; the nm clause reads the entry twin's binary
+/// (`build_run_keep_entry`), not this helper's.
 fn build_run_keep(tag: &str, src: &str) -> (Tree, PathBuf, String) {
     let (t, entry) = single_file_hosted(tag, src);
     let build = Command::new(env!("CARGO_BIN_EXE_sooth"))
@@ -292,4 +293,218 @@ import: self::rec * ;\n\
 ",
     );
     let (_binary, _stdout) = build_run_keep_entry(&entry);
+}
+
+// ---- Phase 4: the fence goldens (S4-11, S4-12, S4-13) ----
+
+/// Run a build expected to fail and return its stderr, mirroring
+/// `tests/phase7b_slice3.rs`'s `build_error`.
+fn build_error(entry: &Path) -> String {
+    let build = Command::new(env!("CARGO_BIN_EXE_sooth"))
+        .arg("build")
+        .arg(entry)
+        .output()
+        .expect("sooth build should spawn");
+    assert!(!build.status.success(), "build should have failed");
+    String::from_utf8(build.stderr).expect("stderr should be utf8")
+}
+
+/// The m4 family's u1: its own `Functor['F: * -> *]` with member `unbox`,
+/// its own `impl: Functor for Option`, the shared-bound poly route
+/// `go['F: Functor 'T]`, and `run` spelled through `go`. The /tmp probe
+/// fixture's `run` carries a stale qualified `Functor::unbox` probe
+/// spelling -- whose `unknown word` rejection is the F8 remedy-hole record
+/// (ledger item 4, never spelled in a committed golden) -- so both S4-12
+/// goldens spell the mutations.md §m4 shape: `run` → poly `go` → `unbox`.
+const U1_STH: &str = "\
+import: intrinsics * ;
+import: core::option * ;
+trait: Functor['F: * -> *] :
+  unbox ( 'F['T] [ 'T -- i64 ] -- i64 ) ;
+;
+impl: Functor for Option
+  : unbox swap ~[ ( Some ) Some> swap call ] ~[ ( None ) drop drop 0 ] Option? ;
+;
+: mk ( i64 -- Option[i64] ) Some ;
+: run ( i64 -- i64 ) mk [ 3 sub ] go ;
+: go['F: Functor 'T] ( 'F['T] [ 'T -- i64 ] -- i64 ) unbox ;
+export: run ;
+export: go ;
+";
+
+/// The m4 family's u2: the same-named trait, member, and route, but an
+/// observably different impl body (the payload keeps 100).
+const U2_STH: &str = "\
+import: intrinsics * ;
+import: core::option * ;
+trait: Functor['F: * -> *] :
+  unbox ( 'F['T] [ 'T -- i64 ] -- i64 ) ;
+;
+impl: Functor for Option
+  : unbox swap ~[ ( Some ) Some> swap call 100 add ] ~[ ( None ) drop drop 0 ] Option? ;
+;
+: mk ( i64 -- Option[i64] ) Some ;
+: run ( i64 -- i64 ) mk [ 3 sub ] go ;
+: go['F: Functor 'T] ( 'F['T] [ 'T -- i64 ] -- i64 ) unbox ;
+export: run ;
+export: go ;
+";
+
+/// Golden #7 (S4-12a, the per-trait control): a module holding only its own
+/// `Functor` trait with its own `impl: Functor for Option` builds alone and
+/// prints `39` through the poly route -- `run` → `go` → `unbox` dispatching
+/// on its own impl (42 mapped through `[ 3 sub ]`). This is the m4 record's
+/// "per-trait clean" half: two same-named traits in one program are
+/// distinct `TraitId`s, so a module seeing only its own trait dispatches
+/// exactly as if the twin never existed.
+#[test]
+fn module_with_only_its_own_trait_builds_and_prints_through_the_poly_route() {
+    let t = Tree::new("s4-12a-per-trait-control");
+    write_hosted_pkg(&t);
+    t.write("u1.sth", U1_STH);
+    let entry = t.write(
+        "main.sth",
+        "\
+import: intrinsics * ;
+import: hosted::show | . | ;
+import: self::u1 ;
+: main ( -- ) 42 u1::run . ;
+",
+    );
+    let (_binary, stdout) = build_run_keep_entry(&entry);
+    assert_eq!(stdout, "39\n");
+}
+
+/// Golden #8 (S4-12b): with u1 and u2 both present -- two same-named
+/// `Functor` traits, each carrying an `impl: Functor for Option` over the
+/// same widened identity -- a mono caller in `main` that names
+/// `Option[i64]` itself (in `mk`'s declared signature) and calls bare
+/// `unbox` gets the located `mono_ambiguous_member_error`, not a silent
+/// first-win. This is the golden's pinned delta: pre-change the operand's
+/// naming-module mint matched neither impl and the shape failed with
+/// `mono_member_no_dispatch_error`; post-change both impls dispatch on the
+/// one shared mint and the *ambiguity* error fires (poly.rs:2450, fired at
+/// :2250) -- a strict improvement in diagnostic precision, still located.
+/// The bytes below are what the binary prints at this tree (measured, and
+/// matching the spec's m2b-era inference -- no finding).
+#[test]
+fn twin_impls_make_a_mono_member_call_a_located_ambiguity_error() {
+    let t = Tree::new("s4-12b-twin-impl-ambiguity");
+    write_hosted_pkg(&t);
+    t.write("u1.sth", U1_STH);
+    t.write("u2.sth", U2_STH);
+    let entry = t.write(
+        "main.sth",
+        "\
+import: intrinsics * ;
+import: hosted::show | . | ;
+import: core::option * ;
+import: self::u1 ;
+import: self::u2 ;
+: mk ( i64 -- Option[i64] ) Some ;
+: main ( -- ) 42 mk [ 3 sub ] unbox . ;
+",
+    );
+    let err = build_error(&entry);
+    assert_eq!(
+        err,
+        "error: `unbox` in `main` (line 7, col 31) is a trait member of both `Functor` and `Functor`\n  an `impl:` of each claiming trait dispatches on this call's operand; qualify the call with the claiming trait's module (`module::unbox`) to name the one you mean\n"
+    );
+}
+
+/// Golden #9 (S4-11, non-regression): the same-named-ctor cross-pick error
+/// is byte-identical post-change. Two user modules each declare their own
+/// `Widget['T]` plus ctor (identical i64 payloads) and both name them
+/// through f's shared `Functor`; the generated-ctor env dispatch is a
+/// module-blind name+shape first-match (terms.rs:1399-1404), so one
+/// module's `mk` is fed the other module's ctor and the same-rendering
+/// distinct-mint `Type` mismatch fires. This is the S5-boundary marker: S4
+/// fixed only the *same-header* cross-pick (P4's one mint), and this
+/// different-header same-name shape must stay exactly where it was -- the
+/// bytes below are the wave-1 record, diff-confirmed post-change in m5(c)
+/// (`logs/p5_same_named_ctors.log`; that log's `--- BUILD ... ---` frame
+/// lines are the probe run.sh harness's, not the binary's).
+#[test]
+fn same_named_ctor_cross_pick_error_stays_byte_identical() {
+    let t = Tree::new("s4-11-same-named-ctors");
+    write_hosted_pkg(&t);
+    t.write(
+        "f.sth",
+        "\
+import: intrinsics * ;
+trait: Functor['F] : size ( 'F -- i64 ) ; ;
+: sized['F: Functor] ( 'F -- i64 ) size ;
+export: Functor sized ;
+",
+    );
+    t.write(
+        "a.sth",
+        "\
+import: intrinsics * ;
+import: self::f * ;
+type: Widget['T] v 'T ;
+impl: Functor for Widget
+  : size drop 1 ;
+;
+: mk ( i64 -- Widget[i64] ) Widget ;
+: run ( i64 -- i64 ) mk sized ;
+export: run ;
+",
+    );
+    t.write(
+        "b.sth",
+        "\
+import: intrinsics * ;
+import: self::f * ;
+type: Widget['T] v 'T ;
+impl: Functor for Widget
+  : size drop 2 ;
+;
+: mk ( i64 -- Widget[i64] ) Widget ;
+: run ( i64 -- i64 ) mk sized ;
+export: run ;
+",
+    );
+    let entry = t.write(
+        "main.sth",
+        "\
+import: intrinsics * ;
+import: hosted::show | . | ;
+import: self::f * ;
+import: self::a ;
+import: self::b ;
+: main ( -- ) 5 a::run . 6 b::run . ;
+",
+    );
+    let err = build_error(&entry);
+    assert_eq!(
+        err,
+        "error: type mismatch in `mk` (line 7)\n  body leaves `Widget[i64]` where the declaration requires `Widget[i64]`\n  note: declared ( i64 -- Widget[i64] )\n"
+    );
+}
+
+/// Golden #11 (S4-13): a leading variant slot in a quotation annotation is
+/// visible from a non-declaring module. `showopt` spells the p1 tag model
+/// under a wildcard `core::option` import, and the leading `( Some )`
+/// parses as a `VariantTag` -- visibility routes through the
+/// wildcard-desugared selective map (`driver.rs`'s import desugar) to
+/// `module_declares_variant` -- rather than falling through to the ordinary
+/// `unknown type` annotation error. Positive twin of the negative pins
+/// `parse_leading_variant_slot_other_module_variant_is_not_visible` and its
+/// generic twin (parser.rs:9036/:9088). The spec spells the tag
+/// `[ ( Some ) ... ]` as shorthand for the p1 model's arm, which is the
+/// inline `~[ ... ]` flavour: a plain-`[` arm is the pre-existing R-C2
+/// flavour-gate rejection, an orthogonal fence. No code change was
+/// expected; the pin is deliberate because no committed positive twin
+/// existed (golden #1 exercises the path only incidentally, inside `map`'s
+/// impl body).
+#[test]
+fn leading_variant_slot_tag_is_visible_from_an_importing_module() {
+    let src = "\
+import: core::option * ;
+: showopt ( Option[i64] -- ) ~[ ( Some ) Some> . ] ~[ ( None ) drop ] Option? ;
+: main ( -- ) 41 Some showopt ;
+";
+    let (_t, _binary, stdout) = build_run_keep("s4-13-variant-tag", src);
+    assert_eq!(stdout, "41\n");
 }
