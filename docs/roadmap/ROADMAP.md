@@ -13,7 +13,9 @@ and merged except **S6c** (runtime bounds-checked indexing in a poly body), whic
 needs its brief; **S7d** (retiring the intrinsic `.` onto `hosted::show`) is merged, S3u
 (trait objects) is parked for want of a consumer, and S3w (the generic Show-backed dot)
 is parked as a follow-up to S7d; see
-[P7](./P7-language-prereqs.md) for the full slice breakdown. Per-phase completion history
+[P7](./P7-language-prereqs.md) for the full slice breakdown. Named-slot-locals sugar
+landed (named input slots in a word definition bind locals; see
+`docs/named-slot-locals-spec.md`). Per-phase completion history
 (what shipped in which slice,
 defects found and fixed in review) lives in each phase's own file and its
 `docs/roadmap/P{N}/` briefs/specs, not here.

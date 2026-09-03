@@ -71,6 +71,53 @@ Two restrictions: `main` cannot be `inline` (it is called by the
 runtime entry point, not spliced), and a word whose name overloads a
 builtin operator (`add`, `mul`, etc.) cannot be `inline`.
 
+## Named input slots
+
+A word's effect can name its input slots directly, instead of naming
+them again in a body block. Two spellings work: spaced (`a : i64`) and
+glued (`a: i64`):
+
+```sooth
+: add3 ( a: i64 b: i64 i64 -- i64 )
+  | c |
+  a b add c add ;
+```
+
+Each named input slot becomes a local bound to that slot's value
+before the body runs — `a` and `b` above are already bound when the
+body starts. Unnamed slots stay on the stack in their original
+relative order, so they can still be picked up by a body-level
+`| ... |` block, as the third `i64` slot is here (bound to `c`).
+`add3` runs exactly as the all-bound version does:
+`: add3 ( i64 i64 i64 -- i64 ) | a b c | a b add c add ;`.
+
+Naming is per-slot and can be mixed with body-level binding in any
+order, including out-of-order — a named slot can sit deeper than an
+unnamed one:
+
+```sooth
+: f ( a: i64 i64 -- i64 ) | b | a b add ;
+```
+
+Here `a` names the deeper slot and `b` binds the shallower one in the
+body. `f` runs identically to a version written with an explicit
+binding for every slot.
+
+Two slots in the same effect cannot share a name — that's a duplicate
+slot name and it's a compile error, not a rebind:
+
+```text
+> : f ( x : i64 x : i64 -- i64 ) x ;
+error: slot name `x` is declared more than once in `f` (defined at line 1, col 3)
+```
+
+A slot name is a local, and locals obey the same rules as any other
+local (see Names, below) — in particular, a slot name does **not**
+shadow a word, callable, or variant name; it collides with one, and
+that collision is a compile error. Output slots can carry a name too
+(`( -- total : i64 )`), but an output name is documentation only — it
+never binds anything.
+
 ## Names
 
 When the compiler sees a bare name in a word body, it checks the
@@ -80,23 +127,28 @@ neither exists, it's a compile error.
 
 There is no syntactic difference between calling a word and
 referencing a local — you write the name, the compiler figures out
-which it is. This means locals shadow words: if you bind `| foo |`
-and there is also a word named `foo`, the local wins for the rest of
-the block.
+which it is. But a local cannot share a name with a word defined in
+the same file (or a builtin, poly word, or combinator): that's a
+**collision**, not a shadow, and it's a compile error, whether the
+local comes from a body `| ... |` block or a named input slot:
 
 ```text
 > : foo ( -- i64 ) 1 ;
-> : bar ( i64 -- i64 ) | foo | foo foo add ;
+> : bar ( i64 -- i64 ) | x | foo x add ;
 > 5 bar .
-10
-stack: (empty)
-> foo .
-1
+6
 stack: (empty)
 ```
 
-Inside `bar`, `foo` is the local (5), so `foo foo add` gives 10. Outside
-the block, `foo` is the word, which leaves 1.
+Here `x` doesn't collide with anything, so `bar` calls the word `foo`
+and adds it to the local `x`. Naming the local `foo` instead is
+rejected:
+
+```text
+> : bar ( i64 -- i64 ) | foo | foo foo add ;
+error: local `foo` in `bar` collides with the callable name `foo` (line 1)
+  a local cannot shadow a builtin, word, poly word, or combinator name
+```
 
 ## Calling words
 

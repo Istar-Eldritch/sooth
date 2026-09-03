@@ -41,6 +41,11 @@ stack and leaves one `i64` on the stack." The part before `--` is what
 the word consumes (inputs, bottom to top); the part after is what it
 produces (outputs, bottom to top).
 
+An input slot can optionally carry a name right in the effect (`a: i64`
+or `a : i64`), which binds a local for that slot before the body runs
+— see "Named input slots" in the Words chapter for the syntax and the
+collision rules.
+
 Some common shapes:
 
 ```sooth

@@ -10,7 +10,8 @@
 //!   variant         := Word (Word Word)*
 //!   externdef       := 'extern:' Word '(' effect ')' Str ';'
 //!   effect   := slot* '--' slot*
-//!   slot     := Word (':' Word)?
+//!   slot     := name? Word
+//!   name     := Word ':'          \ spaced `a :`; glued `a:` is one Word token ending in ':'
 //!   binding  := '|' Word+ '|'
 //!   term     := Int | Word | binding | if
 //!   if       := 'if' term* ('else' term*)? 'end'
