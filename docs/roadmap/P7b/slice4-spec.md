@@ -143,8 +143,9 @@ These are still-binding contracts for future slices, not oversights:
 
 All claims below verified against the landed tree at `HEAD` `7a10cd6` during this
 condensation: `cargo test --test phase7b_slice4` → 8/8, full `cargo test` → 3087
-passed / 0 failed, and the S4-1 hunks stand at `src/parser.rs:6866`/`:6884` and
-`src/check/poly.rs:5952`.
+passed / 0 failed, and the S4-1 hunks stand at `src/parser.rs:7070`/`:7088`
+(shifted from `:6866`/`:6884` by main's quotation-locals merge) and
+`src/check/poly.rs:5946-5953`.
 
 - **Docs** (historical record): `c2833f7` recon round, brief, probes, and this spec;
   `bbb0510` spec review rounds 1–2.
