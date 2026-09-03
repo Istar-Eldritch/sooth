@@ -56,11 +56,22 @@ value; unnamed input slots stay on the stack in their original relative order.**
 - **Trailing-colon type names are reinterpreted.** A type declared with a
   trailing-colon name (e.g. `type: Foo: … ;`, legal before this work) is affected: the
   sugar owns `:` in slot position unconditionally. `( Foo: -- )` now reads as a
-  named-slot attempt and errors sharply on the missing type; `( Foo: i64 -- )`
-  (previously two slots) becomes one slot named `Foo` of type `i64`. Corpus exposure
-  was zero (review-verified); such a type must be renamed to be usable bare. A
-  registry-lookup guard was rejected — a fuzzy lookup would silently accept a typo
-  like `i64:` as `i64`.
+  named-slot attempt: the glued split fires and mints a slot named `Foo`, then the
+  missing type surfaces as the resolver's ordinary `unknown type` error on the token
+  that follows (the effect closer `--`, so the message names `--`, not `Foo`) — there
+  is no dedicated diagnostic for this case. `( Foo: i64 -- )` (previously two slots)
+  becomes one slot named `Foo` of type `i64`. Corpus exposure was zero
+  (review-verified); such a type must be renamed to be usable bare. A registry-lookup
+  guard was rejected — a fuzzy lookup would silently accept a typo like `i64:` as
+  `i64`.
+- **A glued name half that cannot be a body-block name is rejected.** `| … |` only
+  ever binds `Word` tokens, so the glued split re-lexes the sliced name half and
+  requires it to be exactly one `Word` token — a name half that re-lexes as a
+  number (`1:`, `1.5:`, `-1:`) or as a lexer line comment (`\:` — a standalone
+  `\` skips to end of line) can never be spelled or referenced by any body term;
+  the glued split rejects it with a located error naming the offending spelling,
+  rather than silently minting an unreachable local and swallowing the slot's
+  argument.
 - **`::`-qualified and leading-colon tokens are exempt from the split.** The glued
   split does not fire when the name half itself contains `:` — a qualified-name-shaped
   token (`q::Point:`, or the degenerate `::`) falls through to the type resolver and
@@ -70,13 +81,46 @@ value; unnamed input slots stay on the stack in their original relative order.**
   an empty name).
 - **Poly-effect slot names are a sharp reject, not sugar.** A word followed by `:` in a
   polymorphic-effect slot position produces a located "slot names are not supported in
-  polymorphic effects" error. Tokens containing `'` are exempt — `'T :`, `'T:`, and
-  sigil-glued `&!'T:` keep the pre-existing located bound-in-effect error. Quotation
-  effect rows get no name path and no new reject (today's errors stand there).
+  polymorphic effects" error, on either side of the effect (an input or an output
+  slot) and inside any quotation-effect row nested in a poly effect, whether that
+  row is itself poly or concrete. Tokens containing `'` are
+  exempt — `'T :`, `'T:`, and sigil-glued `&!'T:` keep the pre-existing located
+  bound-in-effect error. A row in a *concrete* effect is unaffected — `unknown type`
+  stands there, since the concrete slot reader has no R11 path.
+- **The R11 reject does not fire inside an `impl:` target pattern.** `forbid_bounds`
+  (set only while parsing an `impl:` target, `src/parser.rs:4067`) suppresses the
+  reject at its one call site (`src/parser.rs:4930`): that route shares the same
+  slot reader for a bare/concrete target pattern that has no slot-name concept at all,
+  and the token immediately after the target can legitimately be the impl body's own
+  leading `:` — without the exemption, every `impl:` declaration would misparse. This
+  is a parser-internal exemption invisible to the sugar's own diagnostics, not a
+  fourth spelling exempt from R11.
 
 ## Scope boundaries (still true)
 
-- Output-slot names stay doc-only (no binding, no duplicate check).
+- Output-slot names stay doc-only (no binding, no duplicate check) *in a monomorphic
+  effect only* — a named output slot in a polymorphic effect hits R11's blanket
+  reject exactly as a named input slot does.
+- The duplicate-slot check (R12) scans input slots only: the same name on an input
+  slot and an output slot is legal (`( x: i64 -- x: i64 )`), since only two input
+  slots sharing a name are actually ambiguous to bind.
+- The mint-freshness scan (R6) is bounded by what the parser can see at desugar time:
+  the word's own name, its own other slot names, every PLAIN (non-generic) enum
+  variant in the module (the whole-file prepass registers these before any word
+  body is parsed, so declaration order does not matter), and every name the body
+  itself binds (including inside nested quotations). It cannot see other
+  top-level callables -- words register at check time and struct constructor
+  names are not in the scan either -- nor GENERIC-enum variants, which register
+  in a separate later prepass. The generic-enum gap is harmless: a generic
+  enum's variant name does not collide with a local at all (verified: `| Vv |`
+  compiles under `type: G['T] | Vv 'T | ;`, where the plain-enum twin
+  `type: E | Vv | ;` errors), so there is nothing for the scan to protect
+  against there. A user-declared callable — a word or a struct constructor — named
+  exactly like the mint the desugar would otherwise choose (e.g. a word named
+  `__slot1` in a word whose first unnamed slot would mint `__slot1`) is not
+  excluded by the freshness scan and collides at the
+  checker's ordinary callable-collision guard instead — an accepted edge, consistent
+  with the `__`-namespace wart below, not a defect.
 - Extern declarations parse with names intact but perform no binding (no Sooth
   body/frame).
 - Trait impl member bodies are structurally excluded: `parse_impl_member_body` parses

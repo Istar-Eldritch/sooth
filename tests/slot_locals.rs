@@ -1,6 +1,7 @@
-//! Named-slot-locals sugar (`docs/named-slot-locals-spec.md`), Phase 1
-//! goldens: parse/desugar core -- spelling support, the `Bind`-prepend
-//! desugar, positional mints, and the duplicate/poly-name rejects.
+//! Named-slot-locals sugar (`docs/named-slot-locals-spec.md`) goldens, both
+//! phases: parse/desugar core -- spelling support, the `Bind`-prepend
+//! desugar, positional mints, and the duplicate/poly-name rejects (phase 1)
+//! -- plus checker/IR behaviour pins on the desugared output (phase 2).
 
 use sooth::{check, lexer, test_support};
 
@@ -44,15 +45,18 @@ fn check_error(src: &str) -> String {
 
 #[test]
 fn slot_sugar_all_named_matches_explicit_twin_expected() {
+    // `sub` is non-commutative: a reversed Bind order would produce `4 3
+    // sub` = 1, not `3 4 sub` = -1, so this discriminates bind order rather
+    // than merely matching by coincidence (as the earlier `add` fixture did).
     let (sugar_out, sugar_code) = run_src(
         "slot-sugar-all-named",
-        ": f ( a: i64 b: i64 -- i64 ) a b add ;\n: main ( -- ) 3 4 f . ;\n",
+        ": f ( a: i64 b: i64 -- i64 ) a b sub ;\n: main ( -- ) 3 4 f . ;\n",
     );
     let (twin_out, twin_code) = run_src(
         "slot-sugar-all-named-twin",
-        ": f ( i64 i64 -- i64 ) | a b | a b add ;\n: main ( -- ) 3 4 f . ;\n",
+        ": f ( i64 i64 -- i64 ) | a b | a b sub ;\n: main ( -- ) 3 4 f . ;\n",
     );
-    assert_eq!(sugar_out, "7\n");
+    assert_eq!(sugar_out, "-1\n");
     assert_eq!(sugar_code, 0);
     assert_eq!(sugar_out, twin_out);
     assert_eq!(sugar_code, twin_code);
@@ -62,18 +66,36 @@ fn slot_sugar_all_named_matches_explicit_twin_expected() {
 
 #[test]
 fn slot_sugar_out_of_order_matches_explicit_twin_expected() {
+    // `sub` (non-commutative) discriminates bind order, unlike the earlier
+    // `add` fixture, which a reversed Bind would still satisfy.
     let (sugar_out, sugar_code) = run_src(
         "slot-sugar-out-of-order",
-        ": f ( a: i64 i64 -- i64 ) | b | a b add ;\n: main ( -- ) 3 4 f . ;\n",
+        ": f ( a: i64 i64 -- i64 ) | b | a b sub ;\n: main ( -- ) 3 4 f . ;\n",
     );
     let (twin_out, twin_code) = run_src(
         "slot-sugar-out-of-order-twin",
-        ": f ( i64 i64 -- i64 ) | a t | t | b | a b add ;\n: main ( -- ) 3 4 f . ;\n",
+        ": f ( i64 i64 -- i64 ) | a t | t | b | a b sub ;\n: main ( -- ) 3 4 f . ;\n",
     );
-    assert_eq!(sugar_out, "7\n");
+    assert_eq!(sugar_out, "-1\n");
     assert_eq!(sugar_code, 0);
     assert_eq!(sugar_out, twin_out);
     assert_eq!(sugar_code, twin_code);
+}
+
+// ---- R5: named/unnamed/named composes in original slot order ----
+
+#[test]
+fn slot_sugar_named_unnamed_named_composes_in_slot_order_expected() {
+    // A second order-observing witness alongside the out-of-order twin
+    // above: the middle unnamed slot's mint-and-repush must land between
+    // the two named binds in original relative order, not merely produce
+    // the right total.
+    let (stdout, code) = run_src(
+        "slot-sugar-named-unnamed-named",
+        ": f ( a: i64 i64 b: i64 -- ) | m | a . m . b . ;\n: main ( -- ) 1 2 3 f ;\n",
+    );
+    assert_eq!(stdout, "1\n2\n3\n");
+    assert_eq!(code, 0);
 }
 
 // ---- R6: a mint survives a user-named slot0 mint-index collision ----
@@ -128,6 +150,28 @@ fn slot_sugar_mint_bumped_on_sibling_slot_name_collision_expected() {
     assert_eq!(code, 0);
 }
 
+// ---- R6 accepted edge: the freshness scan cannot see sibling callables ----
+
+#[test]
+fn slot_sugar_mint_collides_with_user_callable_named_like_mint_error() {
+    // The freshness scan (`src/parser.rs:3285`) only sees names visible to
+    // the parser at desugar time -- the body's own binds, the word's own
+    // name, other slot names, and enum variants -- never other top-level
+    // words, since those register at check time. A user word named exactly
+    // like the mint the desugar would otherwise choose collides at the
+    // checker's callable-collision guard instead. This is the documented
+    // `__`-namespace wart (a pre-existing non-goal), not a new defect.
+    let err = check_error(
+        ": __slot1 ( -- i64 ) 99 ;\n\
+: f ( a: i64 i64 -- i64 ) | b | a b add ;\n\
+: main ( -- ) 3 4 f . ;\n",
+    );
+    assert!(
+        err.contains("collides with the callable name `__slot1`"),
+        "unexpected message: {err}"
+    );
+}
+
 // ---- R2 exemption: a qualified type slot is unaffected by the glued hint ----
 
 #[test]
@@ -156,10 +200,18 @@ fn parse_slot_qualified_type_slot_unaffected_by_glued_hint_expected() {
 #[test]
 fn parse_worddef_trailing_colon_type_name_is_slot_name_expected() {
     // The parser reads `Foo:` as a slot-name attempt (glued split), then
-    // dies sharply because the effect closer follows instead of a type.
+    // dies -- not with a sharp dedicated diagnostic, but because the effect
+    // closer `--` follows instead of a type, so the resolver reports it as
+    // an unknown type named `--`. Assert the discriminating fragments
+    // (proving the R1 split fired, not R2's fully-glued hint) rather than
+    // just the `error:` prefix every diagnostic shares.
     let missing_ty = parse_error("type: Foo: val i64 ;\n: f ( Foo: -- ) ;\n");
     assert!(
-        missing_ty.starts_with("error:"),
+        missing_ty.contains("unknown type"),
+        "unexpected message: {missing_ty}"
+    );
+    assert!(
+        !missing_ty.contains("space after"),
         "unexpected message: {missing_ty}"
     );
 
@@ -171,6 +223,21 @@ fn parse_worddef_trailing_colon_type_name_is_slot_name_expected() {
     assert_eq!(code, 0);
 }
 
+// ---- A glued name half that cannot be a body-block name is rejected ----
+
+#[test]
+fn parse_slot_glued_line_comment_name_is_error() {
+    // A standalone `\` is a lexer line comment (src/lexer.rs:203-211), so
+    // the name half can never be spelled in a body -- the twin `| \ |`
+    // is a parse error, and a bare `\` inside a body comments out the rest
+    // of the line. The sugar must reject this glued spelling, not silently
+    // mint an unreachable local named `\`.
+    let err = parse_error(": f ( \\: i64 -- i64 ) drop ;");
+    assert!(
+        err.contains("`\\:` reads as a slot named `\\`"),
+        "unexpected message: {err}"
+    );
+}
 // ---- R11 exemption: `'T :` / `'T:` keep the bound-in-effect error ----
 
 #[test]
@@ -186,6 +253,15 @@ fn parse_poly_slot_bound_attempt_keeps_bound_in_effect_error() {
         glued.contains("may not be written inside a stack effect"),
         "unexpected message: {glued}"
     );
+
+    // Sigil-glued: `&!'T:` keeps the same exemption -- the leading `&!`
+    // reaches the reference-syntax reader first, which recurses into the
+    // bound reader on the `'T:` tail rather than falling into the R11 reject.
+    let sigil_glued = parse_error(": f ( &!'T: Copy -- ) drop ;");
+    assert!(
+        sigil_glued.contains("may not be written inside a stack effect"),
+        "unexpected message: {sigil_glued}"
+    );
 }
 
 // ---- R10: a concrete quotation-effect row's name attempt is unchanged ----
@@ -195,6 +271,35 @@ fn parse_quotation_row_name_attempt_unchanged_error() {
     let err = parse_error(": f ( [ x : i64 -- i64 ] -- ) drop ;");
     assert!(err.contains("unknown type"), "unexpected message: {err}");
     assert!(err.contains("`x`"), "unexpected message: {err}");
+}
+
+// ---- R11: a quotation-effect row inside a POLY effect inherits the reject ----
+
+#[test]
+fn parse_poly_quotation_row_name_attempt_is_poly_reject_error() {
+    // The discriminator is the ENCLOSING effect's polymorphism, not the
+    // row's: a row nested in a poly effect inherits R11's blanket reject
+    // whether the row itself is poly (here) or concrete (sibling test
+    // below) -- only a row in a fully concrete effect (the case just above)
+    // keeps today's `unknown type` error.
+    let err = parse_error(": f ( [ x : 'T -- ] 'T -- ) drop drop ;");
+    assert!(
+        err.contains("slot names are not supported in polymorphic effects"),
+        "unexpected message: {err}"
+    );
+}
+
+#[test]
+fn parse_concrete_quotation_row_in_poly_effect_is_poly_reject_error() {
+    // Third matrix cell: a CONCRETE row's name attempt nested inside a
+    // POLY effect still inherits R11's reject -- the row's own concreteness
+    // does not shield it, since the reject is keyed on the enclosing
+    // effect, not the row.
+    let err = parse_error(": f ( [ x : i64 -- ] 'T -- ) drop drop ;");
+    assert!(
+        err.contains("slot names are not supported in polymorphic effects"),
+        "unexpected message: {err}"
+    );
 }
 
 // ---- R8/R9: glued spellings on extern/output slots stay doc-only ----
@@ -248,6 +353,10 @@ fn parse_slot_fully_glued_name_is_located_hint_error() {
     assert!(!err.contains("unknown type"), "unexpected message: {err}");
     assert!(err.contains("space after"), "unexpected message: {err}");
     assert!(err.contains("write `x : i64`"), "unexpected message: {err}");
+    assert!(
+        err.contains("at line 1, col 7"),
+        "unexpected message: {err}"
+    );
 }
 
 // ---- R12: a duplicate input slot name is a located parse error ----
@@ -260,6 +369,25 @@ fn parse_worddef_duplicate_input_slot_name_is_error() {
         err.contains("more than once") || err.contains("duplicate"),
         "unexpected message: {err}"
     );
+    assert!(
+        err.contains("(defined at line 1, col 3)"),
+        "unexpected message: {err}"
+    );
+}
+
+// ---- R12 scope: a duplicate check spans input slots only ----
+
+#[test]
+fn parse_worddef_duplicate_name_across_input_and_output_is_legal_expected() {
+    // The same name on an input slot and an output slot is not a duplicate:
+    // R12's check walks only the input list, so this is legal, unlike two
+    // input slots sharing a name (the test above).
+    let (stdout, code) = run_src(
+        "slot-dup-input-output-legal",
+        ": f ( x: i64 -- x: i64 ) x ;\n: main ( -- ) 7 f . ;\n",
+    );
+    assert_eq!(stdout, "7\n");
+    assert_eq!(code, 0);
 }
 
 // ---- R11: a named poly-effect slot is a located sharp reject ----
@@ -276,6 +404,27 @@ fn parse_poly_slot_named_is_rejected_with_located_error() {
     assert!(
         glued.contains("slot names are not supported in polymorphic effects"),
         "unexpected message: {glued}"
+    );
+    assert!(
+        spaced.contains("at line 1, col 7"),
+        "unexpected message: {spaced}"
+    );
+    assert!(
+        glued.contains("at line 1, col 7"),
+        "unexpected message: {glued}"
+    );
+}
+
+// ---- R11 scope: a named slot on a POLY effect's OUTPUT also rejects ----
+
+#[test]
+fn parse_poly_named_output_is_blanket_rejected() {
+    // R11's reject is not input-only: a named slot on a polymorphic effect's
+    // output side hits the same blanket reject as an input-side one does.
+    let err = parse_error(": f ( 'T -- x: i64 ) drop 1 ;");
+    assert!(
+        err.contains("slot names are not supported in polymorphic effects"),
+        "unexpected message: {err}"
     );
 }
 

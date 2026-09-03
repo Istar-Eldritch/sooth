@@ -2240,6 +2240,25 @@ fn glued_slot_name_needs_space_error(text: &str, span: Span) -> String {
     )
 }
 
+/// Named-slot-locals sugar (R1): the glued trailing-colon spelling only
+/// makes sense when the sliced-off name half could plausibly be a body-block
+/// bind (`| ... |` only ever binds a single `Token::Word`); a name half that
+/// does not re-lex, standalone, to exactly one `Word` token can never be
+/// referenced by any body term, so minting it as a slot name would silently
+/// swallow the slot's argument rather than naming it -- at base `403618f`
+/// this was already an error (`resolve_type_or_apply` on the un-split
+/// token), so this restores a reject rather than introducing one. Re-lexing
+/// (rather than special-casing `is_int_literal`/`is_float_literal`) also
+/// catches a standalone `\`, which the lexer reads as a line comment
+/// (`src/lexer.rs:203-211`) and which would otherwise silently mint an
+/// unreachable local.
+fn glued_slot_name_not_a_word_error(text: &str, name: &str, span: Span) -> String {
+    format!(
+        "error: `{text}` reads as a slot named `{name}`, but `{name}` is not a name a body block could bind at line {}, col {}",
+        span.line, span.col
+    )
+}
+
 /// Named-slot-locals sugar (R11): a poly-effect slot position has no legal
 /// spelling with a `:`, so any word followed by one (spaced or glued) is
 /// always an attempted slot name.
@@ -5764,6 +5783,13 @@ impl<'t> Parser<'t> {
             // dies as an unknown-type error instead of minting a slot named
             // `:` or `q::Point`.
             let name = text[..text.len() - 1].to_string();
+            let is_plain_word = matches!(
+                crate::lexer::lex(&name).as_deref(),
+                Ok([(Token::Word(_), _)])
+            );
+            if !is_plain_word {
+                return Err(glued_slot_name_not_a_word_error(&text, &name, span));
+            }
             let ty = self.parse_type_expr()?;
             Ok(TypedSlot {
                 name: Some(name),
@@ -15070,5 +15096,57 @@ mod tests {
     fn parse_slot_leading_colon_glued_falls_through_to_unknown_type_expected() {
         let err = parse_src(": f ( :i64 -- ) drop ;").unwrap_err();
         assert!(err.contains("unknown type"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn parse_slot_glued_numeric_name_half_is_error() {
+        let err = parse_src(": f ( 1: i64 -- i64 ) 5 ;").unwrap_err();
+        assert!(
+            err.contains("`1:` reads as a slot named `1`"),
+            "unexpected message: {err}"
+        );
+        assert!(
+            err.contains("not a name a body block could bind"),
+            "unexpected message: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_slot_glued_float_name_half_is_error() {
+        let err = parse_src(": f ( 1.5: i64 -- i64 ) 5 ;").unwrap_err();
+        assert!(
+            err.contains("`1.5:` reads as a slot named `1.5`"),
+            "unexpected message: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_slot_glued_negative_int_name_half_is_error() {
+        let err = parse_src(": f ( -1: i64 -- i64 ) 5 ;").unwrap_err();
+        assert!(
+            err.contains("`-1:` reads as a slot named `-1`"),
+            "unexpected message: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_slot_glued_line_comment_name_half_is_error() {
+        // A standalone `\` re-lexes to a line comment (zero tokens), not a
+        // `Word` -- the twin `| \ |` is a parse error and a bare `\` in a
+        // body comments out the rest of the line, so the name half can never
+        // be spelled or referenced.
+        let err = parse_src(": f ( \\: i64 -- i64 ) drop ;").unwrap_err();
+        assert!(
+            err.contains("`\\:` reads as a slot named `\\`"),
+            "unexpected message: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_slot_glued_ordinary_name_still_parses_expected() {
+        // Control: an ordinary glued name still re-lexes to exactly one
+        // `Word` token, so the gate leaves it alone.
+        let module = parse_src(": f ( a: i64 -- i64 ) a ;").unwrap();
+        assert_eq!(module.words[0].effect.inputs[0].name.as_deref(), Some("a"));
     }
 }

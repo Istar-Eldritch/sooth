@@ -91,7 +91,12 @@ Implementation shape (all verified legal today by paper probes):
 5. **Minted names for out-of-order desugars.** Positional mints `__slot{k}` (k =
    slot index), fresh-scanned at desugar time against every name bound anywhere in
    the body (walk all `Bind` terms, nested included), the word's own name, the
-   module's enum variant names (cheap: the parser already resolves types/variants),
+   module's PLAIN (non-generic) enum variant names (cheap: the whole-file prepass
+   already registers these before any body parses, so declaration order does not
+   matter; generic-enum variants register in a later, separate prepass and are not
+   in the scan -- harmless, since a generic enum's variant name does not collide
+   with a local at all: `| Vv |` compiles under `type: G['T] | Vv 'T | ;`, where the
+   plain-enum twin errors),
    the effect's other input-slot names, and every name minted earlier in the same
    desugar (deepest-first; amended in review round 2 to match spec R6);
    bump k on collision. The checker's rebind and X12 checks remain backstops. There
@@ -100,8 +105,17 @@ Implementation shape (all verified legal today by paper probes):
    spelling. Exposure class is identical to the existing `{name}__inl{uid}` inliner
    scheme (user-spellable, live collisions caught sharply) — an accepted,
    pre-existing wart, not a new one. Minted locals are consumed exactly once by
-   their re-push, so they never render in diagnostics on any well-formed path; the
-   desugared `Bind` can never underflow (arity is known from the effect).
+   their re-push, so on a well-formed path where the mint binds and stays a plain
+   local, it never renders in diagnostics; the desugared `Bind` can never underflow
+   (arity is known from the effect). The freshness scan itself cannot see this wart:
+   it has no visibility into other top-level callables (words register at check
+   time, after the parser has already desugared; struct constructor names are not
+   in the scan either), so a user-declared callable — a word or a struct
+   constructor — named exactly like the chosen mint is not excluded and the mint's
+   name *does* then render, in the checker's
+   ordinary callable-collision error — an accepted edge, not a scan defect to fix
+   (test: `slot_sugar_mint_collides_with_user_callable_named_like_mint_error`,
+   `tests/slot_locals.rs`).
 6. **Collision/rebind semantics are inherited, not invented.** Slot names obey the
    local rules: callable-name collision (`callable_local_error`, src/check.rs:1235 —
    a local may NOT shadow a word/builtin; note docs/book/words.md:83-99 claims the

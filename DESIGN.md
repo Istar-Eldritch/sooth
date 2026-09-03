@@ -86,12 +86,15 @@ error: stack effect mismatch in `oops`
           ^ `add` needs 2 values, stack holds 1 here (one `add` too many)
 ```
 
-Types and names live in different places, never both at once: the effect comment
-carries the boundary **types** (`( int int -- int )`), and `| … |` introduces the
-**names** the body uses. Naming a slot in the effect comment (`( a:int … )`) is an
-alternative to binding it, useful as caller-facing documentation for a word that
-juggles on the stack instead of naming; a slot that is bound by `| … |` stays a bare
-type, so a name is never written twice.
+The effect comment carries the boundary **types** (`( int int -- int )`); a word's
+inputs get their **names** either there, inline (`( a : int int -- int )`), or from
+a body-level `| … |` block — and the two compose, including out of order, so an
+inline name and a block can bind different slots of the same word. An inline input
+name is not documentation: it binds a local for that slot before the body runs.
+Output slots and `extern:` slots are the exception — a name there stays doc-only,
+since neither has a body to bind into. Inline naming has no reach into a
+polymorphic effect: a slot name on either side of a `'T`-bearing effect is a hard
+reject, not sugar (see `docs/named-slot-locals-spec.md`).
 
 ## The linear spine
 
