@@ -37,6 +37,9 @@ re-introduce a separate kind mechanism).
 
 **Sequencing:** independent of P8 (packages) and P9 (stdlib layers). May be taken up any time
 after P7.S4 lands, by the craft principle of reordering by what you want to play with first.
+S6 requires S4 (real lib types taking ctor-keyed impls) and S5 (mono member routing for
+colliding member words); S7 is probe-first and needs only S4 — its dogfood composes with S6's
+traits; S8 sits on S6's `List`.
 
 ## The five pieces
 
@@ -152,17 +155,75 @@ member word per its operand's constructor; same-named ctors with identical paylo
 shapes resolve by a pinned rule (module scope or qualified spelling), and the #10
 workaround (payload disambiguation) becomes unnecessary.
 
-**Dogfood:** implement `Functor` for `Option`, `Result`, and `List`; write a program that
-`map`s over all three through a shared `Functor` bound; the compiled output matches hand-written
-inline equivalents instruction-for-instruction.
+**P7b.S6 — Container traits: Functor/Bifunctor/Foldable over the real lib types, plus linear
+merge.**
+The tier-1 library slice, unblocked by S4. `core::option`/`core::result` take ctor-keyed
+impls; `Bifunctor['F: * -> * -> *]` with
+`bimap ( 'F['A 'B] [ 'A -- 'C ] [ 'B -- 'D ] -- 'F['C 'D] )` unifies `map`/`map_err`/`swap`
+on Result; `Foldable['F: * -> *]` with `fold ( 'F['T] 'A [ 'A 'T -- 'A ] -- 'A )` is the most
+concatenative abstraction in the ladder, and the linear spine is what makes it stronger than
+its Haskell cousin: every element moves into the fold quotation exactly once and forgetting
+one is a compile error. Carries `Semigroup`/`Monoid` as *linear merge* —
+`combine ( 'T 'T -- 'T )` totally consumes both operands (StrBuf concat, list append,
+numeric add), and `empty ( -- 'T )` is return-type polymorphism grounded bottom-up from the
+consuming stack or pinned by explicit instantiation; `mconcat` falls out as
+Foldable+Monoid. Also promotes a linear cons `List['T]` into core: the monomorphic example
+exists, but whether `^List['T]` self-reference grounds under a generic declaration, and
+whether the fused iterative destructor dispatches per-instantiation payload drops, are S6
+probes. The array-as-`'F: * -> Len -> *` probe (a member-scoped `Len` var in `map`'s
+signature) runs here too: either it grounds and arrays become Functor/Foldable instances, or
+the kind story gets a ruling.
+**Exit:** a program `map`s and folds over `Option`, `Result`, and `List` through shared
+bounds with impls on the real lib types; `combine`/`empty`/`mconcat` goldens; core gains
+`List['T]` with a constant-stack destructor that drops linear payloads per instantiation;
+the array-kind and `^List['T]` probes have recorded rulings.
+
+**P7b.S7 — Quotation effects over type constructors (the `call` extension).**
+S2's recorded residual, now its own slice. `bind ( 'F['T] [ 'T -- 'F['U] ] -- 'F['U] )`
+needs `call` to ground a quotation whose effect contains a constructor application with an
+unbound head; `ap`'s first operand `'F[ [ 'A -- 'B ] ]` asks the mirror question (a
+constructor application over an *effect type*). Probe-first per the fragile-slice
+convention: one probe round answers both shapes before the brief. Scope is the
+quotation-effect grounding paths only — no new trait surface, no new declaration syntax.
+Dogfood: `Monad` for Option/Result (`bind`, `and_then`, early-exit chains over
+errors-as-values); `Applicative.ap` if shape (b) grounds for free in the same extension.
+**Exit:** `bind` through a shared bound type-checks, dispatches per constructor, and
+splices to the same IR a hand-written inline `and_then` would produce; `and_then` goldens
+for Option and Result; the probe round's rulings on which effect shapes ground are
+recorded in the brief.
+
+**P7b.S8 — Linear iterators (HKT as the associated-type substitute).**
+Associated types stay out of scope and are not needed: make the iterator itself the type
+constructor — `trait: Iterator['It: * -> *] : next ( 'It['T] -- Option['T] 'It['T] ) ;`.
+The "associated type" is just the constructor's own parameter, and linearity *is* the
+protocol: `next` consumes the iterator and yields element-plus-remainder, so no borrows,
+no lifetimes, no `&!` exclusivity puzzles. The exhausted case's linear shape — `None`
+with the iterator dropped inside `next`, versus a
+`type: Step['T 'Rest] | Done | More 'T 'Rest ;` instantiated as `Step['T 'It['T]]` — is
+an S8 probe (the `Step` shape exercises nested constructor applications as type
+arguments). One real impl each for List and a count-up `Range`; `map`/`fold` over an
+Iterator through bounds; whether chained splices actually fuse in the IR is recorded as
+a question, not an answer.
+**Exit:** `next`/`map`/`fold` through an Iterator bound over List and Range goldens; a
+consuming loop runs with one frame total; the exhausted-case ruling and the fusion
+evidence from a small chain are written down.
+
+**Dogfood:** S6 — a program that `map`s and folds over `Option`, `Result`, and `List` through
+shared bounds, with the impls declared against the real lib types and output matching
+hand-written inline equivalents. S7 — `and_then` chains over `Option`/`Result` through a shared
+`Monad` bound. S8 — a consuming `map`/`fold` loop over an `Iterator` with no frames between
+elements.
 
 ## Out of scope
 
 GATs (generic associated types), associated types, dependent types, polymorphic kind recursion,
-kind polymorphism. `Applicative` and `Monad` are library work once the machinery exists, not
-type-system slices — declaring them is writing more `trait:`/`impl:` blocks, not extending the
-checker. One open question: `Monad.bind`'s signature `bind ( 'F['T] ~[ 'T -- 'F['U] ] -- 'F['U] )`
-has a quotation whose effect type contains a higher-kinded application (`'F['U]` as an output);
-whether the quotation effect machinery handles this for free or needs its own extension is a
-question for S2's brief. A `Default` or `Empty` trait for construction is a separate ordinary
-(kind `*`) trait, not HKT, and not part of this phase.
+kind polymorphism. S2's brief answered the `Monad.bind` open question by *recording* it:
+`call` cannot see through an HKT member (`slice2-spec.md`, "Monad.bind awaits a later slice"),
+so `Monad` is **not** free library work — S7 is its checker extension. `Applicative.ap` asks
+the same quotation-effect machinery the mirror question (a constructor application over an
+*effect type*, `'F[ [ 'A -- 'B ] ]`); `pure` alone is library work once S6 settles
+grounding for return-type-polymorphic words. A general `Default` trait for construction stays
+out (S6's `Monoid.empty` is scoped to merge identities, not defaults). Drop-forwarding for
+user-declared generic containers (a `Drop` trait) rides with P9's alloc layer where the need
+first becomes real; whether drop_graph already covers payload drops for minted generic
+instantiations is an S6 probe note.
