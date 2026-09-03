@@ -5636,9 +5636,8 @@ fn poly_construction_header(
 /// (see the module doc) and the module identity a fresh instantiation is
 /// minted under. Absent when this word's output does not name the header at
 /// all (a value constructed and consumed entirely within the body, never
-/// returned): the naming-site module then falls back to the enclosing word's
-/// own module (`ctx.module()`), and every argument must come from the
-/// operands alone.
+/// returned): the instantiation is then minted under the header's declaring
+/// module, and every argument must come from the operands alone.
 fn poly_construction_fallback(
     sig: &PolySig,
     is_enum: bool,

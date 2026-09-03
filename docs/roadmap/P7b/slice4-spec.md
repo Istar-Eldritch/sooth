@@ -129,7 +129,15 @@ These are still-binding contracts for future slices, not oversights:
 7. **Symbol parity is a phase-1 measurement, not a committed golden.** Pinning `gcd`'s
    full symbol list in-tree is brittle and low-value; the *committed* symbol assertions
    are S4-8's zero-`sooth_mono_*` pin and S4-10's single-mint build — the identities
-   the exit clause is about.
+   the exit clause is about. The recursive fixture's nm-level single-`Cons` fact is
+   likewise recorded in the phase-1 battery (`1fff1b5`'s message, m5(h)); the
+   committed S4-10 golden pins the property behaviorally (build + run + exit 0, where
+   a second mint would fail the build with duplicate-overload rejection).
+8. **Poly-side mutation isolation is a recorded caveat, not a committed golden.** No
+   committed golden isolates the `check/poly.rs` no-fallback hunk under mutation — the
+   recorded mutation check (`afe2164`'s message) reverts only the parser hunk; the
+   poly hunk's keying is covered by the focused unit test plus the
+   fallback/no-fallback agreement.
 
 ## Implementation
 

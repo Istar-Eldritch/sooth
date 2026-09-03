@@ -138,8 +138,8 @@ fn write_hosted_pkg(t: &Tree) {
 }
 
 /// `binary`'s symbol names: `nm`'s last whitespace-separated field per
-/// line (`tests/phase7b_slice3.rs`'s helper, verbatim but for the sanity
-/// target). The sanity clause keeps the zero-`sooth_mono_` assertion from
+/// line (`tests/phase7b_slice3.rs`'s helper, verbatim including the sanity
+/// clause). The sanity clause keeps the zero-`sooth_mono_` assertion from
 /// passing vacuously on an nm failure.
 fn symbols(binary: &Path) -> Vec<String> {
     let nm = Command::new("nm")
