@@ -5943,7 +5943,18 @@ fn poly_construct_generic(
     };
     let (module, output_args) = match fallback {
         Some((module, args, _)) => (module, args.to_vec()),
-        None => (ctx.module(), Vec::new()),
+        None => (
+            // P7b.S4 candidate C (m5): key the mint on the header's DECLARING
+            // module, not the enclosing word's naming module -- identity of a
+            // generic instantiation belongs to the module that declared the
+            // header, so every producer and consumer agrees on one mint.
+            if is_enum {
+                generics.enums[idx].module
+            } else {
+                generics.structs[idx].module
+            },
+            Vec::new(),
+        ),
     };
     let field_ptys: Vec<PolyType> = if is_enum {
         generics.enums[idx].variants[variant]
@@ -13951,6 +13962,90 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("type mismatch in `mk`"), "{err}");
+    }
+
+    /// P7b.S4 (S4-1): `poly_construct_generic`'s no-fallback arm (the word's
+    /// declared output names no header) keys a fresh mint on the header's
+    /// *declaring* module, not the enclosing word's module. Built directly --
+    /// the header is declared in module 0 while the poly word (and `ctx`)
+    /// live in module 1, a two-module shape `check_src` cannot spell -- so
+    /// the all-concrete construction must land in `inst_structs` stamped 0:
+    /// the identity every producer and consumer agrees on (S4-2's one-mint
+    /// property).
+    #[test]
+    fn poly_construct_generic_no_fallback_mint_keys_the_declaring_module() {
+        let mut generics = GenericTypes::with_bases(0, 0);
+        generics.structs.push(GenericStructDecl {
+            name: "Box".to_string(),
+            ty_var_names: vec!["'T".to_string()],
+            ty_kinds: Vec::new(),
+            len_var_names: vec![],
+            fields: vec![("val".to_string(), PolyType::Var(0))],
+            span: Span::default(),
+            module: 0,
+        });
+        let cell = RefCell::new(generics);
+        // An output naming no header: the fallback arm's `None` case.
+        let sig = PolySig {
+            row_in: None,
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            row_out: None,
+            bounds: Vec::new(),
+            ty_var_names: vec!["'T".to_string()],
+            ty_var_spans: Vec::new(),
+            ty_kinds: Vec::new(),
+            len_var_names: vec![],
+            len_var_spans: Vec::new(),
+            row_var_names: Vec::new(),
+        };
+        let effect = StackEffect {
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+        };
+        let enums: Vec<EnumDecl> = Vec::new();
+        let mut arrays: Vec<ArrayDecl> = Vec::new();
+        let mut cells: Vec<OwnedCellDecl> = Vec::new();
+        let mut refs: Vec<RefDecl> = Vec::new();
+        let env = HashMap::new();
+        let mut obligations = Vec::new();
+        let mut enum_sites = Vec::new();
+        let mut tctx = TraitCtx::scratch(&mut obligations, &mut enum_sites);
+        let ctx = Ctx {
+            mangled: "f",
+            effect: &effect,
+            structs: &[],
+            enums: &enums,
+            statics: &[],
+            module: 1,
+            modules: None,
+            self_tail_call: false,
+            generics: Some(&cell),
+        };
+        let mut stack = vec![PolySlot::new(PolyType::Concrete(Type::I64))];
+        let next = poly_construct_generic(
+            "Box",
+            Span::default(),
+            &mut stack,
+            &sig,
+            &ctx,
+            &env,
+            &[],
+            &enums,
+            &mut arrays,
+            &mut cells,
+            &mut refs,
+            &mut tctx,
+        )
+        .expect("a concrete construction in a poly body mints");
+        assert!(next.is_some(), "the construction is handled, not delegated");
+        let g = cell.borrow();
+        assert_eq!(g.inst_structs.len(), 1);
+        assert_eq!(g.inst_structs[0].name, "Box[i64]");
+        assert_eq!(
+            g.inst_structs[0].module, 0,
+            "the mint keys on the declaring module (0), not the word's module (1)"
+        );
     }
 
     /// Slice 10a (R1): a fully-concrete `~` folds to `Concrete(InlineQuotation)`,
