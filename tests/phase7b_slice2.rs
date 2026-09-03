@@ -463,23 +463,29 @@ impl: Functor for 'T
 
 // ---- Phase 4: end-to-end goldens and non-regression ----
 
-// The W3/W4 twins. Both witnesses run over fixture-local twins of
-// `core::option`/`core::result` rather than the lib types themselves: a
-// lib-declared generic header cannot take a ctor-keyed `impl:` from a user
-// module yet. The S1-era module-identity convention mints the operand's
+// W3/W4 provenance. P7b.S4 (S4-6/S4-7) migrated both witnesses onto the
+// real lib types (`import: core::result * ;` / `import: core::option * ;`):
+// S4-1's declaring-module mint keys a generic instantiation on the header's
+// *declaring* module, so a user module's ctor-keyed `impl:` on a lib header
+// dispatches. This replaces the recorded wart, which used to read: "Both
+// witnesses run over fixture-local twins of `core::option`/`core::result`
+// rather than the lib types themselves: a lib-declared generic header cannot
+// take a ctor-keyed `impl:` from a user module yet." (Mechanism, as
+// history: the S1-era module-identity convention minted the operand's
 // instantiation at the *naming* module (`resolve_type_or_apply` ->
 // `instantiate_*` with the parsing module, `parser.rs:6862-6880`; memo key
-// `(idx, module, args, lens)`), while the impl target pattern records the
-// header's *declaring* module, and both dispatch paths compare the two for
+// `(idx, module, args, lens)`), while the impl target pattern recorded the
+// header's *declaring* module, and both dispatch paths compared the two for
 // equality (`match_impl_target_rec`'s `Generic` arm; the CtorImage identity
-// match feeds on the same recorded module). Observed verbatim: a mono caller
-// reports "no `impl:` in this program dispatches on these operands"; a poly
-// caller reports "cannot instantiate `'F` ... does not satisfy `Functor`".
-// This is the wart documented at golden #7 (in this file) and deferred to a
-// future ruling (slice2-spec.md, Open questions); committed W2 (golden #2
-// above) set the twin precedent. What W3/W4 prove -- leading-slot
-// displacement and shared-bound dispatch -- is the machinery under test,
-// not the type's provenance.
+// match feeds on the same recorded module). Observed verbatim then: a mono
+// caller reported "no `impl:` in this program dispatches on these
+// operands"; a poly caller "cannot instantiate `'F` ... does not satisfy
+// `Functor`".) This was the wart documented at golden #7 (in this file);
+// committed W2 (golden #2 above) set the twin precedent, and the other
+// twin-bearing goldens (#7, #8) keep theirs where the fixture's point is
+// not the type's provenance. What W3/W4 prove -- leading-slot displacement
+// and shared-bound dispatch -- is the machinery under test, not the type's
+// provenance.
 
 /// Golden (positive #3, W3): `map` over `Result[i64 i64]` dispatches to the
 /// Result impl and passes `Err` through untouched -- exit criterion #4's
@@ -505,10 +511,17 @@ impl: Functor for 'T
 /// (target vars `'ctor0 'ctor1` first, the appended local `'U` last -- the
 /// dispatch machinery is fully exercised either way; this is recorded W2
 /// deviation (1), slice2-spec.md Open questions).
+///
+/// P7b.S4 (S4-6): the local twin declaration became
+/// `import: core::result * ;` -- byte-for-byte otherwise, pin unchanged.
+/// This supersedes the twin justification in the W3/W4 note above ("a
+/// lib-declared generic header cannot take a ctor-keyed `impl:` from a user
+/// module yet"): under the declaring-module mint, a lib-declared generic
+/// header takes a ctor-keyed `impl:` from a user module and dispatches.
 #[test]
 fn functor_map_over_result_dispatches_to_the_result_impl_and_passes_err_through() {
     let src = "\
-type: Result['T 'E] | Ok 'T | Err 'E ;
+import: core::result * ;
 trait: Functor['F: * -> * -> *] :
   map ( 'F['T 'E] [ 'T -- 'U ] -- 'F['U 'E] ) ;
 ;
@@ -529,9 +542,13 @@ impl: Functor for Result
 
 /// Golden (positive #4, W4): `twice` -- a poly body holding ONE shared
 /// `Functor` bound -- calls `map` twice, and the bound dispatches per
-/// constructor at the call sites: the Opt impl serves the `Opt` operand, the
-/// Res impl the `Res` operand (exit criterion #4's shared-bound dogfood,
-/// dispatched through one bound word).
+/// constructor at the call sites (exit criterion #4's shared-bound dogfood,
+/// dispatched through one bound word). P7b.S4 (S4-7) migrated the witness
+/// onto the real `core::option`: the per-constructor aspect now runs over
+/// the one real ctor's two call sites, and the two-impls-per-constructor
+/// half is parked on a future real `* -> *` lib type (`core::list` does not
+/// exist yet -- slice4-spec.md, Q3); before S4 the two call sites went to
+/// the Opt and Res fixture twins per the (now historical) W3/W4 note above.
 ///
 /// Machinery under test: at `twice`'s body check the member call is
 /// App-vs-App unification against the *declared* sig -- the member's header
@@ -548,42 +565,36 @@ impl: Functor for Result
 /// Sketch deltas from the brief's W4, recorded in slice2-spec.md's Open
 /// questions: (1) the sketch's `map map` consumes the quotation parameter on
 /// the first call; plain quotations are `Copy`, so the working form binds it
-/// to a local and re-reads it (`| q | q map q map`). (2) The sketch's one
-/// `Functor['F: * -> *]` over both `Some` and `Ok` is kind-inconsistent (see
-/// golden #3), so the shared trait is `* -> * -> *` and both ctor twins are
-/// two-parameter types -- `Opt`'s `Some` carries both slots and `None`
-/// exercises golden #6's zero-field arm unification against the ambient
-/// variable. (3) Local twins per the W3/W4 note above.
+/// to a local and re-reads it (`| q | q map q map`). (2) Over the two-param
+/// twins the sketch's one `Functor['F: * -> *]` was kind-inconsistent (see
+/// golden #3), so the twins' shared trait was spelled `* -> * -> *` and
+/// `Opt`'s `Some` carried both slots; on the real single-argument `Option`
+/// the sketch's `* -> *` kind is the correct one and the migration restores
+/// it. (3) The local twins are gone -- superseded by S4; the W3/W4 note
+/// above quotes the wart they worked around.
 #[test]
 fn functor_map_through_shared_bound_dispatches_per_constructor_from_poly_body() {
     let src = "\
-type: Opt['T 'E] | None | Some 'T 'E ;
-type: Res['T 'E] | Ok 'T | Err 'E ;
-trait: Functor['F: * -> * -> *] :
-  map ( 'F['T 'E] [ 'T -- 'U ] -- 'F['U 'E] ) ;
+import: core::option * ;
+trait: Functor['F: * -> *] :
+  map ( 'F['T] [ 'T -- 'U ] -- 'F['U] ) ;
 ;
-impl: Functor for Opt
-  : map swap ~[ ( Some ) Some> swap rot call swap Some ] ~[ ( None ) drop drop None ] Opt? ;
+impl: Functor for Option
+  : map swap ~[ ( Some ) Some> swap call Some ] ~[ ( None ) drop drop None ] Option? ;
 ;
-impl: Functor for Res
-  : map swap ~[ ( Ok ) Ok> swap call Ok ] ~[ ( Err ) Err> swap drop Err ] Res? ;
-;
-: twice['F: Functor 'T 'E] ( 'F['T 'E] [ 'T -- 'T ] -- 'F['T 'E] )
+: twice['F: Functor 'T] ( 'F['T] [ 'T -- 'T ] -- 'F['T] )
   | q |
   q map
   q map ;
-: showopt ( Opt[i64 i64] -- ) ~[ ( Some ) Some> drop . ] ~[ ( None ) drop ] Opt? ;
-: showres ( Res[i64 i64] -- ) ~[ ( Ok ) Ok> . ] ~[ ( Err ) Err> . ] Res? ;
-: mkopt ( i64 -- Opt[i64 i64] ) dup Some ;
-: mkres ( i64 -- Res[i64 i64] ) Ok ;
+: showopt ( Option[i64] -- ) ~[ ( Some ) Some> . ] ~[ ( None ) drop ] Option? ;
+: mkopt ( i64 -- Option[i64] ) Some ;
 : main ( -- ) 1 mkopt [ 1 sub ] twice showopt
-  5 mkres [ 1 sub ] twice showres ;
+  5 mkopt [ 1 sub ] twice showopt ;
 ";
     let (_t, entry) = single_file_hosted("w4-shared-bound-twice", src);
     let out = build_and_run(&entry);
-    // `twice` applies `[ 1 sub ]` twice: the Some payload 1 -> -1, the Ok
-    // payload 5 -> 3. Two different impls served the two calls through the
-    // one bound word.
+    // `twice` applies `[ 1 sub ]` twice: the Some payload 1 -> -1, the
+    // second Some payload 5 -> 3. One bound word served both calls.
     assert_eq!(out, "-1\n3\n");
 }
 

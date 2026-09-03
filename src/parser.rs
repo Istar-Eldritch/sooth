@@ -7067,7 +7067,7 @@ impl<'t> Parser<'t> {
             };
             return Ok(self
                 .generics
-                .instantiate_struct(idx, &args, &lens, self.module, regs));
+                .instantiate_struct(idx, &args, &lens, owner, regs));
         }
         if let Some(idx) = self.generics.find_enum(base, owner) {
             let ty_var_names = self.generics.enums[idx].ty_var_names.clone();
@@ -7085,7 +7085,7 @@ impl<'t> Parser<'t> {
             };
             return Ok(self
                 .generics
-                .instantiate_enum(idx, &args, &lens, self.module, regs));
+                .instantiate_enum(idx, &args, &lens, owner, regs));
         }
         self.resolve_type(name, span)
     }
@@ -10847,12 +10847,14 @@ mod tests {
 
     /// Slice 2 (OQ1): the positive twin of the bare-name rejection above -- a
     /// `q::Box[i64]` application maps `q` through the import map, finds the
-    /// header in the target module, and monomorphizes there. The minted
-    /// instantiation is stamped with the *applying* module, not the declaring
-    /// one, exactly as a same-module application is. `owner` exports `Box`
-    /// (R16, round-2 review fix): a qualified generic application is gated on
-    /// export exactly like a concrete cross-module type, so this positive
-    /// case needs the export to reach the application at all.
+    /// header in the target module, and monomorphizes there. P7b.S4 re-baseline
+    /// (S4-3): the minted instantiation is stamped with the *declaring* module
+    /// -- the header's owner -- so every producer and consumer of the
+    /// instantiation's identity agrees on one mint. This replaces the recorded
+    /// wart "stamped with the *applying* module, not the declaring one". `owner`
+    /// exports `Box` (R16, round-2 review fix): a qualified generic application
+    /// is gated on export exactly like a concrete cross-module type, so this
+    /// positive case needs the export to reach the application at all.
     #[test]
     fn parse_qualified_generic_application_from_another_module_resolves() {
         let owner = lex("type: Box['T] val 'T ;\nexport: Box ;\n").unwrap();
@@ -10892,7 +10894,7 @@ mod tests {
         }
         assert_eq!(generics.inst_structs.len(), 1);
         assert_eq!(generics.inst_structs[0].name, "Box[i64]");
-        assert_eq!(generics.inst_structs[0].module, 1);
+        assert_eq!(generics.inst_structs[0].module, 0);
         assert_eq!(
             generics.inst_structs[0].fields,
             vec![("val".to_string(), Type::I64)]
@@ -10954,10 +10956,13 @@ mod tests {
         assert!(err.contains("unknown type `q::Box`"), "unexpected: {err}");
     }
 
-    /// The minted instantiation carries the *instantiating* module's id, not
-    /// a hard-coded `0` (the same defaulting hazard
-    /// `parse_generic_typedef_and_enum_stamp_the_parser_module_id` guards on
-    /// the declaration side).
+    /// P7b.S4 re-baseline (S4-3): a minted instantiation carries the
+    /// *declaring* module's id, not a hard-coded `0` (the same defaulting
+    /// hazard `parse_generic_typedef_and_enum_stamp_the_parser_module_id`
+    /// guards on the declaration side). This replaces the recorded wart "The
+    /// minted instantiation carries the *instantiating* module's id, not a
+    /// hard-coded `0`" -- this test is same-module, where declaring ==
+    /// instantiating, so the body is unchanged.
     #[test]
     fn parse_generic_application_stamps_the_instantiating_module_id() {
         let tokens = lex(
