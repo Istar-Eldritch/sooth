@@ -143,6 +143,22 @@ fn cross_module_same_shaped_ctor_dispatches_callers_own_impl() {
 /// reaches `select_overload` with exactly the 2 existing candidates in
 /// `matching`. `c`'s own module is neither `a` nor `b`, so tier 1 misses for
 /// both, and exactly one (`a`'s) is visible.
+///
+/// Not a placebo (review round 1 fix): a same-payload `i64`/`i64` roundtrip
+/// through a single-field struct produces the identical printed value
+/// regardless of which module's `Widget[i64]` wins -- deleting tier 2's
+/// visibility filter entirely (`OverloadPick::Pick(matching[0])`) left the
+/// original fixture's assertion passing unchanged. `a`'s own
+/// `pin['T] ( Widget['T] -- Widget['T] )` closes that: a variable-headed
+/// generic type names nothing concrete, so exporting it hits no
+/// export-privacy rule, and its parameter is headed on `a`'s own
+/// `GenericStructDecl` specifically, fixed at `a`'s own declaration site --
+/// unambiguous regardless of how a third module's own local type-name
+/// resolution behaves. Verified: swapping tier 2's pick for the *other*
+/// (`matching[matching.len() - 1]`, forcing `b`'s candidate) turns this
+/// fixture from a passing build into `` `pin` expected `Widget['T]`, found
+/// `Widget[i64]` `` -- a genuine type-identity mismatch between two
+/// identically-shaped, identically-named, differently-declared structs.
 #[test]
 fn imported_generic_ctor_resolves_single_visible_candidate() {
     let t = Tree::new("s5-tier2-selective-import");
@@ -152,7 +168,8 @@ fn imported_generic_ctor_resolves_single_visible_candidate() {
         "import: intrinsics * ;\n\
          type: Widget['T] v 'T ;\n\
          : mk ( i64 -- Widget[i64] ) Widget ;\n\
-         export: Widget ;\n",
+         : pin['T] ( Widget['T] -- Widget['T] ) ;\n\
+         export: Widget pin ;\n",
     );
     t.write(
         "b.sth",
@@ -165,7 +182,7 @@ fn imported_generic_ctor_resolves_single_visible_candidate() {
         "c.sth",
         "import: intrinsics * ;\n\
          import: self::a | Widget | ;\nimport: self::b ;\n\
-         : run ( i64 -- i64 ) Widget Widget> 30 add ;\n\
+         : run ( i64 -- i64 ) Widget a::pin Widget> 30 add ;\n\
          export: run ;\n",
     );
     let entry = t.write(
@@ -175,9 +192,10 @@ fn imported_generic_ctor_resolves_single_visible_candidate() {
          : main ( -- ) 5 c::run . ;\n",
     );
     let out = build_and_run(&entry);
-    // `c` imports only `a`'s `Widget` bare, so its `run` must construct and
-    // read back through `a`'s `Widget` (5 + 30 = 35), never `b`'s -- proving
-    // tier 2's visibility filter, not an accidental first-match pick.
+    // `c` imports only `a`'s `Widget` bare, so its bare `Widget` call must
+    // construct *`a`'s own* struct -- routing it through `a::pin` (headed on
+    // `a`'s own `GenericStructDecl`) before destructuring makes a wrong pick
+    // a type mismatch, not merely the same printed value.
     assert_eq!(out, "35\n");
 }
 
@@ -255,4 +273,56 @@ fn cross_module_colliding_mono_call_is_no_dispatch_error() {
         err.contains("is a trait member of Sized, but no `impl:` in this program dispatches on these operands"),
         "expected mono_member_no_dispatch_error, got: {err}"
     );
+}
+
+/// P7b.S5 Phase 2b review-round-1 fix: `poly_call_term`'s own tier-arm
+/// (`src/check/poly.rs`, the `env.get(name).and_then` match beside
+/// `poly_construct_generic`) was flagged as possibly dead -- three mutation
+/// probes (replace the pick with `matching.first()`, panic on
+/// `matching.len() > 1`, `eprintln!` in the multi-candidate arm) all left
+/// the suite green. Reproduced: true for every *other* existing fixture, but
+/// this one reaches it for real. `a`'s `run['S]` is itself generic (an
+/// unused `'S` type variable is enough to route its body through
+/// `poly_call_term` rather than `check_term`), and its bare `Widget` call
+/// operates on an already-concrete `i64` -- `poly_env_exact_match` finds
+/// `a`'s own pre-minted `Widget[i64]` (from `mk`) and bails
+/// `poly_construct_generic`, landing on the tier arm with `b`'s
+/// independently-minted `Widget[i64]` also in `matching` (verified via a
+/// temporary `eprintln!`: `matching_len=2`). Discriminating, not a placebo:
+/// `pin`'s declared input `Widget[i64]` names *`a`'s own* struct header, so
+/// a wrong pick (verified by temporarily swapping the tier pick for
+/// `matching.last()`) turns this into `` `pin` is not permitted on
+/// `Widget[i64]` `` -- a type mismatch against the wrong module's otherwise
+/// identically-shaped and identically-named `Widget[i64]`.
+#[test]
+fn poly_body_tier_arm_resolves_same_shaped_ctor_to_callers_own_module() {
+    let t = Tree::new("s5-poly-tier-arm");
+    write_manifest(&t);
+    t.write(
+        "a.sth",
+        "import: intrinsics * ;\n\
+         type: Widget['T] v 'T ;\n\
+         : mk ( i64 -- Widget[i64] ) Widget ;\n\
+         : pin ( Widget[i64] -- i64 ) Widget> ;\n\
+         : run['S] ( i64 'S -- i64 'S )\n\
+         \x20  swap Widget pin swap\n\
+         ;\n\
+         export: Widget run ;\n",
+    );
+    t.write(
+        "b.sth",
+        "import: intrinsics * ;\n\
+         type: Widget['T] v 'T ;\n\
+         : mk ( i64 -- Widget[i64] ) Widget ;\n\
+         : run ( i64 -- i64 ) mk Widget> 20 add ;\n\
+         export: run ;\n",
+    );
+    let entry = t.write(
+        "main.sth",
+        "import: intrinsics * ;\nimport: hosted::show | . | ;\n\
+         import: self::a ;\nimport: self::b ;\n\
+         : main ( -- ) 42 7 a::run drop . ;\n",
+    );
+    let out = build_and_run(&entry);
+    assert_eq!(out, "42\n");
 }

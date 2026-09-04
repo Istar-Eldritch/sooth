@@ -3315,15 +3315,22 @@ pub(super) fn poly_call_term(
     // (review finding 3) -- it already fell through here `Ok(None)` when it
     // didn't apply, so nothing changes for the ordinary `env` dispatch below
     // by having tried it earlier.
-    // P7b.S5 (R4 audit VERDICT): confirmed reachable for the ctor-collision
-    // shape -- `poly_construct_generic` above returns `Ok(None)` and falls
+    // P7b.S5 (R4 audit VERDICT, corrected -- review round 1 fix): actually
+    // reached and actually discriminating, verified with a real fixture, not
+    // assumed. `poly_construct_generic` above returns `Ok(None)` and falls
     // through to here whenever the constructor is non-fieldless and its
     // operands already exactly match one of `env`'s generated candidates
-    // (`poly_env_exact_match`), the same-shaped cross-module ctor collision
-    // `terms.rs:956` fixes. Routed through the shared tier policy
-    // (`tier_pick`, not `select_overload` directly): `select_overload`'s own
-    // Step 1 assumes one uniform-length `Type` operand vector, but this call
-    // site's per-candidate window is checked for concreteness against each
+    // (`poly_env_exact_match`); a poly (generic) word's own bare ctor call
+    // over an already-concrete operand lands here with 2+ same-shaped
+    // cross-module candidates in `matching` (confirmed via a temporary
+    // `eprintln!`: `matching_len=2`), and the tier pick is load-bearing, not
+    // a no-op -- swapping it for `matching.last()` turns a passing build
+    // into a type-mismatch error (`tests/phase7b_slice5.rs`,
+    // `poly_body_tier_arm_resolves_same_shaped_ctor_to_callers_own_module`).
+    // Routed through the shared tier policy (`tier_pick`, not
+    // `select_overload` directly): `select_overload`'s own Step 1 assumes
+    // one uniform-length `Type` operand vector, but this call site's
+    // per-candidate window is checked for concreteness against each
     // candidate's OWN arity, matching the original per-slot `matches!`
     // exactly -- a differently-arity-overloaded candidate here whose own
     // (shorter) window is concrete must still be able to match even if an
