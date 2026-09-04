@@ -3202,6 +3202,12 @@ pub(super) fn poly_call_term(
     // poly callee; an overloaded name (more than one candidate) never
     // matches `single_candidate` below and keeps the rejection, which is
     // R2's own completeness-gap note, not a bug in this carve-out.
+    //
+    // P7b.S5 (R4 audit VERDICT): confirmed non-issue. This binds only
+    // `Some([only])` -- never a multi-candidate `find` -- so an overloaded
+    // name (including a same-shaped cross-module ctor collision) always
+    // falls to `None` here and keeps the rejection; it cannot cross-pick.
+    // Not widened.
     let single_candidate = match env.get(name).map(Vec::as_slice) {
         Some([only]) => Some(only),
         _ => None,
@@ -3258,15 +3264,50 @@ pub(super) fn poly_call_term(
     // (review finding 3) -- it already fell through here `Ok(None)` when it
     // didn't apply, so nothing changes for the ordinary `env` dispatch below
     // by having tried it earlier.
+    // P7b.S5 (R4 audit VERDICT): confirmed reachable for the ctor-collision
+    // shape -- `poly_construct_generic` above returns `Ok(None)` and falls
+    // through to here whenever the constructor is non-fieldless and its
+    // operands already exactly match one of `env`'s generated candidates
+    // (`poly_env_exact_match`), the same-shaped cross-module ctor collision
+    // `terms.rs:956` fixes. Routed through the shared tier policy
+    // (`tier_pick`, not `select_overload` directly): `select_overload`'s own
+    // Step 1 assumes one uniform-length `Type` operand vector, but this call
+    // site's per-candidate window is checked for concreteness against each
+    // candidate's OWN arity, matching the original per-slot `matches!`
+    // exactly -- a differently-arity-overloaded candidate here whose own
+    // (shorter) window is concrete must still be able to match even if an
+    // earlier, non-concrete stack slot lies outside that window; a single
+    // max-arity window shared across all candidates would wrongly require
+    // concreteness beyond what that candidate actually needs.
     let chosen = env.get(name).and_then(|candidates| match &candidates[..] {
         [only] => Some(only),
-        _ => candidates.iter().find(|o| {
-            stack.len() >= o.sig.inputs.len()
-                && stack[stack.len() - o.sig.inputs.len()..]
-                    .iter()
-                    .zip(&o.sig.inputs)
-                    .all(|(s, inp)| matches!(&s.pt, PolyType::Concrete(t) if t == inp))
-        }),
+        candidates => {
+            let matching: Vec<&Overload> = candidates
+                .iter()
+                .filter(|o| {
+                    stack.len() >= o.sig.inputs.len()
+                        && stack[stack.len() - o.sig.inputs.len()..]
+                            .iter()
+                            .zip(&o.sig.inputs)
+                            .all(|(s, inp)| matches!(&s.pt, PolyType::Concrete(t) if t == inp))
+                })
+                .collect();
+            let caller_module = span.module;
+            let pick = match ctx.modules() {
+                Some(modules) => {
+                    // Same demangle-before-visibility rule as `terms.rs:956`.
+                    let bare_name = crate::resolve::demangle_call(name);
+                    tier_pick(&matching, caller_module, |m| {
+                        is_name_visible_to_module(modules, caller_module, m, &bare_name)
+                    })
+                }
+                None => tier_pick(&matching, caller_module, |_| true),
+            };
+            match pick {
+                OverloadPick::Pick(hit) => Some(hit),
+                OverloadPick::Ambiguous => None,
+            }
+        }
     });
     if let Some(chosen) = chosen {
         let msig = &chosen.sig;
@@ -6556,6 +6597,13 @@ pub(super) enum PolyOverloadMiss {
 /// untouched. Bounds (R6) are checked only against the chosen candidate by
 /// the caller, matching the single-candidate path: they gate a resolved
 /// instantiation, not resolution itself.
+///
+/// P7b.S5 (R4 audit VERDICT): not reachable for the ctor-collision shape.
+/// `candidates` here are declared `PolySig`s of overloaded *polymorphic
+/// words* (a different registry than the generated-ctor `Overload`s
+/// `struct_generated_sigs`/`enum_generated_sigs`/`variant_generated_sigs`
+/// populate), and `PolySig` carries no `module` field to disambiguate on --
+/// the ctor-collision fix does not apply to this candidate shape at all.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn resolve_poly_overload(
     candidates: &[PolySig],
@@ -6771,6 +6819,12 @@ pub(super) fn poly_sig_could_match(
 /// position, differing only in a declared quotation's effect, are
 /// indistinguishable here; the first declared wins, the same trade
 /// `resolve_poly_overload` already accepts on an ambiguous unification.
+///
+/// P7b.S5 (R4 audit VERDICT): not reachable for the ctor-collision shape.
+/// `candidates` here are `Combinator`s -- always-spliced words indexed by
+/// `CombinatorIndex`, never a generated ctor -- a distinct registry from the
+/// `Overload`s the S5 fix disambiguates; a same-shaped generic ctor never
+/// registers as a combinator.
 pub(super) fn resolve_combinator_overload<'a>(
     candidates: &[Combinator<'a>],
     stack: &[Slot],

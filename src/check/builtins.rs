@@ -38,10 +38,8 @@ pub struct Overload {
     pub sig: Sig,
     pub symbol: String,
     /// P7b.S5 (R3.6): the owning module id, populated at every construction
-    /// site (mirroring `StructDecl::module`/`WordDef::module`) so a future
-    /// tier can key visibility on it. Not yet consulted by `select_overload`
-    /// (Phase 2a is behavior-preserving; the tier policy lands in Phase 2b).
-    #[allow(dead_code)]
+    /// site (mirroring `StructDecl::module`/`WordDef::module`). Consulted by
+    /// `select_overload`'s tier 1/2 policy (Phase 2b, R3.5).
     pub module: u32,
 }
 
@@ -56,21 +54,131 @@ pub(super) enum OverloadPick<'a> {
     Ambiguous,
 }
 
-/// P7b.S5 (R3.6, Fix A/D, Phase 2a): reproduces today's `terms.rs` inline
-/// `.find`-by-input arm exactly, extracted so a future tier policy has one
-/// call site to widen (Phase 2b) instead of an inline match arm. Behavior-
-/// preserving: no `caller_module`/`caller_visible` yet, so the widened
-/// 4-argument form (R3.6 Fix D) arrives only once Phase 2b consults them.
+/// P7b.S5 (R3.5-R3.8, Fix A-F, Phase 2b): the two-step selector. Step 1
+/// narrows `candidates` to `matching` -- those whose declared inputs match
+/// `operands` -- exactly the predicate `terms.rs`'s inline `.find` used
+/// before Phase 2a's extraction. Step 2 tiers `matching`, never the raw
+/// `candidates`:
+///
+/// 1. a `matching` candidate whose `.module == caller_module` wins (own
+///    module, the caller's lexically-declaring one -- `span.module` at the
+///    call site, never `ctx.module()`, which is re-scoped to the callee's
+///    module under a combinator splice, R3.5);
+/// 2. else, if exactly one `matching` candidate is visible to the caller
+///    (`caller_visible`, `is_name_visible_to_module`'s direct-only rule), it
+///    wins;
+/// 3. else (2+ visible, or zero visible, out of a `matching` set of 2+)
+///    `Ambiguous` -- a real error via the caller's existing
+///    `no_overload_matches_error` mapping, not a permissive fallback. The
+///    zero-visible case is an accepted, scoped regression (R3.7, Ruling A):
+///    `ModuleInfo.imports`/`.selective` are direct-only, so a caller reaching
+///    a name only through a re-exporting hub sees no direct-visible
+///    candidate even though the program compiles today; P8.S5 is the tracked
+///    follow-up for transitive visibility.
+///
+/// `matching` empty returns `Ambiguous` too -- today's unchanged "wrong
+/// argument types" disposition (R3.7).
+///
+/// The `modules() == None` path (unit-test / retained-poly-word harnesses,
+/// `Ctx::modules` doc comment) needs no special-casing here: the call site
+/// passes `caller_visible = |_| true`, which makes tier 2's "exactly one
+/// visible" degenerate to "exactly one in `matching`" for free, and 2+
+/// remaining still lands on the same `Ambiguous` real error (Ruling A).
+///
+/// NOTE (R3.8): tier 3 is *believed* vacuous for the ctor-collision shape
+/// specifically -- every surface route to "2+ same-shaped ctor candidates
+/// visible bare to one caller" is blocked before `check::check` runs (two
+/// selective imports of the same name, a path-wildcard import, two `self::`
+/// wildcard imports of the same name), and the one surviving 2-visible shape
+/// (a local decl + a wildcard import) resolves at tier 1 first. This is
+/// evidence, not a runtime assertion -- `Ambiguous` is a real, reachable
+/// value here, asserted by a unit test below, not `unreachable!`.
 pub(super) fn select_overload<'a>(
     candidates: &'a [Overload],
     operands: &[Type],
+    caller_module: u32,
+    caller_visible: impl Fn(u32) -> bool,
 ) -> OverloadPick<'a> {
-    match candidates.iter().find(|o| {
-        operands.len() >= o.sig.inputs.len()
-            && operands[operands.len() - o.sig.inputs.len()..] == o.sig.inputs[..]
-    }) {
-        Some(hit) => OverloadPick::Pick(hit),
-        None => OverloadPick::Ambiguous,
+    let matching: Vec<&Overload> = candidates
+        .iter()
+        .filter(|o| {
+            operands.len() >= o.sig.inputs.len()
+                && operands[operands.len() - o.sig.inputs.len()..] == o.sig.inputs[..]
+        })
+        .collect();
+    tier_pick(&matching, caller_module, caller_visible)
+}
+
+/// P7b.S5 (Fix D follow-up): Step 2 of `select_overload`, factored out so a
+/// caller that must build `matching` itself -- `poly.rs:3260`'s window is
+/// sized per-candidate against `PolyType::Concrete` slots, not a single
+/// uniform `Type` operand vector `select_overload`'s own Step 1 assumes --
+/// can still share the tier policy verbatim rather than reimplementing it.
+pub(super) fn tier_pick<'a>(
+    matching: &[&'a Overload],
+    caller_module: u32,
+    caller_visible: impl Fn(u32) -> bool,
+) -> OverloadPick<'a> {
+    // A lone survivor is not a disambiguation case at all -- the same "only
+    // one candidate, take it" disposition the single-Overload `[only]` fast
+    // path elsewhere already gives unconditionally. The tier policy (own-
+    // module, else exactly-one-visible, else `Ambiguous`) only has real work
+    // to do -- and only then gets to decide against a genuine second
+    // candidate -- once `matching` holds 2+; applying it to a lone survivor
+    // would newly reject a program whose sole matching candidate simply
+    // isn't the caller's own module and isn't reached through a selective
+    // import (R3.7's zero-visible ruling is scoped to "a `matching` set of
+    // 2+", not this case).
+    match matching.len() {
+        0 => return OverloadPick::Ambiguous,
+        1 => return OverloadPick::Pick(matching[0]),
+        _ => {}
+    }
+    if let Some(own) = matching.iter().find(|o| o.module == caller_module) {
+        return OverloadPick::Pick(own);
+    }
+    let mut visible = matching.iter().filter(|o| caller_visible(o.module));
+    match (visible.next(), visible.next()) {
+        (Some(only), None) => OverloadPick::Pick(only),
+        _ => OverloadPick::Ambiguous,
+    }
+}
+
+/// P7b.S5 (R4, Fix D): the `mint_fallback_candidates` carve-out. That
+/// provenance's `Overload.module` is not reliably the declaring module --
+/// `poly_construct_generic` (`poly.rs`, `poly_construction_fallback`) mints
+/// under the declared-output header's own module when the enclosing word's
+/// output names it, but falls back to `ctx.module()` otherwise, and
+/// `ctx.module()` carries the exact splice-rescoping hazard R3.5 rules
+/// `span.module` around for tier 1 (`combinators.rs`'s `with_module`
+/// comment). So tier 1 (own-module) still applies here -- a wrong
+/// `ctx.module()` value can at worst fail to win a real match, never
+/// silently win the wrong one, since it is still compared for exact
+/// equality against `caller_module` -- but tiers 2/3's visibility narrowing
+/// does not: filtering or erroring a fallback-sourced candidate on an
+/// unverified module id would invent a stricter rule than the pre-existing
+/// first-match dispatch `mint_fallback_candidates`'s own doc comment
+/// forbids. On a tier-1 miss, this falls back to the original
+/// first-input-match semantics (the first `matching` candidate, arbitrary
+/// among ties) rather than tiering further.
+pub(super) fn select_overload_fallback_sourced<'a>(
+    candidates: &'a [Overload],
+    operands: &[Type],
+    caller_module: u32,
+) -> OverloadPick<'a> {
+    let matching: Vec<&Overload> = candidates
+        .iter()
+        .filter(|o| {
+            operands.len() >= o.sig.inputs.len()
+                && operands[operands.len() - o.sig.inputs.len()..] == o.sig.inputs[..]
+        })
+        .collect();
+    match matching.iter().find(|o| o.module == caller_module) {
+        Some(own) => OverloadPick::Pick(own),
+        None => match matching.first() {
+            Some(first) => OverloadPick::Pick(first),
+            None => OverloadPick::Ambiguous,
+        },
     }
 }
 
@@ -86,13 +194,21 @@ mod select_overload_tests {
         }
     }
 
+    fn overload_in(inputs: Vec<Type>, outputs: Vec<Type>, symbol: &str, module: u32) -> Overload {
+        Overload {
+            sig: Sig { inputs, outputs },
+            symbol: symbol.to_string(),
+            module,
+        }
+    }
+
     #[test]
     fn select_overload_single_input_match_returns_pick() {
         let candidates = vec![
             overload(vec![Type::I64], vec![Type::I64], "i64_id"),
             overload(vec![Type::U32], vec![Type::U32], "u32_id"),
         ];
-        match select_overload(&candidates, &[Type::I64]) {
+        match select_overload(&candidates, &[Type::I64], 0, |_| true) {
             OverloadPick::Pick(hit) => assert_eq!(hit.symbol, "i64_id"),
             OverloadPick::Ambiguous => panic!("expected a pick"),
         }
@@ -101,17 +217,117 @@ mod select_overload_tests {
     #[test]
     fn select_overload_no_input_match_returns_ambiguous() {
         let candidates = vec![overload(vec![Type::I64], vec![Type::I64], "i64_id")];
-        match select_overload(&candidates, &[Type::U32]) {
+        match select_overload(&candidates, &[Type::U32], 0, |_| true) {
             OverloadPick::Ambiguous => {}
             OverloadPick::Pick(_) => panic!("expected no match"),
+        }
+    }
+
+    /// P7b.S5 (Phase 2b): the table-driven tier policy, one case per tier
+    /// plus the `modules() == None` degenerate path (R3.5-R3.8).
+    #[test]
+    fn select_overload_tier_1_own_module_wins_among_two_in_matching() {
+        let candidates = vec![
+            overload_in(vec![Type::I64], vec![Type::I64], "a_widget", 1),
+            overload_in(vec![Type::I64], vec![Type::I64], "b_widget", 2),
+        ];
+        // caller_visible would make both visible, but tier 1 wins first.
+        match select_overload(&candidates, &[Type::I64], 2, |_| true) {
+            OverloadPick::Pick(hit) => assert_eq!(hit.symbol, "b_widget"),
+            OverloadPick::Ambiguous => panic!("expected the caller's own-module candidate"),
+        }
+    }
+
+    #[test]
+    fn select_overload_tier_2_single_visible_candidate_wins() {
+        let candidates = vec![
+            overload_in(vec![Type::I64], vec![Type::I64], "a_widget", 1),
+            overload_in(vec![Type::I64], vec![Type::I64], "b_widget", 2),
+        ];
+        // caller is module 3, own to neither; only module 2 is visible.
+        match select_overload(&candidates, &[Type::I64], 3, |m| m == 2) {
+            OverloadPick::Pick(hit) => assert_eq!(hit.symbol, "b_widget"),
+            OverloadPick::Ambiguous => panic!("expected the single visible candidate"),
+        }
+    }
+
+    #[test]
+    fn select_overload_tier_2_under_modules_none_degenerate_single_remaining_wins() {
+        let candidates = vec![overload_in(vec![Type::I64], vec![Type::I64], "only", 7)];
+        // `Ctx::modules() == None` path: `caller_visible` is `|_| true`, so
+        // "exactly one visible" degenerates to "exactly one in matching".
+        match select_overload(&candidates, &[Type::I64], 0, |_| true) {
+            OverloadPick::Pick(hit) => assert_eq!(hit.symbol, "only"),
+            OverloadPick::Ambiguous => panic!("expected the sole matching candidate"),
+        }
+    }
+
+    #[test]
+    fn select_overload_zero_visible_out_of_two_matching_is_ambiguous() {
+        let candidates = vec![
+            overload_in(vec![Type::I64], vec![Type::I64], "a_widget", 1),
+            overload_in(vec![Type::I64], vec![Type::I64], "b_widget", 2),
+        ];
+        // Neither is the caller's own module, and neither is visible
+        // (R3.7's accepted, scoped regression -- a real error, not a
+        // permissive first-pick).
+        match select_overload(&candidates, &[Type::I64], 3, |_| false) {
+            OverloadPick::Ambiguous => {}
+            OverloadPick::Pick(_) => panic!("expected the zero-visible accepted error"),
+        }
+    }
+
+    #[test]
+    fn select_overload_two_or_more_visible_is_ambiguous() {
+        let candidates = vec![
+            overload_in(vec![Type::I64], vec![Type::I64], "a_widget", 1),
+            overload_in(vec![Type::I64], vec![Type::I64], "b_widget", 2),
+        ];
+        match select_overload(&candidates, &[Type::I64], 3, |_| true) {
+            OverloadPick::Ambiguous => {}
+            OverloadPick::Pick(_) => panic!("expected the tier-3 ambiguous case"),
+        }
+    }
+
+    #[test]
+    fn select_overload_fallback_sourced_tier_1_hit_wins_over_unreliable_module() {
+        let candidates = vec![
+            overload_in(vec![Type::I64], vec![Type::I64], "a_widget", 1),
+            overload_in(vec![Type::I64], vec![Type::I64], "b_widget", 2),
+        ];
+        match select_overload_fallback_sourced(&candidates, &[Type::I64], 2) {
+            OverloadPick::Pick(hit) => assert_eq!(hit.symbol, "b_widget"),
+            OverloadPick::Ambiguous => panic!("expected the own-module candidate"),
+        }
+    }
+
+    #[test]
+    fn select_overload_fallback_sourced_tier_1_miss_falls_back_to_first_match() {
+        let candidates = vec![
+            overload_in(vec![Type::I64], vec![Type::I64], "a_widget", 1),
+            overload_in(vec![Type::I64], vec![Type::I64], "b_widget", 2),
+        ];
+        // Neither candidate is the caller's own module: unlike the reliable
+        // `select_overload` path, this does NOT become `Ambiguous` -- it
+        // preserves the pre-existing permissive first-match dispatch, since
+        // the module id here is not verified reliable (R4).
+        match select_overload_fallback_sourced(&candidates, &[Type::I64], 9) {
+            OverloadPick::Pick(hit) => assert_eq!(hit.symbol, "a_widget"),
+            OverloadPick::Ambiguous => panic!("expected the permissive first-match fallback"),
         }
     }
 }
 
 /// R1/R2: the one candidate among `candidates` whose declared inputs exactly
 /// match `operands`, if any. R1's widened duplicate-word key guarantees at
-/// most one: two candidates registered under one name in scope never share
-/// input types.
+/// most one *for the sets this function is actually called against*
+/// (`operators.rs`'s scoped-operator candidates). P7b.S5 (R4 audit): this is
+/// now false in general -- two same-shaped cross-module generic ctors can
+/// register under one bare name with identical input types (the collision
+/// `select_overload`'s tier policy exists to disambiguate) -- but ctors
+/// never reach *this* function; its live caller (`operators.rs:196`) only
+/// ever hands it operator-name candidates, which the ctor-collision shape
+/// cannot produce (R4's `scoped_ops` provenance note).
 pub(super) fn resolve_overload<'a>(
     candidates: &'a [Overload],
     operands: &[Type],
