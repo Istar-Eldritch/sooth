@@ -16346,7 +16346,7 @@ mod tests {
         assert_eq!(
             transitive,
             vec![
-                "sooth_mono_id__t0_Bool",
+                "sooth_mono_id__t0_e0_Bool",
                 "sooth_mono_id__t0_i64",
                 "sooth_mono_id__t0_str"
             ]

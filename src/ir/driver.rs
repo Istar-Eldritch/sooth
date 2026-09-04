@@ -1474,11 +1474,11 @@ mod tests {
                            9 Qt |q| &q getval drop q drop ;\n",
         );
         assert_eq!(
-            call_symbols(func(&m, "sooth_mono_getval__m0__t0_Pt")),
+            call_symbols(func(&m, "sooth_mono_getval__m0__t0_s0_Pt")),
             vec!["get;Getter;0;Pt__m0"]
         );
         assert_eq!(
-            call_symbols(func(&m, "sooth_mono_getval__m0__t0_Qt")),
+            call_symbols(func(&m, "sooth_mono_getval__m0__t0_s1_Qt")),
             vec!["get;Getter;0;Qt__m0"]
         );
     }
@@ -1504,7 +1504,7 @@ mod tests {
              : main ( -- ) 7 Pt |p| &p &p getval drop p drop ;\n",
         );
         assert_eq!(
-            call_symbols(func(&m, "sooth_mono_getval__m0__t0_Pt")),
+            call_symbols(func(&m, "sooth_mono_getval__m0__t0_s0_Pt")),
             vec!["get;Getter;0;Pt__m0"]
         );
         assert_eq!(

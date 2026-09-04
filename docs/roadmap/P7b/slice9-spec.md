@@ -374,7 +374,8 @@ the record of what the review round originally (incorrectly) believed.
   from the decl's leaked `name_static`), which the backend emits as `type
   :{name}` and which a second same-named decl silently redefines. Only a
   *duplicated* name is qualified, so every program with no two same-named
-  declarations emits byte-identical IL (measured: zero golden churn). No
+  declarations emits byte-identical IL (measured: zero golden churn for *that*
+  change; R2.1's own rendering does move mono-symbol strings — see RISK-1). No
   lookup, dispatch or tier logic moves.
 - **R-NFR2 — matcher untouched.** `match_impl_target`/`..._rec` and
   `find_bound_impl`'s scan are expected to have **zero** behavioural diff. A
@@ -518,9 +519,20 @@ roadmap correction.
 - **RISK-1.** Widening `instantiation_symbol`'s fall-through arm (R2.1) has
   blast radius across every monomorphized bound word, every `Struct`/`Enum`
   grounding, not just `sized`. Mitigation: R-NFR5 baseline anchor after each
-  phase; if the widening reds unrelated goldens, **stop and escalate per
-  R-NFR1** — there is no map-side fallback (R2.2 is withdrawn, not a narrower
-  alternative).
+  phase; if the widening reds a golden **behaviourally** — a changed program
+  output, a changed diagnostic text, a broken invariant — **stop and escalate
+  per R-NFR1**: there is no map-side fallback (R2.2 is withdrawn, not a
+  narrower alternative). A red that is only a **mono-symbol rename** in a test
+  that pins the symbol string, or in the `tests/qbe_baseline` IL snapshots, is
+  not that: it is the prescribed rendering change arriving where it was
+  predicted to arrive, and `instantiation_symbol`'s own contract is "one
+  source of truth for the checker's table and `IrFunc.name`", never a
+  particular spelling. Update those through the documented path
+  (`REGEN_QBE_BASELINE=1` for the snapshots) after verifying the diff is
+  rename-only; measured at implementation (2026-09-04, Phase 3): four
+  `#[cfg(test)]` assertion strings (`src/check/poly.rs:16349`,
+  `src/ir/driver.rs:1477/1481/1507`) and 34 baseline files, +476/-476, every
+  changed line a `sooth_mono_{render,flush}` symbol, zero structural IL diff.
 - **RISK-2.** The V2 fix could perturb #10's distinct-substitution dispatch
   (F4). Mitigation: R5/G5 keeps #10 green as a per-phase gate.
 - **RISK-3 (`poly.rs` size).** Editing the ~21k-line `poly.rs` again; the split
@@ -592,6 +604,15 @@ independently of their own changes.
   comments (`tests/phase7b_slice4.rs:423-425` and `:485-488`), which narrate
   the falsified matcher-blindness story, to the corrected attribution (operand
   provenance + `instantiation_symbol` injectivity, per the mechanism section).
+  Sanctioned churn (measured at implementation, 2026-09-04): the widened
+  rendering moves every `Struct`/`Enum` grounding's mono symbol, so four
+  `#[cfg(test)]` assertion strings (`src/check/poly.rs:16349`,
+  `src/ir/driver.rs:1477/1481/1507` — test strings, no production line, the
+  dedup loop with zero diff hunks) and the 34 `tests/qbe_baseline/*.ssa`
+  snapshots (regenerated via `REGEN_QBE_BASELINE=1`; +476/-476, every changed
+  line a `sooth_mono_{render,flush}` symbol, zero structural IL diff) are
+  updated with the fix, per RISK-1's behavioural/rename distinction. Error
+  texts are unchanged.
   Exit: G2 and the
   re-pinned slice4 test both print `1\n2` deterministically; the pre-fix flip
   noted only in scratch; the known-flaky pin is deterministically green from
@@ -680,7 +701,8 @@ independently of their own changes.
         "R2.1: widen instantiation_symbol's Type::Struct/Type::Enum fall-through arm (src/ast.rs:2886) to render the StructId/EnumId already carried by the matched Type variant (src/ast.rs:2991-2992) -- no lookup (not struct_instantiation_of/enum_instantiation_of, that is the matcher's own subsystem), no signature change, matching the existing CtorImage arm's GenericId-render approach (:2885; the `GenericId` struct itself is :2521) without importing its lookup mechanism",
         "No change to trait_calls, builtin_overloads, or any IR/lowering file (R-NFR1); the dedup loop at src/ir/driver.rs:350-373 is unmodified and simply stops colliding",
         "Add G2r golden (deferred from Phase 2): once V2 mints two distinct caller-owned groundings, G2r's shared bound word sized collides in instantiation_symbol's fall-through -- measured post-V2 2\\n2 4/6, 1\\n1 2/6; deterministic only after this phase's widening",
-        "Re-pin tests/phase7b_slice4.rs:490 (same_named_ctor_mk_ambiguity_resolves_but_impl_dispatch_still_cross_picks, same shape as G2, different trait/text) from 1\\n1 to deterministic 1\\n2; rename off its dead pre-fix criterion; also rewrite its comments (tests/phase7b_slice4.rs:423-425 and :485-488, currently narrating the falsified find_bound_impl-blindness story) to the corrected attribution (operand provenance + instantiation_symbol injectivity)"
+        "Re-pin tests/phase7b_slice4.rs:490 (same_named_ctor_mk_ambiguity_resolves_but_impl_dispatch_still_cross_picks, same shape as G2, different trait/text) from 1\\n1 to deterministic 1\\n2; rename off its dead pre-fix criterion; also rewrite its comments (tests/phase7b_slice4.rs:423-425 and :485-488, currently narrating the falsified find_bound_impl-blindness story) to the corrected attribution (operand provenance + instantiation_symbol injectivity)",
+        "Sanctioned rename churn from the widened rendering (measured 2026-09-04, per RISK-1): update four #[cfg(test)] assertion strings pinning a mono symbol (src/check/poly.rs:16349; src/ir/driver.rs:1477/1481/1507 -- test strings only, no production line, dedup loop zero hunks) and regenerate the 34 tests/qbe_baseline/*.ssa snapshots via REGEN_QBE_BASELINE=1 (+476/-476, every changed line a sooth_mono_{render,flush} symbol, zero structural IL diff, error texts unchanged)"
       ],
       "goldens": [
         "tests/phase7b_slice9.rs: cross_module_same_shaped_impls_via_named_instantiation_dispatch_each_callers_own_impl (G2, mk variant) -> deterministic 1\\n2 (NEVER assert a run-count ratio, R-NFR3)",
@@ -689,8 +711,8 @@ independently of their own changes.
       "units": [
         "instantiation_symbol_same_rendered_name_different_struct_ids_mints_distinct_symbols"
       ],
-      "exit": "G2 and G2r print 1\\n2 deterministically; re-pinned slice4 test prints 1\\n2 deterministically; pre-fix flip noted only in scratch, not committed; suite fully 3150+N/0 from here on",
-      "notes": "V3 nondeterministic 1\\n1/2\\n2 -> deterministic 1\\n2. One mechanism, one fix site (OQ-2 resolved, R2.2 withdrawn). RISK-1: if the widening reds unrelated goldens, stop and escalate per R-NFR1 -- no map-side fallback."
+      "exit": "G2 and G2r print 1\\n2 deterministically; re-pinned slice4 test prints 1\\n2 deterministically; pre-fix flip noted only in scratch, not committed; the mono-symbol rename churn (test strings + qbe_baseline regen) verified rename-only; suite fully 3150+N/0 from here on",
+      "notes": "V3 nondeterministic 1\\n1/2\\n2 -> deterministic 1\\n2. One mechanism, one fix site (OQ-2 resolved, R2.2 withdrawn). RISK-1: a *behavioural* red (changed output, changed diagnostic text, broken invariant) stops the phase and escalates per R-NFR1 -- no map-side fallback; a mono-symbol rename in a symbol-pinning test or the qbe_baseline snapshots is the prescribed rendering arriving where predicted, and is updated through the documented path after verifying the diff is rename-only."
     },
     {
       "id": 4,

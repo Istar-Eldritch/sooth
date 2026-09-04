@@ -1,7 +1,10 @@
-//! P7b.S9 Phase 2 exit golden: the operand-provenance fix (R1.1a,
+//! P7b.S9 goldens: the operand-provenance fix (R1.1a,
 //! `bare_generated_word_own_module_grounding`, `src/check/terms.rs`) for a bare
 //! generic-ctor call whose single `env` candidate is another module's
-//! eager mint. Styled after `tests/phase7b_slice5.rs`'s `Tree` harness.
+//! eager mint, and the monomorphization-identity fix (R2.1,
+//! `instantiation_symbol`, `src/ast.rs`) for two groundings of one bound word
+//! whose operands render the same name. Styled after
+//! `tests/phase7b_slice5.rs`'s `Tree` harness.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -398,5 +401,94 @@ fn same_named_headers_of_differing_shapes_pack_each_modules_own_field_values() {
         build_and_run(&entry),
         "99\n11\n",
         "both of b's own field values survive the bundle, in b's own field order"
+    );
+}
+
+/// G2 (Phase 3, R2.1/REQ-3): both modules name their own `Widget[i64]`
+/// explicitly through their own `mk`, so provenance is never in question --
+/// each caller already holds its own grounding. What collapsed them is one
+/// stage later: the shared bound word `sized` grounds twice, and
+/// `instantiation_symbol` rendered both groundings' operands by name
+/// (`Widget_i64_`), so lowering's instantiation dedup kept whichever
+/// `CallInst` its randomized `HashMap` iteration reached first and discarded
+/// the other whole -- `trait_calls` map included. Both callers then ran the
+/// surviving grounding's `size`, printing `1\n1` or `2\n2` by build seed
+/// (never asserted: R-NFR3). Post-fix each grounding renders its own
+/// `StructId` and keeps its own specialization.
+///
+/// Same shape as `tests/phase7b_slice4.rs`'s
+/// `cross_module_same_shaped_impls_each_dispatch_their_own_impl` (a different
+/// trait and text, its own fixture -- neither is churned to match the other).
+#[test]
+fn cross_module_same_shaped_impls_via_named_instantiation_dispatch_each_callers_own_impl() {
+    let t = Tree::new("g2-mk");
+    write_manifest(&t);
+    write_sized_trait(&t);
+    for (module, constant) in [("a", "1"), ("b", "2")] {
+        t.write(
+            &format!("{module}.sth"),
+            &format!(
+                "import: intrinsics * ; import: self::f * ;\n\
+                 type: Widget['T] v 'T ;\n\
+                 impl: Sized for Widget : size drop {constant} ; ;\n\
+                 : mk ( i64 -- Widget[i64] ) Widget ;\n\
+                 : run ( i64 -- i64 ) mk sized ;\n\
+                 export: run ;\n"
+            ),
+        );
+    }
+    let entry = t.write(
+        "main.sth",
+        "import: intrinsics * ; import: hosted::show | . | ;\n\
+         import: self::f * ; import: self::a ; import: self::b ;\n\
+         : main ( -- ) 5 a::run . 6 b::run . ;\n",
+    );
+    assert_eq!(
+        build_and_run(&entry),
+        "1\n2\n",
+        "two groundings of one bound word must keep their own specializations"
+    );
+}
+
+/// G2r (Phase 3, R2.1): G1's provenance mirror -- `a` is the eager minter
+/// (its `mk` spells `Widget[i64]`) and `b`'s consumer stays bare -- so it
+/// pins that the first eager mint does not win regardless of caller. Both
+/// halves of the slice are needed to see `1\n2`: pre-Phase-2 it printed a
+/// deterministic `1\n1` (b borrowed a's mint), and with the provenance fix
+/// alone it went nondeterministic, because unlike G1 *both* of its callers
+/// reach `size` through the shared `sized`, which is exactly G2's symbol
+/// collision.
+#[test]
+fn cross_module_same_shaped_impls_eager_minter_wins_regardless_of_caller() {
+    let t = Tree::new("g2r-eager");
+    write_manifest(&t);
+    write_sized_trait(&t);
+    t.write(
+        "a.sth",
+        "import: intrinsics * ; import: self::f * ;\n\
+         type: Widget['T] v 'T ;\n\
+         impl: Sized for Widget : size drop 1 ; ;\n\
+         : mk ( i64 -- Widget[i64] ) Widget ;\n\
+         : run ( i64 -- i64 ) mk sized ;\n\
+         export: run ;\n",
+    );
+    t.write(
+        "b.sth",
+        "import: intrinsics * ; import: self::f * ;\n\
+         type: Widget['T] v 'T ;\n\
+         impl: Sized for Widget : size drop 2 ; ;\n\
+         : run ( i64 -- i64 ) Widget sized ;\n\
+         export: run ;\n",
+    );
+    let entry = t.write(
+        "main.sth",
+        "import: intrinsics * ; import: hosted::show | . | ;\n\
+         import: self::f * ; import: self::a ; import: self::b ;\n\
+         : main ( -- ) 5 a::run . 5 b::run . ;\n",
+    );
+    assert_eq!(
+        build_and_run(&entry),
+        "1\n2\n",
+        "b's bare ctor grounds at b's own header, and its own grounding of sized survives lowering"
     );
 }

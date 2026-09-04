@@ -2881,8 +2881,18 @@ pub fn instantiation_symbol(word: &str, subst: &Subst) -> String {
         // hazard that lifting ctor-target reachability makes reachable. The
         // name stays in the render for readability; the `(idx, module)`
         // identity is what makes it distinct.
+        // P7b.S9 (R2.1): a struct/enum image is keyed on its `StructId`/
+        // `EnumId` for the same reason -- `Module::structs`/`Module::enums`
+        // are whole-program registries, so an id is globally unique, while
+        // `ty.name()` is a rendered name two same-named headers in different
+        // modules both spell `Widget[i64]`. Rendering the name alone made two
+        // groundings of one bound word mint one symbol, and lowering's
+        // instantiation dedup then discarded the second grounding's whole
+        // `CallInst`, picking a dispatch target by `HashMap` iteration order.
         let rendered = match ty {
             Type::CtorImage(gid, name) => format!("c{}m{}_{name}", gid.idx, gid.module),
+            Type::Struct(id, name) => format!("s{}_{name}", id.index()),
+            Type::Enum(id, name) => format!("e{}_{name}", id.index()),
             other => other.name().to_string(),
         };
         parts.push(format!("t{id}_{}", sanitize(&rendered)));
@@ -5400,6 +5410,63 @@ mod tests {
             "the ctor identity rides the symbol: {a}"
         );
         assert!(b.contains("c2m1_Box"), "{b}");
+    }
+
+    /// P7b.S9 (R2.1/REQ-4): two groundings of one bound word whose operands
+    /// render the same name but carry different ids are distinct
+    /// specializations. Pre-fix both minted one symbol and lowering's
+    /// instantiation dedup discarded the second grounding's whole `CallInst`,
+    /// so which impl either caller dispatched fell out of `HashMap`
+    /// iteration order.
+    #[test]
+    fn instantiation_symbol_same_rendered_name_different_struct_ids_mints_distinct_symbols() {
+        let ground = |ty| Subst {
+            ty: vec![(0, ty)],
+            ..Subst::default()
+        };
+        let a = instantiation_symbol(
+            "sized",
+            &ground(Type::Struct(StructId::from_index(2), "Widget[i64]")),
+        );
+        let b = instantiation_symbol(
+            "sized",
+            &ground(Type::Struct(StructId::from_index(3), "Widget[i64]")),
+        );
+        assert_ne!(
+            a, b,
+            "same-named structs of two modules collide on one symbol: {a}"
+        );
+        assert!(a.contains("s2_Widget_i64_"), "the struct id rides it: {a}");
+        assert!(b.contains("s3_Widget_i64_"), "{b}");
+
+        let e = instantiation_symbol(
+            "sized",
+            &ground(Type::Enum(EnumId::from_index(2), "Widget[i64]")),
+        );
+        let f = instantiation_symbol(
+            "sized",
+            &ground(Type::Enum(EnumId::from_index(3), "Widget[i64]")),
+        );
+        assert_ne!(e, f, "the enum twin collides too: {e}");
+        assert!(e.contains("e2_Widget_i64_"), "the enum id rides it: {e}");
+        assert!(f.contains("e3_Widget_i64_"), "{f}");
+        assert_ne!(a, e, "a struct and an enum of one name stay distinct");
+
+        // The `CtorImage` arm's own rendering is unchanged by the widening.
+        assert_eq!(
+            instantiation_symbol(
+                "map",
+                &ground(Type::CtorImage(
+                    GenericId {
+                        is_enum: false,
+                        idx: 2,
+                        module: 1,
+                    },
+                    "Box",
+                )),
+            ),
+            "sooth_mono_map__t0_c2m1_Box"
+        );
     }
 
     /// P7b.S2 (S2-15.f): the non-raising grounding twin rejects the shapes

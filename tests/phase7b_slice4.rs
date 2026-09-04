@@ -412,19 +412,22 @@ import: self::u2 ;
     );
 }
 
-/// Golden #9 (S4-11), post-merge with P7b.S5. Was the S5-boundary marker:
-/// two user modules each declare their own `Widget['T]` plus ctor (identical
-/// i64 payloads), both naming them through f's shared `Functor` -- pinned
-/// (at S4 time) as a byte-identical `mk` type mismatch, because the
-/// generated-ctor env dispatch was a module-blind name+shape first-match.
-/// P7b.S5 Phase 2b's tier policy resolves exactly that ambiguity (each
-/// module's own mint now wins in its own module), so `mk` type-checks in
-/// both -- the marker's own boundary moved, as designed. What's left: `size`
-/// dispatch through `find_bound_impl` is a *different*, still module-blind
-/// registry S5 never touched (tracked as P7b.S9), so both calls silently
-/// resolve to the same impl. Re-pinned to that current output.
+/// Golden #9 (S4-11), post-merge with P7b.S5 and P7b.S9. Was the
+/// S5-boundary marker: two user modules each declare their own `Widget['T]`
+/// plus ctor (identical i64 payloads), both naming them through f's shared
+/// `Functor` -- pinned (at S4 time) as a byte-identical `mk` type mismatch,
+/// because the generated-ctor env dispatch was a module-blind name+shape
+/// first-match. P7b.S5 Phase 2b's tier policy resolves exactly that
+/// ambiguity (each module's own mint wins in its own module), so `mk`
+/// type-checks in both -- the marker's own boundary moved, as designed, and
+/// each caller now dispatches its own `impl:`.
+///
+/// Same shape as P7b.S9's G2
+/// (`cross_module_same_shaped_impls_via_named_instantiation_dispatch_each_callers_own_impl`,
+/// `tests/phase7b_slice9.rs`), a different trait and text: each keeps its own
+/// fixture.
 #[test]
-fn same_named_ctor_mk_ambiguity_resolves_but_impl_dispatch_still_cross_picks() {
+fn cross_module_same_shaped_impls_each_dispatch_their_own_impl() {
     let t = Tree::new("s4-11-same-named-ctors");
     write_hosted_pkg(&t);
     t.write(
@@ -475,19 +478,22 @@ import: self::b ;
 : main ( -- ) 5 a::run . 6 b::run . ;
 ",
     );
-    // Post-merge correction (P7b.S5 landed on `main` after this fence was
-    // written): P7b.S5 Phase 2b's tier policy resolves the `mk` ctor-mint
-    // ambiguity this fixture used to hard-error on (each module's own
-    // `Widget[i64]` mint is now distinguished, so `mk` type-checks in both
-    // `a` and `b`). The build now succeeds -- this is no longer the S5
-    // boundary marker it was pinned as. What replaces it: execution proceeds
-    // to `sized`/`size` trait-impl dispatch, which still module-blindly
-    // cross-picks (`find_bound_impl`'s target-pattern matching, tracked as
-    // P7b.S9) -- both calls silently resolve to `b`'s impl (`1` printed
-    // twice instead of `1` then `2`). Re-pinned to the current, still-buggy
-    // output rather than the now-stale error text; P7b.S9 is the fix.
+    // Post-merge correction (P7b.S5 then P7b.S9 landed on `main` after this
+    // fence was written): P7b.S5 Phase 2b's tier policy resolves the `mk`
+    // ctor-mint ambiguity this fixture used to hard-error on (each module's
+    // own `Widget[i64]` mint is distinguished, so `mk` type-checks in both
+    // `a` and `b`), so this is no longer the S5 boundary marker it was
+    // pinned as. The cross-pick that replaced it was never the trait-impl
+    // matcher's: `match_impl_target_rec` compares header identity
+    // `(idx, module)` and resolves per-module correctly. It was two other
+    // mechanisms, both off the matcher -- operand provenance (a bare ctor
+    // call borrowing another module's eager mint) and monomorphization
+    // identity (`instantiation_symbol` rendering a struct operand by name,
+    // so the two groundings of `sized` minted one symbol and lowering's
+    // dedup discarded one of them). Both are fixed in P7b.S9, and each
+    // caller now dispatches its own impl deterministically.
     let (_binary, out) = build_run_keep_entry(&entry);
-    assert_eq!(out, "1\n1\n");
+    assert_eq!(out, "1\n2\n");
 }
 
 /// Golden #11 (S4-13): a leading variant slot in a quotation annotation is
