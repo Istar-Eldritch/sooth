@@ -232,17 +232,26 @@ fn same_input_different_output_overload_in_one_module_is_rejected_at_declaration
 /// (`resolve_mono_member_call`'s generic-impl branch) is a dead guard --
 /// `poly_env` is built once, whole-program, over the fully `assemble_module`-
 /// flattened `Module` (`src/check.rs:668-706`), so a found impl's member word
-/// is always present in it. Every cross-module attempt at a generic-target
-/// member dispatch is intercepted upstream by `mono_member_no_dispatch_error`
-/// instead, because `find_bound_impl` requires the caller's concrete
-/// instantiation and the impl's target pattern to resolve to the same
-/// registry identity, which the cross-module generic-instantiation gap
-/// (`project_generic_instantiation_cannot_cross_modules`) prevents. This
-/// fixture is the `pa2` probe shape: a mono caller with no bound, in a third
+/// is always present in it.
+///
+/// Post-merge correction (P7b.S4 landed on `main` after this fixture was
+/// written): this exact shape -- a mono caller with no bound, in a third
 /// module, calling a generic-target trait member whose only impl lives in a
-/// second module.
+/// second module -- used to be intercepted upstream by
+/// `mono_member_no_dispatch_error`, because `find_bound_impl` required the
+/// caller's concrete instantiation and the impl's target pattern to resolve
+/// to the same registry identity, which the cross-module generic-
+/// instantiation gap prevented. P7b.S4 fixed that gap (instantiations now key
+/// on the header's declaring module everywhere), so this shape now dispatches
+/// for real -- `main`'s own `Box[i64]` and `a`'s impl target agree on the
+/// same identity, and `usesize` correctly reads back `7`. This is a genuine
+/// improvement, not a regression; the fixture is kept as a *positive*
+/// dispatch golden instead of a `mono_member_no_dispatch_error` witness. The
+/// dead-guard verdict above is unaffected: it never depended on which
+/// programs reach `find_bound_impl` successfully, only on `poly_env` being
+/// whole-program once one is found.
 #[test]
-fn cross_module_colliding_mono_call_is_no_dispatch_error() {
+fn cross_module_generic_target_member_dispatches_since_p7b_s4() {
     let t = Tree::new("s5-p3-mono-unroutable");
     write_manifest(&t);
     t.write(
@@ -265,6 +274,33 @@ fn cross_module_colliding_mono_call_is_no_dispatch_error() {
         "main.sth",
         "import: intrinsics * ;\nimport: hosted::show | . | ;\n\
          import: self::f * ;\nimport: self::a * ;\n\
+         : usesize ( Box[i64] -- i64 ) size ;\n\
+         : main ( -- ) 3 Box usesize . ;\n",
+    );
+    let out = build_and_run(&entry);
+    assert_eq!(out, "7\n");
+}
+
+/// P7b.S5 Phase 3 (R5), real witness (post-merge addition): a mono caller
+/// invoking a trait member where genuinely no `impl:` exists anywhere in the
+/// program for the operand's type. Unlike the fixture above (which P7b.S4's
+/// landing turned into a real dispatch), this shape has no impl to find at
+/// all, so it still reaches `mono_member_no_dispatch_error` for real.
+#[test]
+fn mono_call_with_no_impl_anywhere_is_no_dispatch_error() {
+    let t = Tree::new("s5-p3-no-impl-anywhere");
+    write_manifest(&t);
+    t.write(
+        "f.sth",
+        "import: intrinsics * ;\n\
+         trait: Sized['S] : size ( 'S -- i64 ) ; ;\n\
+         export: Sized ;\n",
+    );
+    let entry = t.write(
+        "main.sth",
+        "import: intrinsics * ;\nimport: hosted::show | . | ;\n\
+         import: self::f * ;\n\
+         type: Box['T] v 'T ;\n\
          : usesize ( Box[i64] -- i64 ) size ;\n\
          : main ( -- ) 3 Box usesize . ;\n",
     );
