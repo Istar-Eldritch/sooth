@@ -340,3 +340,161 @@ record of what the probe round observed and concluded at the time:
 
 The nondeterminism story is now identical across every S9 doc: a build-time
 effect, per-compilation flip, one binary stable on repeat runs.
+
+## Phase-1 verdict (R1.0)
+
+Phase-1 diagnosis gate for [slice9-spec](./slice9-spec.md) REQ-1/R1.0: pin why
+a's own `Widget[i64]` ctor is absent from the candidate set at a's bare
+`Widget` call in `pb2` — **absent-mint (VERDICT A)** vs
+**present-but-filtered (VERDICT B)**. Method: print-only instrumentation
+spike (`S9P1` `eprintln!` traces at `struct_generated_sigs`
+(`src/check/declarations.rs:1824`), check.rs's env build and word loop, the
+single-candidate arm and tier path (`src/check/terms.rs:932`/`:968-991`),
+`mint_fallback_candidates`, `GenericTypes::instantiate_struct`
+(`src/ast.rs:1310`), `resolve_user_bound`/`resolve_mono_member_call`
+(around, never inside, the untouched matcher `match_impl_target`/
+`find_bound_impl`), the `poly.insts.insert` site (`src/check/poly.rs:7374`),
+the `trait_calls` write (`:8663`), and lowering's dedup + dispatch
+(`src/ir/driver.rs:350-373`, `src/ir/func_builder/calls.rs:440`). Every edit
+reverted before this section was written (see Commands).
+
+**VERDICT: A — absent-mint.** a's own `Widget[i64]` grounding is **never
+minted anywhere in the build**. Exactly one `Widget[i64]` instantiation exists
+program-wide — b's, minted at *parse* time (the only `mint-struct` trace line,
+emitted before check's env build; b's `usesize` spells `Widget[i64]`) — and
+**both** bare ctor calls (a's and b's) select that single candidate through
+the **single-candidate arm** (`terms.rs:932`). Nothing filters a's grounding:
+the tier path (`select_overload`, `terms.rs:968-991`) never fires (0
+`tier-select` lines) and `mint_fallback_candidates` never returns a Widget
+candidate (0 non-empty `mint-fallback` lines). There is no a-provenance entry
+to filter — not in the struct registry, not in `env["Widget"]`, not in
+`module.instantiations`. This selects **R1.1a** (registration/application:
+the bare-ctor path must mint/select the instantiation keyed to the caller's
+own resolved header); R1.1b (operand normalization at the `find_bound_impl`
+feed, `src/check/poly.rs:8235`) is moot — there is no a-side operand to
+normalize: the operand reaching dispatch is b's mint, faithfully carrying
+b's provenance `(gi=1, module=4)`, and the matcher dispatches it correctly
+(only b's pattern matches).
+
+### Discriminating evidence
+
+Fixture `/tmp/p7bs9-phase1/pb2` (verbatim S5 pb2: f/a/b/main, unmodified;
+`./main` → `2\n2`, exit 0). pb2 measured deterministic: 16/16 clean rebuilds
+(`2\n2`) and 3/3 instrumented rebuilds — consistent with the spec's mechanism
+section (the per-rebuild flip belongs to the `mk` variant / V3, not pb2).
+
+1. **Mint list: exactly one `Widget[i64]` mint, b's header, parse-time.** The
+   only `mint-struct` line in the whole build (one per
+   `GenericTypes::instantiate_struct`):
+
+   ```text
+   S9P1 mint-struct gi=1 m=4 id=2 name=Widget[i64] args=[Int(IntType { bits: 64, signed: true })]
+   ```
+
+   Registry corroboration at lowering — a's header is `gi=0`/module 3, b's is
+   `gi=1`/module 4, and the whole-program struct registry holds only b's mint
+   (`Widget[i64]__m3` exists nowhere):
+
+   ```text
+   S9P1 lower-generic-headers gi=0 name=Widget m3
+   S9P1 lower-generic-headers gi=1 name=Widget m4
+   S9P1 lower-structs[2] name=Widget[i64]__m4 m4
+   ```
+
+   a's own impl member word exists as a word (`S9P1 word-check w20
+   name=size;Sized;2;Widget['T0]__m3 m3 poly=true`) but is never
+   monomorphized and never dispatched to — no `sooth_mono_size_..._m3__t0_i64`
+   is minted in this build.
+
+2. **env at check start: one candidate, b's.**
+
+   ```text
+   S9P1 env-build Widget: (sym=Widget[i64]__m4 m4)
+   ```
+
+3. **Each bare ctor call sees that single candidate and takes it in the
+   single-candidate arm; the tier path never runs.** a::run is checked as w21
+   (`Widget` at line 7, col 22, module 3); b::run as w24 (line 8, col 22,
+   module 4):
+
+   ```text
+   S9P1 single-cand name=Widget span=(7,22,m3) fallback=false chosen=(sym=Widget[i64]__m4 m4)
+   S9P1 single-cand name=Widget span=(8,22,m4) fallback=false chosen=(sym=Widget[i64]__m4 m4)
+   ```
+
+   Note even b's own bare ctor goes through the same env-single-candidate
+   borrow — the eager spelling decides whose mint both callers get (the
+   recon's mk-variant trace above shows the complementary case: with both
+   sides spelled, two mints exist and `ctor-select` picks tier-1 correctly per
+   caller — selection is fine once two candidates exist; a's candidate is
+   simply never minted).
+
+4. **Both dispatches therefore carry b's provenance and pick b's impl.** a's
+   `sized` grounding (poly call at span (7,29,m3)) and b's mono member call
+   (`size` inside `usesize`, span (7,34,m4)) both dispatch on the identical
+   operand `Struct(StructId(2), "Widget[i64]")` — b's mint — and both select
+   impl_idx=1 = b's impl:
+
+   ```text
+   S9P1 dispatch name=sized__m2 span=(7,29,m3) ty=Struct(StructId(2), "Widget[i64]")
+   S9P1 dispatch winner impl_idx=1 impl_m=4 subst_ty=[(0, Int(IntType { bits: 64, signed: true }))]
+   S9P1 mono-member-dispatch name=size span=(7,34,m4) operand=Struct(StructId(2), "Widget[i64]") impl_idx=1 impl_m=4
+   ```
+
+5. **The instantiation table has no a-provenance entry.**
+   `module.instantiations` holds exactly one Widget-related record — a's
+   `sized` CallInst, whose θ grounds `'S` to *b's* mint — plus b's mono
+   member-call record; both key on `StructId(2)`:
+
+   ```text
+   S9P1 inst-insert span=(7,29,m3) callee=sized__m2 symbol=sooth_mono_sized__m2__t0_Widget_i64_ subst_ty=[(0, Struct(StructId(2), "Widget[i64]"))]
+   S9P1 lower-insts span=(7,29,m3) callee=sized__m2 sym=sooth_mono_sized__m2__t0_Widget_i64_ trait_calls=[(3,34,m2)->sooth_mono_size_Sized_2_Widget__T0___m4__t0_i64]
+   S9P1 inst-insert span=(7,34,m4) callee=size;Sized;2;Widget['T0]__m4 symbol=sooth_mono_size_Sized_2_Widget__T0___m4__t0_i64 subst_ty=[(0, Int(IntType { bits: 64, signed: true }))]
+   ```
+
+   Both callers lowered against b's size body: the `size` call inside f's
+   `sized` dispatched via `S9P1 lower-dispatch span=(3,34,m2) ->
+   sooth_mono_size_Sized_2_Widget__T0___m4__t0_i64`, and b's `usesize`
+   recorded `S9P1 mono-member-record span=(7,34,m4) ->
+   size;Sized;2;Widget['T0]__m4` (the `drop 2` impl). Hence `2\n2`.
+
+6. **No dedup collision in pb2** (V3 is unreachable here): lowering's dedup
+   kept `sized`'s single grounding (`S9P1 dedup callee=sized__m2 symbol=
+   sooth_mono_sized__m2__t0_Widget_i64_ KEPT`; the only other dup-discarded
+   lines are the unrelated `flush` monomorph). pb2's `2\n2` is the pure V2
+   story.
+
+### Fix site (selected)
+
+**R1.1a** (registration/application): make the bare-ctor candidate
+registration/application path ground at the caller's own resolved header —
+mint (or select) the instantiation keyed to the caller's own header when none
+exists for it — so a's call sees a's own `Widget[i64]` candidate. The
+decisive selection point measured here is the **single-candidate arm**
+(`src/check/terms.rs:932`, fed by the env built from `struct_generated_sigs`,
+`src/check/declarations.rs:1824`), not the tier path
+(`src/check/terms.rs:968-991`), which never runs in this shape.
+
+### Commands run
+
+```sh
+cd /root/code/ordfruma/sooth-worktrees/p7b-s9
+git status --porcelain        # clean pre-spike
+cargo build                   # exit 0 (with S9P1 spike in src/)
+cd /tmp/p7bs9-phase1/pb2
+/root/code/ordfruma/sooth-worktrees/p7b-s9/target/debug/sooth build main.sth \
+  >run.out 2>trace.err        # exit 0; ./main → 2\n2, exit 0
+grep -c 'tier-select' trace.err    # 0
+grep -c 'mint-fallback' trace.err  # 0  (mint_fallback_candidates never
+                                   #  returned a Widget candidate)
+grep 'mint-struct' trace.err       # the single line quoted in (1)
+grep 'single-cand' trace.err       # the two lines quoted in (3)
+cd /root/code/ordfruma/sooth-worktrees/p7b-s9
+git checkout -- src/          # spike reverted
+git status --porcelain        # empty (then only this file, post-append)
+git diff --stat               # only docs/roadmap/P7b/slice9-probes.md
+cargo build                   # exit 0 on the clean tree
+```
+
+Raw captures (ephemeral): `/tmp/p7bs9-phase1/pb2-trace.err` (234 lines),
+`pb2-run.out`.
