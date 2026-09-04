@@ -928,6 +928,33 @@ fn check_term(
                     }
                 },
             };
+            // P7b.S9 Phase 2 (R1.1a): the single-candidate case may be
+            // another module's eager mint of a same-named-but-distinct
+            // generic header (Phase-1 verdict, slice9-probes.md -- a's own
+            // instantiation is simply never minted, so there is never a
+            // second candidate here to filter). Ground at the caller's own
+            // header before taking the single-candidate arm, never silently
+            // substituting the borrowed mint.
+            let ground_storage;
+            let candidates: &[Overload] = if let [only] = candidates {
+                match bare_ctor_own_module_grounding(
+                    only,
+                    name,
+                    span.module,
+                    ctx,
+                    arrays,
+                    cells,
+                    refs,
+                ) {
+                    Some(g) => {
+                        ground_storage = g;
+                        std::slice::from_ref(&ground_storage)
+                    }
+                    None => candidates,
+                }
+            } else {
+                candidates
+            };
             let chosen = match candidates {
                 [only] => {
                     // P7b.S3 (S3-1.e): inside a combinator splice, a generated
@@ -1414,6 +1441,65 @@ pub(super) fn eliminator_arm_names_no_eliminator_error(
         in_word(ctx),
         span.line,
     )
+}
+
+/// P7b.S9 Phase 2 (R1.1a): a bare ctor call's single `env` candidate may be
+/// another module's eager mint of a same-named-but-distinct generic header --
+/// see the Phase-1 verdict (`slice9-probes.md`): `a`'s own instantiation is
+/// never minted at all when only `b` spells the concrete type explicitly, so
+/// `env` never holds more than the one, borrowed, candidate to filter. When
+/// the caller's own module declares its own generic struct header under
+/// `name`, distinct from the candidate's owning header, mint (or find) the
+/// caller's own instantiation at the same concrete arguments and hand back
+/// that `Overload` instead of the borrowed one. `None` when there is nothing
+/// to ground against (an ordinary concrete struct, a non-struct-ctor word, or
+/// a caller with no header of its own under this name -- Phase 4's D3
+/// territory) -- the existing candidate is used unchanged.
+fn bare_ctor_own_module_grounding(
+    only: &Overload,
+    name: &str,
+    caller_module: u32,
+    ctx: &Ctx,
+    arrays: &mut Vec<ArrayDecl>,
+    cells: &mut Vec<OwnedCellDecl>,
+    refs: &mut Vec<RefDecl>,
+) -> Option<Overload> {
+    let Some(Type::Struct(id, _)) = only.sig.outputs.first().copied() else {
+        return None;
+    };
+    let cell = ctx.generics()?;
+    let mut guard = cell.borrow_mut();
+    let (gi, owning_module, args, lens) = {
+        let (gi, m, a, l) = guard.struct_instantiation_of(id)?;
+        (gi, m, a.to_vec(), l.to_vec())
+    };
+    if owning_module == caller_module {
+        return None;
+    }
+    let own_idx = guard.find_struct(name, caller_module)?;
+    if own_idx == gi {
+        return None;
+    }
+    let regs = crate::ast::MutRegistries {
+        structs: ctx.structs(),
+        enums: ctx.enums(),
+        arrays,
+        cells,
+        refs,
+    };
+    let ty = guard.instantiate_struct(own_idx, &args, &lens, caller_module, regs);
+    let Type::Struct(new_id, _) = ty else {
+        return None;
+    };
+    let symbol = guard.struct_decl(new_id)?.name.clone();
+    Some(Overload {
+        sig: Sig {
+            inputs: only.sig.inputs.clone(),
+            outputs: vec![ty],
+        },
+        symbol,
+        module: caller_module,
+    })
 }
 
 /// P7.S11-follow (Part 4): a shared `env`-miss fallback for the generated
@@ -2681,5 +2767,127 @@ mod tests {
         let stack = vec![Slot::computed(Type::Enum(unminted_id, "Result[i64]"))];
         let prov = Provenance::default();
         assert_eq!(scrutinee_enum_id_of_family(&stack, &prov, &[], &ctx), None);
+    }
+
+    /// P7b.S9 Phase 2 (R1.1a): a generic struct header declared separately in
+    /// two modules under the same bare name, mirroring `pb2`'s `a`/`b`
+    /// `Widget['T]`.
+    fn generic_struct_decl(name: &str, module: u32) -> crate::ast::GenericStructDecl {
+        crate::ast::GenericStructDecl {
+            name: name.to_string(),
+            ty_var_names: vec!["'T".to_string()],
+            ty_kinds: Vec::new(),
+            len_var_names: vec![],
+            fields: vec![("v".to_string(), PolyType::Var(0))],
+            span: Span::default(),
+            module,
+        }
+    }
+
+    /// P7b.S9 Phase 2 (R1.1a, happy path): the Phase-1 verdict's exact shape --
+    /// two modules each declare their own `Widget['T]` header, only one has
+    /// been eagerly minted (module 4's), and the caller (module 3) is
+    /// grounding a bare `Widget` ctor call. The caller's own header must be
+    /// minted (or found) and used, never the borrowed candidate.
+    #[test]
+    fn bare_ctor_operand_provenance_is_callers_own_header_not_a_borrowed_mint() {
+        let structs: Vec<StructDecl> = Vec::new();
+        let enums: Vec<EnumDecl> = Vec::new();
+        let mut generics = GenericTypes::with_bases(structs.len(), enums.len());
+        generics.structs.push(generic_struct_decl("Widget", 3));
+        generics.structs.push(generic_struct_decl("Widget", 4));
+        let mut scratch = ScratchRegs::default();
+        let borrowed = generics.instantiate_struct(1, &[Type::I64], &[], 4, scratch.regs());
+        let Type::Struct(borrowed_id, _) = borrowed else {
+            panic!("expected a Type::Struct")
+        };
+        let only = Overload {
+            sig: Sig {
+                inputs: vec![Type::I64],
+                outputs: vec![borrowed],
+            },
+            symbol: "Widget[i64]".to_string(),
+            module: 4,
+        };
+        let cell = RefCell::new(generics);
+        let word = crate::test_support::bare_word("run", 3);
+        let ctx = word_ctx(
+            &word,
+            &structs,
+            &enums,
+            &[],
+            None,
+            &CombinatorIndex::new(),
+            Some(&cell),
+        );
+        let mut arrays = Vec::new();
+        let mut cells = Vec::new();
+        let mut refs = Vec::new();
+        let grounded = bare_ctor_own_module_grounding(
+            &only,
+            "Widget",
+            3,
+            &ctx,
+            &mut arrays,
+            &mut cells,
+            &mut refs,
+        )
+        .expect("the caller's own module declares its own header, so this must ground");
+        assert_eq!(
+            grounded.module, 3,
+            "the grounded candidate's module must be the caller's own, not the borrowed mint's"
+        );
+        let Type::Struct(grounded_id, _) = grounded.sig.outputs[0] else {
+            panic!("expected a Type::Struct")
+        };
+        assert_ne!(
+            grounded_id, borrowed_id,
+            "the caller must get its own instantiation, never the borrowed module's id"
+        );
+    }
+
+    /// P7b.S9 Phase 2 (R1.1a, edge case): the caller's own module already
+    /// owns the single candidate (the ordinary, non-cross-module case) --
+    /// nothing to ground, the borrowed candidate is used unchanged.
+    #[test]
+    fn bare_ctor_own_module_grounding_none_when_caller_already_owns_the_mint() {
+        let structs: Vec<StructDecl> = Vec::new();
+        let enums: Vec<EnumDecl> = Vec::new();
+        let mut generics = GenericTypes::with_bases(structs.len(), enums.len());
+        generics.structs.push(generic_struct_decl("Widget", 3));
+        let mut scratch = ScratchRegs::default();
+        let minted = generics.instantiate_struct(0, &[Type::I64], &[], 3, scratch.regs());
+        let only = Overload {
+            sig: Sig {
+                inputs: vec![Type::I64],
+                outputs: vec![minted],
+            },
+            symbol: "Widget[i64]".to_string(),
+            module: 3,
+        };
+        let cell = RefCell::new(generics);
+        let word = crate::test_support::bare_word("run", 3);
+        let ctx = word_ctx(
+            &word,
+            &structs,
+            &enums,
+            &[],
+            None,
+            &CombinatorIndex::new(),
+            Some(&cell),
+        );
+        let mut arrays = Vec::new();
+        let mut cells = Vec::new();
+        let mut refs = Vec::new();
+        assert!(bare_ctor_own_module_grounding(
+            &only,
+            "Widget",
+            3,
+            &ctx,
+            &mut arrays,
+            &mut cells,
+            &mut refs,
+        )
+        .is_none());
     }
 }

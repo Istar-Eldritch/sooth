@@ -148,8 +148,13 @@ provenance (spec R2.1), not the rendered name alone.
 
 Provenance mirror of G1: `f.sth` identical to G1's; `a` gets the `mk` (eager
 `Widget[i64]`), `b`'s consumer stays bare (`Widget sized`, no annotation) —
-isolates "first eager mint wins" without G2's `instantiation_symbol`-collision
-noise.
+isolates "first eager mint wins". CORRECTION (measured at implementation,
+2026-09-04): this isolation does not hold end-to-end — once the V2 fix mints
+the two distinct caller-owned groundings, both of G2r's calls go through the
+shared bound word `sized`, whose two groundings collide in
+`instantiation_symbol`'s fall-through (the V3 defect), so post-V2-fix G2r is
+nondeterministic (`2\n2` 4/6, `1\n1` 2/6). Its golden therefore lands with
+Phase 3 (after R2.1), not Phase 2; G1 remains Phase 2's end-to-end pin.
 
 ```sth
 // a.sth

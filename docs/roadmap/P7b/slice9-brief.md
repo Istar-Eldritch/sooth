@@ -297,7 +297,10 @@ Two live defects, one ruled-out hypothesis, one collapsed pair:
   `1\n2`. The flakiness itself is the pre-fix evidence.
 - **G2r** `..._eager_minter_wins_regardless_of_caller` — provenance mirror
   (a eager / b bare); before deterministic `1\n1` (5 cycles) — the cleanest
-  isolated V2 witness; after `1\n2`. Recommended primary regression pin.
+  isolated V2 witness; after `1\n2`. Primary regression pin. Implementation note
+  (2026-09-04): post-V2-fix G2r is nondeterministic (`2\n2` 4/6, `1\n1` 2/6) — its
+  two distinct caller-owned groundings collide in `instantiation_symbol`'s
+  fall-through (the V3 defect), so the golden lands with Phase 3, not Phase 2.
 - **G3** `duplicate_blanket_impl_across_modules_is_a_declared_error` — pins
   the existing declaration-time duplicate error text (measured: `error:
   duplicate \`impl:\` for \`'T\` (line 3, col 1); first declared at line 3, col

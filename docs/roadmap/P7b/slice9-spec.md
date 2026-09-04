@@ -372,7 +372,7 @@ the record of what the review round originally (incorrectly) believed.
 | --- | --- | --- | --- |
 | **G1** | `cross_module_same_shaped_impls_dispatch_each_callers_own_impl` (verbatim `pb2`) | `2\n2`, exit 0, deterministic (3 cycles) | `1\n2` |
 | **G2** | `..._via_named_instantiation_dispatch_each_callers_own_impl` (`mk` variant) | **nondeterministic** `1\n1`/`2\n2` (8/2 paper, 6/4 probe — never asserted) | deterministic `1\n2` |
-| **G2r** | `..._eager_minter_wins_regardless_of_caller` (a eager / b bare — cleanest V2 witness; **primary provenance regression pin**) | `1\n1`, exit 0, deterministic (5 cycles) | `1\n2` |
+| **G2r** | `..._eager_minter_wins_regardless_of_caller` (a eager / b bare — cleanest V2 witness; **primary provenance regression pin**) | `1\n1`, exit 0, deterministic (5 cycles) | `1\n2` — **golden lands in Phase 3, not Phase 2**: once V2 mints two distinct caller-owned groundings, G2r's shared bound word hits the V3 symbol collision (measured post-V2: `2\n2` 4/6, `1\n1` 2/6 — nondeterministic until R2.1) |
 | **G3** | `duplicate_blanket_impl_across_modules_is_a_declared_error` | `error: duplicate \`impl:\` for \`'T\` (line 3, col 1); first declared at line 3, col 1`, exit 1 | unchanged (regression pin) |
 | **G4** | `third_module_mono_caller_is_not_silently_cross_picked` | silent `2`, exit 0 (3 cycles) | `build_error` per R3's Phase-4 determination (outcome (a) or (b)) |
 | **G5** | #10 (`tests/phase7b_slice2.rs:655`); S5 tier-1 (`tests/phase7b_slice5.rs:100`) | `1\n2`; `15\n25` | unchanged |
@@ -506,20 +506,28 @@ independently of their own changes.
   together with Phase 2. Instrumentation is spike-only: revert it before commit,
   no src diff in this phase. No golden. Exit: the verdict is recorded and
   selects R1.1a vs R1.1b; no src change lands; suite unaffected by this phase.
-- **Phase 2 — V2 fix + G1/G2r goldens.** Implement R1.1 at the site Phase 1
+- **Phase 2 — V2 fix + G1 golden (G2r deferred to Phase 3).** Implement R1.1 at the site Phase 1
   chose: a bare ctor grounds at the caller's own header, never borrowing another
-  module's mint. Add G1 (`pb2` → `1\n2`) and G2r (eager-mirror → `1\n2`, primary
-  provenance pin) to `tests/phase7b_slice9.rs`, plus
-  `bare_ctor_operand_provenance_is_callers_own_header_not_a_borrowed_mint`.
-  Matcher untouched (R-NFR2). Exit: G1 + G2r green; #10 and S5 tier-1 unchanged;
-  suite +2 green (known-flaky test still not yet re-pinned — that's Phase 3).
-- **Phase 3 — V3 fix + G2 golden + flaky-test re-pin.** Implement R2.1: widen
+  module's mint. Add G1 (`pb2` → `1\n2`) to `tests/phase7b_slice9.rs`, plus
+  `bare_ctor_operand_provenance_is_callers_own_header_not_a_borrowed_mint` and the helper's
+  None-path unit `bare_ctor_own_module_grounding_none_when_caller_already_owns_the_mint`.
+  **G2r moves to Phase 3** (measured at implementation, 2026-09-04): the earlier claim that
+  G2r isolates V2 is falsified — once V2 mints the two distinct caller-owned groundings,
+  G2r's shared bound word `sized` collides in `instantiation_symbol`'s fall-through arm (the
+  V3 defect) and runs nondeterministically (`2\n2` 4/6, `1\n1` 2/6) until R2.1 lands. G1
+  dodges the collision only because its b-side dispatches `size` as a direct mono member
+  call; provenance still gets its Phase-2 pin at unit level.
+  Matcher untouched (R-NFR2). Exit: G1 green deterministically (5+ rebuild cycles); #10 and
+  S5 tier-1 unchanged; suite +3 green (known-flaky test still not yet re-pinned — that's
+  Phase 3, where G2r's golden also lands).
+- **Phase 3 — V3 fix + G2/G2r goldens + flaky-test re-pin.** Implement R2.1: widen
   `instantiation_symbol`'s `Type::Struct`/`Type::Enum` fall-through arm
   (`src/ast.rs:2886`) to render the id already carried by the matched variant
   (no lookup, no signature change — see R2.1), so the shared bound word's two
   groundings mint distinct symbols and lowering's dedup
   (`src/ir/driver.rs:350-373`) keeps both. Add G2 (`mk` variant → `1\n2`, no
-  ratio assertion — R-NFR3) plus
+  ratio assertion — R-NFR3) and G2r (eager-mirror → `1\n2`, deferred from Phase 2 —
+  post-V2 it exposes this phase's V3 collision until R2.1 lands) plus
   `instantiation_symbol_same_rendered_name_different_struct_ids_mints_distinct_symbols`.
   **Re-pin** `tests/phase7b_slice4.rs`'s
   `same_named_ctor_mk_ambiguity_resolves_but_impl_dispatch_still_cross_picks`
@@ -571,38 +579,39 @@ independently of their own changes.
     },
     {
       "id": 2,
-      "name": "V2 fix (operand provenance) + G1/G2r goldens",
+      "name": "V2 fix (operand provenance) + G1 golden (G2r deferred to Phase 3)",
       "requirements": ["REQ-2", "REQ-8", "REQ-10"],
       "changes": [
         "Implement R1.1 at the Phase-1-chosen site: bare ctor grounds at caller's own resolved header (src/parser.rs:7101 module-scoped resolution precedent); never substitute another module's eager mint",
         "Matcher and find_bound_impl scan untouched (R-NFR2/R4)"
       ],
       "goldens": [
-        "tests/phase7b_slice9.rs: cross_module_same_shaped_impls_dispatch_each_callers_own_impl (G1, pb2) -> 1\\n2",
-        "tests/phase7b_slice9.rs: cross_module_same_shaped_impls_eager_minter_wins_regardless_of_caller (G2r, primary provenance pin) -> 1\\n2"
+        "tests/phase7b_slice9.rs: cross_module_same_shaped_impls_dispatch_each_callers_own_impl (G1, pb2) -> 1\\n2"
       ],
       "units": [
         "bare_ctor_operand_provenance_is_callers_own_header_not_a_borrowed_mint"
       ],
-      "exit": "G1 + G2r print 1\\n2 deterministically; #10 stays 1\\n2, S5 tier-1 stays 15\\n25; fmt/clippy/test green; suite +2 (known-flaky test not yet re-pinned, see Phase 3)",
-      "notes": "V2 deterministic pb2 2\\n2 -> 1\\n2. Fix site per REQ-1 (R1.1a or R1.1b)."
+      "exit": "G1 prints 1\\n2 deterministically (5+ rebuild cycles); #10 stays 1\\n2, S5 tier-1 stays 15\\n25; fmt/clippy/test green; suite +3 (G1 + two unit tests; known-flaky test not yet re-pinned, see Phase 3); G2r golden deferred to Phase 3 -- once V2 mints two distinct caller-owned groundings, G2r's shared bound word exposes the V3 symbol collision (measured post-V2: 2\\n2 4/6, 1\\n1 2/6)",
+      "notes": "V2 deterministic pb2 2\\n2 -> 1\\n2. Phase-1 verdict selected R1.1a (absent-mint; decisive site = single-candidate arm src/check/terms.rs:932; tier path never runs). The spec's earlier claim that G2r isolates V2 was falsified at implementation: post-V2, G2r's shared bound word collides in instantiation_symbol's fall-through until R2.1 (Phase 3)."
     },
     {
       "id": 3,
-      "name": "V3 fix (instantiation_symbol widening) + G2 golden + flaky-test re-pin",
+      "name": "V3 fix (instantiation_symbol widening) + G2/G2r goldens + flaky-test re-pin",
       "requirements": ["REQ-3", "REQ-4", "REQ-5", "REQ-10"],
       "changes": [
         "R2.1: widen instantiation_symbol's Type::Struct/Type::Enum fall-through arm (src/ast.rs:2886) to render the StructId/EnumId already carried by the matched Type variant (src/ast.rs:2991-2992) -- no lookup (not struct_instantiation_of/enum_instantiation_of, that is the matcher's own subsystem), no signature change, matching the existing CtorImage arm's GenericId-render approach (:2885; the `GenericId` struct itself is :2521) without importing its lookup mechanism",
         "No change to trait_calls, builtin_overloads, or any IR/lowering file (R-NFR1); the dedup loop at src/ir/driver.rs:350-373 is unmodified and simply stops colliding",
+        "Add G2r golden (deferred from Phase 2): once V2 mints two distinct caller-owned groundings, G2r's shared bound word sized collides in instantiation_symbol's fall-through -- measured post-V2 2\\n2 4/6, 1\\n1 2/6; deterministic only after this phase's widening",
         "Re-pin tests/phase7b_slice4.rs:490 (same_named_ctor_mk_ambiguity_resolves_but_impl_dispatch_still_cross_picks, same shape as G2, different trait/text) from 1\\n1 to deterministic 1\\n2; rename off its dead pre-fix criterion; also rewrite its comments (tests/phase7b_slice4.rs:423-425 and :485-488, currently narrating the falsified find_bound_impl-blindness story) to the corrected attribution (operand provenance + instantiation_symbol injectivity)"
       ],
       "goldens": [
-        "tests/phase7b_slice9.rs: cross_module_same_shaped_impls_via_named_instantiation_dispatch_each_callers_own_impl (G2, mk variant) -> deterministic 1\\n2 (NEVER assert a run-count ratio, R-NFR3)"
+        "tests/phase7b_slice9.rs: cross_module_same_shaped_impls_via_named_instantiation_dispatch_each_callers_own_impl (G2, mk variant) -> deterministic 1\\n2 (NEVER assert a run-count ratio, R-NFR3)",
+        "tests/phase7b_slice9.rs: cross_module_same_shaped_impls_eager_minter_wins_regardless_of_caller (G2r, deferred from Phase 2) -> deterministic 1\\n2 (NEVER assert a run-count ratio, R-NFR3)"
       ],
       "units": [
         "instantiation_symbol_same_rendered_name_different_struct_ids_mints_distinct_symbols"
       ],
-      "exit": "G2 prints 1\\n2 deterministically; re-pinned slice4 test prints 1\\n2 deterministically; pre-fix flip noted only in scratch, not committed; suite fully 3150+N/0 from here on",
+      "exit": "G2 and G2r print 1\\n2 deterministically; re-pinned slice4 test prints 1\\n2 deterministically; pre-fix flip noted only in scratch, not committed; suite fully 3150+N/0 from here on",
       "notes": "V3 nondeterministic 1\\n1/2\\n2 -> deterministic 1\\n2. One mechanism, one fix site (OQ-2 resolved, R2.2 withdrawn). RISK-1: if the widening reds unrelated goldens, stop and escalate per R-NFR1 -- no map-side fallback."
     },
     {
