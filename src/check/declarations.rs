@@ -442,9 +442,18 @@ fn member_inputs_nest_trait_var(member: &TraitMember) -> bool {
 /// actually nest the trait var under a composite shape -- it is advice about
 /// that specific near-miss, not part of the spec's pinned S2-15.a text.
 fn nested_receiver_member_error(decl: &TraitDecl, member: &TraitMember) -> String {
+    // The trait header var is always var 0 of each member's sig, per the
+    // parser's `debug_assert_eq!(id, 0, ...)` at src/parser.rs:3931.
+    let head = member
+        .sig
+        .ty_var_names
+        .first()
+        .map(String::as_str)
+        .unwrap_or("'F");
+    let arg = if head == "'T" { "'U" } else { "'T" };
     let mut msg = format!(
         "error: trait member `{}` of `{}` (line {}, col {}) has no input for a call to dispatch on \
-         (expected the trait's variable `'F` bare or heading an application like `'F['T]`)",
+         (expected the trait's variable `{head}` bare or heading an application like `{head}[{arg}]`)",
         member.name, decl.name, member.span.line, member.span.col
     );
     if member_inputs_nest_trait_var(member) {
@@ -3872,7 +3881,7 @@ mod tests {
             "{err}"
         );
         assert!(
-            err.contains("heading an application like `'F['T]`"),
+            err.contains("heading an application like `'T['U]`"),
             "the expected shape is named in the parenthetical: {err}"
         );
         assert!(
@@ -3881,6 +3890,28 @@ mod tests {
         );
         // Located at the member, not the trait header (S2-15.a's position).
         assert!(err.contains("line 1, col 19"), "member position: {err}");
+    }
+
+    #[test]
+    fn nested_receiver_member_error_interpolates_a_non_t_header_var() {
+        let err =
+            trait_check_src("trait: Show['G] : sum ( array[ 'G 4 ] -- i64 ) ; ;").unwrap_err();
+        assert!(
+            err.contains("heading an application like `'G['T]`")
+                && err.contains("expected the trait's variable `'G` bare"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn nested_receiver_member_error_uses_u_placeholder_when_header_var_is_t() {
+        let err =
+            trait_check_src("trait: Show['T] : sum ( array[ 'T 4 ] -- i64 ) ; ;").unwrap_err();
+        assert!(
+            err.contains("heading an application like `'T['U]`")
+                && err.contains("expected the trait's variable `'T` bare"),
+            "{err}"
+        );
     }
 
     #[test]
