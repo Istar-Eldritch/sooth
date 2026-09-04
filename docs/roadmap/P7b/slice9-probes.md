@@ -12,7 +12,11 @@ ephemeral.
 ## Baseline (P6)
 
 `cargo test --no-fail-fast` at HEAD `600bc1b`: **82 test binaries, 3150 tests
-passed, 0 failed** (~40s). Full log: `/tmp/p7bs9-probes/p6-full.log`.
+passed, 0 failed** (~40s). Full log: `/tmp/p7bs9-probes/p6-full.log`. **Round-1
+review correction:** this run passed by luck — `tests/phase7b_slice4.rs:427-490`
+is flaky (G2's same-shape twin — different trait and text — hard-pinned to the
+pre-fix coin-flip) and reds
+~3/8 on rerun; see the errata below and `slice9-spec.md`'s R-NFR5.
 
 ## Verbatim log
 
@@ -285,6 +289,7 @@ S9PROBE   winner impl_idx=1 winner.module=4
 
 `cargo test --no-fail-fast` at HEAD `600bc1b`: **82 test binaries, 3150 tests
 passed, 0 failed**, ~40s wall time. Full log: `/tmp/p7bs9-probes/p6-full.log`.
+See the errata below: this run passed by luck, one test is flaky.
 
 ### 5. Check order
 
@@ -294,3 +299,44 @@ which is exactly why the same binary flips between `1 1` and `2 2` across
 repeated invocations with no source change. `pb2` (only one caller of `sized`
 in the whole program) has no such race and is fully deterministic; the `mk`
 variant (two callers grounding the same shared `sized` specialization) does.
+
+## Errata (round-1 review)
+
+Three corrections to the verbatim log/verdict above, left untouched as the
+record of what the probe round observed and concluded at the time:
+
+1. **The "P4: clean binary, 10x mkvar" block and §5's conclusion ("the same
+   binary flips between `1 1` and `2 2` across repeated invocations with no
+   source change") are mislabelled.** The series was rebuild+run cycles, not
+   same-binary reruns — round-1 review built the mk-variant fixture directly
+   and measured: one built binary is **stable** across 5 repeat runs (checked
+   on two separately-built binaries, one landing `1\n1`, one landing `2\n2`,
+   each stable on its own 5 reruns); only *rebuilding* flips the outcome
+   (6/8 `1\n1`, 2/8 `2\n2` across 8 rebuilds). The nondeterminism is a
+   build-time effect, confirmed identically by the paper round's "rebuild+run
+   cycles" framing.
+2. **Every exit code in this log for an error case reads `exit=0`; this is a
+   harness artifact, not the compiler's behavior.** Round-1 review built the
+   G3 duplicate-impl fixture directly: `sooth build main2.sth; echo $?` →
+   `exit=1`. Treat every `exit=0` above an `error:` line in this log as `1`.
+3. **The H1 mechanism interpretation (§2: `trait_calls.insert(ob.span,
+   symbol)` as "last-writer-wins" across two groundings sharing one span) is
+   superseded.** `trait_calls` is a `HashMap<Span, String>` created fresh per
+   instantiation (`src/check/poly.rs:7235`) and moved onto that
+   instantiation's own `CallInst` (`:7384`; field `CallInst.trait_calls`,
+   `src/ast.rs:2808`) — the two decisive trace lines quoted above ("two
+   *correct*, distinct `resolve_user_bound` writes—for the same `ob.span`")
+   are exactly this: two separate writes into two separate maps, not one
+   overwrite. The actual collapse is one stage later, in lowering's
+   instantiation dedup (`src/ir/driver.rs:350-373`): a `HashSet<String>` keyed
+   on `instantiation_symbol(&inst.callee, &inst.subst)`, iterating a
+   randomized `HashMap`; `instantiation_symbol`'s `Type::Struct`/`Type::Enum`
+   fall-through arm (`src/ast.rs:2886`) renders only the type's name, so both
+   groundings mint the identical symbol and `HashSet::insert` keeps only the
+   first `CallInst` reached — discarding the other grounding's `CallInst`,
+   `trait_calls` map included, whole. See the adjudicated mechanism in
+   [slice9-spec](./slice9-spec.md) and [slice9-brief](./slice9-brief.md)
+   (V3/F5/F5b).
+
+The nondeterminism story is now identical across every S9 doc: a build-time
+effect, per-compilation flip, one binary stable on repeat runs.
