@@ -771,6 +771,18 @@ verdicts recorded; the false doc comment corrected; legitimate intra-module
 overloading unregressed; tier 3's vacuity documented and unit-witnessed; full suite
 green.
 
+> **Post-ship correction (review round 1, 260904):** `pb2`'s cross-pick is *not* gone.
+> The tier policy this phase built governs `env`/`select_overload` ctor-construction
+> selection only; `pb2`'s actual collision is in `find_bound_impl`'s trait-impl target
+> matching (`poly.rs:8218`), a separate, module-blind registry this phase never
+> touches. Reproduced deterministically at HEAD: `pb2/main.sth` still prints `2` `2`.
+> The ctor-construction tier policy itself is sound (independently probed); the spec's
+> own motivating fixture just exercises a second, distinct mechanism the phase's scope
+> didn't reach. Carved out as **P7b.S9** (`docs/roadmap/P7b-higher-kinded-types.md`).
+> A same-payload variant with `mk` in both modules also regressed from a hard
+> compile-time `type mismatch` error to a silent `1 1` at exit 0 — newly reachable
+> wrong output, not merely an unfixed pre-existing one; S9 must also close that.
+
 ### Phase 3 — (a) guard reachability ruling + roadmap edit (R5, R6)
 
 - **`:1915` first, statically — but read the result per R5's corrected logic:** check

@@ -138,14 +138,17 @@ lib types unchanged in behavior; no duplicate monomorphs are introduced by the w
 identity. S3's dogfood (real `Option`/`Result`/`List` through a shared bound) depends on
 this slice or on twin workarounds.
 
-**P7b.S5 — Member-word routing and env-dispatch residuals.** Shipped, see
-[slice5-spec](./P7b/slice5-spec.md) for the full rulings.
+**P7b.S5 — Member-word routing and env-dispatch residuals.** Shipped for its scoped
+mechanism, see [slice5-spec](./P7b/slice5-spec.md) for the full rulings; the residual
+trait-impl-dispatch collision below is carved out to **P7b.S9**.
 The nested-receiver member diagnostic interpolates the trait header's actual variable
 (`declarations.rs` `nested_receiver_member_error`), never a hardcoded `'F`. Same-shaped
-cross-module generic ctors dispatch correctly per a 3-tier caller-module/visibility
-policy in `select_overload` (`builtins.rs`): a caller's own module wins first, then a
-single visible candidate, then an accepted ambiguity error for 2+ visible candidates
-from neither the caller's module. Golden #10
+cross-module generic **ctor construction** dispatches correctly per a 3-tier
+caller-module/visibility policy in `select_overload` (`builtins.rs`): a caller's own
+module wins first, then a single visible candidate, then an accepted ambiguity error for
+2+ visible candidates from neither the caller's module. This governs which module's
+`Widget[i64]` *struct symbol* a construction picks — it does not reach trait-impl
+dispatch (see P7b.S9). Golden #10
 (`same_named_ctors_in_two_modules_dispatch_distinct_impls`,
 `tests/phase7b_slice2.rs:644`) **keeps** its `i64`/`str` payload split as a regression
 witness — its inputs never collide, so the tier policy never fires for it, and the
@@ -214,6 +217,25 @@ a question, not an answer.
 **Exit:** `next`/`map`/`fold` through an Iterator bound over List and Range goldens; a
 consuming loop runs with one frame total; the exhausted-case ruling and the fusion
 evidence from a small chain are written down.
+
+**P7b.S9 — Module-aware trait-impl matching.**
+Carved out of S5's review (260904): `find_bound_impl` (`poly.rs:8218`) matches a
+concrete `Type` against every `impl:` target pattern for a trait, whole-program, with no
+module-identity check anywhere in `match_impl_target` or the `select_most_specific`
+tie-break — a different registry from S5's `env`/`select_overload` ctor-construction
+path, and untouched by it. Consequence, reproduced deterministically (`pb2`, S5's own
+motivating fixture): two modules each declaring their own same-shaped generic struct
+(`type: Widget['T] v 'T ;`) and their own `impl:` for the same trait cross-pick — a mono
+caller in one module dispatches through the *other* module's impl, silently, exit 0, no
+diagnostic. S5's tier policy does not apply here: both impls are already directly
+visible to their own module (no re-export, no hub), so this is not a visibility gap
+either P8.S5 or S5's tiers touch — it is `find_bound_impl`'s target-pattern matching
+itself being blind to which module's struct declaration a `impl: Trait for X` pattern
+was written against.
+**Exit:** `pb2` prints `1` then `2` (each caller's own impl); a mono caller with no
+bound, in a third module, seeing both impls (case-appropriate visibility) gets a real
+ambiguity error, not a first/most-specific-match guess; goldens pin both the resolved
+and the ambiguous shape.
 
 **Dogfood:** S6 — a program that `map`s and folds over `Option`, `Result`, and `List` through
 shared bounds, with the impls declared against the real lib types and output matching
