@@ -4020,6 +4020,39 @@ mod tests {
         assert!(err.contains("duplicate `impl:` for `i64`"), "{err}");
     }
 
+    /// G3 (P7b.S9 Phase 4, R4/R5): a single cross-module blanket
+    /// `impl: Trait for 'T` is already placement-illegal on its own (the
+    /// must-live-in-declaring-module rule, the second loop below). Two such
+    /// impls hit the duplicate error here only because the duplicate scan
+    /// (the first loop in `check_impl_decls`, unconditional on `imp.module`)
+    /// runs before the placement loop -- a bare `PolyType::Var` carries no
+    /// `(idx, module)` header identity, so the scan can't tell the two apart
+    /// even when they are attributed to different modules. The duplicate
+    /// scan's own coverage is the same-module duplicate shape; this is a
+    /// regression pin on that scan plus its precedence over the placement
+    /// loop, not new work: S9's fix touches `instantiation_symbol`
+    /// (`src/ast.rs:2869`), R1.1a grounding in `src/check/terms.rs`, and
+    /// `ir/layout.rs`'s module-blind name keys, but never `check_impl_decls`.
+    #[test]
+    fn check_impl_decls_duplicate_blanket_impl_across_modules_still_errors() {
+        let src = "trait: Sized['T] : size ( 'T -- i64 ) ; ;\n\
+             impl: Sized for 'T\n\
+               : size drop 1 ;\n\
+             ;\n\
+             impl: Sized for 'T\n\
+               : size drop 2 ;\n\
+             ;\n";
+        let tokens = lex(src).unwrap();
+        let mut module = crate::parser::parse(&tokens).unwrap();
+        // Attribute the two impls to distinct modules (as if declared in two
+        // separate files with no import edge between them) -- the duplicate
+        // scan must still fire, since it never reads `imp.module`.
+        module.impls[1].module = 1;
+        check_trait_decls(&module).unwrap();
+        let err = check_impl_decls(&mut module).unwrap_err();
+        assert!(err.contains("duplicate `impl:` for `'T`"), "{err}");
+    }
+
     // P7.S4 (R7): duplicate check compares `target.pattern` (the `PolyType`),
     // so alpha-equivalent generic targets are duplicates.
 

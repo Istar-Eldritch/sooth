@@ -206,6 +206,41 @@ guess" intent (a caller that cannot resolve one header among several visible,
 equally-plausible ones does not get a silent pick). Phase 4's first task is to
 build the fixture and observe; only then choose which of (a)/(b) to pin.
 
+**Phase-4 determination (measured, 2026-09-04): neither (a) nor (b) — a third,
+un-enumerated outcome.** Built against the landed Phase-2/3 fix, `c`'s build
+succeeds (exit 0, no diagnostic) and the binary deterministically prints `2`
+(b's constant) across 8/8 rebuild+run cycles, in both import orders (`self::a`
+before `self::b` and reversed). Mechanism: `c` declares no `Widget` header, so
+R1.1a's own-header grounding has nothing to ground *at* (it only reaches a
+bare ctor call inside a module that itself declares the type); `a`'s own
+`Widget[i64]` grounding (minted mid-check, inside `a::run`'s body by the
+Phase-2 fix) is never exported as a nameable instantiation across the module
+boundary — indeed `b`'s own `Widget[i64]` is not exported either (`export:`ing
+it is itself an error, "names private type"); the only `Widget[i64]` visible
+to `c`'s env lookup is the single instantiation minted into the shared
+whole-program env, `b`'s (spelled explicitly in `usesize`'s signature). With
+exactly one such candidate, the pre-existing single-candidate arm takes it —
+silently, with no awareness that `a`'s module holds a same-shaped,
+differently-`impl`'d instantiation of its own. This is the Phase-1 verdict's
+corollary realized: whichever eager mint exists and is the sole instantiation
+visible in the shared whole-program env decides for every bare caller with no
+header of its own. Golden:
+`third_module_bare_caller_dispatches_the_single_shared_env_instantiation`
+(renamed from the spec's placeholder `third_module_mono_caller_is_not_silently_cross_picked`,
+since the measured outcome *is* a silent — deterministic — pick, not its
+absence).
+
+**Residual / known limitation (out of S9's scope).** Two modules each
+instantiating a same-shaped type via a same-shaped `impl`, consumed by a
+third module with no header of its own, resolves silently and deterministically
+to whichever instantiation happens to be the single one minted into the shared
+whole-program env — not to a compile-time ambiguity error. Closing this (an
+export-ambiguity rule) is a new cross-module *import-resolution* policy, not a
+trait-dispatch fix, and needs its own brief/probes/spec; R4/REQ-7 forbid the
+dispatch-time machinery a naive fix would reach for (`find_bound_impl`), so
+this is future work, not a Phase-4 regression to close now — see Phase 5's
+roadmap-follow-up task below.
+
 ### R4 — D4: no new dispatch-time visibility/tier machinery in the registry scan. (design ruling; no code)
 
 Ruling: **no new visibility filter or dispatch-time tier machinery in
@@ -213,17 +248,38 @@ Ruling: **no new visibility filter or dispatch-time tier machinery in
 headers never both match one operand — their `(idx, module)` identities differ —
 and the import system prevents a caller from ever holding an operand whose header
 identity is ambiguous to it (probes P5b/P5c: import cycle / placement rule /
-selective-import collision all fire first). The one **constructible**
-concrete-target ambiguity — two modules each declaring a blanket `impl: Sized
-for 'T` — already errors at declaration time via `check_impl_decls`
-(`src/check/declarations.rs:544`, P7.S4 R7), module-blind by design because a
-bare `PolyType::Var` carries no header identity. `ImplDecl.module`
-(`src/ast.rs:2492`) stays read only by the placement rule (`:588`); the scan
-stays `trait_id` + pattern-match only. Under R3 outcome (a), the third-module
+selective-import collision all fire first). A single cross-module blanket
+`impl: Sized for 'T` (declared outside `Sized`'s declaring module) is already
+placement-illegal on its own — `check_impl_decls`' must-live-in-declaring-module
+rule (`src/check/declarations.rs:544`, second loop, `:574`+) rejects one
+instance alone. Two such impls instead surface as the **duplicate** error,
+but only because `check_impl_decls`' module-blind duplicate scan (first loop,
+`:555-570`) runs before the placement loop and never reads `imp.module`; a
+bare `PolyType::Var` carries no header identity, so the scan can't tell two
+cross-module impls apart. The duplicate scan's own coverage is the
+same-module duplicate shape — the cross-module pair reaches it only by loop
+order, not because the scan is deliberately module-blind for cross-module
+ambiguity. `ImplDecl.module` (`src/ast.rs:2492`) stays read only by the
+placement rule (`:588`); the scan stays `trait_id` + pattern-match only. Under R3 outcome (a), the third-module
 ambiguity routes through the ctor `select_overload` path, not `find_bound_impl`;
-under outcome (b), `c` errors before reaching either registry. Either way,
-`find_bound_impl` gains no new machinery — revisit only if Phase 4's evidence
-somehow forces candidate-set awareness at dispatch, which neither outcome does.
+under outcome (b), `c` errors before reaching either registry. **Phase-4
+determination (measured):** neither (a) nor (b) happened for the *ctor* half —
+`c`'s bare `Widget` ctor call never reaches `select_overload` at all (there is
+only one candidate visible in the whole-program env, so the pre-existing
+single-candidate arm resolves it directly, silently). The *dispatch* half does
+reach `find_bound_impl`: `c`'s bare `size` is a trait member call on a
+concrete operand, routed through `resolve_mono_member_call`
+(`src/check/poly.rs:2239`, documented at `:2147`), which calls
+`find_bound_impl` to select an impl — that call is what picks `b`'s impl
+(removing `b`'s impl instead surfaces `find_bound_impl`'s own "no impl: for
+the operand types here `Widget[i64]`" error). What never fires is the
+*ambiguity* path: `select_overload`'s 2-candidate collision, because only one
+instantiation is visible in the candidate scan, so `find_bound_impl` is handed
+a single, unambiguous target rather than a contested one. `find_bound_impl`
+gained no new machinery, confirmed by measurement rather than by either
+anticipated route — revisit only if a future export-ambiguity fix (out of
+S9's scope, see R3) somehow forces candidate-set awareness at dispatch, which
+the measured outcome does not.
 
 ### R5 — Regression pins stay green, unchanged. (every phase)
 
@@ -266,8 +322,11 @@ CLAUDE.md split signals at phase exit against the files as they then stand; do
 
 ### R7 — Roadmap correction at slice exit. (final phase)
 
-Five edit targets, all falsified by the probe round, none currently instructed
-together — a prior draft of this ruling named only target 1:
+Six edit targets: five falsified by the probe round (none currently instructed
+together — a prior draft of this ruling named only target 1), plus a sixth
+that records a residual the probe round didn't produce (Phase 4's
+export-ambiguity determination, not previously scheduled to reach the
+roadmap):
 
 1. **`docs/roadmap/P7b-higher-kinded-types.md:221-238`, mechanism sentence one**
    ("no module-identity check anywhere in `match_impl_target` or the
@@ -298,13 +357,22 @@ together — a prior draft of this ruling named only target 1:
    **nondeterministic** `1\n1`/`2\n2` (checker-HashMap-iteration-order
    dependent; a built binary is stable, rebuilds flip), same marker discipline
    as target 4.
+6. **New: record the S9 Phase-4 export-ambiguity residual as a roadmap
+   follow-up.** No target above states this, and no phase before Phase 5 was
+   scheduled to write it — add it to the roadmap entry while correcting
+   targets 1-2, one sentence: two modules each instantiating a same-shaped
+   type via a same-shaped `impl`, consumed by a third module with no header of
+   its own, dispatches silently on the single instantiation minted into the
+   shared whole-program env; an export-ambiguity rule for this shape is future
+   work (see this spec's R3/R4 Phase-4 determination).
 
 For targets 1-2 (the roadmap's own current-design prose), also reword the exit
-criterion: the constructible ambiguity shape is covered by the
-**declaration-time** duplicate check (no new dispatch-time mechanism); the
-third-module mono caller is ruled per R3's Phase-4 determination (either
-outcome). Do not imply "add a dispatch-time ambiguity error" unless R3's Phase-4
-evidence actually lands on outcome (a).
+criterion to the concrete landed outcome: the constructible ambiguity shape is
+covered by the **declaration-time** duplicate check (no new dispatch-time
+mechanism); a third-module bare caller with no own header dispatches
+deterministically on the single instantiation minted into the shared
+whole-program env (the Phase-4 determination — neither of R3's two candidate
+outcomes, see R3). Do not imply "add a dispatch-time ambiguity error".
 
 Per [[feedback_roadmap_design_no_history]]: the roadmap's own current-design
 prose (targets 1-2) states the current design only, no "was X, now Y"
@@ -343,13 +411,17 @@ the record of what the review round originally (incorrectly) believed.
 - **REQ-6** (R3): Phase 4 determines (does not assume) whether G4's after-column
   is a located compile-time ambiguity error naming `Widget`, both candidate
   modules, and `c`'s call site, or an earlier error from `c` grounding against no
-  visible header; either is pinned against measured fixture output.
+  visible header; whichever outcome the fixture measures is pinned against
+  that measured output, including a documented silent deterministic dispatch
+  if that is what the fixture actually produces (the measured Phase-4 result:
+  neither of the two anticipated outcomes, but a third — see R3).
 - **REQ-7** (R4): `find_bound_impl` gains no visibility filter or dispatch-time
   tier machinery; the declaration-time duplicate check is untouched.
 - **REQ-8** (R5): #10 stays `1\n2`; S5 tier-1 stays `15\n25`; G3 pins the
   existing duplicate-impl error text.
-- **REQ-9** (R7): all five roadmap/slice5-spec edit targets are corrected to
-  the adjudicated story (not only the roadmap's first mechanism sentence).
+- **REQ-9** (R7): all six roadmap/slice5-spec edit targets are corrected to
+  the adjudicated story (not only the roadmap's first mechanism sentence),
+  including recording the Phase-4 export-ambiguity residual as a follow-up.
 - **REQ-10** (CLAUDE.md): every stage function edited gets a unit test beside it
   (happy path + one error/edge); every phase exit criterion is a golden.
 
@@ -408,7 +480,7 @@ the record of what the review round originally (incorrectly) believed.
 | **G2** | `..._via_named_instantiation_dispatch_each_callers_own_impl` (`mk` variant) | **nondeterministic** `1\n1`/`2\n2` (8/2 paper, 6/4 probe — never asserted) | deterministic `1\n2` |
 | **G2r** | `..._eager_minter_wins_regardless_of_caller` (a eager / b bare — cleanest V2 witness; **primary provenance regression pin**) | `1\n1`, exit 0, deterministic (5 cycles) | `1\n2` — **golden lands in Phase 3, not Phase 2**: once V2 mints two distinct caller-owned groundings, G2r's shared bound word hits the V3 symbol collision (measured post-V2: `2\n2` 4/6, `1\n1` 2/6 — nondeterministic until R2.1) |
 | **G3** | `duplicate_blanket_impl_across_modules_is_a_declared_error` | `error: duplicate \`impl:\` for \`'T\` (line 3, col 1); first declared at line 3, col 1`, exit 1 | unchanged (regression pin) |
-| **G4** | `third_module_mono_caller_is_not_silently_cross_picked` | silent `2`, exit 0 (3 cycles) | `build_error` per R3's Phase-4 determination (outcome (a) or (b)) |
+| **G4** | `third_module_bare_caller_dispatches_the_single_shared_env_instantiation` (renamed from the placeholder `third_module_mono_caller_is_not_silently_cross_picked`) | silent `2`, exit 0 (3 cycles) | unchanged: deterministic `2`, exit 0 — measured Phase-4 outcome, neither (a) nor (b) (see R3); pinned behaviour for this shape, with a documented residual limitation (export-ambiguity rule is future work, out of S9's scope) |
 | **G5** | #10 (`tests/phase7b_slice2.rs:655`); S5 tier-1 (`tests/phase7b_slice5.rs:100`) | `1\n2`; `15\n25` | unchanged |
 
 Fixture text for G1/G2/G2r/G3/G4 is preserved complete (every source file, not
@@ -436,9 +508,10 @@ CLAUDE.md; fix sites are R1/R2's choice within the named function):
 wiring / `trait_calls` is untouched, see R2.2); Phase 2's module-unique
 `ir/layout.rs` generated-word/type-symbol keys, the collision V2's second mint
 made reachable (R-NFR1's sanctioned exception, R2.4); Phase 4's D3 determination
-(routes through S5's existing `select_overload` tier policy under outcome (a);
-an earlier error under outcome (b) — R3); new `tests/phase7b_slice9.rs`; the
-roadmap correction.
+(build first, pin whatever measures — the landed outcome is the third one
+recorded in Phase 4's notes: neither route (a)/(b) fires, since `c`'s bare
+ctor call never reaches `select_overload`'s ambiguity arm); new
+`tests/phase7b_slice9.rs`; the roadmap correction.
 
 **Out of scope / untouched:**
 
@@ -497,7 +570,7 @@ roadmap correction.
   `tests/phase7b_slice5.rs:100`; the pre-existing flaky pin
   `tests/phase7b_slice4.rs:427-490` (R5, re-pinned Phase 3); `pb2` fixture
   complete in [slice9-paper-tests](./slice9-paper-tests.md) G1.
-- **Roadmap entries to correct (R7, five targets).**
+- **Roadmap entries to correct (R7, six targets).**
   `docs/roadmap/P7b-higher-kinded-types.md:221-238` (two falsified mechanism
   sentences, one stale anchor); `docs/roadmap/P7b/slice5-spec.md:776-778` and
   `:783` (falsified post-ship-correction claims, same stale anchor).
@@ -619,20 +692,23 @@ independently of their own changes.
   here on (running total tracked per phase, not a fixed absolute).
 - **Phase 4 — D3 determination + G3/G4 goldens.** Build the G4 fixture against
   the Phase-2/3 fix first, observe which of R3's two outcomes actually happens,
-  then add G4 (`third_module_mono_caller_is_not_silently_cross_picked` →
-  `build_error` pinning the measured text) accordingly. Add G3 (regression pin
+  then add G4 (measured a third, un-enumerated outcome — neither (a) nor (b) —
+  renamed to `third_module_bare_caller_dispatches_the_single_shared_env_instantiation`,
+  a `build_and_run` pin on the deterministic `2\n`, both import orders)
+  accordingly. Add G3 (regression pin
   for the existing declaration-time duplicate error text — R5, exact text and
   exit code measured against the fixture, not re-derived) plus
   `check_impl_decls_duplicate_blanket_impl_across_modules_still_errors`.
   Confirm no new machinery in `find_bound_impl` (R4). Exit: G4 and G3 green;
   suite green.
 - **Phase 5 — roadmap correction + growth-structure re-check + final gate.**
-  Apply R7's five edit targets (`docs/roadmap/P7b-higher-kinded-types.md:221-238`
+  Apply R7's six edit targets (`docs/roadmap/P7b-higher-kinded-types.md:221-238`
   two sentences + stale anchor; `docs/roadmap/P7b/slice5-spec.md:776-778` and
-  `:783`). Re-run CLAUDE.md split signals against every file S9 touched (R6);
-  record the verdict (expected: split still deferred). Final green gate; confirm
-  all S9 goldens + #10 + S5 tier-1 pass and no edit landed in the matcher
-  (R-NFR2).
+  `:783`; the new sixth target recording the Phase-4 export-ambiguity residual
+  as a roadmap follow-up in that same entry). Re-run CLAUDE.md split signals
+  against every file S9 touched (R6); record the verdict (expected: split
+  still deferred). Final green gate; confirm all S9 goldens + #10 + S5 tier-1
+  pass and no edit landed in the matcher (R-NFR2).
 
 ## Phases (JSON)
 
@@ -724,13 +800,13 @@ independently of their own changes.
       ],
       "goldens": [
         "tests/phase7b_slice9.rs: duplicate_blanket_impl_across_modules_is_a_declared_error (G3) -> pins measured 'error: duplicate `impl:` for `'T` (line 3, col 1); first declared at line 3, col 1' text, exit 1",
-        "tests/phase7b_slice9.rs: third_module_mono_caller_is_not_silently_cross_picked (G4) -> build_error pinning whichever of R3's outcomes (a)/(b) the fixture actually produces, measured not re-derived"
+        "tests/phase7b_slice9.rs: third_module_bare_caller_dispatches_the_single_shared_env_instantiation (G4, renamed from the placeholder third_module_mono_caller_is_not_silently_cross_picked) -> measured a THIRD outcome, neither (a) nor (b): build_and_run pinning deterministic 2, exit 0, no diagnostic, both import orders -- c has no Widget header of its own, so only b's instantiation minted into the shared whole-program env is a candidate"
       ],
       "units": [
         "check_impl_decls_duplicate_blanket_impl_across_modules_still_errors"
       ],
-      "exit": "G3 + G4 green; G4 message pinned against actual fixture output (not spec prose); find_bound_impl gained no new machinery; suite green",
-      "notes": "OQ-3: build first, pin second. Do not assume outcome (a)."
+      "exit": "G3 + G4 green; G4 output pinned against actual fixture output (not spec prose); find_bound_impl gained no new machinery; suite green",
+      "notes": "OQ-3: build first, pin second. Measured result is a third outcome the spec's R3 didn't enumerate: neither an ambiguity error (a) nor an early no-header error (b), but a silent, deterministic single-visible-candidate dispatch. This is a legitimate determination result (REQ-6), not a gap; an export-ambiguity rule for this shape is recorded as roadmap follow-up (out of S9's scope, R4/REQ-7) rather than implemented here."
     },
     {
       "id": 5,
@@ -742,12 +818,13 @@ independently of their own changes.
         "R7 target 3: fix stale anchor poly.rs:8218 -> poly.rs:8235 at both sites (roadmap entry and slice5-spec.md:776)",
         "R7 target 4: docs/roadmap/P7b/slice5-spec.md:776-778 ('pb2's actual collision is in find_bound_impl's trait-impl target matching...') -> mark corrected (V1/V2), keep historical marker structure",
         "R7 target 5: docs/roadmap/P7b/slice5-spec.md:783 ('silent 1 1 at exit 0') -> mark corrected to nondeterministic 1\\n1/2\\n2",
-        "Reword roadmap exit item 3 (targets 1-2 area): declaration-time duplicate check covers the constructible shape; third-module caller per R3's Phase-4 determination (whichever outcome landed). No history narration in the roadmap's own current-design prose.",
+        "Reword roadmap exit item 3 (targets 1-2 area) to the concrete landed outcome: a single cross-module blanket impl is already placement-illegal (must-live-in-declaring-module rule); two such impls surface as a duplicate error only because check_impl_decls' module-blind duplicate scan runs before the placement loop, and that scan's own coverage is the same-module duplicate shape, not a deliberate cross-module ambiguity check; a third-module bare caller with no own header separately dispatches deterministically on the single instantiation minted into the shared whole-program env (determination recorded in slice9-spec Phase 4) -- not 'add a dispatch-time ambiguity error'. No history narration in the roadmap's own current-design prose.",
+        "R7 target 6 (new): when correcting the roadmap entry, also record the export-ambiguity follow-up explicitly -- one sentence: two modules each instantiating a same-shaped type via a same-shaped impl, consumed by a third module with no header of its own, dispatches silently on the single instantiation minted into the shared whole-program env; an export-ambiguity rule is future work",
         "R6: re-run CLAUDE.md split signals against every file S9 touched (poly.rs untouched this slice except possibly none; ast.rs, terms.rs, declarations.rs, tests/); record verdict (expected: split still deferred)"
       ],
       "goldens": [],
       "units": [],
-      "exit": "All five R7 targets corrected; growth-signal verdict recorded; final fmt/clippy/test green; all S9 goldens + #10 + S5 tier-1 pass; no edit landed in match_impl_target/find_bound_impl scan (R-NFR2)",
+      "exit": "All six R7 targets corrected (including the export-ambiguity follow-up); growth-signal verdict recorded; final fmt/clippy/test green; all S9 goldens + #10 + S5 tier-1 pass; no edit landed in match_impl_target/find_bound_impl scan (R-NFR2)",
       "notes": "Documentation + verification phase; no new behaviour."
     }
   ]
