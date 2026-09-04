@@ -237,6 +237,22 @@ struct-shaped argument or return, and a module can mark an exported word for unm
 linkage. **Dogfood:** a small Rust host program that links against a Sooth-compiled module
 by its bare word names and exchanges a struct across the boundary in both directions.
 
+**P8.S5 — Transitive re-export visibility for overload disambiguation.** Carved out of
+P7b.S5's dispatch-correctness fix: `is_name_visible_to_module` (`src/check/word_families.rs:1155`)
+is direct-only (a candidate's declaring module must appear in the caller's own
+`imports`/`selective` map), so a module that sees a name only through a hub's re-export
+(`import: self::lib * ;` where `lib` itself re-exports another module's type) has zero
+visible candidates for that name under P7b.S5's tiered ctor-overload selection, even though
+the name is legitimately in scope. P7b.S5 rules this a scoped, accepted error rather than
+building transitive closure, precisely because the fix belongs here: it needs the import
+graph's re-export edges (S2's hub mechanism) already resolved, and it likely intersects the
+standing gap that a hub re-export carries word names but not type names on at least one
+existing path — the same limitation the REPL already hits from a different angle. **Exit:**
+a module reaches a colliding same-shaped generic ctor through a hub's re-export and
+dispatch resolves it exactly as a direct import would, with no regression to P7b.S5's
+direct-visibility cases. **Dogfood:** the P7b.S5 fixture that this slice's absence makes an
+accepted error, now resolving correctly through the hub.
+
 ## Declined and deferred, with reasons
 
 **A Rust-style source-side `mod` declaration.** Declined. `mod foo;` exists in Rust as the
