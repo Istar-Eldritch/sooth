@@ -145,7 +145,7 @@ export function $.2e.__m1.24..24.2(l %v0) {
 	%v18 =l alloc4 1
 	%v19 =l add %v18, 0
 	%v20 =l add %v14, 0
-	call $sooth_mono_flush__m4__t0_Stdout(l %v19, l %v20)
+	call $sooth_mono_flush__m4__t0_s1_Stdout(l %v19, l %v20)
 	call $newline__m1()
 	ret
 }
@@ -183,7 +183,7 @@ export function $.2e.__m1.24..24.3(w %v0) {
 	%v18 =l alloc4 1
 	%v19 =l add %v18, 0
 	%v20 =l add %v14, 0
-	call $sooth_mono_flush__m4__t0_Stdout(l %v19, l %v20)
+	call $sooth_mono_flush__m4__t0_s1_Stdout(l %v19, l %v20)
 	call $newline__m1()
 	ret
 }
@@ -221,7 +221,7 @@ export function $.2e.__m1.24..24.4(w %v0) {
 	%v18 =l alloc4 1
 	%v19 =l add %v18, 0
 	%v20 =l add %v14, 0
-	call $sooth_mono_flush__m4__t0_Stdout(l %v19, l %v20)
+	call $sooth_mono_flush__m4__t0_s1_Stdout(l %v19, l %v20)
 	call $newline__m1()
 	ret
 }
@@ -259,7 +259,7 @@ export function $.2e.__m1.24..24.5(w %v0) {
 	%v18 =l alloc4 1
 	%v19 =l add %v18, 0
 	%v20 =l add %v14, 0
-	call $sooth_mono_flush__m4__t0_Stdout(l %v19, l %v20)
+	call $sooth_mono_flush__m4__t0_s1_Stdout(l %v19, l %v20)
 	call $newline__m1()
 	ret
 }
@@ -297,7 +297,7 @@ export function $.2e.__m1.24..24.6(l %v0) {
 	%v18 =l alloc4 1
 	%v19 =l add %v18, 0
 	%v20 =l add %v14, 0
-	call $sooth_mono_flush__m4__t0_Stdout(l %v19, l %v20)
+	call $sooth_mono_flush__m4__t0_s1_Stdout(l %v19, l %v20)
 	call $newline__m1()
 	ret
 }
@@ -335,7 +335,7 @@ export function $.2e.__m1.24..24.7(w %v0) {
 	%v18 =l alloc4 1
 	%v19 =l add %v18, 0
 	%v20 =l add %v14, 0
-	call $sooth_mono_flush__m4__t0_Stdout(l %v19, l %v20)
+	call $sooth_mono_flush__m4__t0_s1_Stdout(l %v19, l %v20)
 	call $newline__m1()
 	ret
 }
@@ -373,7 +373,7 @@ export function $.2e.__m1.24..24.8(w %v0) {
 	%v18 =l alloc4 1
 	%v19 =l add %v18, 0
 	%v20 =l add %v14, 0
-	call $sooth_mono_flush__m4__t0_Stdout(l %v19, l %v20)
+	call $sooth_mono_flush__m4__t0_s1_Stdout(l %v19, l %v20)
 	call $newline__m1()
 	ret
 }
@@ -411,7 +411,7 @@ export function $.2e.__m1.24..24.9(w %v0) {
 	%v18 =l alloc4 1
 	%v19 =l add %v18, 0
 	%v20 =l add %v14, 0
-	call $sooth_mono_flush__m4__t0_Stdout(l %v19, l %v20)
+	call $sooth_mono_flush__m4__t0_s1_Stdout(l %v19, l %v20)
 	call $newline__m1()
 	ret
 }
@@ -449,7 +449,7 @@ export function $.2e.__m1.24..24.10(l %v0) {
 	%v18 =l alloc4 1
 	%v19 =l add %v18, 0
 	%v20 =l add %v14, 0
-	call $sooth_mono_flush__m4__t0_Stdout(l %v19, l %v20)
+	call $sooth_mono_flush__m4__t0_s1_Stdout(l %v19, l %v20)
 	call $newline__m1()
 	ret
 }
@@ -487,7 +487,7 @@ export function $.2e.__m1.24..24.11(l %v0) {
 	%v18 =l alloc4 1
 	%v19 =l add %v18, 0
 	%v20 =l add %v14, 0
-	call $sooth_mono_flush__m4__t0_Stdout(l %v19, l %v20)
+	call $sooth_mono_flush__m4__t0_s1_Stdout(l %v19, l %v20)
 	call $newline__m1()
 	ret
 }
@@ -521,11 +521,11 @@ export function $.2e.__m1.24..24.12(w %v0) {
 	%v16 =l add %v14, 64
 	storel %v13, %v16
 	%v17 =l add %v14, 0
-	call $sooth_mono_render__m4__t0_Bool(w %v0, l %v17)
+	call $sooth_mono_render__m4__t0_e0_Bool(w %v0, l %v17)
 	%v18 =l alloc4 1
 	%v19 =l add %v18, 0
 	%v20 =l add %v14, 0
-	call $sooth_mono_flush__m4__t0_Stdout(l %v19, l %v20)
+	call $sooth_mono_flush__m4__t0_s1_Stdout(l %v19, l %v20)
 	call $newline__m1()
 	ret
 }
@@ -1266,13 +1266,13 @@ export function $write.3b.Write.3b.4.3b.Stdout__m5(l %v0, l %v1) {
 	ret
 }
 
-export function $sooth_mono_flush__m4__t0_Stdout(l %v0, l %v1) {
+export function $sooth_mono_flush__m4__t0_s1_Stdout(l %v0, l %v1) {
 @start
 	call $write.3b.Write.3b.4.3b.Stdout__m5(l %v0, l %v1)
 	ret
 }
 
-export function $sooth_mono_render__m4__t0_Bool(w %v0, l %v1) {
+export function $sooth_mono_render__m4__t0_e0_Bool(w %v0, l %v1) {
 @start
 	call $show.3b.Show.3b.4.3b.Bool__m4(w %v0, l %v1)
 	ret
