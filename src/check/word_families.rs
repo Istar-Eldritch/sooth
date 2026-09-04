@@ -339,14 +339,31 @@ fn check_field_projection(
     // the fields and display name just come from a different declaration
     // table. Its resolution lands in `resolved_variant_fields`
     // (`EnumId`-keyed) below, not `resolved_fields` (`StructId`-keyed).
-    let (fields, receiver_name): (&[(String, Type)], &str) = match referent {
-        Type::Struct(id, _) => (
-            &ctx.structs()[id.index()].fields,
-            ctx.structs()[id.index()].name_static,
-        ),
+    let (fields, receiver_name): (Vec<(String, Type)>, &str) = match referent {
+        // P7b.S9 (R1.1a): a receiver minted mid-word (a bare ctor grounded at
+        // the caller's own header) is still pending in the live generics cell
+        // when its own word is being checked, so indexing the live registry
+        // by id would panic outright rather than merely miss.
+        Type::Struct(id, _) => {
+            match ctx
+                .with_struct_decl_or_generic(id, |d| d.map(|d| (d.fields.clone(), d.name_static)))
+            {
+                Some(parts) => parts,
+                None => return Ok(None),
+            }
+        }
+        // The enum twin of the same hole: a variant receiver's enum may be a
+        // pending mint too, and the raw index would panic on it.
         Type::Variant(id, vi, _) => {
-            let variant = &ctx.enums()[id.index()].variants[vi];
-            (&variant.fields, variant.display_static)
+            match ctx.with_enum_decl_or_generic(id, |d| {
+                d.map(|d| {
+                    let variant = &d.variants[vi];
+                    (variant.fields.clone(), variant.display_static)
+                })
+            }) {
+                Some(parts) => parts,
+                None => return Ok(None),
+            }
         }
         _ => return Ok(None),
     };

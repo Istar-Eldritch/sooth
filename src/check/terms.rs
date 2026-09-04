@@ -937,15 +937,9 @@ fn check_term(
             // substituting the borrowed mint.
             let ground_storage;
             let candidates: &[Overload] = if let [only] = candidates {
-                match bare_ctor_own_module_grounding(
-                    only,
-                    name,
-                    span.module,
-                    ctx,
-                    arrays,
-                    cells,
-                    refs,
-                ) {
+                match bare_generated_word_own_module_grounding(
+                    only, name, span, ctx, arrays, cells, refs,
+                )? {
                     Some(g) => {
                         ground_storage = g;
                         std::slice::from_ref(&ground_storage)
@@ -1443,63 +1437,235 @@ pub(super) fn eliminator_arm_names_no_eliminator_error(
     )
 }
 
-/// P7b.S9 Phase 2 (R1.1a): a bare ctor call's single `env` candidate may be
-/// another module's eager mint of a same-named-but-distinct generic header --
-/// see the Phase-1 verdict (`slice9-probes.md`): `a`'s own instantiation is
-/// never minted at all when only `b` spells the concrete type explicitly, so
-/// `env` never holds more than the one, borrowed, candidate to filter. When
-/// the caller's own module declares its own generic struct header under
-/// `name`, distinct from the candidate's owning header, mint (or find) the
-/// caller's own instantiation at the same concrete arguments and hand back
-/// that `Overload` instead of the borrowed one. `None` when there is nothing
-/// to ground against (an ordinary concrete struct, a non-struct-ctor word, or
-/// a caller with no header of its own under this name -- Phase 4's D3
+/// P7b.S9 Phase 2 (R1.1a): a bare generated struct word's single `env`
+/// candidate may be another module's eager mint of a same-named-but-distinct
+/// generic header -- see the Phase-1 verdict (`slice9-probes.md`): `a`'s own
+/// instantiation is never minted at all when only `b` spells the concrete
+/// type explicitly, so `env` never holds more than the one, borrowed,
+/// candidate to filter. When the caller's own module declares its own generic
+/// struct header under that name, distinct from the candidate's owning
+/// header, mint (or find) the caller's own instantiation at the same concrete
+/// arguments and hand back *its* generated word instead of the borrowed one.
+/// `Ok(None)` when there is nothing to ground against (an ordinary concrete
+/// struct, a word that is not one of this struct's generated pair, or a
+/// caller with no header of its own under this name -- Phase 4's D3
 /// territory) -- the existing candidate is used unchanged.
-fn bare_ctor_own_module_grounding(
+///
+/// Both members of the pair ground, not just the constructor: the caller's
+/// own mint is minted mid-word and so has no `env` entry of its own (`env` is
+/// built before check, and `mint_fallback_candidates` fires only on an `env`
+/// *miss*), so a destructure applied to a caller-grounded operand would
+/// otherwise select the borrowed module's generated word and fail with a
+/// self-contradictory `expected Widget[i64], found Widget[i64]` -- two live
+/// decls sharing one surface name.
+///
+/// The whole grounded `Overload` -- `Sig`, lowering symbol and module -- is
+/// re-derived from the caller's *own* minted decl through
+/// `struct_generated_sigs_of`, the same rule env registration uses. Keeping
+/// any part of the borrowed candidate would mix provenances: its field list
+/// on a constructor whose output is the caller's mint silently consumes (and
+/// forgets) an operand the caller's own header has no field for.
+#[allow(clippy::too_many_arguments)]
+fn bare_generated_word_own_module_grounding(
     only: &Overload,
     name: &str,
-    caller_module: u32,
+    span: Span,
     ctx: &Ctx,
     arrays: &mut Vec<ArrayDecl>,
     cells: &mut Vec<OwnedCellDecl>,
     refs: &mut Vec<RefDecl>,
-) -> Option<Overload> {
-    let Some(Type::Struct(id, _)) = only.sig.outputs.first().copied() else {
-        return None;
+) -> Result<Option<Overload>, String> {
+    // The two shapes `struct_generated_sigs` registers -- a constructor
+    // `S ( fields -- S )` and a destructure `S> ( S -- fields )` -- told
+    // apart by the surface key, the only spelling a source term can carry.
+    let (header_name, destructure) = match name.strip_suffix('>') {
+        Some(base) => (base, true),
+        None => (name, false),
     };
-    let cell = ctx.generics()?;
-    let mut guard = cell.borrow_mut();
-    let (gi, owning_module, args, lens) = {
-        let (gi, m, a, l) = guard.struct_instantiation_of(id)?;
-        (gi, m, a.to_vec(), l.to_vec())
+    let slot = match destructure {
+        true => only.sig.inputs.first(),
+        false => only.sig.outputs.first(),
     };
-    if owning_module == caller_module {
-        return None;
+    let (Some(Type::Struct(id, _)), Some(cell)) = (slot.copied(), ctx.generics()) else {
+        return Ok(None);
+    };
+    let caller_module = span.module;
+    // The registry filters first, and the allocating identity check below
+    // only for a candidate that survives them: every one of these is a plain
+    // `Ok(None)`, so the order is free, and this is the reject route for
+    // every generated-word call in a program with no same-named headers at
+    // all.
+    let (own_idx, own_ty_vars, declared_lens, args, lens) = {
+        let guard = cell.borrow();
+        // A hand-written concrete `type:` has no header to re-ground at.
+        let Some((gi, owning_module, args, lens)) = guard.struct_instantiation_of(id) else {
+            return Ok(None);
+        };
+        if owning_module == caller_module {
+            return Ok(None);
+        }
+        let Some(own_idx) = guard.find_struct(header_name, caller_module) else {
+            return Ok(None);
+        };
+        if own_idx == gi {
+            return Ok(None);
+        }
+        let own = &guard.structs[own_idx];
+        // Cloned rather than borrowed across the mint below, which needs the
+        // cell mutably.
+        let own_ty_vars: Vec<(String, Option<crate::ast::Kind>)> = own
+            .ty_var_names
+            .iter()
+            .enumerate()
+            .map(|(i, v)| (v.clone(), own.ty_kinds.get(i).cloned()))
+            .collect();
+        (
+            own_idx,
+            own_ty_vars,
+            own.len_var_names.len(),
+            args.to_vec(),
+            lens.to_vec(),
+        )
+    };
+    // The candidate must actually *be* that struct's generated word: an
+    // ordinary user word whose output (or operand) happens to be another
+    // module's instantiation keeps its own resolution.
+    let Some((key, symbol, _, _)) = generated_word_entry(ctx, id, destructure) else {
+        return Ok(None);
+    };
+    if key != name || symbol != only.symbol {
+        return Ok(None);
     }
-    let own_idx = guard.find_struct(name, caller_module)?;
-    if own_idx == gi {
-        return None;
+    // `substitute_generic_field` indexes the argument list raw (`args[v]`,
+    // `src/ast.rs`), so minting the caller's own header against the
+    // *candidate's* argument list panics outright on a header of a different
+    // parameter count. Validate before minting -- and report rather than fall
+    // back to the borrowed mint, which is the silent cross-module borrow
+    // R1.1 forbids.
+    if own_ty_vars.len() != args.len() {
+        return Err(own_header_cannot_ground_error(
+            ctx,
+            span,
+            header_name,
+            &format!(
+                "it declares {} type parameter{}, but the only `{header_name}` instantiation in scope supplies {}",
+                own_ty_vars.len(),
+                plural_s(own_ty_vars.len()),
+                args.len(),
+            ),
+        ));
     }
-    let regs = crate::ast::MutRegistries {
-        structs: ctx.structs(),
-        enums: ctx.enums(),
-        arrays,
-        cells,
-        refs,
+    if declared_lens != lens.len() {
+        return Err(own_header_cannot_ground_error(
+            ctx,
+            span,
+            header_name,
+            &format!(
+                "it declares {declared_lens} length parameter{}, but the only `{header_name}` instantiation in scope supplies {}",
+                plural_s(declared_lens),
+                lens.len(),
+            ),
+        ));
+    }
+    // The counts agreeing is not enough: `substitute_generic_field`'s `App`
+    // arm applies a header variable's binding *as a constructor*, and falls
+    // back to returning the binding unapplied on anything that is not a
+    // `CtorImage` -- a fall-back whose own doc calls itself unreachable
+    // because `validate_ctor_arg_kinds` (`parser.rs`) rejects a kind mismatch
+    // at the use site. Grounding here mints against an argument list written
+    // at *another module's* use site, which that guard never saw, so the same
+    // rule is re-applied to it: an HKT header grounded at a `*`-kinded
+    // argument would otherwise take that fall-back and silently give the
+    // field a wrong type.
+    for ((var, kind), arg) in own_ty_vars.iter().zip(args.iter()) {
+        let wants_ctor = matches!(kind, Some(crate::ast::Kind::Arrow { .. }));
+        let is_ctor = matches!(arg, Type::CtorImage(_, _));
+        if wants_ctor != is_ctor {
+            let detail = match wants_ctor {
+                true => format!(
+                    "its `{var}` takes a type constructor, but the only `{header_name}` instantiation in scope supplies the concrete type `{arg}`"
+                ),
+                false => format!(
+                    "its `{var}` takes a concrete type, but the only `{header_name}` instantiation in scope supplies the type constructor `{arg}`"
+                ),
+            };
+            return Err(own_header_cannot_ground_error(
+                ctx,
+                span,
+                header_name,
+                &detail,
+            ));
+        }
+    }
+    let ty = {
+        let mut guard = cell.borrow_mut();
+        let regs = crate::ast::MutRegistries {
+            structs: ctx.structs(),
+            enums: ctx.enums(),
+            arrays,
+            cells,
+            refs,
+        };
+        guard.instantiate_struct(own_idx, &args, &lens, caller_module, regs)
     };
-    let ty = guard.instantiate_struct(own_idx, &args, &lens, caller_module, regs);
     let Type::Struct(new_id, _) = ty else {
-        return None;
+        unreachable!("instantiate_struct always returns a Type::Struct")
     };
-    let symbol = guard.struct_decl(new_id)?.name.clone();
-    Some(Overload {
-        sig: Sig {
-            inputs: only.sig.inputs.clone(),
-            outputs: vec![ty],
-        },
+    let Some((_, symbol, module, sig)) = generated_word_entry(ctx, new_id, destructure) else {
+        unreachable!(
+            "the caller's own mint was just registered in the live cell, so its generated-word entry resolves"
+        )
+    };
+    Ok(Some(Overload {
+        sig,
         symbol,
-        module: caller_module,
+        module,
+    }))
+}
+
+/// P7b.S9 Phase 2 (R1.1a): one struct's own generated constructor (or, with
+/// `destructure`, its destructure) entry, read through the accessor that sees
+/// both a still-pending mid-word mint and one `check`'s per-word bracket has
+/// already flushed into the live registry -- a second bare-ctor site in one
+/// module reaches its own module's mint through the flushed prefix, and the
+/// unflushed-only `GenericTypes::struct_decl` would miss it and fail open
+/// onto the borrowed candidate.
+fn generated_word_entry(
+    ctx: &Ctx,
+    id: StructId,
+    destructure: bool,
+) -> Option<(String, String, u32, Sig)> {
+    ctx.with_struct_decl_or_generic(id, |d| {
+        d.map(|d| {
+            let [ctor, destr] = struct_generated_sigs_of(id, d);
+            match destructure {
+                true => destr,
+                false => ctor,
+            }
+        })
     })
+}
+
+/// P7b.S9 Phase 2 (R1.1a): a bare generated-word call in a module that
+/// declares its own generic header under that name, where the only
+/// instantiation in scope is another module's, minted at an argument list
+/// this module's header cannot be applied to -- a differing parameter count,
+/// or a kind its `App` field would misread. There is nothing to ground and
+/// nothing safe to borrow, so the call site is reported. `detail` names which
+/// of the two it was.
+fn own_header_cannot_ground_error(ctx: &Ctx, span: Span, header: &str, detail: &str) -> String {
+    format!(
+        "error: `{header}`{} (line {}) cannot ground at this module's own header: {detail}\n  note: name an instantiation of this module's own `{header}` explicitly (in a signature or an annotation) so it is minted here, rather than borrowing another module's",
+        in_word(ctx),
+        span.line,
+    )
+}
+
+fn plural_s(n: usize) -> &'static str {
+    match n {
+        1 => "",
+        _ => "s",
+    }
 }
 
 /// P7.S11-follow (Part 4): a shared `env`-miss fallback for the generated
@@ -2771,68 +2937,129 @@ mod tests {
 
     /// P7b.S9 Phase 2 (R1.1a): a generic struct header declared separately in
     /// two modules under the same bare name, mirroring `pb2`'s `a`/`b`
-    /// `Widget['T]`.
-    fn generic_struct_decl(name: &str, module: u32) -> crate::ast::GenericStructDecl {
+    /// `Widget['T]`. `ty_vars`/`fields` vary per fixture: the point of most of
+    /// these units is that two same-named headers need not agree on either.
+    fn generic_struct_decl(
+        name: &str,
+        module: u32,
+        ty_vars: &[&str],
+        fields: &[(&str, PolyType)],
+    ) -> crate::ast::GenericStructDecl {
         crate::ast::GenericStructDecl {
             name: name.to_string(),
-            ty_var_names: vec!["'T".to_string()],
+            ty_var_names: ty_vars.iter().map(|v| v.to_string()).collect(),
             ty_kinds: Vec::new(),
             len_var_names: vec![],
-            fields: vec![("v".to_string(), PolyType::Var(0))],
+            fields: fields
+                .iter()
+                .map(|(f, ty)| (f.to_string(), ty.clone()))
+                .collect(),
             span: Span::default(),
             module,
         }
+    }
+
+    /// The `pb2` grounding fixture: module 3 (the caller) declares
+    /// `Widget['T] v 'T`, module 4 declares a *differently shaped*
+    /// `Widget['T] v 'T w i64`, and only module 4's is eagerly minted. Hands
+    /// back the live cell and module 4's mint.
+    fn two_header_widget_cell() -> (RefCell<GenericTypes>, Type) {
+        let mut generics = GenericTypes::with_bases(0, 0);
+        generics.structs.push(generic_struct_decl(
+            "Widget",
+            3,
+            &["'T"],
+            &[("v", PolyType::Var(0))],
+        ));
+        generics.structs.push(generic_struct_decl(
+            "Widget",
+            4,
+            &["'T"],
+            &[
+                ("v", PolyType::Var(0)),
+                ("w", PolyType::Concrete(Type::I64)),
+            ],
+        ));
+        let mut scratch = ScratchRegs::default();
+        let borrowed = generics.instantiate_struct(1, &[Type::I64], &[], 4, scratch.regs());
+        (RefCell::new(generics), borrowed)
+    }
+
+    /// Module 4's generated constructor (or, with `destructure`, its
+    /// destructure) of `borrowed` -- the single `env` candidate a bare call in
+    /// module 3 actually sees.
+    fn borrowed_widget_candidate(borrowed: Type, destructure: bool) -> Overload {
+        let fields = vec![Type::I64, Type::I64];
+        match destructure {
+            true => Overload {
+                sig: Sig {
+                    inputs: vec![borrowed],
+                    outputs: fields,
+                },
+                symbol: "Widget[i64]>".to_string(),
+                module: 4,
+            },
+            false => Overload {
+                sig: Sig {
+                    inputs: fields,
+                    outputs: vec![borrowed],
+                },
+                symbol: "Widget[i64]".to_string(),
+                module: 4,
+            },
+        }
+    }
+
+    fn ground_in_module_3(
+        only: &Overload,
+        name: &str,
+        cell: &RefCell<GenericTypes>,
+        structs: &[StructDecl],
+    ) -> Result<Option<Overload>, String> {
+        let word = crate::test_support::bare_word("run", 3);
+        let ctx = word_ctx(
+            &word,
+            structs,
+            &[],
+            &[],
+            None,
+            &CombinatorIndex::new(),
+            Some(cell),
+        );
+        let span = Span {
+            line: 4,
+            col: 1,
+            module: 3,
+        };
+        bare_generated_word_own_module_grounding(
+            only,
+            name,
+            span,
+            &ctx,
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &mut Vec::new(),
+        )
     }
 
     /// P7b.S9 Phase 2 (R1.1a, happy path): the Phase-1 verdict's exact shape --
     /// two modules each declare their own `Widget['T]` header, only one has
     /// been eagerly minted (module 4's), and the caller (module 3) is
     /// grounding a bare `Widget` ctor call. The caller's own header must be
-    /// minted (or found) and used, never the borrowed candidate.
+    /// minted (or found) and used, never the borrowed candidate -- *including*
+    /// its `Sig`: the two headers here have different field lists, so a
+    /// grounded ctor keeping the borrowed candidate's `inputs` would take two
+    /// operands into a one-field struct and silently forget one.
     #[test]
     fn bare_ctor_operand_provenance_is_callers_own_header_not_a_borrowed_mint() {
-        let structs: Vec<StructDecl> = Vec::new();
-        let enums: Vec<EnumDecl> = Vec::new();
-        let mut generics = GenericTypes::with_bases(structs.len(), enums.len());
-        generics.structs.push(generic_struct_decl("Widget", 3));
-        generics.structs.push(generic_struct_decl("Widget", 4));
-        let mut scratch = ScratchRegs::default();
-        let borrowed = generics.instantiate_struct(1, &[Type::I64], &[], 4, scratch.regs());
+        let (cell, borrowed) = two_header_widget_cell();
         let Type::Struct(borrowed_id, _) = borrowed else {
             panic!("expected a Type::Struct")
         };
-        let only = Overload {
-            sig: Sig {
-                inputs: vec![Type::I64],
-                outputs: vec![borrowed],
-            },
-            symbol: "Widget[i64]".to_string(),
-            module: 4,
-        };
-        let cell = RefCell::new(generics);
-        let word = crate::test_support::bare_word("run", 3);
-        let ctx = word_ctx(
-            &word,
-            &structs,
-            &enums,
-            &[],
-            None,
-            &CombinatorIndex::new(),
-            Some(&cell),
-        );
-        let mut arrays = Vec::new();
-        let mut cells = Vec::new();
-        let mut refs = Vec::new();
-        let grounded = bare_ctor_own_module_grounding(
-            &only,
-            "Widget",
-            3,
-            &ctx,
-            &mut arrays,
-            &mut cells,
-            &mut refs,
-        )
-        .expect("the caller's own module declares its own header, so this must ground");
+        let only = borrowed_widget_candidate(borrowed, false);
+        let grounded = ground_in_module_3(&only, "Widget", &cell, &[])
+            .expect("the two headers agree on parameter count, so this must not error")
+            .expect("the caller's own module declares its own header, so this must ground");
         assert_eq!(
             grounded.module, 3,
             "the grounded candidate's module must be the caller's own, not the borrowed mint's"
@@ -2844,6 +3071,178 @@ mod tests {
             grounded_id, borrowed_id,
             "the caller must get its own instantiation, never the borrowed module's id"
         );
+        assert_eq!(
+            grounded.sig.inputs,
+            vec![Type::I64],
+            "the ctor's inputs are the caller's own header's fields, not the borrowed decl's"
+        );
+        assert_eq!(
+            grounded.symbol, "Widget[i64]",
+            "the lowering symbol is the caller's own minted decl's name"
+        );
+        let guard = cell.borrow();
+        let minted = guard
+            .struct_decl(grounded_id)
+            .expect("the caller's own mint is still pending in the live cell");
+        assert_eq!(
+            minted.fields,
+            vec![("v".to_string(), Type::I64)],
+            "the minted decl is the caller's own one-field header at `i64`"
+        );
+    }
+
+    /// P7b.S9 Phase 2 (R1.1a): the constructor's sibling. The caller's own
+    /// mint is minted mid-word and has no `env` entry, so a destructure of a
+    /// caller-grounded operand sees only the borrowed module's generated word
+    /// -- and that one's input is the *other* `Widget[i64]`. It grounds by the
+    /// same rule, with the caller's own fields as its outputs.
+    #[test]
+    fn bare_destructure_grounds_at_the_callers_own_header_too() {
+        let (cell, borrowed) = two_header_widget_cell();
+        let only = borrowed_widget_candidate(borrowed, true);
+        let grounded = ground_in_module_3(&only, "Widget>", &cell, &[])
+            .expect("no arity mismatch here")
+            .expect("the caller's own module declares its own header, so this must ground");
+        assert_eq!(grounded.module, 3);
+        assert_eq!(
+            grounded.symbol, "Widget[i64]>",
+            "the destructure's lowering symbol is the caller's own decl name plus `>`"
+        );
+        assert_eq!(
+            grounded.sig.outputs,
+            vec![Type::I64],
+            "a destructure yields the caller's own header's fields"
+        );
+        assert_ne!(
+            grounded.sig.inputs, only.sig.inputs,
+            "and it consumes the caller's own instantiation, not the borrowed one"
+        );
+    }
+
+    /// P7b.S9 Phase 2 (R1.1a): the caller's own header cannot be applied to
+    /// the borrowed mint's argument list at all -- `substitute_generic_field`
+    /// indexes it raw, so minting would panic. A located error, never a
+    /// silent fall-back to the borrowed mint.
+    #[test]
+    fn bare_ctor_own_header_of_a_different_arity_is_error() {
+        let mut generics = GenericTypes::with_bases(0, 0);
+        generics.structs.push(generic_struct_decl(
+            "Widget",
+            3,
+            &["'T", "'U"],
+            &[("v", PolyType::Var(0)), ("w", PolyType::Var(1))],
+        ));
+        generics.structs.push(generic_struct_decl(
+            "Widget",
+            4,
+            &["'T"],
+            &[("v", PolyType::Var(0))],
+        ));
+        let mut scratch = ScratchRegs::default();
+        let borrowed = generics.instantiate_struct(1, &[Type::I64], &[], 4, scratch.regs());
+        let cell = RefCell::new(generics);
+        let only = Overload {
+            sig: Sig {
+                inputs: vec![Type::I64],
+                outputs: vec![borrowed],
+            },
+            symbol: "Widget[i64]".to_string(),
+            module: 4,
+        };
+        let err = ground_in_module_3(&only, "Widget", &cell, &[])
+            .expect_err("a header of a different arity cannot ground here");
+        assert_eq!(
+            err,
+            "error: `Widget` in `run` (line 4) cannot ground at this module's own header: it declares 2 type parameters, but the only `Widget` instantiation in scope supplies 1\n  note: name an instantiation of this module's own `Widget` explicitly (in a signature or an annotation) so it is minted here, rather than borrowing another module's"
+        );
+    }
+
+    /// P7b.S9 Phase 2 (R1.1a): the counts agree and the *kinds* do not -- the
+    /// caller's own header binds `'F` at `* -> *` and applies it in a field,
+    /// the borrowed mint supplies a plain `i64`.
+    /// `substitute_generic_field`'s `App` arm returns a non-`CtorImage`
+    /// binding unapplied (its own doc calls that fall-back unreachable,
+    /// because `validate_ctor_arg_kinds` rejects a kind mismatch at the use
+    /// site -- but the use site here is another module's), so without this
+    /// guard the field silently takes a wrong type.
+    #[test]
+    fn bare_ctor_own_header_of_a_higher_kind_is_error() {
+        let mut generics = GenericTypes::with_bases(0, 0);
+        let mut own = generic_struct_decl(
+            "Widget",
+            3,
+            &["'F"],
+            &[(
+                "v",
+                PolyType::App {
+                    head: 0,
+                    args: vec![PolyType::Concrete(Type::I64)],
+                },
+            )],
+        );
+        own.ty_kinds = vec![crate::ast::Kind::Arrow {
+            domains: vec![crate::ast::Kind::Star],
+            result: Box::new(crate::ast::Kind::Star),
+        }];
+        generics.structs.push(own);
+        generics.structs.push(generic_struct_decl(
+            "Widget",
+            4,
+            &["'T"],
+            &[("v", PolyType::Var(0))],
+        ));
+        let mut scratch = ScratchRegs::default();
+        let borrowed = generics.instantiate_struct(1, &[Type::I64], &[], 4, scratch.regs());
+        let cell = RefCell::new(generics);
+        let only = Overload {
+            sig: Sig {
+                inputs: vec![Type::I64],
+                outputs: vec![borrowed],
+            },
+            symbol: "Widget[i64]".to_string(),
+            module: 4,
+        };
+        let err = ground_in_module_3(&only, "Widget", &cell, &[])
+            .expect_err("a header of a higher kind cannot ground at a concrete argument");
+        assert_eq!(
+            err,
+            "error: `Widget` in `run` (line 4) cannot ground at this module's own header: its `'F` takes a type constructor, but the only `Widget` instantiation in scope supplies the concrete type `i64`\n  note: name an instantiation of this module's own `Widget` explicitly (in a signature or an annotation) so it is minted here, rather than borrowing another module's"
+        );
+    }
+
+    /// P7b.S9 Phase 2 (R1.1a): the length-argument twin of the arity error --
+    /// the caller's own header binds a length variable the borrowed mint's
+    /// argument list has no value for, which `substitute_generic_field`'s
+    /// `Len::Var` arm would index past.
+    #[test]
+    fn bare_ctor_own_header_needing_a_length_argument_is_error() {
+        let mut generics = GenericTypes::with_bases(0, 0);
+        let mut own = generic_struct_decl("Widget", 3, &["'T"], &[("v", PolyType::Var(0))]);
+        own.len_var_names = vec!["'N".to_string()];
+        generics.structs.push(own);
+        generics.structs.push(generic_struct_decl(
+            "Widget",
+            4,
+            &["'T"],
+            &[("v", PolyType::Var(0))],
+        ));
+        let mut scratch = ScratchRegs::default();
+        let borrowed = generics.instantiate_struct(1, &[Type::I64], &[], 4, scratch.regs());
+        let cell = RefCell::new(generics);
+        let only = Overload {
+            sig: Sig {
+                inputs: vec![Type::I64],
+                outputs: vec![borrowed],
+            },
+            symbol: "Widget[i64]".to_string(),
+            module: 4,
+        };
+        let err = ground_in_module_3(&only, "Widget", &cell, &[])
+            .expect_err("a header needing a length argument cannot ground here");
+        assert_eq!(
+            err,
+            "error: `Widget` in `run` (line 4) cannot ground at this module's own header: it declares 1 length parameter, but the only `Widget` instantiation in scope supplies 0\n  note: name an instantiation of this module's own `Widget` explicitly (in a signature or an annotation) so it is minted here, rather than borrowing another module's"
+        );
     }
 
     /// P7b.S9 Phase 2 (R1.1a, edge case): the caller's own module already
@@ -2851,12 +3250,16 @@ mod tests {
     /// nothing to ground, the borrowed candidate is used unchanged.
     #[test]
     fn bare_ctor_own_module_grounding_none_when_caller_already_owns_the_mint() {
-        let structs: Vec<StructDecl> = Vec::new();
-        let enums: Vec<EnumDecl> = Vec::new();
-        let mut generics = GenericTypes::with_bases(structs.len(), enums.len());
-        generics.structs.push(generic_struct_decl("Widget", 3));
+        let mut generics = GenericTypes::with_bases(0, 0);
+        generics.structs.push(generic_struct_decl(
+            "Widget",
+            3,
+            &["'T"],
+            &[("v", PolyType::Var(0))],
+        ));
         let mut scratch = ScratchRegs::default();
         let minted = generics.instantiate_struct(0, &[Type::I64], &[], 3, scratch.regs());
+        let cell = RefCell::new(generics);
         let only = Overload {
             sig: Sig {
                 inputs: vec![Type::I64],
@@ -2865,29 +3268,128 @@ mod tests {
             symbol: "Widget[i64]".to_string(),
             module: 3,
         };
-        let cell = RefCell::new(generics);
-        let word = crate::test_support::bare_word("run", 3);
-        let ctx = word_ctx(
-            &word,
-            &structs,
-            &enums,
-            &[],
-            None,
-            &CombinatorIndex::new(),
-            Some(&cell),
-        );
-        let mut arrays = Vec::new();
-        let mut cells = Vec::new();
-        let mut refs = Vec::new();
-        assert!(bare_ctor_own_module_grounding(
-            &only,
+        assert!(ground_in_module_3(&only, "Widget", &cell, &[])
+            .expect("no error on the ordinary same-module case")
+            .is_none());
+    }
+
+    /// P7b.S9 Phase 2 (R1.1a): the discriminating case for the owning-module
+    /// check. Two same-named headers exist (module 3's and module 4's) and the
+    /// caller is module 3, but the *mint* was keyed to module 3 already -- so
+    /// there is nothing to re-ground even though `find_struct` finds a
+    /// different header index for this module. Dropping the owning-module
+    /// comparison flips this to a spurious second mint of module 3's own
+    /// header at another header's field shape.
+    #[test]
+    fn bare_ctor_own_module_grounding_none_when_the_mint_is_already_the_callers_own_module() {
+        let mut generics = GenericTypes::with_bases(0, 0);
+        generics.structs.push(generic_struct_decl(
             "Widget",
             3,
-            &ctx,
-            &mut arrays,
-            &mut cells,
-            &mut refs,
-        )
-        .is_none());
+            &["'T"],
+            &[("v", PolyType::Var(0))],
+        ));
+        generics.structs.push(generic_struct_decl(
+            "Widget",
+            4,
+            &["'T"],
+            &[("v", PolyType::Var(0))],
+        ));
+        let mut scratch = ScratchRegs::default();
+        // Module 4's *header* (gi = 1), minted under module 3.
+        let minted = generics.instantiate_struct(1, &[Type::I64], &[], 3, scratch.regs());
+        let cell = RefCell::new(generics);
+        let only = Overload {
+            sig: Sig {
+                inputs: vec![Type::I64],
+                outputs: vec![minted],
+            },
+            symbol: "Widget[i64]".to_string(),
+            module: 3,
+        };
+        assert!(ground_in_module_3(&only, "Widget", &cell, &[])
+            .expect("no error")
+            .is_none());
+    }
+
+    /// P7b.S9 Phase 2 (R1.1a): a caller with no header of its own under this
+    /// name has nothing to ground at -- Phase 4's D3 territory. Pinned
+    /// existing behaviour: the borrowed candidate is used unchanged.
+    #[test]
+    fn bare_ctor_own_module_grounding_none_when_the_caller_declares_no_header() {
+        let mut generics = GenericTypes::with_bases(0, 0);
+        generics.structs.push(generic_struct_decl(
+            "Widget",
+            4,
+            &["'T"],
+            &[("v", PolyType::Var(0))],
+        ));
+        let mut scratch = ScratchRegs::default();
+        let borrowed = generics.instantiate_struct(0, &[Type::I64], &[], 4, scratch.regs());
+        let cell = RefCell::new(generics);
+        let only = Overload {
+            sig: Sig {
+                inputs: vec![Type::I64],
+                outputs: vec![borrowed],
+            },
+            symbol: "Widget[i64]".to_string(),
+            module: 4,
+        };
+        assert!(ground_in_module_3(&only, "Widget", &cell, &[])
+            .expect("no error")
+            .is_none());
+    }
+
+    /// P7b.S9 Phase 2 (R1.1a): an ordinary *user* word whose output happens to
+    /// be another module's instantiation is not a generated word of it, and
+    /// keeps its own resolution -- re-grounding it would rewrite a call to a
+    /// word in `b` into a construction in `a`. The candidate here is reached
+    /// under the header's own surface name, so only the symbol tells the two
+    /// apart.
+    #[test]
+    fn bare_ctor_own_module_grounding_none_for_a_user_word_returning_the_borrowed_mint() {
+        let (cell, borrowed) = two_header_widget_cell();
+        let only = Overload {
+            sig: Sig {
+                inputs: vec![Type::I64, Type::I64],
+                outputs: vec![borrowed],
+            },
+            symbol: "makeit__m4".to_string(),
+            module: 4,
+        };
+        assert!(ground_in_module_3(&only, "Widget", &cell, &[])
+            .expect("no error")
+            .is_none());
+    }
+
+    /// P7b.S9 Phase 2 (R1.1a): the candidate's mint is of the caller's *own*
+    /// header, keyed to another module (an application written at a use site
+    /// elsewhere). There is nothing to re-ground: minting again under the
+    /// caller's module would hand the same header at the same arguments a
+    /// second, distinct `StructId` -- the very identity split this fix exists
+    /// to close.
+    #[test]
+    fn bare_ctor_own_module_grounding_none_when_the_mint_is_the_callers_own_header() {
+        let mut generics = GenericTypes::with_bases(0, 0);
+        generics.structs.push(generic_struct_decl(
+            "Widget",
+            3,
+            &["'T"],
+            &[("v", PolyType::Var(0))],
+        ));
+        let mut scratch = ScratchRegs::default();
+        let minted = generics.instantiate_struct(0, &[Type::I64], &[], 4, scratch.regs());
+        let cell = RefCell::new(generics);
+        let only = Overload {
+            sig: Sig {
+                inputs: vec![Type::I64],
+                outputs: vec![minted],
+            },
+            symbol: "Widget[i64]".to_string(),
+            module: 4,
+        };
+        assert!(ground_in_module_3(&only, "Widget", &cell, &[])
+            .expect("no error")
+            .is_none());
     }
 }

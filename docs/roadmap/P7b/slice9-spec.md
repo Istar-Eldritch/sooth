@@ -120,7 +120,9 @@ at `src/check/poly.rs:7235`, moved onto the instantiation at `:7384`) and is
 already lowering-consumed (`src/ir/driver.rs:414`,
 `src/ir/func_builder/calls.rs:375/385`, `src/ir/destructors.rs:379` via
 `empty_trait_calls` `src/ir.rs:130`); it is never re-keyed by this fix (see the
-withdrawal note below — doing so would breach R-NFR1).
+withdrawal note below — doing so would breach R-NFR1, whose one sanctioned
+lowering-side exception is Phase 2's `ir/layout.rs` name keys and nothing
+else).
 
 **R2.1 — the fix.** `instantiation_symbol` (`src/ast.rs:2869`) IS the mono key
 (its own doc comment: "the checker's call-site table and the lowered
@@ -146,8 +148,9 @@ on its own — no module field is needed either. This makes two groundings mint
 two distinct symbols, so lowering's dedup (`src/ir/driver.rs:350-373`) keeps both `CallInst`s
 — including both `trait_calls` maps — and each compiles its own `sized` body
 with its own single `size` call resolved to its own grounding. No IR/lowering
-edit: the dedup loop and every `trait_calls` consumer are untouched: they
-simply stop colliding.
+edit *in this phase*: the dedup loop and every `trait_calls` consumer are
+untouched: they simply stop colliding. (Phase 2's `ir/layout.rs` name keys are a
+separate layer, R2.4.)
 
 **R2.2 — withdrawn.** An earlier reading of this defect proposed re-keying
 `trait_calls`/`builtin_overloads` from `Span` to a grounding-aware key. That is
@@ -156,10 +159,17 @@ the first place (each instantiation owns its own map, per `R2` above), so
 re-keying it changes nothing while the two `CallInst`s still collide on one
 `instantiation_symbol`; and `trait_calls` is lowering-consumed (`CallInst`,
 above), so editing its key shape would touch `src/ir/driver.rs` and
-`src/ir/func_builder/calls.rs`, which R-NFR1 forbids without an explicit stop-
-and-escalate. There is no map-side fallback for R2.1; if widening
-`instantiation_symbol` reds unrelated goldens, stop and escalate per R-NFR1
-rather than reach for R2.2.
+`src/ir/func_builder/calls.rs`, which R-NFR1's V3-mechanism exclusion forbids
+without an explicit stop-and-escalate (Phase 2's sanctioned exception is the
+`ir/layout.rs` registry keys and nothing else). There is no map-side fallback
+for R2.1; if widening `instantiation_symbol` reds unrelated goldens, stop and
+escalate per R-NFR1 rather than reach for R2.2.
+
+**R2.4 — two distinct name-key layers.** `instantiation_symbol` (the *word*
+monomorphization key, R2.1) and the generated-word registry
+(`type_instantiation_name` → `ir/layout.rs`'s `swords`/emitted type symbol) are
+distinct layers: Phase 3's widening does not reach the latter, and that hole is
+closed in Phase 2 by the module-unique keys.
 
 **R2.3 — verification, not a coupling choice.** Phase 3 verifies G2 resolves
 to deterministic `1\n2` under the R2.1 widening alone; there is no second
@@ -311,6 +321,12 @@ the record of what the review round originally (incorrectly) believed.
   filtered-mint), chosen with instrumentation evidence.
 - **REQ-2** (R1.1): a bare ctor application grounds at the caller's own resolved
   header; it never substitutes another module's eagerly-minted instantiation.
+  This covers the whole generated pair (the destructure grounds with the ctor,
+  since the caller's own mint has no `env` entry of its own) and every site in
+  one module (the mint is flushed around every word); the grounded signature is
+  derived from the caller's own minted decl, never the borrowed candidate's
+  field list; and where the caller's own header cannot be applied to the call's
+  arguments at all, the call site is reported rather than silently borrowed.
 - **REQ-3** (R2.1, observable): repeated `sooth build`s of unchanged source
   (the G2 shape — a shared bound word grounded at two same-rendered-name,
   distinct-identity `Struct`/`Enum` operands) produce identical dispatch
@@ -339,10 +355,27 @@ the record of what the review round originally (incorrectly) believed.
 
 ## Non-functional requirements
 
-- **R-NFR1 — check-stage only.** No IR change, no backend change, no lowering
-  change. The linear spine, `Ptr[T]` opacity, QBE-only backend invariants are
-  untouched (nothing here reaches lowering). If any candidate fix appears to need
-  an IR/lowering edit, stop and escalate — that is out of scope.
+- **R-NFR1 — V3 mechanism check-stage only.** The R2.1 widening stays confined
+  to `instantiation_symbol` (`src/ast.rs:2886`); the dedup loop
+  (`src/ir/driver.rs:350-373`), `trait_calls`, and `builtin_overloads` logic stay
+  unmodified. Sole sanctioned lowering-side exception (Phase 2): `ir/layout.rs`'s
+  generated-word registry keys become module-unique — a naming fix with no
+  dispatch, visibility, or tier logic; the same-named-mint collision it closes
+  was unreachable before V2's second mint existed. The linear spine, `Ptr[T]`
+  opacity and QBE-only backend invariants are untouched. If any *other*
+  candidate fix appears to need an IR/lowering edit, stop and escalate — that is
+  out of scope.
+
+  Phase-2 measurement (2026-09-04): that exception covers **two** name-key
+  layers in `ir/layout.rs`, both module-blind for the same reason and both
+  measured wrong on the reviewer's witness. (i) the generated-word registry
+  (`swords`), whose bare surface key an unrecorded call site resolves by; and
+  (ii) the emitted type symbol (`StructLayout::name`/`EnumLayout::name`, read
+  from the decl's leaked `name_static`), which the backend emits as `type
+  :{name}` and which a second same-named decl silently redefines. Only a
+  *duplicated* name is qualified, so every program with no two same-named
+  declarations emits byte-identical IL (measured: zero golden churn). No
+  lookup, dispatch or tier logic moves.
 - **R-NFR2 — matcher untouched.** `match_impl_target`/`..._rec` and
   `find_bound_impl`'s scan are expected to have **zero** behavioural diff. A
   Phase-exit check confirms no edit landed there (or, if one did, justifies it
@@ -399,14 +432,19 @@ CLAUDE.md; fix sites are R1/R2's choice within the named function):
 
 **In scope:** check-stage repair of V2 (operand provenance) and V3
 (`instantiation_symbol`'s monomorphization-identity fall-through arm; obligation
-wiring / `trait_calls` is untouched, see R2.2); Phase 4's D3 determination
+wiring / `trait_calls` is untouched, see R2.2); Phase 2's module-unique
+`ir/layout.rs` generated-word/type-symbol keys, the collision V2's second mint
+made reachable (R-NFR1's sanctioned exception, R2.4); Phase 4's D3 determination
 (routes through S5's existing `select_overload` tier policy under outcome (a);
 an earlier error under outcome (b) — R3); new `tests/phase7b_slice9.rs`; the
 roadmap correction.
 
 **Out of scope / untouched:**
 
-- IR, lowering, backend — R-NFR1.
+- IR, lowering, backend — R-NFR1, except its one sanctioned Phase-2 exception:
+  `ir/layout.rs`'s module-blind generated-word registry keys and emitted type
+  symbol (naming only; no dispatch, visibility or tier logic, and the two
+  lookup sites in `ir/func_builder/calls.rs` that read those keys).
 - `match_impl_target`/`match_impl_target_rec` and `find_bound_impl`'s registry
   scan — R-NFR2 / R4 (sound per F1/F2/V1).
 - New dispatch-time visibility or tier machinery in the registry — R4.
@@ -508,18 +546,36 @@ independently of their own changes.
   selects R1.1a vs R1.1b; no src change lands; suite unaffected by this phase.
 - **Phase 2 — V2 fix + G1 golden (G2r deferred to Phase 3).** Implement R1.1 at the site Phase 1
   chose: a bare ctor grounds at the caller's own header, never borrowing another
-  module's mint. Add G1 (`pb2` → `1\n2`) to `tests/phase7b_slice9.rs`, plus
-  `bare_ctor_operand_provenance_is_callers_own_header_not_a_borrowed_mint` and the helper's
-  None-path unit `bare_ctor_own_module_grounding_none_when_caller_already_owns_the_mint`.
+  module's mint. The grounding covers the struct's whole generated pair and
+  re-derives the grounded `Overload` (signature, lowering symbol, module) from
+  the caller's own minted decl through `struct_generated_sigs_of` — the same
+  rule env registration uses — read through `Ctx::with_struct_decl_or_generic`,
+  which sees both a still-pending mint and one already flushed by `check`'s
+  per-word bracket. A caller header that cannot be applied to the call's
+  arguments (a different type/length parameter count, or a kind its `App` field
+  would misread) is a located error, not a fall-back. `check_field_projection`
+  reads its receiver — struct or variant — through the same accessor, so a
+  mid-word mint is visible to it. Two live decls now share one mangled name, so
+  `ir/layout.rs`'s module-blind name keys are made module-unique in the same
+  phase (R-NFR1's sanctioned exception, R2.4): the generated-word registry
+  (`Structs::word`, read at the call term's own module by
+  `ir/func_builder/calls.rs`'s two lookup sites) and the emitted type symbol
+  (qualified only where a name is duplicated, so IL for every other program is
+  byte-identical). Add G1 (`pb2` → `1\n2`) to `tests/phase7b_slice9.rs`, plus
+  G1a/G1b/G1c/G1d/G1e/G1f (every site in one module grounds at its own header; a
+  field projection reads the caller-grounded mint's own field; the arity and
+  kind mismatches' byte-exact diagnostics; and the two-module collision shape,
+  destructuring and bundle-packing each module's own layout), the ten `bare_*`
+  units beside the helper, and two beside `ir/layout.rs`'s registry.
   **G2r moves to Phase 3** (measured at implementation, 2026-09-04): the earlier claim that
   G2r isolates V2 is falsified — once V2 mints the two distinct caller-owned groundings,
   G2r's shared bound word `sized` collides in `instantiation_symbol`'s fall-through arm (the
   V3 defect) and runs nondeterministically (`2\n2` 4/6, `1\n1` 2/6) until R2.1 lands. G1
   dodges the collision only because its b-side dispatches `size` as a direct mono member
   call; provenance still gets its Phase-2 pin at unit level.
-  Matcher untouched (R-NFR2). Exit: G1 green deterministically (5+ rebuild cycles); #10 and
-  S5 tier-1 unchanged; suite +3 green (known-flaky test still not yet re-pinned — that's
-  Phase 3, where G2r's golden also lands).
+  Matcher untouched (R-NFR2). Exit: G1 and G1a-G1f green deterministically (3+ rebuild
+  cycles); #10 and S5 tier-1 unchanged; suite +19 green (known-flaky test still not yet
+  re-pinned — that's Phase 3, where G2r's golden also lands).
 - **Phase 3 — V3 fix + G2/G2r goldens + flaky-test re-pin.** Implement R2.1: widen
   `instantiation_symbol`'s `Type::Struct`/`Type::Enum` fall-through arm
   (`src/ast.rs:2886`) to render the id already carried by the matched variant
@@ -583,15 +639,37 @@ independently of their own changes.
       "requirements": ["REQ-2", "REQ-8", "REQ-10"],
       "changes": [
         "Implement R1.1 at the Phase-1-chosen site: bare ctor grounds at caller's own resolved header (src/parser.rs:7101 module-scoped resolution precedent); never substitute another module's eager mint",
+        "Ground the struct's whole generated pair (ctor + destructure) and re-derive the grounded Overload -- Sig, lowering symbol, module -- from the caller's own minted decl via declarations.rs' struct_generated_sigs_of (lifted out of struct_generated_sigs so env registration and this path share one rule), read through Ctx::with_struct_decl_or_generic so both a pending mint and one already flushed by check's per-word bracket are visible",
+        "Validate the call's type/length argument count against the caller's own header before minting: on a mismatch report a located error at the call site (substitute_generic_field indexes args raw), never fall back to the borrowed mint",
+        "Validate the caller's own header's ty-var KINDS against the borrowed argument list in the same pre-mint guard: substitute_generic_field's App arm returns a non-CtorImage binding unapplied (a fall-back the parser's validate_ctor_arg_kinds makes unreachable at a same-module use site, but not at another module's), so an HKT header grounded at a Star-kinded argument would silently take a wrong field type -- located error instead",
+        "check_field_projection reads its receiver -- struct AND variant -- through with_struct_decl_or_generic/with_enum_decl_or_generic instead of indexing the live registry, so a mid-word mint is visible to it (src/check/word_families.rs:343)",
+        "R-NFR1's sanctioned exception: make ir/layout.rs's two module-blind name-key layers module-unique, now that two live StructDecls share one type_instantiation_name spelling -- (a) the generated-word registry gains a per-declaring-module map read through Structs::word at the call term's own module (ir/func_builder/calls.rs' builtin_overloads and bare-name lookup sites), the module-blind map kept as the fall-back for a cross-module spelling; (b) the emitted type symbol (StructLayout/EnumLayout name, from the decl's leaked name_static) is qualified {name}__m{module} for duplicated names only, so a program with no two same-named decls emits byte-identical IL. Naming only: no dispatch, visibility or tier logic, find_bound_impl and the driver.rs dedup loop untouched",
         "Matcher and find_bound_impl scan untouched (R-NFR2/R4)"
       ],
       "goldens": [
-        "tests/phase7b_slice9.rs: cross_module_same_shaped_impls_dispatch_each_callers_own_impl (G1, pb2) -> 1\\n2"
+        "tests/phase7b_slice9.rs: cross_module_same_shaped_impls_dispatch_each_callers_own_impl (G1, pb2) -> 1\\n2",
+        "tests/phase7b_slice9.rs: every_bare_ctor_site_in_one_module_grounds_at_the_callers_own_header (G1a, three sites past the per-word flush) -> 1\\n1\\n7\\n2",
+        "tests/phase7b_slice9.rs: field_projection_reads_the_caller_grounded_mints_own_field (G1b) -> 5\\n2",
+        "tests/phase7b_slice9.rs: bare_ctor_arity_mismatch_with_the_callers_own_header_is_a_located_error (G1c) -> build_error pinning the byte-exact diagnostic",
+        "tests/phase7b_slice9.rs: bare_ctor_kind_mismatch_with_the_callers_own_header_is_a_located_error (G1d, HKT own header vs a Star-kinded borrowed argument) -> build_error pinning the byte-exact diagnostic",
+        "tests/phase7b_slice9.rs: same_named_headers_of_differing_shapes_destructure_each_modules_own_layout (G1e, the two-module collision shape: b destructures its own declared Widget[i64] param) -> 11",
+        "tests/phase7b_slice9.rs: same_named_headers_of_differing_shapes_pack_each_modules_own_field_values (G1f, G1e's multi-output twin, the pack_bundle shape) -> 99\\n11"
       ],
       "units": [
-        "bare_ctor_operand_provenance_is_callers_own_header_not_a_borrowed_mint"
+        "bare_ctor_operand_provenance_is_callers_own_header_not_a_borrowed_mint",
+        "bare_destructure_grounds_at_the_callers_own_header_too",
+        "bare_ctor_own_header_of_a_different_arity_is_error",
+        "bare_ctor_own_header_needing_a_length_argument_is_error",
+        "bare_ctor_own_header_of_a_higher_kind_is_error",
+        "bare_ctor_own_module_grounding_none_when_caller_already_owns_the_mint",
+        "bare_ctor_own_module_grounding_none_when_the_mint_is_already_the_callers_own_module",
+        "bare_ctor_own_module_grounding_none_when_the_mint_is_the_callers_own_header",
+        "bare_ctor_own_module_grounding_none_when_the_caller_declares_no_header",
+        "bare_ctor_own_module_grounding_none_for_a_user_word_returning_the_borrowed_mint",
+        "struct_word_lookup_prefers_the_calling_modules_own_declaration (src/ir/layout.rs)",
+        "duplicated_type_name_emits_one_symbol_per_declaring_module (src/ir/layout.rs)"
       ],
-      "exit": "G1 prints 1\\n2 deterministically (5+ rebuild cycles); #10 stays 1\\n2, S5 tier-1 stays 15\\n25; fmt/clippy/test green; suite +3 (G1 + two unit tests; known-flaky test not yet re-pinned, see Phase 3); G2r golden deferred to Phase 3 -- once V2 mints two distinct caller-owned groundings, G2r's shared bound word exposes the V3 symbol collision (measured post-V2: 2\\n2 4/6, 1\\n1 2/6)",
+      "exit": "G1 prints 1\\n2 deterministically (3+ rebuild cycles) and G1a-G1f are green; #10 stays 1\\n2, S5 tier-1 stays 15\\n25; fmt/clippy/test green; suite +19 (7 goldens + 12 unit tests; known-flaky test not yet re-pinned, see Phase 3); G2r golden deferred to Phase 3 -- once V2 mints two distinct caller-owned groundings, G2r's shared bound word exposes the V3 symbol collision (measured post-V2: 2\\n2 4/6, 1\\n1 2/6)",
       "notes": "V2 deterministic pb2 2\\n2 -> 1\\n2. Phase-1 verdict selected R1.1a (absent-mint; decisive site = single-candidate arm src/check/terms.rs:932; tier path never runs). The spec's earlier claim that G2r isolates V2 was falsified at implementation: post-V2, G2r's shared bound word collides in instantiation_symbol's fall-through until R2.1 (Phase 3)."
     },
     {

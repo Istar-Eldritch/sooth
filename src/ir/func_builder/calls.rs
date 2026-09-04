@@ -489,7 +489,13 @@ impl<'a> FuncBuilder<'a> {
             // must be tried before the ordinary-user-overload path below,
             // which would otherwise `expect` a `self.env` entry no struct or
             // enum word ever registers.
-            if let Some(&sw) = self.structs.words.get(&sym_name) {
+            //
+            // P7b.S9: read at this term's own module, because the mangled
+            // spelling is unique only within one (`Structs::word`) -- two
+            // modules' own `Widget['T]` headers both mint a live
+            // `Widget[i64]`, and the checker resolved this site to exactly
+            // one of them.
+            if let Some(sw) = self.structs.word(&sym_name, span.module) {
                 self.lower_struct_word(sw);
                 return Ok(());
             }
@@ -876,8 +882,11 @@ impl<'a> FuncBuilder<'a> {
                     return Ok(());
                 }
                 // A generated struct word (`S`/`S>`) lowers to alloc/blit/
-                // field-load inline, not a normal call.
-                if let Some(&sw) = self.structs.words.get(name) {
+                // field-load inline, not a normal call. Read at this term's
+                // own module first (P7b.S9, `Structs::word`): a source term
+                // can only spell the bare surface name, which two modules'
+                // same-named headers both claim.
+                if let Some(sw) = self.structs.word(name, span.module) {
                     self.lower_struct_word(sw);
                     return Ok(());
                 }

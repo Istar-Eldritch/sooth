@@ -118,6 +118,15 @@ pub(super) enum StructWord {
 pub struct Structs {
     pub layouts: Vec<StructLayout>,
     pub(super) words: HashMap<String, StructWord>,
+    /// P7b.S9 (R-NFR1's Phase-2 exception): the same generated words, keyed
+    /// per *declaring* module. `words`' own keys are module-blind --
+    /// `type_instantiation_name` does not encode the declaring module, so two
+    /// modules' same-named generic headers mint two live `StructDecl`s under
+    /// one mangled name (`Widget[i64]`) and the module-blind insert is
+    /// last-wins. `Structs::word` consults this map first, at the module the
+    /// call site is written in, so each module's own header wins its own
+    /// spelling.
+    pub(super) module_words: HashMap<u32, HashMap<String, StructWord>>,
     /// R10: the interned return bundles as `(output tuple, its id)`, the
     /// lookup a word's declared outputs go through to find the aggregate it
     /// returns. Keyed on the frontend `Type` tuple the checker interned by,
@@ -283,6 +292,22 @@ impl Structs {
             .iter()
             .find(|(tys, _)| tys == outputs)
             .map(|(_, id)| *id)
+    }
+
+    /// P7b.S9 (R-NFR1's Phase-2 exception): the generated struct word `name`
+    /// names when spelled in `module` -- that module's own declaration first,
+    /// the module-blind registry after. The fall-back is what serves every
+    /// call site naming *another* module's declaration (nothing in either key
+    /// space records which module a call site resolved into, so a
+    /// cross-module spelling can only be found module-blind); it is
+    /// unambiguous wherever one declaration owns the name program-wide, which
+    /// is every program with no two same-named headers.
+    pub(super) fn word(&self, name: &str, module: u32) -> Option<StructWord> {
+        self.module_words
+            .get(&module)
+            .and_then(|own| own.get(name))
+            .or_else(|| self.words.get(name))
+            .copied()
     }
 }
 
@@ -481,16 +506,39 @@ pub(super) fn build_registries_ww(
     for i in 0..arrays.len() {
         lb.ensure_array(i);
     }
-    let struct_layouts: Vec<StructLayout> = lb
+    let mut struct_layouts: Vec<StructLayout> = lb
         .struct_memo
         .into_iter()
         .map(|l| l.expect("layout"))
         .collect();
-    let enum_layouts: Vec<EnumLayout> = lb
+    let mut enum_layouts: Vec<EnumLayout> = lb
         .enum_memo
         .into_iter()
         .map(|l| l.expect("layout"))
         .collect();
+    // P7b.S9 (R-NFR1's Phase-2 exception): the backend emits one `type
+    // :{layout.name}` per layout and refers to it by that symbol, so two
+    // declarations sharing a name silently redefine one another -- and
+    // `type_instantiation_name` does not encode the declaring module, so two
+    // modules' own `Widget['T]` headers mint two live, differently shaped
+    // `Widget[i64]` decls. Whichever is laid out last then owns the symbol,
+    // and the other module's aggregate is classified by the wrong field list.
+    // Only a *duplicated* name is qualified, so every program with no two
+    // same-named declarations emits byte-identical IL.
+    for (layout, qualified) in struct_layouts.iter_mut().zip(module_qualified_names(
+        structs.iter().map(|d| (d.name_static, d.module)),
+    )) {
+        if let Some(name) = qualified {
+            layout.name = name;
+        }
+    }
+    for (layout, qualified) in enum_layouts.iter_mut().zip(module_qualified_names(
+        enums.iter().map(|d| (d.name_static, d.module)),
+    )) {
+        if let Some(name) = qualified {
+            layout.name = name;
+        }
+    }
     let array_layouts: Vec<ArrayLayout> = lb
         .array_memo
         .into_iter()
@@ -498,6 +546,7 @@ pub(super) fn build_registries_ww(
         .collect();
 
     let mut swords = HashMap::new();
+    let mut smodule_words: HashMap<u32, HashMap<String, StructWord>> = HashMap::new();
     // R10: a synthesized bundle is an ABI detail with no source spelling, so it
     // contributes no generated words; lowering reaches its pack and unpack
     // through `StructWord` directly, never by name.
@@ -507,18 +556,30 @@ pub(super) fn build_registries_ww(
     // `builtin_overloads` symbol names when two instantiations share a bare
     // surface name) and the bare surface spelling (`Box>val` -- the only
     // spelling a source term can ever contain, `[` being a lexer delimiter).
-    // The surface key collides across instantiations sharing one surface
-    // name, but that is only ever consulted by the unambiguous
-    // single-instantiation case, where exactly one insert reaches it; an
-    // ambiguous call site's checker-resolved symbol is looked up under the
-    // (unique) mangled key instead (`lower_call`'s `builtin_overloads` arm).
+    //
+    // P7b.S9 (R-NFR1's Phase-2 exception): every key goes into two registries,
+    // the module-blind `swords` and the declaring module's own map. Neither
+    // spelling is program-wide unique: the surface key collides across
+    // instantiations sharing a surface name, and the *mangled* key collides
+    // across modules, because `type_instantiation_name` does not encode the
+    // declaring module -- two modules' own `Widget['T]` headers both mint
+    // `Widget[i64]`, and a module-blind insert would hand one module's call
+    // site the other's layout. The invariant that holds is per module:
+    // `(module, mangled key)` is unique (a module cannot declare two headers
+    // under one name), and `(module, surface key)` is unique wherever that
+    // module instantiated its header once -- an ambiguous surface spelling is
+    // resolved by the checker's mangled symbol instead (`lower_call`'s
+    // `builtin_overloads` arm). `Structs::word` reads the pair.
     for (idx, decl) in structs.iter().enumerate().filter(|(_, d)| !d.is_bundle) {
         let id = StructId::from_index(idx);
         let surface = generic_surface_name(&decl.name);
+        let own = smodule_words.entry(decl.module).or_default();
         let mut insert = |mangled_key: String, surface_key: String, sw: StructWord| {
             if surface_key != mangled_key {
+                own.insert(surface_key.clone(), sw);
                 swords.insert(surface_key, sw);
             }
+            own.insert(mangled_key.clone(), sw);
             swords.insert(mangled_key, sw);
         };
         insert(
@@ -590,6 +651,7 @@ pub(super) fn build_registries_ww(
         Structs {
             layouts: struct_layouts,
             words: swords,
+            module_words: smodule_words,
             bundles,
         },
         Enums {
@@ -606,6 +668,41 @@ pub(super) fn build_registries_ww(
             referent: ref_referents,
         },
     )
+}
+
+/// P7b.S9 (R-NFR1's Phase-2 exception): for each declaration, the
+/// `{name}__m{module}` spelling its emitted type symbol needs -- or `None`
+/// when the name is the only one in the registry, which is every declaration
+/// in a program whose modules declare no two same-named types. Reads the
+/// leaked `name_static` the backend actually emits, not the (already
+/// per-module `resolve::mangle`d) `name`: a check-time mint carries no
+/// mangle, so two modules' `Widget[i64]`s differ in `name` and agree in
+/// `name_static`. Mirrors
+/// `resolve::mangle`'s own per-module word suffix, and stays inside
+/// `qbe_name`'s passthrough alphabet, so a qualified symbol is still
+/// injective there. Deterministic: a pure function of the `Vec`-ordered
+/// declarations.
+///
+/// A pair sharing *both* name and module is still indistinguishable here --
+/// as it is at every other name-key layer (the `env` symbol, the
+/// generated-word registry), so this is not the layer to invent an identity
+/// at.
+fn module_qualified_names<'a>(
+    decls: impl Iterator<Item = (&'a str, u32)>,
+) -> Vec<Option<&'static str>> {
+    let decls: Vec<(&str, u32)> = decls.collect();
+    let mut claims: HashMap<&str, usize> = HashMap::new();
+    for (name, _) in &decls {
+        *claims.entry(name).or_insert(0) += 1;
+    }
+    decls
+        .iter()
+        .map(|(name, module)| {
+            (claims[name] > 1).then(|| -> &'static str {
+                Box::leak(format!("{name}__m{module}").into_boxed_str())
+            })
+        })
+        .collect()
 }
 
 /// The shared field-placement + memoized layout core over the combined
@@ -871,6 +968,63 @@ mod tests {
 
         let plain = structs_of("type: File fd i64 ; : main ( -- ) 1 File drop ;");
         assert!(!layout(&plain, "File").is_linear);
+    }
+
+    /// P7b.S9 (R-NFR1's Phase-2 exception): two modules' own `Widget['T]`
+    /// headers mint two live decls under one `type_instantiation_name`
+    /// spelling -- only one of which carries `resolve::mangle`'s per-module
+    /// suffix, since the other is minted at check time -- and both claim the
+    /// bare surface key a source term spells. Hand-built rather than parsed:
+    /// no single-file source can declare the same type in two modules.
+    fn two_modules_own_widget(second_fields: &[(&str, Type)]) -> Vec<StructDecl> {
+        let decl = |name: &str, module: u32, fields: &[(&str, Type)]| StructDecl {
+            name: name.to_string(),
+            name_static: "Widget[i64]",
+            fields: fields.iter().map(|(f, ty)| (f.to_string(), *ty)).collect(),
+            span: Span::default(),
+            has_drop_overload: false,
+            is_bundle: false,
+            module,
+        };
+        vec![
+            decl("Widget[i64]__m3", 3, &[("v", Type::I64), ("w", Type::I64)]),
+            decl("Widget[i64]", 2, second_fields),
+        ]
+    }
+
+    #[test]
+    fn struct_word_lookup_prefers_the_calling_modules_own_declaration() {
+        let structs = Structs::from_structs(&two_modules_own_widget(&[("v", Type::I64)]));
+        let own_of = |module: u32| structs.word("Widget>", module);
+        assert!(
+            matches!(own_of(3), Some(StructWord::Destructure(id)) if id.index() == 0),
+            "module 3 spelling `Widget>` means its own two-field decl: {:?}",
+            own_of(3)
+        );
+        assert!(
+            matches!(own_of(2), Some(StructWord::Destructure(id)) if id.index() == 1),
+            "module 2 spelling the same surface name means its own decl: {:?}",
+            own_of(2)
+        );
+        // A module with no declaration of its own still resolves, through the
+        // module-blind registry -- the path every cross-module spelling takes.
+        assert!(own_of(9).is_some());
+        assert!(structs.word("Nothing>", 3).is_none());
+    }
+
+    #[test]
+    fn duplicated_type_name_emits_one_symbol_per_declaring_module() {
+        let structs = Structs::from_structs(&two_modules_own_widget(&[("v", Type::I64)]));
+        let names: Vec<&str> = structs.layouts.iter().map(|l| l.name).collect();
+        assert_eq!(
+            names,
+            vec!["Widget[i64]__m3", "Widget[i64]__m2"],
+            "two decls sharing one emitted spelling would redefine one QBE type"
+        );
+        // The single-declaration case is left exactly as it was: the emitted
+        // symbol carries no module suffix, so no existing IL moves.
+        let lone = Structs::from_structs(&two_modules_own_widget(&[("v", Type::I64)])[..1]);
+        assert_eq!(lone.layouts[0].name, "Widget[i64]");
     }
 
     #[test]

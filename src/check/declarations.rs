@@ -1824,11 +1824,25 @@ fn visit_recursion(
 pub fn struct_generated_sigs(structs: &[StructDecl]) -> Vec<(String, String, u32, Sig)> {
     let mut sigs = Vec::new();
     for (idx, decl) in structs.iter().enumerate() {
-        let struct_ty = Type::Struct(StructId::from_index(idx), decl.name_static);
-        let field_types: Vec<Type> = decl.fields.iter().map(|(_, ty)| *ty).collect();
-        let surface = generic_surface_name(&decl.name);
+        sigs.extend(struct_generated_sigs_of(StructId::from_index(idx), decl));
+    }
+    sigs
+}
 
-        sigs.push((
+/// One struct's own pair of generated-word entries, constructor first then
+/// destructure -- `struct_generated_sigs`' per-decl body, lifted so a
+/// mid-check consumer holding a single `StructDecl` derives the very same
+/// keys, symbols and `Sig`s instead of restating the rule (P7b.S9's
+/// `bare_generated_word_own_module_grounding`, `check/terms.rs`).
+pub(super) fn struct_generated_sigs_of(
+    id: StructId,
+    decl: &StructDecl,
+) -> [(String, String, u32, Sig); 2] {
+    let struct_ty = Type::Struct(id, decl.name_static);
+    let field_types: Vec<Type> = decl.fields.iter().map(|(_, ty)| *ty).collect();
+    let surface = generic_surface_name(&decl.name);
+    [
+        (
             surface.to_string(),
             decl.name.clone(),
             decl.module,
@@ -1836,18 +1850,17 @@ pub fn struct_generated_sigs(structs: &[StructDecl]) -> Vec<(String, String, u32
                 inputs: field_types.clone(),
                 outputs: vec![struct_ty],
             },
-        ));
-        sigs.push((
+        ),
+        (
             format!("{surface}>"),
             format!("{}>", decl.name),
             decl.module,
             Sig {
                 inputs: vec![struct_ty],
-                outputs: field_types.clone(),
+                outputs: field_types,
             },
-        ));
-    }
-    sigs
+        ),
+    ]
 }
 
 /// Synthesize the generated-word `Sig` for every registered enum variant
