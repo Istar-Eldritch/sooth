@@ -782,6 +782,18 @@ green.
 > A same-payload variant with `mk` in both modules also regressed from a hard
 > compile-time `type mismatch` error to a silent `1 1` at exit 0 — newly reachable
 > wrong output, not merely an unfixed pre-existing one; S9 must also close that.
+>
+> **Further correction (P7b.S9 Phase 5, 260905):** the `find_bound_impl` attribution
+> above is itself falsified. S9's probe round (V1/F1/F3) proved that
+> `match_impl_target_rec`'s `Generic` arm already compares header identity
+> `(idx, module)` and resolves per-module correctly in every run; the matcher (now at
+> `poly.rs:8235`, not `:8218` — stale anchor) and pattern resolution are sound. `pb2`'s
+> actual collision is two defects upstream of the matcher — operand provenance and
+> `instantiation_symbol`'s monomorphization identity — both closed in S9 (see
+> [slice9-spec](./slice9-spec.md)). And the "silent `1 1` at exit 0" claim above is
+> itself not a stable regression but HashMap-iteration-order **nondeterminism**
+> (checker-HashMap-iteration-order dependent; a built binary is stable, rebuilds
+> flip): measured `1\n1`/`2\n2` before the fix, deterministic `1\n2` after.
 
 ### Phase 3 — (a) guard reachability ruling + roadmap edit (R5, R6)
 

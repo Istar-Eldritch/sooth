@@ -219,23 +219,32 @@ consuming loop runs with one frame total; the exhausted-case ruling and the fusi
 evidence from a small chain are written down.
 
 **P7b.S9 — Module-aware trait-impl matching.**
-Carved out of S5's review (260904): `find_bound_impl` (`poly.rs:8218`) matches a
-concrete `Type` against every `impl:` target pattern for a trait, whole-program, with no
-module-identity check anywhere in `match_impl_target` or the `select_most_specific`
-tie-break — a different registry from S5's `env`/`select_overload` ctor-construction
-path, and untouched by it. Consequence, reproduced deterministically (`pb2`, S5's own
-motivating fixture): two modules each declaring their own same-shaped generic struct
-(`type: Widget['T] v 'T ;`) and their own `impl:` for the same trait cross-pick — a mono
-caller in one module dispatches through the *other* module's impl, silently, exit 0, no
-diagnostic. S5's tier policy does not apply here: both impls are already directly
-visible to their own module (no re-export, no hub), so this is not a visibility gap
-either P8.S5 or S5's tiers touch — it is `find_bound_impl`'s target-pattern matching
-itself being blind to which module's struct declaration a `impl: Trait for X` pattern
-was written against.
-**Exit:** `pb2` prints `1` then `2` (each caller's own impl); a mono caller with no
-bound, in a third module, seeing both impls (case-appropriate visibility) gets a real
-ambiguity error, not a first/most-specific-match guess; goldens pin both the resolved
-and the ambiguous shape.
+Carved out of S5's review (260904): `find_bound_impl` (`poly.rs:8235`) matches a
+concrete `Type` against every `impl:` target pattern for a trait, whole-program.
+`match_impl_target`/`match_impl_target_rec`'s `Generic` arm compares header identity
+`(idx, module)` and resolves per-module correctly, so the matcher and pattern
+resolution are sound. Same-shaped cross-module trait-impl dispatch resolves upstream
+of the matcher through two mechanisms: a bare, un-annotated ctor call grounds at the
+caller's own resolved header — never another module's eagerly-minted instantiation —
+and `instantiation_symbol` renders the `StructId`/`EnumId` a grounding already
+carries, so distinct groundings of a shared bound word mint distinct symbols and
+lowering's dedup keeps both. `pb2`, S5's own motivating fixture (two modules each
+declaring their own same-shaped generic struct `type: Widget['T] v 'T ;` with their
+own `impl:` for the same trait), pins both mechanisms: it prints `1` then `2`, each
+caller's own impl.
+**Exit:** `pb2` prints `1` then `2` (each caller's own impl). The constructible
+ambiguity shape is covered by the declaration-time duplicate check, not a new
+dispatch-time mechanism: a single cross-module blanket impl is already
+placement-illegal (must-live-in-declaring-module rule), and two such impls surface as
+a duplicate error only because `check_impl_decls`' module-blind duplicate scan runs
+before the placement loop — that scan's own coverage is the same-module duplicate
+shape, not a deliberate cross-module ambiguity check. A third-module bare caller with
+no own header separately dispatches deterministically on the single instantiation
+minted into the shared whole-program env (see [slice9-spec](./P7b/slice9-spec.md)
+Phase 4). Residual: two modules each instantiating a same-shaped type via a
+same-shaped `impl`, consumed by a third module with no header of its own, dispatches
+silently on the single shared-env instantiation; an export-ambiguity rule for this
+shape is future work.
 
 **Dogfood:** S6 — a program that `map`s and folds over `Option`, `Result`, and `List` through
 shared bounds, with the impls declared against the real lib types and output matching

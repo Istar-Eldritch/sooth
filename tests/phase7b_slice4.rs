@@ -478,8 +478,8 @@ import: self::b ;
 : main ( -- ) 5 a::run . 6 b::run . ;
 ",
     );
-    // Post-merge correction (P7b.S5 then P7b.S9 landed on `main` after this
-    // fence was written): P7b.S5 Phase 2b's tier policy resolves the `mk`
+    // Post-merge correction (P7b.S5 landed on `main`, P7b.S9 on this branch, after
+    // this fence was written): P7b.S5 Phase 2b's tier policy resolves the `mk`
     // ctor-mint ambiguity this fixture used to hard-error on (each module's
     // own `Widget[i64]` mint is distinguished, so `mk` type-checks in both
     // `a` and `b`), so this is no longer the S5 boundary marker it was

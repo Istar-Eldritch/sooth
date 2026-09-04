@@ -320,6 +320,40 @@ wiring / mono identity), the ctor path in `terms.rs`/`declarations.rs`, possibly
 CLAUDE.md split signals at phase exit against the files as they then stand; do
 **not** preemptively split.
 
+#### Phase-5 growth-signal verdict (measured via `git diff 600bc1b..HEAD --numstat`, HEAD `59dd87b`)
+
+Split signals re-run per file S9 touched, against CLAUDE.md's five: import
+divergence, a module doing X/Y/Z, high/low-level code mixed, functions that never
+call each other, a would-be circular dependency forced split.
+
+| File | Lines (now) | S9 delta | Signals fired | Verdict |
+| --- | --- | --- | --- | --- |
+| `src/check/poly.rs` | 20,968 | +1/-1 (one `#[cfg(test)]` assertion string only, R-NFR2 confirms no production edit) | none newly fired by S9 (pre-existing 3/5, no clean cut, S5 residual) | split still deferred |
+| `src/check/terms.rs` | 3,395 | +710/-0 (4 small production helpers cohesive with the file's existing ctor-application checking; the rest is 10 new `#[cfg(test)]` units beside them, per CLAUDE.md convention) | none | no split warranted |
+| `src/check/declarations.rs` | 4,441 | +56/-10 (`struct_generated_sigs_of` factored out of the existing `struct_generated_sigs`, same responsibility; plus one new `#[cfg(test)]` unit, `check_impl_decls_duplicate_blanket_impl_across_modules_still_errors`) | none | no split warranted |
+| `src/check/word_families.rs` | 3,107 | +24/-7 (one accessor read path change in an existing function) | none | no split warranted |
+| `src/ir/layout.rs` | 1,611 | +161/-7 (module-unique registry keys, same responsibility as the existing per-module structures it extends) | none | no split warranted |
+| `src/ir/func_builder/calls.rs` | 2,593 | +12/-3 (two lookup sites updated to read the new keys) | none | no split warranted |
+| `src/ast.rs` | 5,765 | +67/-0 (two new `instantiation_symbol` match arms keying a struct/enum image on its `StructId`/`EnumId`, the R2.1 fix authorized in Phase 3; the rest is one new `#[cfg(test)]` unit beside the existing grounding-identity tests) | none | no split warranted |
+| `src/ir/driver.rs` | 1,520 | +3/-3 (hard-pinned symbol strings in `#[cfg(test)]` re-pinned to the new `s{id}_`/`e{id}_` rendering; no production edit) | none | no split warranted |
+| `tests/phase7b_slice9.rs` | 667 | new file, +667/-0, all `#[cfg(test)]` goldens | n/a | new test file, no split needed |
+| `tests/phase7b_slice4.rs` | 523 | +30/-24 (symbol-string goldens re-pinned to the R2.1 rendering, same shape as `driver.rs`) | none | no split warranted |
+
+`src/parser.rs` is absent from the diff (S9 never touched it) and is dropped
+from this table accordingly; the 34 regenerated `tests/qbe_baseline/*.ssa`
+snapshots and the `docs/roadmap/P7b/*.md` corrections are likewise out of
+scope for split signals (generated artefacts and prose, not modules).
+
+No new `use`/`mod` imports were added by S9 in any of the above *source* files
+(checked via diff), so no import-divergence signal is newly introduced anywhere;
+`tests/phase7b_slice9.rs` is a new file whose imports (`std::path`,
+`std::process`, `std::sync::atomic`) are its own, not divergence. Every
+non-test addition sits beside the existing code it extends (same function's
+neighbourhood or a direct factoring-out), so no new X/Y/Z-mixing or
+never-call-each-other signal fires either. Verdict: split remains deferred
+for `poly.rs` (pre-existing, unchanged by this slice); no other S9-touched
+file crosses the 2-signal refactor threshold.
+
 ### R7 — Roadmap correction at slice exit. (final phase)
 
 Six edit targets: five falsified by the probe round (none currently instructed
