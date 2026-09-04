@@ -583,14 +583,26 @@ fn check_module_inner(module: &mut Module) -> Result<Vec<WordObligations>, Strin
     // second silently clobber the first's constructor/accessor entry. Each
     // candidate's `Overload::symbol` stays the mangled per-instantiation
     // spelling, so the operand-type match below still picks the right one.
-    for (name, symbol, sig) in struct_generated_sigs(&module.structs) {
-        env.entry(name).or_default().push(Overload { sig, symbol });
+    for (name, symbol, decl_module, sig) in struct_generated_sigs(&module.structs) {
+        env.entry(name).or_default().push(Overload {
+            sig,
+            symbol,
+            module: decl_module,
+        });
     }
-    for (name, symbol, sig) in enum_generated_sigs(&module.enums) {
-        env.entry(name).or_default().push(Overload { sig, symbol });
+    for (name, symbol, decl_module, sig) in enum_generated_sigs(&module.enums) {
+        env.entry(name).or_default().push(Overload {
+            sig,
+            symbol,
+            module: decl_module,
+        });
     }
-    for (name, symbol, sig) in variant_generated_sigs(&module.enums) {
-        env.entry(name).or_default().push(Overload { sig, symbol });
+    for (name, symbol, decl_module, sig) in variant_generated_sigs(&module.enums) {
+        env.entry(name).or_default().push(Overload {
+            sig,
+            symbol,
+            module: decl_module,
+        });
     }
 
     // R1: an `extern:` declaration is registered into the same word
@@ -612,6 +624,7 @@ fn check_module_inner(module: &mut Module) -> Result<Vec<WordObligations>, Strin
             vec![Overload {
                 sig: sig_of(&decl.effect),
                 symbol,
+                module: decl.module,
             }],
         );
     }
@@ -695,6 +708,7 @@ fn check_module_inner(module: &mut Module) -> Result<Vec<WordObligations>, Strin
             env.entry(word.name.clone()).or_default().push(Overload {
                 sig: sig_of(&word.effect),
                 symbol: symbols[idx].clone(),
+                module: word.module,
             });
         }
     }

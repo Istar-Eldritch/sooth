@@ -953,12 +953,12 @@ fn check_term(
                 }
                 _ => {
                     let operands: Vec<Type> = stack.iter().map(|s| s.ty).collect();
-                    let hit = candidates.iter().find(|o| {
-                        operands.len() >= o.sig.inputs.len()
-                            && operands[operands.len() - o.sig.inputs.len()..] == o.sig.inputs[..]
-                    });
-                    let chosen =
-                        hit.ok_or_else(|| no_overload_matches_error(ctx, span, name, candidates))?;
+                    let chosen = match select_overload(candidates, &operands) {
+                        OverloadPick::Pick(hit) => hit,
+                        OverloadPick::Ambiguous => {
+                            return Err(no_overload_matches_error(ctx, span, name, candidates))
+                        }
+                    };
                     // S3-1.e: the same redirect as the single-candidate arm.
                     match splice_enum_site(name, chosen, ctx, prov) {
                         Some((uid, id)) => {
@@ -1407,21 +1407,35 @@ fn mint_fallback_candidates(name: &str, ctx: &Ctx) -> Vec<Overload> {
     ctx.with_extended_type_slices(|structs, enums| {
         let mut out = Vec::new();
         let struct_skip = struct_generated_sigs(ctx.structs()).len();
-        for (n, symbol, sig) in struct_generated_sigs(structs).into_iter().skip(struct_skip) {
+        for (n, symbol, module, sig) in struct_generated_sigs(structs).into_iter().skip(struct_skip)
+        {
             if n == name {
-                out.push(Overload { sig, symbol });
+                out.push(Overload {
+                    sig,
+                    symbol,
+                    module,
+                });
             }
         }
         let enum_skip = enum_generated_sigs(ctx.enums()).len();
-        for (n, symbol, sig) in enum_generated_sigs(enums).into_iter().skip(enum_skip) {
+        for (n, symbol, module, sig) in enum_generated_sigs(enums).into_iter().skip(enum_skip) {
             if n == name {
-                out.push(Overload { sig, symbol });
+                out.push(Overload {
+                    sig,
+                    symbol,
+                    module,
+                });
             }
         }
         let variant_skip = variant_generated_sigs(ctx.enums()).len();
-        for (n, symbol, sig) in variant_generated_sigs(enums).into_iter().skip(variant_skip) {
+        for (n, symbol, module, sig) in variant_generated_sigs(enums).into_iter().skip(variant_skip)
+        {
             if n == name {
-                out.push(Overload { sig, symbol });
+                out.push(Overload {
+                    sig,
+                    symbol,
+                    module,
+                });
             }
         }
         out
@@ -1457,13 +1471,13 @@ fn splice_enum_site(
     let id = ctx.with_extended_type_slices(|_, enums| {
         if enum_generated_sigs(enums)
             .into_iter()
-            .any(|(n, symbol, _)| n == name && symbol == chosen.symbol)
+            .any(|(n, symbol, _, _)| n == name && symbol == chosen.symbol)
         {
             return enum_id_at(&chosen.sig.outputs);
         }
         if variant_generated_sigs(enums)
             .into_iter()
-            .any(|(n, symbol, _)| n == name && symbol == chosen.symbol)
+            .any(|(n, symbol, _, _)| n == name && symbol == chosen.symbol)
         {
             return enum_id_at(&chosen.sig.inputs);
         }

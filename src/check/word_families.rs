@@ -2026,8 +2026,12 @@ mod tests {
     /// residual stack.
     fn infer_variant_call(module: &Module, entry: &[Type], src: &str) -> Result<Vec<Type>, String> {
         let mut env: HashMap<String, Vec<Overload>> = HashMap::new();
-        for (name, symbol, sig) in variant_generated_sigs(&module.enums) {
-            env.entry(name).or_default().push(Overload { sig, symbol });
+        for (name, symbol, module, sig) in variant_generated_sigs(&module.enums) {
+            env.entry(name).or_default().push(Overload {
+                sig,
+                symbol,
+                module,
+            });
         }
         infer_probe_body(src, entry, &env, &module.structs, &module.enums)
     }
@@ -2050,7 +2054,7 @@ mod tests {
         assert_eq!(stack, vec![]);
         let minted: Vec<String> = variant_generated_sigs(&module.enums)
             .into_iter()
-            .map(|(key, _, _)| key)
+            .map(|(key, _, _, _)| key)
             .filter(|key| key.starts_with("Dot>"))
             .collect();
         assert_eq!(minted, vec!["Dot>".to_string()]);

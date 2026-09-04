@@ -37,6 +37,75 @@ pub fn sig_of(effect: &StackEffect) -> Sig {
 pub struct Overload {
     pub sig: Sig,
     pub symbol: String,
+    /// P7b.S5 (R3.6): the owning module id, populated at every construction
+    /// site (mirroring `StructDecl::module`/`WordDef::module`) so a future
+    /// tier can key visibility on it. Not yet consulted by `select_overload`
+    /// (Phase 2a is behavior-preserving; the tier policy lands in Phase 2b).
+    #[allow(dead_code)]
+    pub module: u32,
+}
+
+/// P7b.S5 (R3.6, Fix A): the outcome of `select_overload`. `Pick` borrows the
+/// selected candidate out of the `candidates` slice the call site already
+/// holds. There is no separate `NoMatch` variant: today's "no candidate's
+/// inputs match" case and a future tiering pass's "candidates matched but
+/// none survive the visibility filter" case both map onto the same existing
+/// `no_overload_matches_error` path at the call site.
+pub(super) enum OverloadPick<'a> {
+    Pick(&'a Overload),
+    Ambiguous,
+}
+
+/// P7b.S5 (R3.6, Fix A/D, Phase 2a): reproduces today's `terms.rs` inline
+/// `.find`-by-input arm exactly, extracted so a future tier policy has one
+/// call site to widen (Phase 2b) instead of an inline match arm. Behavior-
+/// preserving: no `caller_module`/`caller_visible` yet, so the widened
+/// 4-argument form (R3.6 Fix D) arrives only once Phase 2b consults them.
+pub(super) fn select_overload<'a>(
+    candidates: &'a [Overload],
+    operands: &[Type],
+) -> OverloadPick<'a> {
+    match candidates.iter().find(|o| {
+        operands.len() >= o.sig.inputs.len()
+            && operands[operands.len() - o.sig.inputs.len()..] == o.sig.inputs[..]
+    }) {
+        Some(hit) => OverloadPick::Pick(hit),
+        None => OverloadPick::Ambiguous,
+    }
+}
+
+#[cfg(test)]
+mod select_overload_tests {
+    use super::*;
+
+    fn overload(inputs: Vec<Type>, outputs: Vec<Type>, symbol: &str) -> Overload {
+        Overload {
+            sig: Sig { inputs, outputs },
+            symbol: symbol.to_string(),
+            module: 0,
+        }
+    }
+
+    #[test]
+    fn select_overload_single_input_match_returns_pick() {
+        let candidates = vec![
+            overload(vec![Type::I64], vec![Type::I64], "i64_id"),
+            overload(vec![Type::U32], vec![Type::U32], "u32_id"),
+        ];
+        match select_overload(&candidates, &[Type::I64]) {
+            OverloadPick::Pick(hit) => assert_eq!(hit.symbol, "i64_id"),
+            OverloadPick::Ambiguous => panic!("expected a pick"),
+        }
+    }
+
+    #[test]
+    fn select_overload_no_input_match_returns_ambiguous() {
+        let candidates = vec![overload(vec![Type::I64], vec![Type::I64], "i64_id")];
+        match select_overload(&candidates, &[Type::U32]) {
+            OverloadPick::Ambiguous => {}
+            OverloadPick::Pick(_) => panic!("expected no match"),
+        }
+    }
 }
 
 /// R1/R2: the one candidate among `candidates` whose declared inputs exactly
