@@ -502,7 +502,7 @@ fn a_nested_receiver_member_is_still_rejected() {
     assert!(
         err.contains(
             "`sum` of `Show` (line 2, col 19) has no input for a call to dispatch on \
-             (expected the trait's variable `'F` bare or heading an application like `'F['T]`)"
+             (expected the trait's variable `'T` bare or heading an application like `'T['U]`)"
         ),
         "{err}"
     );

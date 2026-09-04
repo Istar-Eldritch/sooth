@@ -442,9 +442,18 @@ fn member_inputs_nest_trait_var(member: &TraitMember) -> bool {
 /// actually nest the trait var under a composite shape -- it is advice about
 /// that specific near-miss, not part of the spec's pinned S2-15.a text.
 fn nested_receiver_member_error(decl: &TraitDecl, member: &TraitMember) -> String {
+    // The trait header var is always var 0 of each member's sig, per the
+    // parser's `debug_assert_eq!(id, 0, ...)` at src/parser.rs:3931.
+    let head = member
+        .sig
+        .ty_var_names
+        .first()
+        .map(String::as_str)
+        .unwrap_or("'F");
+    let arg = if head == "'T" { "'U" } else { "'T" };
     let mut msg = format!(
         "error: trait member `{}` of `{}` (line {}, col {}) has no input for a call to dispatch on \
-         (expected the trait's variable `'F` bare or heading an application like `'F['T]`)",
+         (expected the trait's variable `{head}` bare or heading an application like `{head}[{arg}]`)",
         member.name, decl.name, member.span.line, member.span.col
     );
     if member_inputs_nest_trait_var(member) {
@@ -1812,7 +1821,7 @@ fn visit_recursion(
 /// name (`generic_surface_name`, `Box`) every use site actually calls,
 /// while the symbol stays the mangled spelling so two instantiations'
 /// generated words keep distinct lowering identities (R5).
-pub fn struct_generated_sigs(structs: &[StructDecl]) -> Vec<(String, String, Sig)> {
+pub fn struct_generated_sigs(structs: &[StructDecl]) -> Vec<(String, String, u32, Sig)> {
     let mut sigs = Vec::new();
     for (idx, decl) in structs.iter().enumerate() {
         let struct_ty = Type::Struct(StructId::from_index(idx), decl.name_static);
@@ -1822,6 +1831,7 @@ pub fn struct_generated_sigs(structs: &[StructDecl]) -> Vec<(String, String, Sig
         sigs.push((
             surface.to_string(),
             decl.name.clone(),
+            decl.module,
             Sig {
                 inputs: field_types.clone(),
                 outputs: vec![struct_ty],
@@ -1830,6 +1840,7 @@ pub fn struct_generated_sigs(structs: &[StructDecl]) -> Vec<(String, String, Sig
         sigs.push((
             format!("{surface}>"),
             format!("{}>", decl.name),
+            decl.module,
             Sig {
                 inputs: vec![struct_ty],
                 outputs: field_types.clone(),
@@ -1849,7 +1860,7 @@ pub fn struct_generated_sigs(structs: &[StructDecl]) -> Vec<(String, String, Sig
 /// P7 slice 1) rather than a generated getter. These join the env alongside
 /// user words and struct-generated words, so a constructor's arity/field-type
 /// misuse (X9) falls out of the existing call-check path.
-pub fn enum_generated_sigs(enums: &[EnumDecl]) -> Vec<(String, String, Sig)> {
+pub fn enum_generated_sigs(enums: &[EnumDecl]) -> Vec<(String, String, u32, Sig)> {
     let mut sigs = Vec::new();
     for (idx, decl) in enums.iter().enumerate() {
         let enum_ty = Type::Enum(EnumId::from_index(idx), decl.name_static);
@@ -1859,6 +1870,7 @@ pub fn enum_generated_sigs(enums: &[EnumDecl]) -> Vec<(String, String, Sig)> {
             sigs.push((
                 surface.to_string(),
                 variant.name.clone(),
+                decl.module,
                 Sig {
                     inputs: field_types,
                     outputs: vec![enum_ty],
@@ -1882,7 +1894,7 @@ pub fn enum_generated_sigs(enums: &[EnumDecl]) -> Vec<(String, String, Sig)> {
 /// and every construction of the same `(EnumId, vi)` compares equal (R1).
 /// Keying follows `struct_generated_sigs`' D7 rule: the env key is the bare
 /// surface variant name, the lowering symbol the mangled registry spelling.
-pub fn variant_generated_sigs(enums: &[EnumDecl]) -> Vec<(String, String, Sig)> {
+pub fn variant_generated_sigs(enums: &[EnumDecl]) -> Vec<(String, String, u32, Sig)> {
     let mut sigs = Vec::new();
     // Value-mode projection interns nothing, so this scratch registry stays
     // empty; the helper is shared with the accessor path so a destructure's
@@ -1897,6 +1909,7 @@ pub fn variant_generated_sigs(enums: &[EnumDecl]) -> Vec<(String, String, Sig)> 
             sigs.push((
                 format!("{surface}>"),
                 format!("{}>", variant.name),
+                decl.module,
                 Sig {
                     inputs: vec![variant_ty],
                     outputs: field_types,
@@ -3872,7 +3885,7 @@ mod tests {
             "{err}"
         );
         assert!(
-            err.contains("heading an application like `'F['T]`"),
+            err.contains("heading an application like `'T['U]`"),
             "the expected shape is named in the parenthetical: {err}"
         );
         assert!(
@@ -3881,6 +3894,28 @@ mod tests {
         );
         // Located at the member, not the trait header (S2-15.a's position).
         assert!(err.contains("line 1, col 19"), "member position: {err}");
+    }
+
+    #[test]
+    fn nested_receiver_member_error_interpolates_a_non_t_header_var() {
+        let err =
+            trait_check_src("trait: Show['G] : sum ( array[ 'G 4 ] -- i64 ) ; ;").unwrap_err();
+        assert!(
+            err.contains("heading an application like `'G['T]`")
+                && err.contains("expected the trait's variable `'G` bare"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn nested_receiver_member_error_uses_u_placeholder_when_header_var_is_t() {
+        let err =
+            trait_check_src("trait: Show['T] : sum ( array[ 'T 4 ] -- i64 ) ; ;").unwrap_err();
+        assert!(
+            err.contains("heading an application like `'T['U]`")
+                && err.contains("expected the trait's variable `'T` bare"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -4240,9 +4275,9 @@ mod tests {
         let mut extended = base.clone();
         extended.push(grounded.clone());
 
-        let (_, _, sig) = enum_generated_sigs(&extended)
+        let (_, _, _, sig) = enum_generated_sigs(&extended)
             .into_iter()
-            .find(|(name, _, _)| name == "Ok")
+            .find(|(name, _, _, _)| name == "Ok")
             .expect("the extended slice generates Ok's constructor");
         assert_eq!(
             sig.outputs[0],
@@ -4252,9 +4287,9 @@ mod tests {
         // The one-element-slice failure mode this test forbids: the same
         // decl alone yields id 0, which is why R4 must generate over the
         // whole extended slice, not a fresh slice of just the mint.
-        let (_, _, alone_sig) = enum_generated_sigs(std::slice::from_ref(&grounded))
+        let (_, _, _, alone_sig) = enum_generated_sigs(std::slice::from_ref(&grounded))
             .into_iter()
-            .find(|(name, _, _)| name == "Ok")
+            .find(|(name, _, _, _)| name == "Ok")
             .expect("a one-element slice still generates Ok's constructor");
         assert_eq!(
             alone_sig.outputs[0],

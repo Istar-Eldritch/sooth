@@ -944,6 +944,7 @@ mod tests {
                 vec![Overload {
                     sig: sig_of(&word.effect),
                     symbol: word.name.clone(),
+                    module: word.module,
                 }],
             );
         }

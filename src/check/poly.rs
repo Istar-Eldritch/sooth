@@ -796,34 +796,37 @@ pub(super) fn check_poly_combinator_standalone(
         if local.enums.len() > enums.len() || local.structs.len() > structs.len() {
             local_env = env.clone();
             let struct_skip = struct_generated_sigs(structs).len();
-            for (name, symbol, sig) in struct_generated_sigs(&local.structs)
+            for (name, symbol, module, sig) in struct_generated_sigs(&local.structs)
                 .into_iter()
                 .skip(struct_skip)
             {
-                local_env
-                    .entry(name)
-                    .or_default()
-                    .push(Overload { sig, symbol });
+                local_env.entry(name).or_default().push(Overload {
+                    sig,
+                    symbol,
+                    module,
+                });
             }
             let enum_skip = enum_generated_sigs(enums).len();
-            for (name, symbol, sig) in enum_generated_sigs(&local.enums)
+            for (name, symbol, module, sig) in enum_generated_sigs(&local.enums)
                 .into_iter()
                 .skip(enum_skip)
             {
-                local_env
-                    .entry(name)
-                    .or_default()
-                    .push(Overload { sig, symbol });
+                local_env.entry(name).or_default().push(Overload {
+                    sig,
+                    symbol,
+                    module,
+                });
             }
             let variant_skip = variant_generated_sigs(enums).len();
-            for (name, symbol, sig) in variant_generated_sigs(&local.enums)
+            for (name, symbol, module, sig) in variant_generated_sigs(&local.enums)
                 .into_iter()
                 .skip(variant_skip)
             {
-                local_env
-                    .entry(name)
-                    .or_default()
-                    .push(Overload { sig, symbol });
+                local_env.entry(name).or_default().push(Overload {
+                    sig,
+                    symbol,
+                    module,
+                });
             }
             &local_env
         } else {
@@ -1910,6 +1913,22 @@ pub(super) fn resolve_splice_member_call(
         // of this block (which stores the synth name for exactly this case,
         // see there). Either way termination is lowering's splice-budget
         // guard, which reports the recursion.
+        // P7b.S5 Phase 3 (R5): as at the non-inline call site above,
+        // `poly_env` is whole-program (`src/check.rs:668-706`), not
+        // per-module, so this guard's original "not visible from this
+        // module" premise does not describe the current architecture.
+        // Unlike the non-inline site, this one is not provably dead: it is
+        // an INCONCLUSIVE reachability verdict. `check_combinator_cycles`
+        // (`src/check/combinators.rs:186-189`) keys its rejection pass on
+        // bare `c.word.name`, while a trait-member combinator is registered
+        // under a synthesized `member;Trait;Type` spelling, so a member-to-
+        // member call produces no edge in that graph and is not rejected
+        // upstream by it -- but every fixture attempt at reaching this arm
+        // (direct cross-member call, a bounded helper, a bare-forwarded
+        // receiver, and self-recursion) was intercepted by a different,
+        // earlier guard first (see the four attempts recorded beside
+        // `mono_member_unroutable_error`'s doc comment and R5 in
+        // `docs/roadmap/P7b/slice5-spec.md`). No live trigger is known.
         if !tr.impls[imp_idx].target.is_concrete() {
             if !poly.env.contains_key(&symbol) {
                 return Err(mono_member_unroutable_error(
@@ -2386,11 +2405,20 @@ pub(super) fn resolve_mono_member_call(
         // synthesized name does the rest: unification against the concrete
         // slots, the word's own where-bounds at θ_call, and the span-keyed
         // `CallInst` (symbol + θ_call) lowering emits.
-        if !poly.env.contains_key(&word_sym) {
-            return Err(mono_member_unroutable_error(
-                ctx, span, member, trait_name, &word_sym,
-            ));
-        }
+        // P7b.S5 Phase 3 (R5): this guard's premise -- a per-module `poly_env`
+        // that a found impl's member word might not be visible from -- does not
+        // exist. `poly_env` is built once, whole-program, over the fully
+        // `assemble_module`-flattened `Module` (`src/check.rs:668-706`), so a
+        // member word that reaches this branch (i.e. `find_bound_impl` already
+        // matched an impl) is always present. Every cross-module attempt is
+        // intercepted upstream, at the zero-viable-candidates branch, by
+        // `mono_member_no_dispatch_error` instead (see
+        // `cross_module_colliding_mono_call_is_no_dispatch_error`,
+        // `tests/phase7b_slice5.rs`).
+        debug_assert!(
+            poly.env.contains_key(&word_sym),
+            "a dispatched impl's member word is always in the whole-program poly_env"
+        );
         let next = check_poly_call(
             &word_sym, span, type_args, len_args, stack, ctx, env, scope, arrays, cells, refs,
             slices, prov, live, at, poly,
@@ -2419,11 +2447,37 @@ fn mono_member_no_dispatch_error(
     )
 }
 
-/// P7b.S2 (S2-16, mono caller): the dispatching impl's member word is not in
-/// this module's poly environment -- a member word lives in the module that
-/// declared the impl, and a mono caller there has no route to it. The poly
-/// bound-dispatch path (whole-program tables) has no such limit; the mono
-/// path routes through the module's own `poly_env`.
+/// P7b.S2 (S2-16, mono caller). `poly_env` is in fact built once,
+/// whole-program (`src/check.rs:668-706`), so every member word a found impl
+/// dispatches to is present in it -- the non-inline call site (S2-16's
+/// generic-impl branch of `resolve_mono_member_call`) has no live caller
+/// today and asserts this with a `debug_assert!` instead (P7b.S5 Phase 3, R5).
+///
+/// The remaining call site -- the inline re-entry path, reached only when a
+/// `declares_inline` trait member calls another (or itself) while already on
+/// the active splice stack -- is INCONCLUSIVE (P7b.S5 Phase 3, R5). Four
+/// fixture attempts, none of which reached it:
+///   1. direct cross-member call (`ping` calling `pong` by name in the same
+///      impl body): `error: unknown word `pong` in `ping` (member of trait
+///      `Foo` for `Box['T0]`)` -- members aren't visible to each other by
+///      bare name.
+///   2. via a bounded helper (`ping` calling a `['T: Foo] ( 'T -- 'T )`
+///      helper with the receiver): `error: `ping` (member of trait `Foo` for
+///      `Box['T0]`) cannot pass `Box['T]` to `'T` of the polymorphic word
+///      `helper`` -- a poly call site may pass a type variable only bare.
+///   3. forwarding the receiver bare (`impl: Foo for 'T` calling the same
+///      bounded helper): `error: `'T` of `helper` requires `Foo`, which `'T`
+///      in `ping` (member of trait `Foo` for `'T0`) does not declare` -- the
+///      member's own header lacks the bound its body's call requires.
+///   4. (novel) direct self-recursion (`ping` calling `ping`): `error:
+///      `ping;Foo;0;Box['T0]` in `ping` (member of trait `Foo` for
+///      `Box['T0]`) names the generic type `Box['T]`, which cannot yet be
+///      instantiated at a variable-bearing application` -- grounding a
+///      generic over its own type variable is a separate, unimplemented
+///      case.
+///
+/// Every attempt is intercepted by a distinct upstream guard before reaching
+/// this call site. See `docs/roadmap/P7b/slice5-spec.md` R5.
 fn mono_member_unroutable_error(
     ctx: &Ctx,
     span: Span,
@@ -3199,6 +3253,12 @@ pub(super) fn poly_call_term(
     // poly callee; an overloaded name (more than one candidate) never
     // matches `single_candidate` below and keeps the rejection, which is
     // R2's own completeness-gap note, not a bug in this carve-out.
+    //
+    // P7b.S5 (R4 audit VERDICT): confirmed non-issue. This binds only
+    // `Some([only])` -- never a multi-candidate `find` -- so an overloaded
+    // name (including a same-shaped cross-module ctor collision) always
+    // falls to `None` here and keeps the rejection; it cannot cross-pick.
+    // Not widened.
     let single_candidate = match env.get(name).map(Vec::as_slice) {
         Some([only]) => Some(only),
         _ => None,
@@ -3255,15 +3315,57 @@ pub(super) fn poly_call_term(
     // (review finding 3) -- it already fell through here `Ok(None)` when it
     // didn't apply, so nothing changes for the ordinary `env` dispatch below
     // by having tried it earlier.
+    // P7b.S5 (R4 audit VERDICT, corrected -- review round 1 fix): actually
+    // reached and actually discriminating, verified with a real fixture, not
+    // assumed. `poly_construct_generic` above returns `Ok(None)` and falls
+    // through to here whenever the constructor is non-fieldless and its
+    // operands already exactly match one of `env`'s generated candidates
+    // (`poly_env_exact_match`); a poly (generic) word's own bare ctor call
+    // over an already-concrete operand lands here with 2+ same-shaped
+    // cross-module candidates in `matching` (confirmed via a temporary
+    // `eprintln!`: `matching_len=2`), and the tier pick is load-bearing, not
+    // a no-op -- swapping it for `matching.last()` turns a passing build
+    // into a type-mismatch error (`tests/phase7b_slice5.rs`,
+    // `poly_body_tier_arm_resolves_same_shaped_ctor_to_callers_own_module`).
+    // Routed through the shared tier policy (`tier_pick`, not
+    // `select_overload` directly): `select_overload`'s own Step 1 assumes
+    // one uniform-length `Type` operand vector, but this call site's
+    // per-candidate window is checked for concreteness against each
+    // candidate's OWN arity, matching the original per-slot `matches!`
+    // exactly -- a differently-arity-overloaded candidate here whose own
+    // (shorter) window is concrete must still be able to match even if an
+    // earlier, non-concrete stack slot lies outside that window; a single
+    // max-arity window shared across all candidates would wrongly require
+    // concreteness beyond what that candidate actually needs.
     let chosen = env.get(name).and_then(|candidates| match &candidates[..] {
         [only] => Some(only),
-        _ => candidates.iter().find(|o| {
-            stack.len() >= o.sig.inputs.len()
-                && stack[stack.len() - o.sig.inputs.len()..]
-                    .iter()
-                    .zip(&o.sig.inputs)
-                    .all(|(s, inp)| matches!(&s.pt, PolyType::Concrete(t) if t == inp))
-        }),
+        candidates => {
+            let matching: Vec<&Overload> = candidates
+                .iter()
+                .filter(|o| {
+                    stack.len() >= o.sig.inputs.len()
+                        && stack[stack.len() - o.sig.inputs.len()..]
+                            .iter()
+                            .zip(&o.sig.inputs)
+                            .all(|(s, inp)| matches!(&s.pt, PolyType::Concrete(t) if t == inp))
+                })
+                .collect();
+            let caller_module = span.module;
+            let pick = match ctx.modules() {
+                Some(modules) => {
+                    // Same demangle-before-visibility rule as `terms.rs:956`.
+                    let bare_name = crate::resolve::demangle_call(name);
+                    tier_pick(&matching, caller_module, |m| {
+                        is_name_visible_to_module(modules, caller_module, m, &bare_name)
+                    })
+                }
+                None => tier_pick(&matching, caller_module, |_| true),
+            };
+            match pick {
+                OverloadPick::Pick(hit) => Some(hit),
+                OverloadPick::Ambiguous => None,
+            }
+        }
     });
     if let Some(chosen) = chosen {
         let msig = &chosen.sig;
@@ -6563,6 +6665,13 @@ pub(super) enum PolyOverloadMiss {
 /// untouched. Bounds (R6) are checked only against the chosen candidate by
 /// the caller, matching the single-candidate path: they gate a resolved
 /// instantiation, not resolution itself.
+///
+/// P7b.S5 (R4 audit VERDICT): not reachable for the ctor-collision shape.
+/// `candidates` here are declared `PolySig`s of overloaded *polymorphic
+/// words* (a different registry than the generated-ctor `Overload`s
+/// `struct_generated_sigs`/`enum_generated_sigs`/`variant_generated_sigs`
+/// populate), and `PolySig` carries no `module` field to disambiguate on --
+/// the ctor-collision fix does not apply to this candidate shape at all.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn resolve_poly_overload(
     candidates: &[PolySig],
@@ -6778,6 +6887,12 @@ pub(super) fn poly_sig_could_match(
 /// position, differing only in a declared quotation's effect, are
 /// indistinguishable here; the first declared wins, the same trade
 /// `resolve_poly_overload` already accepts on an ambiguous unification.
+///
+/// P7b.S5 (R4 audit VERDICT): not reachable for the ctor-collision shape.
+/// `candidates` here are `Combinator`s -- always-spliced words indexed by
+/// `CombinatorIndex`, never a generated ctor -- a distinct registry from the
+/// `Overload`s the S5 fix disambiguates; a same-shaped generic ctor never
+/// registers as a combinator.
 pub(super) fn resolve_combinator_overload<'a>(
     candidates: &[Combinator<'a>],
     stack: &[Slot],

@@ -883,6 +883,7 @@ fn check_term(
             // operator name under module scoping and carries the caller-visible
             // overloads; every other name still resolves through `env`.
             let fallback_storage;
+            let mut from_fallback = false;
             let candidates = match &scoped_ops {
                 Some(v) => v.as_slice(),
                 None => match env.get(name) {
@@ -896,6 +897,7 @@ fn check_term(
                     // mutating nothing.
                     None => {
                         let mints = mint_fallback_candidates(name, ctx);
+                        from_fallback = true;
                         if mints.is_empty() {
                             // P7b.S2 (S2-16, mono caller): the bare member
                             // lookup, after the check-time monomorph mints
@@ -953,12 +955,48 @@ fn check_term(
                 }
                 _ => {
                     let operands: Vec<Type> = stack.iter().map(|s| s.ty).collect();
-                    let hit = candidates.iter().find(|o| {
-                        operands.len() >= o.sig.inputs.len()
-                            && operands[operands.len() - o.sig.inputs.len()..] == o.sig.inputs[..]
-                    });
-                    let chosen =
-                        hit.ok_or_else(|| no_overload_matches_error(ctx, span, name, candidates))?;
+                    // P7b.S5 (R3.5): the caller's *lexically-declaring*
+                    // module, never `ctx.module()` -- inside an inline
+                    // combinator splice, `ctx.module()` is re-scoped to the
+                    // callee's module (`combinators.rs`'s `with_module`),
+                    // which would make tier 1 prefer the splice target's
+                    // module and reintroduce the silent cross-pick this
+                    // policy exists to kill.
+                    let caller_module = span.module;
+                    // P7b.S5 (R4/Fix D): `mint_fallback_candidates`'s
+                    // `Overload.module` is not reliably the declaring module
+                    // (see `select_overload_fallback_sourced`'s doc comment),
+                    // so that provenance gets tier 1 only, never tiers 2/3.
+                    let pick = if from_fallback {
+                        select_overload_fallback_sourced(candidates, &operands, caller_module)
+                    } else {
+                        match ctx.modules() {
+                            Some(modules) => {
+                                // R3.5's `caller_visible` predicate reads
+                                // `modules[caller].selective`, which is keyed
+                                // by the *surface* (bare) name -- a
+                                // module-scoped operator's `name` here may
+                                // already be mangled per-module
+                                // (`resolve::mangle`, the comment above this
+                                // arm), so demangle before the visibility
+                                // lookup or every mangled candidate reads as
+                                // invisible.
+                                let bare_name = crate::resolve::demangle_call(name);
+                                select_overload(candidates, &operands, caller_module, |m| {
+                                    is_name_visible_to_module(modules, caller_module, m, &bare_name)
+                                })
+                            }
+                            // R3.7: no import-closure data to consult, so
+                            // tier 2 degenerates to "exactly one in matching".
+                            None => select_overload(candidates, &operands, caller_module, |_| true),
+                        }
+                    };
+                    let chosen = match pick {
+                        OverloadPick::Pick(hit) => hit,
+                        OverloadPick::Ambiguous => {
+                            return Err(no_overload_matches_error(ctx, span, name, candidates))
+                        }
+                    };
                     // S3-1.e: the same redirect as the single-candidate arm.
                     match splice_enum_site(name, chosen, ctx, prov) {
                         Some((uid, id)) => {
@@ -1403,25 +1441,59 @@ pub(super) fn eliminator_arm_names_no_eliminator_error(
 /// follows the existing env-overload discipline (first-wins on a genuine
 /// collision, no ambiguity check); this fallback must not invent a stricter
 /// rule than a present `env` entry would have had.
+///
+/// P7b.S5 (R4/Fix D, Phase 2b's mint_fallback module-provenance probe --
+/// VERDICT: NOT reliably the declaring module). Each returned `Overload`'s
+/// `.module` traces to the `module` argument `instantiate_struct`/
+/// `instantiate_enum` was minted under. Tracing the one live construction
+/// path that reaches a still-pending mint through this fallback
+/// (`poly_construct_generic`, `poly.rs:5900`+): it takes the module from
+/// `poly_construction_fallback` (the enclosing word's declared *output*
+/// naming this header, its own module) when one exists, but falls back to
+/// `ctx.module()` when it does not (`poly.rs`, the `(module, output_args)`
+/// match arm). `ctx.module()` is the exact splice-rescoped value R3.5 rules
+/// `span.module` around for tier 1's own-module comparison. So this
+/// provenance's `.module` is reliable in the declared-output case and
+/// unreliable (a splice-scoped value) in the no-fallback case, with no way
+/// to tell the two apart from the `Overload` alone -- call-site dispatch
+/// therefore treats every fallback-sourced candidate as unverified
+/// (`select_overload_fallback_sourced`, `builtins.rs`): tier 1 still runs
+/// (safe regardless, since a wrong module id can only fail to match, never
+/// falsely match another module's id), but tiers 2/3 are excluded in favour
+/// of the pre-existing permissive first-match dispatch.
 fn mint_fallback_candidates(name: &str, ctx: &Ctx) -> Vec<Overload> {
     ctx.with_extended_type_slices(|structs, enums| {
         let mut out = Vec::new();
         let struct_skip = struct_generated_sigs(ctx.structs()).len();
-        for (n, symbol, sig) in struct_generated_sigs(structs).into_iter().skip(struct_skip) {
+        for (n, symbol, module, sig) in struct_generated_sigs(structs).into_iter().skip(struct_skip)
+        {
             if n == name {
-                out.push(Overload { sig, symbol });
+                out.push(Overload {
+                    sig,
+                    symbol,
+                    module,
+                });
             }
         }
         let enum_skip = enum_generated_sigs(ctx.enums()).len();
-        for (n, symbol, sig) in enum_generated_sigs(enums).into_iter().skip(enum_skip) {
+        for (n, symbol, module, sig) in enum_generated_sigs(enums).into_iter().skip(enum_skip) {
             if n == name {
-                out.push(Overload { sig, symbol });
+                out.push(Overload {
+                    sig,
+                    symbol,
+                    module,
+                });
             }
         }
         let variant_skip = variant_generated_sigs(ctx.enums()).len();
-        for (n, symbol, sig) in variant_generated_sigs(enums).into_iter().skip(variant_skip) {
+        for (n, symbol, module, sig) in variant_generated_sigs(enums).into_iter().skip(variant_skip)
+        {
             if n == name {
-                out.push(Overload { sig, symbol });
+                out.push(Overload {
+                    sig,
+                    symbol,
+                    module,
+                });
             }
         }
         out
@@ -1457,13 +1529,13 @@ fn splice_enum_site(
     let id = ctx.with_extended_type_slices(|_, enums| {
         if enum_generated_sigs(enums)
             .into_iter()
-            .any(|(n, symbol, _)| n == name && symbol == chosen.symbol)
+            .any(|(n, symbol, _, _)| n == name && symbol == chosen.symbol)
         {
             return enum_id_at(&chosen.sig.outputs);
         }
         if variant_generated_sigs(enums)
             .into_iter()
-            .any(|(n, symbol, _)| n == name && symbol == chosen.symbol)
+            .any(|(n, symbol, _, _)| n == name && symbol == chosen.symbol)
         {
             return enum_id_at(&chosen.sig.inputs);
         }
