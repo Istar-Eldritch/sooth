@@ -1,866 +1,215 @@
-# P7b.S9 spec — module-aware trait-impl matching
+# P7b.S9 — module-aware trait-impl matching (condensed)
 
-Scoped against worktree `p7b-s9`, HEAD `600bc1b`, baseline `cargo test
---no-fail-fast` **82 binaries, 3149 passing + 1 known-flaky, 0 unconditionally
-failed** (see R-NFR5 for the flaky test and why). Discovery input:
-[slice9-brief](./slice9-brief.md) (recon round) and its two completed evidence
-rounds — the adjudicated mechanism in [slice9-probes](./slice9-probes.md)
-(verbatim probe log + verdict) and the validated golden designs in
-[slice9-paper-tests](./slice9-paper-tests.md). S9 is the
-[post-ship correction](./slice5-spec.md) that closed S5: the tier policy S5
-built governs `env`/`select_overload` ctor-*construction* selection only, and
-the cross-pick it was motivated by lives in two other mechanisms, both upstream
-or downstream of the (sound) trait-impl matcher.
+> Implemented reference. The delivery plan (numbered requirements, risk tables,
+> codebase map, phased steps, phases JSON) is retired; the code and the
+> **Implementation** section below supersede it. The frozen companion docs stay
+> as-is: [slice9-brief](./slice9-brief.md) (recon), [slice9-probes](./slice9-probes.md)
+> (verbatim probe log + Phase-1 verdict + errata) and
+> [slice9-paper-tests](./slice9-paper-tests.md) (fixture text). Branch point
+> `600bc1b`.
 
-> **Mechanism correction (carried from the probe round; supersedes the
-> roadmap).** The roadmap's S9 entry claims "no module-identity check anywhere
-> in `match_impl_target` or the `select_most_specific` tie-break". **That is
-> false.** The probe round proved (V1/F1/F3) that `match_impl_target_rec`'s
-> `Generic` arm *does* compare header identity `(idx, module)` and resolves
-> per-module correctly in every run; the matcher and pattern resolution are
-> sound. The real defects are two, both off the matcher:
->
-> - **V2 (operand provenance, deterministic `pb2` `2\n2`).** A bare,
->   un-annotated ctor call silently borrows an *unrelated* module's
->   eagerly-minted instantiation. In `pb2` only `b`'s `usesize` spells
->   `Widget[i64]`, so exactly one `Widget[i64]` mint exists program-wide
->   (`StructId(2)`, provenance `gi=1, module=4` — b's header). a::run's bare
->   `Widget` ctor call applies *that* mint, so both callers dispatch with
->   provenance `(1, 4)` and only b's pattern matches. The S5 tier policy never
->   fires — `ctor-select` shows a single candidate at a's call site (a's own
->   ctor is absent from the candidate set there).
-> - **V3 (monomorphization identity, non-deterministic `mk` variant
->   `1\n1`/`2\n2`).** `trait_calls: HashMap<Span, String>` is **not** shared
->   across groundings — it is a local created fresh per instantiation
->   (`src/check/poly.rs:7235`) and moved onto that instantiation's own
->   `CallInst` (`:7384`; field `CallInst.trait_calls`, `src/ast.rs:2808`), so
->   two groundings write two separate maps and never overwrite each other.
->   The actual collapse is one stage later, in lowering's instantiation dedup
->   (`src/ir/driver.rs:350-373`): a `HashSet<String>` keyed on
->   `instantiation_symbol(&inst.callee, &inst.subst)`, iterating
->   `module.instantiations.values()` (a randomized `HashMap`). `sized`'s two
->   groundings have different substitutions (`Struct(StructId(2))` vs
->   `Struct(StructId(3))`) but `instantiation_symbol`'s rendered-name fall-through
->   arm (`other => other.name().to_string()`, `src/ast.rs:2886`) is
->   non-injective on them, so both mint the identical symbol
->   (`sooth_mono_sized__m2__t0_Widget_i64_`); the `HashSet::insert` in the dedup
->   loop keeps only the first `CallInst` reached under iteration order —
->   **discarding the other grounding's entire `CallInst`, `trait_calls` map
->   included**, not overwriting one entry within a shared map. `instantiation_symbol`
->   (`src/ast.rs:2869`) *is* the mono key already (its own doc: "the checker's
->   call-site table and the lowered `IrFunc.name` are minted from one source of
->   truth", `:2864-2866`) — there is no separate key to bring up to its
->   discipline; the fix widens this one function's **fall-through** arm (the
->   `CtorImage` arm is already correct and stays as-is) to cover the
->   `Struct`/`Enum` case the same way. The race is in **lowering's dedup loop**
->   (`src/ir/driver.rs:359`), which iterates the checker-built
->   `module.instantiations` map (a compile-time `HashMap`, built deterministically
->   but iterated in randomized order, once per `sooth build` process): one built binary
->   reruns deterministically (measured: 5/5 stable repeat runs on each of two
->   builds); only rebuilds flip (measured: 6/8 `1\n1`, 2/8 `2\n2` across 8
->   rebuilds). (`H1`/`H5` are the same mechanism seen from the specialization
->   side and the dedup side — one finding, not two. The earlier reading of this
->   mechanism as `trait_calls.insert(ob.span, symbol)` being "last-writer-wins
->   across two groundings" was wrong — that call writes into a per-instantiation
->   map, never a shared one; see the errata in
->   [slice9-probes](./slice9-probes.md).)
->
-> This spec **rules** on all five decisions the brief hands the spec-writer.
-> The roadmap's own sentences are corrected at slice exit (R7).
+## Why
 
----
+S9 is the post-ship correction that closed S5. S5's tier policy governs
+`env`/`select_overload` ctor-*construction* selection only; the cross-module
+mis-dispatch it was chasing did not live in the trait-impl matcher at all. The
+probe round (V1/F1/F3) proved the matcher is **sound**:
+`match_impl_target_rec`'s `Generic` arm already compares header identity
+`(idx, module)` and resolves per-module correctly in every run. The roadmap's
+S9 entry ("no module-identity check anywhere in `match_impl_target` /
+`select_most_specific`") and slice5-spec's "collision is in `find_bound_impl`"
+were both **false**. The real fault was two defects, both off the matcher:
 
-## Rulings
+- **V2 — operand provenance** (deterministic `pb2` prints `2\n2`). A bare,
+  un-annotated ctor call silently borrowed an unrelated module's eagerly-minted
+  instantiation. In `pb2` only `b`'s `usesize` spells `Widget[i64]`, so exactly
+  one `Widget[i64]` mint existed program-wide (provenance `gi=1, module=4` =
+  b's header); `a::run`'s bare `Widget` ctor applied *that* mint, so both
+  callers dispatched with b's provenance and only b's impl matched. The S5 tier
+  policy never fired: only one candidate was visible at a's call site.
+  Phase-1 verdict (recorded in slice9-probes): **absent-mint** — a's own
+  `Widget[i64]` was never minted (a's construction is bare/inferred), so the
+  fix belongs at registration/application (R1.1a), not operand normalization.
 
-### R1 — V2 fix site: pin the missing candidate first, then ground bare ctors at the caller's own header. (Phase 1 → Phase 2)
+- **V3 — monomorphization identity** (non-deterministic `mk` variant, `1\n1` or
+  `2\n2` per rebuild). Not a shared-map race: `CallInst.trait_calls` is
+  per-instantiation. The collapse was one stage later, in lowering's
+  instantiation dedup (`src/ir/driver.rs:350-373`), a `HashSet<String>` keyed on
+  `instantiation_symbol`. Two groundings of a shared bound word (`sized`) had
+  distinct substitutions (`Struct(StructId(2))` vs `Struct(StructId(3))`) but
+  `instantiation_symbol`'s rendered-name fall-through arm
+  (`other => other.name().to_string()`) was non-injective on them: both minted
+  `sooth_mono_sized__m2__t0_Widget_i64_`, so the dedup `HashSet` kept only the
+  first `CallInst` reached under randomized `HashMap` iteration order,
+  discarding the other grounding's entire `CallInst` (its `trait_calls` map
+  included). One built binary reruns deterministically; only rebuilds flip.
 
-**R1.0 (Phase 1, blocking gate).** Before choosing the V2 fix site, pin *why*
-a's own header's ctor is absent from the single-candidate set at a's bare
-`Widget` call in `pb2`. The probe recorded the symptom (`ctor-select` fires with
-one candidate, provenance `(gi=1, module=4)` = b's) but not the registration
-cause. The candidate set for a bare ctor application is fed from
-`struct_generated_sigs` registration (`src/check/declarations.rs:1824`) into
-either the single-candidate arm (`src/check/terms.rs:932`) or the tier-selection
-path (`src/check/terms.rs:968-991`, `select_overload_fallback_sourced`/
-`select_overload`). The Phase-1 deliverable is a
-recorded verdict answering: does a's own `Widget[i64]` instantiation *exist* in
-the registry at that call site (and the candidate scan filters it out), or is it
-*never minted* because a's construction is bare/inferred and only b's `usesize`
-forces an eager mint? The two answers point at different fix sites (R1.1a vs
-R1.1b); Phase 1 chooses between them with evidence, not prose.
+(The earlier reading of V3 as `trait_calls.insert(...)` "last-writer-wins across
+groundings" was wrong — that call writes a per-instantiation map. See the
+slice9-probes errata. The withdrawn R2.2 proposed re-keying `trait_calls` by a
+grounding-aware key: inert (it never collides) and out of bounds (lowering-side).)
 
-**R1.1 (Phase 2).** A bare ctor application must ground at the **caller's own
+## What shipped
+
+**V2 fix (R1.1a).** A bare ctor application now grounds at the **caller's own
 resolved header** — the same module-scoped resolution the parser already applies
-to type positions (F3, `poly_generic_header` `src/parser.rs:7101` via
-`bare_generic_owner` `:7133`) — minting its own instantiation when none exists
-for that header, and **never** silently substituting another module's
-eagerly-minted instantiation. Two candidate sites, chosen by R1.0's verdict:
+to type positions — minting its own instantiation when none exists, and never
+substituting another module's eager mint. The grounding covers the struct's
+whole generated pair (ctor + destructure) and re-derives the grounded `Overload`
+(signature, lowering symbol, module) from the caller's own minted decl via
+`struct_generated_sigs_of` (factored out of `struct_generated_sigs` so env
+registration and this path share one rule), read through
+`Ctx::with_struct_decl_or_generic` so both a pending mid-word mint and one
+already flushed by `check`'s per-word bracket are visible. `check_field_projection`
+reads its receiver (struct and variant) through the same accessor. A caller
+header that cannot be applied to the call's arguments — wrong arity/length, or a
+kind mismatch (an HKT header grounded at a Star-kinded borrowed argument) — is a
+located error at the call site, never a silent fall-back to the borrowed mint.
+The matcher is untouched: with identity-correct operands, distinct headers have
+distinct `(idx, module)` and the right pattern matches.
 
-- **R1.1a (registration/application, if a's mint is absent):** the bare-ctor
-  candidate registration/application path must mint (or select) the instantiation
-  keyed to the caller's own header, so a's call sees a's own `Widget[i64]`
-  candidate. Neighbourhood: `struct_generated_sigs`
-  (`src/check/declarations.rs:1824`) and the single-candidate arm
-  (`src/check/terms.rs:932`).
-- **R1.1b (operand normalization, if a's mint exists but is filtered):** the
-  operand handed to `find_bound_impl` must carry the caller's own header
-  provenance rather than the borrowed mint's. Neighbourhood: the operand
-  normalization feeding `find_bound_impl` (`src/check/poly.rs:8235`).
+**Layout name-keys (R2.4, R-NFR1's sole sanctioned lowering-side exception).**
+Because two live `StructDecl`s now share one `type_instantiation_name` spelling,
+`ir/layout.rs`'s two module-blind name-key layers were made module-unique:
+(i) the generated-word registry (`swords`), read at the call term's own module;
+(ii) the emitted type symbol (`StructLayout`/`EnumLayout` name), qualified
+`{name}__m{module}` for duplicated names only — so a program with no two
+same-named decls emits byte-identical IL. Naming only: no dispatch, visibility,
+or tier logic.
 
-**The matcher is not touched.** `match_impl_target`/`..._rec` (`:8833`/`:8846`)
-and `find_bound_impl`'s registry scan (`:8235`) are sound (F1/F2/V1) and stay
-as-is: with identity-correct operands, distinct headers have distinct
-`(idx, module)` and exactly the right pattern matches.
+**V3 fix (R2.1).** `instantiation_symbol` (`src/ast.rs:2869`) IS the mono key
+(one source of truth for the checker's call-site table and `IrFunc.name`). Its
+`Type::Struct`/`Type::Enum` fall-through arm now renders the carried
+`StructId`/`EnumId` inner index (`s{id}_{name}` / `e{id}_{name}`,
+`src/ast.rs:2894-2895`), the same way the `CtorImage` arm already renders its
+`GenericId`. A `StructId`/`EnumId` is globally unique across modules on its own
+(the `Module::structs`/`enums` registries are whole-program-assembled), so no
+module component and no lookup are needed; the signature is unchanged and all
+call sites keep compiling. Two groundings now mint distinct symbols, so the
+dedup loop keeps both `CallInst`s (both `trait_calls` maps) and each compiles
+its own body. The dedup loop and every `trait_calls` consumer are untouched:
+they simply stop colliding.
 
-### R2 — V3 fix shape: widen `instantiation_symbol` to be injective on grounding identity. (Phase 3)
+**Phase-4 determination (D3, measured 2026-09-04).** The third-module bare-caller
+case resolved to a **third outcome** neither R3 candidate anticipated. A third
+module `c` declaring no `Widget` header of its own, wildcard-importing `a` and
+`b`: build succeeds, binary deterministically prints `2` (b's constant), 8/8
+rebuild cycles, both import orders. Mechanism: R1.1a's own-header grounding has
+nothing to ground at (`c` declares no header); neither `a`'s nor `b`'s own
+`Widget[i64]` is exported (exporting it is itself a "names private type" error);
+the only `Widget[i64]` visible to `c`'s env lookup is the single instantiation
+minted into the shared whole-program env (b's, spelled in `usesize`'s signature).
+With exactly one candidate, the pre-existing single-candidate arm takes it
+silently. `c`'s bare `size` (a trait member call on a concrete operand) routes
+through `resolve_mono_member_call` → `find_bound_impl`, which is handed a single
+unambiguous target (removing b's impl surfaces `find_bound_impl`'s own "no impl"
+error). The *ambiguity* path (`select_overload`'s 2-candidate collision) never
+fires because only one instantiation is ever visible. `find_bound_impl` gained
+no new machinery — confirmed by measurement.
 
-V3 is **one mechanism, one fix site** — not two coupled halves. `trait_calls`
-is per-instantiation (`CallInst.trait_calls`, `src/ast.rs:2808`; created fresh
-at `src/check/poly.rs:7235`, moved onto the instantiation at `:7384`) and is
-already lowering-consumed (`src/ir/driver.rs:414`,
-`src/ir/func_builder/calls.rs:375/385`, `src/ir/destructors.rs:379` via
-`empty_trait_calls` `src/ir.rs:130`); it is never re-keyed by this fix (see the
-withdrawal note below — doing so would breach R-NFR1, whose one sanctioned
-lowering-side exception is Phase 2's `ir/layout.rs` name keys and nothing
-else).
+**Cross-module blanket-impl ambiguity (R4).** A single cross-module blanket
+`impl: Sized for 'T` is already placement-illegal (`check_impl_decls`'
+must-live-in-declaring-module rule, `src/check/declarations.rs`). Two such impls
+surface as the **duplicate** error — but only because the module-blind duplicate
+scan runs before the placement loop and never reads `imp.module`; a bare
+`PolyType::Var` carries no header identity to tell them apart. That scan's own
+coverage is the same-module duplicate shape; the cross-module pair reaches it by
+loop order, not by design. `ImplDecl.module` stays read only by the placement
+rule. No new dispatch-time visibility or tier machinery was added anywhere.
 
-**R2.1 — the fix.** `instantiation_symbol` (`src/ast.rs:2869`) IS the mono key
-(its own doc comment: "the checker's call-site table and the lowered
-`IrFunc.name` are minted from one source of truth", `:2864-2866`) — there is no
-separate key elsewhere to widen. Its `Type::CtorImage` arm already keys on
-`GenericId` (`:2521`); its fall-through arm for every other `Type`
-(`other => other.name().to_string()`, `:2886`) renders only the type's name,
-which collapses `sized`'s two `Widget[i64]` groundings
-(`Struct(StructId(2))`/module 3, `Struct(StructId(3))`/module 4) to the
-identical string `"Widget_i64_"`. The fix widens that one fall-through arm so a
-`Type::Struct`/`Type::Enum` operand renders its own carried id
-(`StructId`/`EnumId`'s inner index — `Type::Struct(StructId, &'static str)`,
-`src/ast.rs:2991`, already holds it in the matched variant) into the symbol,
-the same way the `CtorImage` arm already renders its carried `GenericId`. No
-lookup, no new parameter, no signature change: `instantiation_symbol(word:
-&str, subst: &Subst)` keeps its signature, so all five call sites
-(`src/ir/driver.rs:109/316/365/851`, `src/ir/func_builder/calls.rs:280`) keep
-compiling unchanged — `GenericTypes::struct_instantiation_of`/`enum_instantiation_of`
-are a different subsystem (the matcher's own provenance lookup, F1) and are not
-needed here, since `Module::structs`/`Module::enums` are whole-program-assembled
-registries and a `StructId`/`EnumId` is already globally unique across modules
-on its own — no module field is needed either. This makes two groundings mint
-two distinct symbols, so lowering's dedup (`src/ir/driver.rs:350-373`) keeps both `CallInst`s
-— including both `trait_calls` maps — and each compiles its own `sized` body
-with its own single `size` call resolved to its own grounding. No IR/lowering
-edit *in this phase*: the dedup loop and every `trait_calls` consumer are
-untouched: they simply stop colliding. (Phase 2's `ir/layout.rs` name keys are a
-separate layer, R2.4.)
+## Load-bearing rulings
 
-**R2.2 — withdrawn.** An earlier reading of this defect proposed re-keying
-`trait_calls`/`builtin_overloads` from `Span` to a grounding-aware key. That is
-both inert and out of bounds: `trait_calls` never collides across groundings in
-the first place (each instantiation owns its own map, per `R2` above), so
-re-keying it changes nothing while the two `CallInst`s still collide on one
-`instantiation_symbol`; and `trait_calls` is lowering-consumed (`CallInst`,
-above), so editing its key shape would touch `src/ir/driver.rs` and
-`src/ir/func_builder/calls.rs`, which R-NFR1's V3-mechanism exclusion forbids
-without an explicit stop-and-escalate (Phase 2's sanctioned exception is the
-`ir/layout.rs` registry keys and nothing else). There is no map-side fallback
-for R2.1; if widening `instantiation_symbol` reds unrelated goldens, stop and
-escalate per R-NFR1 rather than reach for R2.2.
+- **R1.1a** — bare ctors ground at the caller's own header (absent-mint fix at
+  registration/application), never borrowing another module's eager mint; the
+  matcher stays untouched.
+- **R2.1** — `instantiation_symbol` is injective on grounding identity: same
+  rendered name + different `StructId`/`EnumId` ⇒ distinct symbols. This one
+  fix-site delivers determinism; there is no map-side fallback (R2.2 withdrawn).
+- **R2.4** — `instantiation_symbol` (word mono key) and the generated-word /
+  emitted-type-symbol registry (`ir/layout.rs`) are two distinct name-key layers.
+  R2.1 covers the first; the module-unique layout keys cover the second.
+- **R-NFR1 (as amended in Phase 3)** — the V3 mechanism fix is check-stage only
+  (`instantiation_symbol`); the dedup loop, `trait_calls`, and `builtin_overloads`
+  are untouched. The **sole** sanctioned lowering-side exception is Phase 2's
+  `ir/layout.rs` name keys (both layers) — nothing else. Any other candidate fix
+  needing an IR/lowering edit stops and escalates.
+- **R-NFR2** — `match_impl_target`/`..._rec` and `find_bound_impl`'s scan have
+  zero behavioural diff (verified: `src/check/poly.rs` had a +1/-1 test-string
+  change only).
 
-**R2.4 — two distinct name-key layers.** `instantiation_symbol` (the *word*
-monomorphization key, R2.1) and the generated-word registry
-(`type_instantiation_name` → `ir/layout.rs`'s `swords`/emitted type symbol) are
-distinct layers: Phase 3's widening does not reach the latter, and that hole is
-closed in Phase 2 by the module-unique keys.
+## Goldens (identities and behaviour)
 
-**R2.3 — verification, not a coupling choice.** Phase 3 verifies G2 resolves
-to deterministic `1\n2` under the R2.1 widening alone; there is no second
-mechanism to justify or fall back to. A committed test must **never assert a
-run-count ratio** (the pre-fix flip is nondeterministic; see R-NFR3).
+All in `tests/phase7b_slice9.rs` unless noted. Fixture text is preserved in
+[slice9-paper-tests](./slice9-paper-tests.md).
 
-### R3 — D3: third-module mono caller — Phase 4 determines the outcome, does not assume it. (Phase 4)
+| Golden | Test name | Behaviour |
+| --- | --- | --- |
+| G1 | `cross_module_same_shaped_impls_dispatch_each_callers_own_impl` (verbatim `pb2`) | `2\n2` → `1\n2` (V2) |
+| G2 | `cross_module_same_shaped_impls_via_named_instantiation_dispatch_each_callers_own_impl` (`mk` variant) | nondeterministic `1\n1`/`2\n2` → deterministic `1\n2` (V3); never asserts a run-count ratio (R-NFR3) |
+| G2r | `cross_module_same_shaped_impls_eager_minter_wins_regardless_of_caller` (a eager / b bare — primary provenance pin) | `1\n1` → `1\n2`; **lands in Phase 3**, not Phase 2 — post-V2 it hits the V3 symbol collision until R2.1 |
+| G3 | `duplicate_blanket_impl_across_modules_is_a_declared_error` | regression pin on the declaration-time duplicate error (exit 1) |
+| G4 | `third_module_bare_caller_dispatches_the_single_shared_env_instantiation` (renamed from the placeholder `third_module_mono_caller_is_not_silently_cross_picked`) | deterministic `2`, exit 0, both import orders — the measured third outcome |
+| G5 | #10 `same_named_ctors_in_two_modules_dispatch_distinct_impls` (`tests/phase7b_slice2.rs`); S5 tier-1 `cross_module_same_shaped_ctor_dispatches_callers_own_impl` (`tests/phase7b_slice5.rs`) | unchanged: `1\n2`; `15\n25` |
 
-**This is a determination, not a confirmation.** R1.1's own rule is "ground at
-the caller's own resolved header" — but `c` declares no `Widget` header at all,
-and the probe round already measured that a third module naming `Widget[i64]`
-explicitly (with no declaring/importing header of its own) is a hard
-`error: unknown type \`Widget\`` (probes P5a-ii). So R1.1's fix may not give `c`
-a 2-candidate collision to begin with; Phase 4 must build the fixture against
-the Phase-2/3 fix and observe which of two outcomes actually happens, then pin
-that:
+Phase 2 also added G1a–G1f (every same-module site grounds at its own header;
+field projection; arity/kind mismatch diagnostics; the two-module collision
+shape for destructure and bundle-pack) plus the `bare_*` units. The pre-existing
+flaky pin `same_named_ctor_mk_ambiguity_resolves_but_impl_dispatch_still_cross_picks`
+(`tests/phase7b_slice4.rs`, same shape as G2, different trait/text) was re-pinned
+to deterministic `1\n2` in Phase 3 and renamed off its dead pre-fix criterion.
 
-- **(a) 2-candidate collision.** If `c`'s bare `Widget` ctor call *does* surface
-  a 2-candidate collision (e.g. because both `a` and `b`'s mints are visible
-  through `c`'s wildcard imports and the fix's own-header grounding degrades to
-  "ambiguous among visible headers" rather than "no header"), it lands in S5's
-  `select_overload` tier policy; `c` is neither declaring module, so it falls to
-  the ambiguity tier → **compile-time error**. Post-fix assertion: `build_error`
-  pinning a located message naming `Widget`, both candidate modules, and `c`'s
-  call site — pinned against the fixture's actual output, not re-derived here.
-- **(b) no header, earlier error.** If `c`'s bare ctor grounds against no
-  visible header at all (consistent with P5a-ii and R1.1's own-header rule),
-  it errors earlier than dispatch, with whatever message the mechanism actually
-  produces (e.g. `unknown type` or a checker error for an unresolvable bare
-  ctor). Post-fix assertion: `build_error` pinning that measured text.
+Key unit: `instantiation_symbol_same_rendered_name_different_struct_ids_mints_distinct_symbols`
+(`src/ast.rs`).
 
-Either outcome satisfies the roadmap's "real ambiguity error, not a silent
-guess" intent (a caller that cannot resolve one header among several visible,
-equally-plausible ones does not get a silent pick). Phase 4's first task is to
-build the fixture and observe; only then choose which of (a)/(b) to pin.
+## Residual / known limitation
 
-**Phase-4 determination (measured, 2026-09-04): neither (a) nor (b) — a third,
-un-enumerated outcome.** Built against the landed Phase-2/3 fix, `c`'s build
-succeeds (exit 0, no diagnostic) and the binary deterministically prints `2`
-(b's constant) across 8/8 rebuild+run cycles, in both import orders (`self::a`
-before `self::b` and reversed). Mechanism: `c` declares no `Widget` header, so
-R1.1a's own-header grounding has nothing to ground *at* (it only reaches a
-bare ctor call inside a module that itself declares the type); `a`'s own
-`Widget[i64]` grounding (minted mid-check, inside `a::run`'s body by the
-Phase-2 fix) is never exported as a nameable instantiation across the module
-boundary — indeed `b`'s own `Widget[i64]` is not exported either (`export:`ing
-it is itself an error, "names private type"); the only `Widget[i64]` visible
-to `c`'s env lookup is the single instantiation minted into the shared
-whole-program env, `b`'s (spelled explicitly in `usesize`'s signature). With
-exactly one such candidate, the pre-existing single-candidate arm takes it —
-silently, with no awareness that `a`'s module holds a same-shaped,
-differently-`impl`'d instantiation of its own. This is the Phase-1 verdict's
-corollary realized: whichever eager mint exists and is the sole instantiation
-visible in the shared whole-program env decides for every bare caller with no
-header of its own. Golden:
-`third_module_bare_caller_dispatches_the_single_shared_env_instantiation`
-(renamed from the spec's placeholder `third_module_mono_caller_is_not_silently_cross_picked`,
-since the measured outcome *is* a silent — deterministic — pick, not its
-absence).
+Two modules each instantiating a same-shaped type via a same-shaped `impl`,
+consumed by a third module with no header of its own, resolves **silently and
+deterministically** to whichever instantiation happens to be the single one
+minted into the shared whole-program env — not to a compile-time ambiguity
+error. Closing this is a new cross-module *import-resolution* (export-ambiguity)
+policy, not a trait-dispatch fix: R4 forbids the dispatch-time machinery
+(`find_bound_impl`) a naive fix would reach for. It is future work needing its
+own brief/probes/spec, and is recorded as a roadmap follow-up (see the R7
+correction below), not an S9 regression.
 
-**Residual / known limitation (out of S9's scope).** Two modules each
-instantiating a same-shaped type via a same-shaped `impl`, consumed by a
-third module with no header of its own, resolves silently and deterministically
-to whichever instantiation happens to be the single one minted into the shared
-whole-program env — not to a compile-time ambiguity error. Closing this (an
-export-ambiguity rule) is a new cross-module *import-resolution* policy, not a
-trait-dispatch fix, and needs its own brief/probes/spec; R4/REQ-7 forbid the
-dispatch-time machinery a naive fix would reach for (`find_bound_impl`), so
-this is future work, not a Phase-4 regression to close now — see Phase 5's
-roadmap-follow-up task below.
+## Growth-structure re-check (R6)
 
-### R4 — D4: no new dispatch-time visibility/tier machinery in the registry scan. (design ruling; no code)
+Split signals re-run at Phase 5 exit against every file S9 touched: none crossed
+the 2-signal refactor threshold. `src/check/poly.rs` (~21k lines) had a +1/-1
+test-string change only; its split remains deferred (pre-existing 3/5 signals,
+no clean cut, S5 residual) — unchanged by this slice. Every non-test addition
+sits beside the code it extends (same-neighbourhood or a direct factoring-out
+like `struct_generated_sigs_of`), so no import-divergence or X/Y/Z-mixing signal
+newly fired.
 
-Ruling: **no new visibility filter or dispatch-time tier machinery in
-`find_bound_impl`.** With identity-correct operands (R1), distinct modules'
-headers never both match one operand — their `(idx, module)` identities differ —
-and the import system prevents a caller from ever holding an operand whose header
-identity is ambiguous to it (probes P5b/P5c: import cycle / placement rule /
-selective-import collision all fire first). A single cross-module blanket
-`impl: Sized for 'T` (declared outside `Sized`'s declaring module) is already
-placement-illegal on its own — `check_impl_decls`' must-live-in-declaring-module
-rule (`src/check/declarations.rs:544`, second loop, `:574`+) rejects one
-instance alone. Two such impls instead surface as the **duplicate** error,
-but only because `check_impl_decls`' module-blind duplicate scan (first loop,
-`:555-570`) runs before the placement loop and never reads `imp.module`; a
-bare `PolyType::Var` carries no header identity, so the scan can't tell two
-cross-module impls apart. The duplicate scan's own coverage is the
-same-module duplicate shape — the cross-module pair reaches it only by loop
-order, not because the scan is deliberately module-blind for cross-module
-ambiguity. `ImplDecl.module` (`src/ast.rs:2492`) stays read only by the
-placement rule (`:588`); the scan stays `trait_id` + pattern-match only. Under R3 outcome (a), the third-module
-ambiguity routes through the ctor `select_overload` path, not `find_bound_impl`;
-under outcome (b), `c` errors before reaching either registry. **Phase-4
-determination (measured):** neither (a) nor (b) happened for the *ctor* half —
-`c`'s bare `Widget` ctor call never reaches `select_overload` at all (there is
-only one candidate visible in the whole-program env, so the pre-existing
-single-candidate arm resolves it directly, silently). The *dispatch* half does
-reach `find_bound_impl`: `c`'s bare `size` is a trait member call on a
-concrete operand, routed through `resolve_mono_member_call`
-(`src/check/poly.rs:2239`, documented at `:2147`), which calls
-`find_bound_impl` to select an impl — that call is what picks `b`'s impl
-(removing `b`'s impl instead surfaces `find_bound_impl`'s own "no impl: for
-the operand types here `Widget[i64]`" error). What never fires is the
-*ambiguity* path: `select_overload`'s 2-candidate collision, because only one
-instantiation is visible in the candidate scan, so `find_bound_impl` is handed
-a single, unambiguous target rather than a contested one. `find_bound_impl`
-gained no new machinery, confirmed by measurement rather than by either
-anticipated route — revisit only if a future export-ambiguity fix (out of
-S9's scope, see R3) somehow forces candidate-set awareness at dispatch, which
-the measured outcome does not.
+## Roadmap corrections applied (R7)
 
-### R5 — Regression pins stay green, unchanged. (every phase)
+Six edit targets landed in Phase 5:
 
-- **Golden #10** `same_named_ctors_in_two_modules_dispatch_distinct_impls`
-  (`tests/phase7b_slice2.rs:655`) — the only existing golden exercising
-  per-operand trait-impl dispatch with **distinct** substitutions (`i64`/`str`)
-  across modules. Must keep printing `1\n2`. The fix repairs the
-  *same*-substitution (`pb2`) case without regressing the distinct-substitution
-  case.
-- **S5 tier-1** `cross_module_same_shaped_ctor_dispatches_callers_own_impl`
-  (`tests/phase7b_slice5.rs:100`) — pins S5's ctor/destructure tier policy
-  (`select_overload`), a different registry from S9's. Must keep printing
-  `15\n25`.
-- **`same_named_ctor_mk_ambiguity_resolves_but_impl_dispatch_still_cross_picks`**
-  (`tests/phase7b_slice4.rs:427-490`) — **not currently green**: same shape as
-  G2 (`mk` variant, two modules, impl constants 1/2), different trait
-  (`Functor`, not `Sized`) and text — the slice4 test is re-pinned in Phase 3,
-  G2 is written fresh in `tests/phase7b_slice9.rs`; do not churn one fixture to
-  match the other. Currently hard-pinned to the pre-fix
-coin-flip `1\n1` (measured: 3/8 red on rerun — the committed ratio assertion
-R-NFR3 forbids). Phase 3 re-pins it to deterministic `1\n2`, renames it off
-its dead pre-fix criterion, and rewrites its comments (`:423-425`, `:485-488`),
-which narrate the falsified matcher-blindness story, to the corrected
-attribution (see Phase 3's authorization below); until
-  Phase 3 lands, every other phase's green gate may see this test red
-  independently of that phase's own changes — note it, do not chase it.
-- **G3** `duplicate_blanket_impl_across_modules_is_a_declared_error` — the
-  declaration-time duplicate check (`check_impl_decls`, `:544`) must survive the
-  fix untouched. New regression golden in `tests/phase7b_slice9.rs` (not new
-  work; it pins pre-existing behaviour).
+1–2. `docs/roadmap/P7b-higher-kinded-types.md` — both falsified mechanism
+sentences ("no module-identity check…" and "find_bound_impl's target-pattern
+matching itself being blind…") replaced with the adjudicated two-defect story;
+the matcher stated sound.
+3. Stale anchor `poly.rs:8218` → `:8235` at both sites.
+4–5. `docs/roadmap/P7b/slice5-spec.md:776-778` and `:783` — the "collision is in
+`find_bound_impl`" and "silent `1 1`" claims marked corrected inside their
+historical post-ship-correction blockquote (correction marked, record kept).
+6. The Phase-4 export-ambiguity residual recorded as a roadmap follow-up.
 
-### R6 — Growth-structure re-check at phase exit. (final phase)
+The roadmap exit criterion was reworded to the landed outcome: the constructible
+ambiguity shape is covered by the declaration-time duplicate check (no new
+dispatch-time mechanism); a third-module bare caller with no own header
+dispatches deterministically on the single shared-env instantiation. It does
+**not** imply "add a dispatch-time ambiguity error".
 
-`src/check/poly.rs` is ~21k lines; its split remains deferred (3/5 signals, no
-clean cut — recorded S5 residual). S9 is expected to touch `poly.rs` (obligation
-wiring / mono identity), the ctor path in `terms.rs`/`declarations.rs`, possibly
-`ast.rs` (identity helpers), and `tests/phase7b_slice9.rs` (new). Re-run the
-CLAUDE.md split signals at phase exit against the files as they then stand; do
-**not** preemptively split.
+## Implementation
 
-#### Phase-5 growth-signal verdict (measured via `git diff 600bc1b..HEAD --numstat`, HEAD `59dd87b`)
-
-Split signals re-run per file S9 touched, against CLAUDE.md's five: import
-divergence, a module doing X/Y/Z, high/low-level code mixed, functions that never
-call each other, a would-be circular dependency forced split.
-
-| File | Lines (now) | S9 delta | Signals fired | Verdict |
-| --- | --- | --- | --- | --- |
-| `src/check/poly.rs` | 20,968 | +1/-1 (one `#[cfg(test)]` assertion string only, R-NFR2 confirms no production edit) | none newly fired by S9 (pre-existing 3/5, no clean cut, S5 residual) | split still deferred |
-| `src/check/terms.rs` | 3,395 | +710/-0 (4 small production helpers cohesive with the file's existing ctor-application checking; the rest is 10 new `#[cfg(test)]` units beside them, per CLAUDE.md convention) | none | no split warranted |
-| `src/check/declarations.rs` | 4,441 | +56/-10 (`struct_generated_sigs_of` factored out of the existing `struct_generated_sigs`, same responsibility; plus one new `#[cfg(test)]` unit, `check_impl_decls_duplicate_blanket_impl_across_modules_still_errors`) | none | no split warranted |
-| `src/check/word_families.rs` | 3,107 | +24/-7 (one accessor read path change in an existing function) | none | no split warranted |
-| `src/ir/layout.rs` | 1,611 | +161/-7 (module-unique registry keys, same responsibility as the existing per-module structures it extends) | none | no split warranted |
-| `src/ir/func_builder/calls.rs` | 2,593 | +12/-3 (two lookup sites updated to read the new keys) | none | no split warranted |
-| `src/ast.rs` | 5,765 | +67/-0 (two new `instantiation_symbol` match arms keying a struct/enum image on its `StructId`/`EnumId`, the R2.1 fix authorized in Phase 3; the rest is one new `#[cfg(test)]` unit beside the existing grounding-identity tests) | none | no split warranted |
-| `src/ir/driver.rs` | 1,520 | +3/-3 (hard-pinned symbol strings in `#[cfg(test)]` re-pinned to the new `s{id}_`/`e{id}_` rendering; no production edit) | none | no split warranted |
-| `tests/phase7b_slice9.rs` | 667 | new file, +667/-0, all `#[cfg(test)]` goldens | n/a | new test file, no split needed |
-| `tests/phase7b_slice4.rs` | 523 | +30/-24 (symbol-string goldens re-pinned to the R2.1 rendering, same shape as `driver.rs`) | none | no split warranted |
-
-`src/parser.rs` is absent from the diff (S9 never touched it) and is dropped
-from this table accordingly; the 34 regenerated `tests/qbe_baseline/*.ssa`
-snapshots and the `docs/roadmap/P7b/*.md` corrections are likewise out of
-scope for split signals (generated artefacts and prose, not modules).
-
-No new `use`/`mod` imports were added by S9 in any of the above *source* files
-(checked via diff), so no import-divergence signal is newly introduced anywhere;
-`tests/phase7b_slice9.rs` is a new file whose imports (`std::path`,
-`std::process`, `std::sync::atomic`) are its own, not divergence. Every
-non-test addition sits beside the existing code it extends (same function's
-neighbourhood or a direct factoring-out), so no new X/Y/Z-mixing or
-never-call-each-other signal fires either. Verdict: split remains deferred
-for `poly.rs` (pre-existing, unchanged by this slice); no other S9-touched
-file crosses the 2-signal refactor threshold.
-
-### R7 — Roadmap correction at slice exit. (final phase)
-
-Six edit targets: five falsified by the probe round (none currently instructed
-together — a prior draft of this ruling named only target 1), plus a sixth
-that records a residual the probe round didn't produce (Phase 4's
-export-ambiguity determination, not previously scheduled to reach the
-roadmap):
-
-1. **`docs/roadmap/P7b-higher-kinded-types.md:221-238`, mechanism sentence one**
-   ("no module-identity check anywhere in `match_impl_target` or the
-   `select_most_specific` tie-break…"): replace with the adjudicated two-defect
-   story (operand provenance; monomorphization identity, one fix site —
-   `instantiation_symbol`). State explicitly that the matcher and pattern
-   resolution are sound.
-2. **Same roadmap entry, `:232-234`, mechanism sentence two** ("it is
-   `find_bound_impl`'s target-pattern matching itself being blind to which
-   module's struct declaration a `impl: Trait for X` pattern was written
-   against"): this is a *separate* sentence from target 1 and is equally
-   falsified (F1/V1: the matcher's `Generic` arm already compares
-   `(idx, module)`); replace or remove it in the same edit.
-3. **Stale anchor `poly.rs:8218`** (appears in both the roadmap entry and
-   `slice5-spec.md:776`, target 4 below): the real `fn find_bound_impl` is
-   `src/check/poly.rs:8235`. Fix at both sites while editing them.
-4. **`docs/roadmap/P7b/slice5-spec.md:776-778`** ("`pb2`'s actual collision is
-   in `find_bound_impl`'s trait-impl target matching (`poly.rs:8218`), a
-   separate, module-blind registry this phase never touches"): falsified by
-   V1/V2 (the matcher is sound; the defect is operand provenance, upstream of
-   the matcher). Correct in place, keeping the post-ship-correction marker
-   structure (this is historical review-round prose, not the roadmap's own
-   current-design section — mark the correction rather than silently rewriting
-   the historical record).
-5. **`docs/roadmap/P7b/slice5-spec.md:783`** ("also regressed … to a silent
-   `1 1` at exit 0"): this is where the "silent `1 1`" claim actually lives
-   (not in the roadmap entry, which never mentions `mk` or `1 1`) — correct to
-   **nondeterministic** `1\n1`/`2\n2` (checker-HashMap-iteration-order
-   dependent; a built binary is stable, rebuilds flip), same marker discipline
-   as target 4.
-6. **New: record the S9 Phase-4 export-ambiguity residual as a roadmap
-   follow-up.** No target above states this, and no phase before Phase 5 was
-   scheduled to write it — add it to the roadmap entry while correcting
-   targets 1-2, one sentence: two modules each instantiating a same-shaped
-   type via a same-shaped `impl`, consumed by a third module with no header of
-   its own, dispatches silently on the single instantiation minted into the
-   shared whole-program env; an export-ambiguity rule for this shape is future
-   work (see this spec's R3/R4 Phase-4 determination).
-
-For targets 1-2 (the roadmap's own current-design prose), also reword the exit
-criterion to the concrete landed outcome: the constructible ambiguity shape is
-covered by the **declaration-time** duplicate check (no new dispatch-time
-mechanism); a third-module bare caller with no own header dispatches
-deterministically on the single instantiation minted into the shared
-whole-program env (the Phase-4 determination — neither of R3's two candidate
-outcomes, see R3). Do not imply "add a dispatch-time ambiguity error".
-
-Per [[feedback_roadmap_design_no_history]]: the roadmap's own current-design
-prose (targets 1-2) states the current design only, no "was X, now Y"
-narration. Targets 4-5 are inside an already-historical "post-ship correction"
-blockquote in `slice5-spec.md`; mark the correction there rather than deleting
-the record of what the review round originally (incorrectly) believed.
-
----
-
-## Requirements (traceable)
-
-- **REQ-1** (R1.0): a recorded Phase-1 verdict on why a's own ctor is absent from
-  the single-candidate set at a's bare `Widget` call in `pb2` (absent-mint vs
-  filtered-mint), chosen with instrumentation evidence.
-- **REQ-2** (R1.1): a bare ctor application grounds at the caller's own resolved
-  header; it never substitutes another module's eagerly-minted instantiation.
-  This covers the whole generated pair (the destructure grounds with the ctor,
-  since the caller's own mint has no `env` entry of its own) and every site in
-  one module (the mint is flushed around every word); the grounded signature is
-  derived from the caller's own minted decl, never the borrowed candidate's
-  field list; and where the caller's own header cannot be applied to the call's
-  arguments at all, the call site is reported rather than silently borrowed.
-- **REQ-3** (R2.1, observable): repeated `sooth build`s of unchanged source
-  (the G2 shape — a shared bound word grounded at two same-rendered-name,
-  distinct-identity `Struct`/`Enum` operands) produce identical dispatch
-  decisions and output across builds; no HashMap-iteration-order dependence
-  remains observable at the CLI.
-- **REQ-4** (R2.1, mechanism): `instantiation_symbol` is injective on grounding
-  identity — same rendered name, different `(StructId/EnumId)` ⇒ distinct
-  symbols — so distinct groundings of a shared bound word compile to distinct
-  specializations and lowering's dedup (`src/ir/driver.rs:350-373`) never
-  collapses two of them into one. REQ-4 is the mechanism that delivers REQ-3.
-- **REQ-5** (R2.3): both G1 and G2 resolve to deterministic `1\n2` under the
-  R2.1 fix; no committed test asserts a run-count ratio; the pre-existing
-  flaky pin (`tests/phase7b_slice4.rs:490`) is re-pinned in the same phase.
-- **REQ-6** (R3): Phase 4 determines (does not assume) whether G4's after-column
-  is a located compile-time ambiguity error naming `Widget`, both candidate
-  modules, and `c`'s call site, or an earlier error from `c` grounding against no
-  visible header; whichever outcome the fixture measures is pinned against
-  that measured output, including a documented silent deterministic dispatch
-  if that is what the fixture actually produces (the measured Phase-4 result:
-  neither of the two anticipated outcomes, but a third — see R3).
-- **REQ-7** (R4): `find_bound_impl` gains no visibility filter or dispatch-time
-  tier machinery; the declaration-time duplicate check is untouched.
-- **REQ-8** (R5): #10 stays `1\n2`; S5 tier-1 stays `15\n25`; G3 pins the
-  existing duplicate-impl error text.
-- **REQ-9** (R7): all six roadmap/slice5-spec edit targets are corrected to
-  the adjudicated story (not only the roadmap's first mechanism sentence),
-  including recording the Phase-4 export-ambiguity residual as a follow-up.
-- **REQ-10** (CLAUDE.md): every stage function edited gets a unit test beside it
-  (happy path + one error/edge); every phase exit criterion is a golden.
-
-## Non-functional requirements
-
-- **R-NFR1 — V3 mechanism check-stage only.** The R2.1 widening stays confined
-  to `instantiation_symbol` (`src/ast.rs:2886`); the dedup loop
-  (`src/ir/driver.rs:350-373`), `trait_calls`, and `builtin_overloads` logic stay
-  unmodified. Sole sanctioned lowering-side exception (Phase 2): `ir/layout.rs`'s
-  generated-word registry keys become module-unique — a naming fix with no
-  dispatch, visibility, or tier logic; the same-named-mint collision it closes
-  was unreachable before V2's second mint existed. The linear spine, `Ptr[T]`
-  opacity and QBE-only backend invariants are untouched. If any *other*
-  candidate fix appears to need an IR/lowering edit, stop and escalate — that is
-  out of scope.
-
-  Phase-2 measurement (2026-09-04): that exception covers **two** name-key
-  layers in `ir/layout.rs`, both module-blind for the same reason and both
-  measured wrong on the reviewer's witness. (i) the generated-word registry
-  (`swords`), whose bare surface key an unrecorded call site resolves by; and
-  (ii) the emitted type symbol (`StructLayout::name`/`EnumLayout::name`, read
-  from the decl's leaked `name_static`), which the backend emits as `type
-  :{name}` and which a second same-named decl silently redefines. Only a
-  *duplicated* name is qualified, so every program with no two same-named
-  declarations emits byte-identical IL (measured: zero golden churn for *that*
-  change; R2.1's own rendering does move mono-symbol strings — see RISK-1). No
-  lookup, dispatch or tier logic moves.
-- **R-NFR2 — matcher untouched.** `match_impl_target`/`..._rec` and
-  `find_bound_impl`'s scan are expected to have **zero** behavioural diff. A
-  Phase-exit check confirms no edit landed there (or, if one did, justifies it
-  against F1/F2/V1).
-- **R-NFR3 — never assert nondeterminism.** G2's pre-fix flip is HashMap-seed
-  nondeterminism. The pre-fix evidence is noted in a scratch check (run N× before
-  the fix), never encoded as a ratio assertion in committed tests. The committed
-  G2 asserts only the post-fix deterministic `1\n2`.
-- **R-NFR4 — green gate.** `cargo fmt --check && cargo clippy -- -D warnings &&
-  cargo test` green at every phase exit; no dead parameters (clippy `-D
-  warnings`).
-- **R-NFR5 — baseline anchor.** Every phase is independently verifiable against
-  the paper goldens with the baseline stated: **82 binaries, 3149 passing + 1
-  known-flaky at HEAD `600bc1b`** (`tests/phase7b_slice4.rs:427-490`,
-  `same_named_ctor_mk_ambiguity_resolves_but_impl_dispatch_still_cross_picks`,
-  measured 3/8 red on rerun — same shape as G2, a different test file (R5); a
-  single run may report `3150/0` by luck). Phases 1-2 may see this test red
-  independently of their own changes; do not chase it. Phase 3 re-pins it (R5,
-  REQ-5) to deterministic `1\n2`, after which the known-flaky pin is
-  deterministically green and each subsequent phase's baseline is the prior
-  phase's exit count (record the running total as each phase's goldens/units
-  land; do not assert a fixed absolute).
-
-## Success criteria (anchored in the validated goldens; before/after are measured facts, not re-derived)
-
-| Golden | Name | Before (measured) | After |
-| --- | --- | --- | --- |
-| **G1** | `cross_module_same_shaped_impls_dispatch_each_callers_own_impl` (verbatim `pb2`) | `2\n2`, exit 0, deterministic (3 cycles) | `1\n2` |
-| **G2** | `..._via_named_instantiation_dispatch_each_callers_own_impl` (`mk` variant) | **nondeterministic** `1\n1`/`2\n2` (8/2 paper, 6/4 probe — never asserted) | deterministic `1\n2` |
-| **G2r** | `..._eager_minter_wins_regardless_of_caller` (a eager / b bare — cleanest V2 witness; **primary provenance regression pin**) | `1\n1`, exit 0, deterministic (5 cycles) | `1\n2` — **golden lands in Phase 3, not Phase 2**: once V2 mints two distinct caller-owned groundings, G2r's shared bound word hits the V3 symbol collision (measured post-V2: `2\n2` 4/6, `1\n1` 2/6 — nondeterministic until R2.1) |
-| **G3** | `duplicate_blanket_impl_across_modules_is_a_declared_error` | `error: duplicate \`impl:\` for \`'T\` (line 3, col 1); first declared at line 3, col 1`, exit 1 | unchanged (regression pin) |
-| **G4** | `third_module_bare_caller_dispatches_the_single_shared_env_instantiation` (renamed from the placeholder `third_module_mono_caller_is_not_silently_cross_picked`) | silent `2`, exit 0 (3 cycles) | unchanged: deterministic `2`, exit 0 — measured Phase-4 outcome, neither (a) nor (b) (see R3); pinned behaviour for this shape, with a documented residual limitation (export-ambiguity rule is future work, out of S9's scope) |
-| **G5** | #10 (`tests/phase7b_slice2.rs:655`); S5 tier-1 (`tests/phase7b_slice5.rs:100`) | `1\n2`; `15\n25` | unchanged |
-
-Fixture text for G1/G2/G2r/G3/G4 is preserved complete (every source file, not
-prose-derived) in [slice9-paper-tests](./slice9-paper-tests.md), each built and
-its before-column measured directly against this HEAD; use it as-is.
-
-**Unit-level success criteria** (`thing_condition_expected` naming per
-CLAUDE.md; fix sites are R1/R2's choice within the named function):
-
-- `instantiation_symbol_same_rendered_name_different_struct_ids_mints_distinct_symbols`
-  — two groundings with the same rendered type name but different
-  `StructId`s (already globally unique across modules — no module component
-  needed) must not collapse to one specialization (near `src/ast.rs:2869`);
-- `bare_ctor_operand_provenance_is_callers_own_header_not_a_borrowed_mint` (name
-  finalized once Phase 1 picks R1.1a vs R1.1b) — a lazily-minted, un-annotated
-  bare-ctor operand's provenance is never borrowed from an unrelated eager mint;
-- `check_impl_decls_duplicate_blanket_impl_across_modules_still_errors` —
-  `check_impl_decls`'s blanket-impl duplicate check is unaffected
-  (`src/check/declarations.rs:544`).
-
-## Scope and boundaries
-
-**In scope:** check-stage repair of V2 (operand provenance) and V3
-(`instantiation_symbol`'s monomorphization-identity fall-through arm; obligation
-wiring / `trait_calls` is untouched, see R2.2); Phase 2's module-unique
-`ir/layout.rs` generated-word/type-symbol keys, the collision V2's second mint
-made reachable (R-NFR1's sanctioned exception, R2.4); Phase 4's D3 determination
-(build first, pin whatever measures — the landed outcome is the third one
-recorded in Phase 4's notes: neither route (a)/(b) fires, since `c`'s bare
-ctor call never reaches `select_overload`'s ambiguity arm); new
-`tests/phase7b_slice9.rs`; the roadmap correction.
-
-**Out of scope / untouched:**
-
-- IR, lowering, backend — R-NFR1, except its one sanctioned Phase-2 exception:
-  `ir/layout.rs`'s module-blind generated-word registry keys and emitted type
-  symbol (naming only; no dispatch, visibility or tier logic, and the two
-  lookup sites in `ir/func_builder/calls.rs` that read those keys).
-- `match_impl_target`/`match_impl_target_rec` and `find_bound_impl`'s registry
-  scan — R-NFR2 / R4 (sound per F1/F2/V1).
-- New dispatch-time visibility or tier machinery in the registry — R4.
-- The declaration-time duplicate-impl check — R5/G3 (kept as-is).
-- S5's `select_overload` tier *policy* — reused by R3 under outcome (a) only,
-  not re-authored either way (R3 §).
-- Any new trait surface, declaration syntax, or user-facing spelling.
-
-## Codebase map (verified anchors, HEAD `600bc1b`, from the brief's machinery map)
-
-- **V2 fix neighbourhood (ctor application).** single-candidate arm
-  `src/check/terms.rs:932`; tier-selection path `src/check/terms.rs:968-991`
-  (`select_overload_fallback_sourced`/`select_overload`); minted-candidate
-  registration `struct_generated_sigs` `src/check/declarations.rs:1824`;
-  module-scoped ctor name resolution `poly_generic_header` `src/parser.rs:7101`,
-  `bare_generic_owner` `:7133`, unit-pinned
-  `impl_target_module_generic_ctor_target_names_the_ctor_module`
-  `src/check/declarations.rs:4355`.
-- **V3 fix neighbourhood (one fix site).** `instantiation_symbol`
-  `src/ast.rs:2869` — already the mono key (doc `:2864-2866`); `CtorImage` arm
-  keys on `GenericId` already (`:2521`); the fall-through arm to widen is
-  `other => other.name().to_string()` (`:2886`), to render the id already
-  carried by `Type::Struct(StructId, ..)`/`Type::Enum(EnumId, ..)` (`:2991-2992`)
-  — no lookup, no signature change (`GenericTypes::struct_instantiation_of`
-  `src/ast.rs:1118`/`enum_instantiation_of` `:1128` are the matcher's own
-  provenance lookup, F1, and are not part of this fix); `mangle`
-  `src/resolve.rs:36`. Untouched-by-design: `CallInst.trait_calls`
-  `src/ast.rs:2808` (created `src/check/poly.rs:7235`, moved onto the
-  instantiation `:7384`); the dedup loop that stops colliding once R2.1 lands,
-  `src/ir/driver.rs:350-373`; lowering consumers `src/ir/driver.rs:414`,
-  `src/ir/func_builder/calls.rs:375/385`, `src/ir/destructors.rs:379`.
-- **Matcher (untouched).** `find_bound_impl` `src/check/poly.rs:8235` (candidate
-  loop `:8262-8276`, `candidate_bounds_discharge` `:8192`); `select_most_specific`
-  `:8073` (`ambiguity_error` `:8099`, `specificity` `:9640`);
-  `match_impl_target` `:8833` / `..._rec` `:8846` (`Generic` arm identity
-  compare `:8995`). Call sites: inline-splice `:1722`, mono-member viability
-  `:2239` (in `resolve_mono_member_call` `:2165`), where-clause discharge
-  `:8192`, bound dispatch `:8408`.
-- **D3 (tier policy, outcome (a) only).** S5's `select_overload` (in
-  `src/check/builtins.rs` per S5 spec) and the ctor-select path feeding it from
-  `terms.rs` — reached only if Phase 4 lands on outcome (a); under outcome (b),
-  `c` errors before either registry is consulted (R3).
-- **Impl record + duplicate check (untouched).** `ImplDecl` `src/ast.rs:2492`;
-  placement rule `src/check/declarations.rs:575-588`; blanket-impl duplicate
-  check `check_impl_decls` `:544`.
-- **Whole-program env.** `poly_env` built once `src/check.rs:684-698`;
-  `overload_symbols` `$$N` suffixing `src/check.rs:697`.
-- **Goldens in play.** #10 `tests/phase7b_slice2.rs:655`; S5 tier-1
-  `tests/phase7b_slice5.rs:100`; the pre-existing flaky pin
-  `tests/phase7b_slice4.rs:427-490` (R5, re-pinned Phase 3); `pb2` fixture
-  complete in [slice9-paper-tests](./slice9-paper-tests.md) G1.
-- **Roadmap entries to correct (R7, six targets).**
-  `docs/roadmap/P7b-higher-kinded-types.md:221-238` (two falsified mechanism
-  sentences, one stale anchor); `docs/roadmap/P7b/slice5-spec.md:776-778` and
-  `:783` (falsified post-ship-correction claims, same stale anchor).
-
-## Open questions and risks
-
-- **OQ-1 (resolved by Phase 1, gates Phase 2).** Absent-mint vs filtered-mint at
-  a's bare ctor call (REQ-1). The V2 fix site (R1.1a vs R1.1b) depends on the
-  answer; Phase 2 does not start the fix until Phase 1 records the verdict.
-- **OQ-2 — resolved (no longer open).** V3 is one mechanism, one fix site
-  (`instantiation_symbol`'s fall-through arm, R2.1); `trait_calls` never
-  collides across groundings, so there is no second, map-side change to
-  justify or fall back to (R2.2 withdrawn).
-- **OQ-3 (resolved by Phase 4).** Does the V2 fix surface `c`'s bare ctor as a
-  2-candidate `select_overload` collision (R3 outcome (a)), or does `c` ground
-  against no visible header and error earlier (R3 outcome (b), consistent with
-  probes P5a-ii)? Phase 4 builds the fixture first and pins whichever the
-  mechanism produces — do not assume (a).
-- **RISK-1.** Widening `instantiation_symbol`'s fall-through arm (R2.1) has
-  blast radius across every monomorphized bound word, every `Struct`/`Enum`
-  grounding, not just `sized`. Mitigation: R-NFR5 baseline anchor after each
-  phase; if the widening reds a golden **behaviourally** — a changed program
-  output, a changed diagnostic text, a broken invariant — **stop and escalate
-  per R-NFR1**: there is no map-side fallback (R2.2 is withdrawn, not a
-  narrower alternative). A red that is only a **mono-symbol rename** in a test
-  that pins the symbol string, or in the `tests/qbe_baseline` IL snapshots, is
-  not that: it is the prescribed rendering change arriving where it was
-  predicted to arrive, and `instantiation_symbol`'s own contract is "one
-  source of truth for the checker's table and `IrFunc.name`", never a
-  particular spelling. Update those through the documented path
-  (`REGEN_QBE_BASELINE=1` for the snapshots) after verifying the diff is
-  rename-only; measured at implementation (2026-09-04, Phase 3): four
-  `#[cfg(test)]` assertion strings (`src/check/poly.rs:16349`,
-  `src/ir/driver.rs:1477/1481/1507`) and 34 baseline files, +476/-476, every
-  changed line a `sooth_mono_{render,flush}` symbol, zero structural IL diff.
-- **RISK-2.** The V2 fix could perturb #10's distinct-substitution dispatch
-  (F4). Mitigation: R5/G5 keeps #10 green as a per-phase gate.
-- **RISK-3 (`poly.rs` size).** Editing the ~21k-line `poly.rs` again; the split
-  stays deferred (R6). Do not preemptively split; re-run signals at exit.
-
----
-
-## Phased delivery plan
-
-Baseline for every phase: **82 binaries, 3149 passing + 1 known-flaky at HEAD
-`600bc1b`** (R-NFR5). Each phase is independently verifiable against the paper
-goldens and leaves the tree green (`cargo fmt --check && cargo clippy -- -D
-warnings && cargo test`); Phases 1-2 may see the known-flaky test red
-independently of their own changes.
-
-- **Phase 1 — pin the missing candidate (V2 diagnosis gate).** Instrument the
-  bare-ctor candidate path (`struct_generated_sigs` `declarations.rs:1824`;
-  single-candidate arm `terms.rs:932`; tier path `terms.rs:968-991`) in `pb2`
-  and record the REQ-1 verdict (absent-mint vs filtered-mint) in a new
-  "## Phase-1 verdict (R1.0)" section appended to `slice9-probes.md`, committed
-  together with Phase 2. Instrumentation is spike-only: revert it before commit,
-  no src diff in this phase. No golden. Exit: the verdict is recorded and
-  selects R1.1a vs R1.1b; no src change lands; suite unaffected by this phase.
-- **Phase 2 — V2 fix + G1 golden (G2r deferred to Phase 3).** Implement R1.1 at the site Phase 1
-  chose: a bare ctor grounds at the caller's own header, never borrowing another
-  module's mint. The grounding covers the struct's whole generated pair and
-  re-derives the grounded `Overload` (signature, lowering symbol, module) from
-  the caller's own minted decl through `struct_generated_sigs_of` — the same
-  rule env registration uses — read through `Ctx::with_struct_decl_or_generic`,
-  which sees both a still-pending mint and one already flushed by `check`'s
-  per-word bracket. A caller header that cannot be applied to the call's
-  arguments (a different type/length parameter count, or a kind its `App` field
-  would misread) is a located error, not a fall-back. `check_field_projection`
-  reads its receiver — struct or variant — through the same accessor, so a
-  mid-word mint is visible to it. Two live decls now share one mangled name, so
-  `ir/layout.rs`'s module-blind name keys are made module-unique in the same
-  phase (R-NFR1's sanctioned exception, R2.4): the generated-word registry
-  (`Structs::word`, read at the call term's own module by
-  `ir/func_builder/calls.rs`'s two lookup sites) and the emitted type symbol
-  (qualified only where a name is duplicated, so IL for every other program is
-  byte-identical). Add G1 (`pb2` → `1\n2`) to `tests/phase7b_slice9.rs`, plus
-  G1a/G1b/G1c/G1d/G1e/G1f (every site in one module grounds at its own header; a
-  field projection reads the caller-grounded mint's own field; the arity and
-  kind mismatches' byte-exact diagnostics; and the two-module collision shape,
-  destructuring and bundle-packing each module's own layout), the ten `bare_*`
-  units beside the helper, and two beside `ir/layout.rs`'s registry.
-  **G2r moves to Phase 3** (measured at implementation, 2026-09-04): the earlier claim that
-  G2r isolates V2 is falsified — once V2 mints the two distinct caller-owned groundings,
-  G2r's shared bound word `sized` collides in `instantiation_symbol`'s fall-through arm (the
-  V3 defect) and runs nondeterministically (`2\n2` 4/6, `1\n1` 2/6) until R2.1 lands. G1
-  dodges the collision only because its b-side dispatches `size` as a direct mono member
-  call; provenance still gets its Phase-2 pin at unit level.
-  Matcher untouched (R-NFR2). Exit: G1 and G1a-G1f green deterministically (3+ rebuild
-  cycles); #10 and S5 tier-1 unchanged; suite +19 green (known-flaky test still not yet
-  re-pinned — that's Phase 3, where G2r's golden also lands).
-- **Phase 3 — V3 fix + G2/G2r goldens + flaky-test re-pin.** Implement R2.1: widen
-  `instantiation_symbol`'s `Type::Struct`/`Type::Enum` fall-through arm
-  (`src/ast.rs:2886`) to render the id already carried by the matched variant
-  (no lookup, no signature change — see R2.1), so the shared bound word's two
-  groundings mint distinct symbols and lowering's dedup
-  (`src/ir/driver.rs:350-373`) keeps both. Add G2 (`mk` variant → `1\n2`, no
-  ratio assertion — R-NFR3) and G2r (eager-mirror → `1\n2`, deferred from Phase 2 —
-  post-V2 it exposes this phase's V3 collision until R2.1 lands) plus
-  `instantiation_symbol_same_rendered_name_different_struct_ids_mints_distinct_symbols`.
-  **Re-pin** `tests/phase7b_slice4.rs`'s
-  `same_named_ctor_mk_ambiguity_resolves_but_impl_dispatch_still_cross_picks`
-  (same shape as G2, different trait/text) to deterministic `1\n2` and rename
-  it off its dead pre-fix criterion, cross-referencing G2; also rewrite its
-  comments (`tests/phase7b_slice4.rs:423-425` and `:485-488`), which narrate
-  the falsified matcher-blindness story, to the corrected attribution (operand
-  provenance + `instantiation_symbol` injectivity, per the mechanism section).
-  Sanctioned churn (measured at implementation, 2026-09-04): the widened
-  rendering moves every `Struct`/`Enum` grounding's mono symbol, so four
-  `#[cfg(test)]` assertion strings (`src/check/poly.rs:16349`,
-  `src/ir/driver.rs:1477/1481/1507` — test strings, no production line, the
-  dedup loop with zero diff hunks) and the 34 `tests/qbe_baseline/*.ssa`
-  snapshots (regenerated via `REGEN_QBE_BASELINE=1`; +476/-476, every changed
-  line a `sooth_mono_{render,flush}` symbol, zero structural IL diff) are
-  updated with the fix, per RISK-1's behavioural/rename distinction. Error
-  texts are unchanged.
-  Exit: G2 and the
-  re-pinned slice4 test both print `1\n2` deterministically; the pre-fix flip
-  noted only in scratch; the known-flaky pin is deterministically green from
-  here on (running total tracked per phase, not a fixed absolute).
-- **Phase 4 — D3 determination + G3/G4 goldens.** Build the G4 fixture against
-  the Phase-2/3 fix first, observe which of R3's two outcomes actually happens,
-  then add G4 (measured a third, un-enumerated outcome — neither (a) nor (b) —
-  renamed to `third_module_bare_caller_dispatches_the_single_shared_env_instantiation`,
-  a `build_and_run` pin on the deterministic `2\n`, both import orders)
-  accordingly. Add G3 (regression pin
-  for the existing declaration-time duplicate error text — R5, exact text and
-  exit code measured against the fixture, not re-derived) plus
-  `check_impl_decls_duplicate_blanket_impl_across_modules_still_errors`.
-  Confirm no new machinery in `find_bound_impl` (R4). Exit: G4 and G3 green;
-  suite green.
-- **Phase 5 — roadmap correction + growth-structure re-check + final gate.**
-  Apply R7's six edit targets (`docs/roadmap/P7b-higher-kinded-types.md:221-238`
-  two sentences + stale anchor; `docs/roadmap/P7b/slice5-spec.md:776-778` and
-  `:783`; the new sixth target recording the Phase-4 export-ambiguity residual
-  as a roadmap follow-up in that same entry). Re-run CLAUDE.md split signals
-  against every file S9 touched (R6); record the verdict (expected: split
-  still deferred). Final green gate; confirm all S9 goldens + #10 + S5 tier-1
-  pass and no edit landed in the matcher (R-NFR2).
-
-## Phases (JSON)
-
-```json
-{
-  "baseline": { "head": "600bc1b", "binaries": 82, "tests": 3150, "passing": 3149, "knownFlaky": 1, "failed": 0 },
-  "phases": [
-    {
-      "id": 1,
-      "name": "Pin the missing candidate (V2 diagnosis gate)",
-      "requirements": ["REQ-1"],
-      "changes": [
-        "Instrument the bare-ctor candidate path (struct_generated_sigs src/check/declarations.rs:1824; single-candidate arm src/check/terms.rs:932; tier path src/check/terms.rs:968-991) on pb2",
-        "Record verdict: is a's Widget[i64] mint absent (never minted, bare/inferred) or present-but-filtered from the candidate scan",
-        "Revert all instrumentation before commit; append verdict as a new section to docs/roadmap/P7b/slice9-probes.md"
-      ],
-      "goldens": [],
-      "units": [],
-      "exit": "REQ-1 verdict recorded in slice9-probes.md, selecting R1.1a (registration/application) vs R1.1b (operand normalization); no src diff lands this phase",
-      "notes": "Blocking gate: Phase 2 fix site depends on this verdict (OQ-1). Matcher untouched (R-NFR2). Baseline's known-flaky test (tests/phase7b_slice4.rs:490) is unrelated to this phase; do not chase it."
-    },
-    {
-      "id": 2,
-      "name": "V2 fix (operand provenance) + G1 golden (G2r deferred to Phase 3)",
-      "requirements": ["REQ-2", "REQ-8", "REQ-10"],
-      "changes": [
-        "Implement R1.1 at the Phase-1-chosen site: bare ctor grounds at caller's own resolved header (src/parser.rs:7101 module-scoped resolution precedent); never substitute another module's eager mint",
-        "Ground the struct's whole generated pair (ctor + destructure) and re-derive the grounded Overload -- Sig, lowering symbol, module -- from the caller's own minted decl via declarations.rs' struct_generated_sigs_of (lifted out of struct_generated_sigs so env registration and this path share one rule), read through Ctx::with_struct_decl_or_generic so both a pending mint and one already flushed by check's per-word bracket are visible",
-        "Validate the call's type/length argument count against the caller's own header before minting: on a mismatch report a located error at the call site (substitute_generic_field indexes args raw), never fall back to the borrowed mint",
-        "Validate the caller's own header's ty-var KINDS against the borrowed argument list in the same pre-mint guard: substitute_generic_field's App arm returns a non-CtorImage binding unapplied (a fall-back the parser's validate_ctor_arg_kinds makes unreachable at a same-module use site, but not at another module's), so an HKT header grounded at a Star-kinded argument would silently take a wrong field type -- located error instead",
-        "check_field_projection reads its receiver -- struct AND variant -- through with_struct_decl_or_generic/with_enum_decl_or_generic instead of indexing the live registry, so a mid-word mint is visible to it (src/check/word_families.rs:343)",
-        "R-NFR1's sanctioned exception: make ir/layout.rs's two module-blind name-key layers module-unique, now that two live StructDecls share one type_instantiation_name spelling -- (a) the generated-word registry gains a per-declaring-module map read through Structs::word at the call term's own module (ir/func_builder/calls.rs' builtin_overloads and bare-name lookup sites), the module-blind map kept as the fall-back for a cross-module spelling; (b) the emitted type symbol (StructLayout/EnumLayout name, from the decl's leaked name_static) is qualified {name}__m{module} for duplicated names only, so a program with no two same-named decls emits byte-identical IL. Naming only: no dispatch, visibility or tier logic, find_bound_impl and the driver.rs dedup loop untouched",
-        "Matcher and find_bound_impl scan untouched (R-NFR2/R4)"
-      ],
-      "goldens": [
-        "tests/phase7b_slice9.rs: cross_module_same_shaped_impls_dispatch_each_callers_own_impl (G1, pb2) -> 1\\n2",
-        "tests/phase7b_slice9.rs: every_bare_ctor_site_in_one_module_grounds_at_the_callers_own_header (G1a, three sites past the per-word flush) -> 1\\n1\\n7\\n2",
-        "tests/phase7b_slice9.rs: field_projection_reads_the_caller_grounded_mints_own_field (G1b) -> 5\\n2",
-        "tests/phase7b_slice9.rs: bare_ctor_arity_mismatch_with_the_callers_own_header_is_a_located_error (G1c) -> build_error pinning the byte-exact diagnostic",
-        "tests/phase7b_slice9.rs: bare_ctor_kind_mismatch_with_the_callers_own_header_is_a_located_error (G1d, HKT own header vs a Star-kinded borrowed argument) -> build_error pinning the byte-exact diagnostic",
-        "tests/phase7b_slice9.rs: same_named_headers_of_differing_shapes_destructure_each_modules_own_layout (G1e, the two-module collision shape: b destructures its own declared Widget[i64] param) -> 11",
-        "tests/phase7b_slice9.rs: same_named_headers_of_differing_shapes_pack_each_modules_own_field_values (G1f, G1e's multi-output twin, the pack_bundle shape) -> 99\\n11"
-      ],
-      "units": [
-        "bare_ctor_operand_provenance_is_callers_own_header_not_a_borrowed_mint",
-        "bare_destructure_grounds_at_the_callers_own_header_too",
-        "bare_ctor_own_header_of_a_different_arity_is_error",
-        "bare_ctor_own_header_needing_a_length_argument_is_error",
-        "bare_ctor_own_header_of_a_higher_kind_is_error",
-        "bare_ctor_own_module_grounding_none_when_caller_already_owns_the_mint",
-        "bare_ctor_own_module_grounding_none_when_the_mint_is_already_the_callers_own_module",
-        "bare_ctor_own_module_grounding_none_when_the_mint_is_the_callers_own_header",
-        "bare_ctor_own_module_grounding_none_when_the_caller_declares_no_header",
-        "bare_ctor_own_module_grounding_none_for_a_user_word_returning_the_borrowed_mint",
-        "struct_word_lookup_prefers_the_calling_modules_own_declaration (src/ir/layout.rs)",
-        "duplicated_type_name_emits_one_symbol_per_declaring_module (src/ir/layout.rs)"
-      ],
-      "exit": "G1 prints 1\\n2 deterministically (3+ rebuild cycles) and G1a-G1f are green; #10 stays 1\\n2, S5 tier-1 stays 15\\n25; fmt/clippy/test green; suite +19 (7 goldens + 12 unit tests; known-flaky test not yet re-pinned, see Phase 3); G2r golden deferred to Phase 3 -- once V2 mints two distinct caller-owned groundings, G2r's shared bound word exposes the V3 symbol collision (measured post-V2: 2\\n2 4/6, 1\\n1 2/6)",
-      "notes": "V2 deterministic pb2 2\\n2 -> 1\\n2. Phase-1 verdict selected R1.1a (absent-mint; decisive site = single-candidate arm src/check/terms.rs:932; tier path never runs). The spec's earlier claim that G2r isolates V2 was falsified at implementation: post-V2, G2r's shared bound word collides in instantiation_symbol's fall-through until R2.1 (Phase 3)."
-    },
-    {
-      "id": 3,
-      "name": "V3 fix (instantiation_symbol widening) + G2/G2r goldens + flaky-test re-pin",
-      "requirements": ["REQ-3", "REQ-4", "REQ-5", "REQ-10"],
-      "changes": [
-        "R2.1: widen instantiation_symbol's Type::Struct/Type::Enum fall-through arm (src/ast.rs:2886) to render the StructId/EnumId already carried by the matched Type variant (src/ast.rs:2991-2992) -- no lookup (not struct_instantiation_of/enum_instantiation_of, that is the matcher's own subsystem), no signature change, matching the existing CtorImage arm's GenericId-render approach (:2885; the `GenericId` struct itself is :2521) without importing its lookup mechanism",
-        "No change to trait_calls, builtin_overloads, or any IR/lowering file (R-NFR1); the dedup loop at src/ir/driver.rs:350-373 is unmodified and simply stops colliding",
-        "Add G2r golden (deferred from Phase 2): once V2 mints two distinct caller-owned groundings, G2r's shared bound word sized collides in instantiation_symbol's fall-through -- measured post-V2 2\\n2 4/6, 1\\n1 2/6; deterministic only after this phase's widening",
-        "Re-pin tests/phase7b_slice4.rs:490 (same_named_ctor_mk_ambiguity_resolves_but_impl_dispatch_still_cross_picks, same shape as G2, different trait/text) from 1\\n1 to deterministic 1\\n2; rename off its dead pre-fix criterion; also rewrite its comments (tests/phase7b_slice4.rs:423-425 and :485-488, currently narrating the falsified find_bound_impl-blindness story) to the corrected attribution (operand provenance + instantiation_symbol injectivity)",
-        "Sanctioned rename churn from the widened rendering (measured 2026-09-04, per RISK-1): update four #[cfg(test)] assertion strings pinning a mono symbol (src/check/poly.rs:16349; src/ir/driver.rs:1477/1481/1507 -- test strings only, no production line, dedup loop zero hunks) and regenerate the 34 tests/qbe_baseline/*.ssa snapshots via REGEN_QBE_BASELINE=1 (+476/-476, every changed line a sooth_mono_{render,flush} symbol, zero structural IL diff, error texts unchanged)"
-      ],
-      "goldens": [
-        "tests/phase7b_slice9.rs: cross_module_same_shaped_impls_via_named_instantiation_dispatch_each_callers_own_impl (G2, mk variant) -> deterministic 1\\n2 (NEVER assert a run-count ratio, R-NFR3)",
-        "tests/phase7b_slice9.rs: cross_module_same_shaped_impls_eager_minter_wins_regardless_of_caller (G2r, deferred from Phase 2) -> deterministic 1\\n2 (NEVER assert a run-count ratio, R-NFR3)"
-      ],
-      "units": [
-        "instantiation_symbol_same_rendered_name_different_struct_ids_mints_distinct_symbols"
-      ],
-      "exit": "G2 and G2r print 1\\n2 deterministically; re-pinned slice4 test prints 1\\n2 deterministically; pre-fix flip noted only in scratch, not committed; the mono-symbol rename churn (test strings + qbe_baseline regen) verified rename-only; suite fully 3150+N/0 from here on",
-      "notes": "V3 nondeterministic 1\\n1/2\\n2 -> deterministic 1\\n2. One mechanism, one fix site (OQ-2 resolved, R2.2 withdrawn). RISK-1: a *behavioural* red (changed output, changed diagnostic text, broken invariant) stops the phase and escalates per R-NFR1 -- no map-side fallback; a mono-symbol rename in a symbol-pinning test or the qbe_baseline snapshots is the prescribed rendering arriving where predicted, and is updated through the documented path after verifying the diff is rename-only."
-    },
-    {
-      "id": 4,
-      "name": "D3 determination + G3/G4 goldens",
-      "requirements": ["REQ-6", "REQ-7", "REQ-8"],
-      "changes": [
-        "Build the G4 fixture (c.sth wildcard-importing a and b, bare Widget size call) against the Phase-2/3 fix; observe whether c's call surfaces a 2-candidate select_overload collision (outcome a) or grounds against no visible header (outcome b, consistent with probes P5a-ii)",
-        "No new visibility/tier machinery in find_bound_impl (R4); declaration-time duplicate check untouched (src/check/declarations.rs:544)"
-      ],
-      "goldens": [
-        "tests/phase7b_slice9.rs: duplicate_blanket_impl_across_modules_is_a_declared_error (G3) -> pins measured 'error: duplicate `impl:` for `'T` (line 3, col 1); first declared at line 3, col 1' text, exit 1",
-        "tests/phase7b_slice9.rs: third_module_bare_caller_dispatches_the_single_shared_env_instantiation (G4, renamed from the placeholder third_module_mono_caller_is_not_silently_cross_picked) -> measured a THIRD outcome, neither (a) nor (b): build_and_run pinning deterministic 2, exit 0, no diagnostic, both import orders -- c has no Widget header of its own, so only b's instantiation minted into the shared whole-program env is a candidate"
-      ],
-      "units": [
-        "check_impl_decls_duplicate_blanket_impl_across_modules_still_errors"
-      ],
-      "exit": "G3 + G4 green; G4 output pinned against actual fixture output (not spec prose); find_bound_impl gained no new machinery; suite green",
-      "notes": "OQ-3: build first, pin second. Measured result is a third outcome the spec's R3 didn't enumerate: neither an ambiguity error (a) nor an early no-header error (b), but a silent, deterministic single-visible-candidate dispatch. This is a legitimate determination result (REQ-6), not a gap; an export-ambiguity rule for this shape is recorded as roadmap follow-up (out of S9's scope, R4/REQ-7) rather than implemented here."
-    },
-    {
-      "id": 5,
-      "name": "Roadmap correction + growth re-check + final gate",
-      "requirements": ["REQ-9", "REQ-10"],
-      "changes": [
-        "R7 target 1: docs/roadmap/P7b-higher-kinded-types.md:221-238, mechanism sentence one ('no module-identity check...') -> the adjudicated two-defect story; state the matcher is sound",
-        "R7 target 2: same roadmap entry, :232-234, mechanism sentence two ('find_bound_impl's target-pattern matching itself being blind...') -> replace or remove, equally falsified",
-        "R7 target 3: fix stale anchor poly.rs:8218 -> poly.rs:8235 at both sites (roadmap entry and slice5-spec.md:776)",
-        "R7 target 4: docs/roadmap/P7b/slice5-spec.md:776-778 ('pb2's actual collision is in find_bound_impl's trait-impl target matching...') -> mark corrected (V1/V2), keep historical marker structure",
-        "R7 target 5: docs/roadmap/P7b/slice5-spec.md:783 ('silent 1 1 at exit 0') -> mark corrected to nondeterministic 1\\n1/2\\n2",
-        "Reword roadmap exit item 3 (targets 1-2 area) to the concrete landed outcome: a single cross-module blanket impl is already placement-illegal (must-live-in-declaring-module rule); two such impls surface as a duplicate error only because check_impl_decls' module-blind duplicate scan runs before the placement loop, and that scan's own coverage is the same-module duplicate shape, not a deliberate cross-module ambiguity check; a third-module bare caller with no own header separately dispatches deterministically on the single instantiation minted into the shared whole-program env (determination recorded in slice9-spec Phase 4) -- not 'add a dispatch-time ambiguity error'. No history narration in the roadmap's own current-design prose.",
-        "R7 target 6 (new): when correcting the roadmap entry, also record the export-ambiguity follow-up explicitly -- one sentence: two modules each instantiating a same-shaped type via a same-shaped impl, consumed by a third module with no header of its own, dispatches silently on the single instantiation minted into the shared whole-program env; an export-ambiguity rule is future work",
-        "R6: re-run CLAUDE.md split signals against every file S9 touched (poly.rs untouched this slice except possibly none; ast.rs, terms.rs, declarations.rs, tests/); record verdict (expected: split still deferred)"
-      ],
-      "goldens": [],
-      "units": [],
-      "exit": "All six R7 targets corrected (including the export-ambiguity follow-up); growth-signal verdict recorded; final fmt/clippy/test green; all S9 goldens + #10 + S5 tier-1 pass; no edit landed in match_impl_target/find_bound_impl scan (R-NFR2)",
-      "notes": "Documentation + verification phase; no new behaviour."
-    }
-  ]
-}
-```
+| Area | Commit(s) | Key files |
+| --- | --- | --- |
+| Phase-1 verdict (R1.0, absent-mint) | `38d90bd` | `docs/roadmap/P7b/slice9-probes.md` |
+| V2 fix — caller-owned grounding (R1.1a) + layout name-keys (R2.4) + G1/G1a–G1f | `9b15d80`, `5fd9d28` | `src/check/terms.rs`, `src/check/declarations.rs`, `src/check/word_families.rs`, `src/ir/layout.rs`, `src/ir/func_builder/calls.rs`, `tests/phase7b_slice9.rs` |
+| V3 fix — `instantiation_symbol` injective (R2.1) + G2/G2r + slice4 re-pin | `5a99385` | `src/ast.rs`, `src/check/poly.rs` (test string), `src/ir/driver.rs` (test strings), `tests/phase7b_slice4.rs`, `tests/phase7b_slice9.rs` |
+| QBE baseline regen for the mono-symbol rendering (RISK-1, rename-only) | `d2e8123` | `tests/qbe_baseline/*.ssa` (34 files, +476/-476, zero structural IL diff) |
+| Phase-4 D3 determination + G3/G4 | `59dd87b` | `src/check/declarations.rs` (duplicate-check unit), `tests/phase7b_slice9.rs` |
+| Roadmap correction + growth re-check + final gate (R7/R6) | `6c0a0ad` | `docs/roadmap/P7b-higher-kinded-types.md`, `docs/roadmap/P7b/slice5-spec.md`, `tests/phase7b_slice4.rs` |
