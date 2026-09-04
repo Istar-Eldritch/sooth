@@ -209,3 +209,50 @@ fn same_input_different_output_overload_in_one_module_is_rejected_at_declaration
         "expected the pre-existing duplicate-word rejection, got: {err}"
     );
 }
+
+/// P7b.S5 Phase 3 (R5): `mono_member_unroutable_error`'s non-inline call site
+/// (`resolve_mono_member_call`'s generic-impl branch) is a dead guard --
+/// `poly_env` is built once, whole-program, over the fully `assemble_module`-
+/// flattened `Module` (`src/check.rs:668-706`), so a found impl's member word
+/// is always present in it. Every cross-module attempt at a generic-target
+/// member dispatch is intercepted upstream by `mono_member_no_dispatch_error`
+/// instead, because `find_bound_impl` requires the caller's concrete
+/// instantiation and the impl's target pattern to resolve to the same
+/// registry identity, which the cross-module generic-instantiation gap
+/// (`project_generic_instantiation_cannot_cross_modules`) prevents. This
+/// fixture is the `pa2` probe shape: a mono caller with no bound, in a third
+/// module, calling a generic-target trait member whose only impl lives in a
+/// second module.
+#[test]
+fn cross_module_colliding_mono_call_is_no_dispatch_error() {
+    let t = Tree::new("s5-p3-mono-unroutable");
+    write_manifest(&t);
+    t.write(
+        "f.sth",
+        "import: intrinsics * ;\n\
+         trait: Sized['S] : size ( 'S -- i64 ) ; ;\n\
+         export: Sized ;\n",
+    );
+    t.write(
+        "a.sth",
+        "import: intrinsics * ;\n\
+         import: self::f * ;\n\
+         type: Box['T] v 'T ;\n\
+         impl: Sized for Box['T]\n\
+           : size drop 7 ;\n\
+         ;\n\
+         export: Box ;\n",
+    );
+    let entry = t.write(
+        "main.sth",
+        "import: intrinsics * ;\nimport: hosted::show | . | ;\n\
+         import: self::f * ;\nimport: self::a * ;\n\
+         : usesize ( Box[i64] -- i64 ) size ;\n\
+         : main ( -- ) 3 Box usesize . ;\n",
+    );
+    let err = build_error(&entry);
+    assert!(
+        err.contains("is a trait member of Sized, but no `impl:` in this program dispatches on these operands"),
+        "expected mono_member_no_dispatch_error, got: {err}"
+    );
+}

@@ -1913,6 +1913,22 @@ pub(super) fn resolve_splice_member_call(
         // of this block (which stores the synth name for exactly this case,
         // see there). Either way termination is lowering's splice-budget
         // guard, which reports the recursion.
+        // P7b.S5 Phase 3 (R5): as at the non-inline call site above,
+        // `poly_env` is whole-program (`src/check.rs:668-706`), not
+        // per-module, so this guard's original "not visible from this
+        // module" premise does not describe the current architecture.
+        // Unlike the non-inline site, this one is not provably dead: it is
+        // an INCONCLUSIVE reachability verdict. `check_combinator_cycles`
+        // (`src/check/combinators.rs:186-189`) keys its rejection pass on
+        // bare `c.word.name`, while a trait-member combinator is registered
+        // under a synthesized `member;Trait;Type` spelling, so a member-to-
+        // member call produces no edge in that graph and is not rejected
+        // upstream by it -- but every fixture attempt at reaching this arm
+        // (direct cross-member call, a bounded helper, a bare-forwarded
+        // receiver, and self-recursion) was intercepted by a different,
+        // earlier guard first (see the four attempts recorded beside
+        // `mono_member_unroutable_error`'s doc comment and R5 in
+        // `docs/roadmap/P7b/slice5-spec.md`). No live trigger is known.
         if !tr.impls[imp_idx].target.is_concrete() {
             if !poly.env.contains_key(&symbol) {
                 return Err(mono_member_unroutable_error(
@@ -2389,11 +2405,20 @@ pub(super) fn resolve_mono_member_call(
         // synthesized name does the rest: unification against the concrete
         // slots, the word's own where-bounds at θ_call, and the span-keyed
         // `CallInst` (symbol + θ_call) lowering emits.
-        if !poly.env.contains_key(&word_sym) {
-            return Err(mono_member_unroutable_error(
-                ctx, span, member, trait_name, &word_sym,
-            ));
-        }
+        // P7b.S5 Phase 3 (R5): this guard's premise -- a per-module `poly_env`
+        // that a found impl's member word might not be visible from -- does not
+        // exist. `poly_env` is built once, whole-program, over the fully
+        // `assemble_module`-flattened `Module` (`src/check.rs:668-706`), so a
+        // member word that reaches this branch (i.e. `find_bound_impl` already
+        // matched an impl) is always present. Every cross-module attempt is
+        // intercepted upstream, at the zero-viable-candidates branch, by
+        // `mono_member_no_dispatch_error` instead (see
+        // `cross_module_colliding_mono_call_is_no_dispatch_error`,
+        // `tests/phase7b_slice5.rs`).
+        debug_assert!(
+            poly.env.contains_key(&word_sym),
+            "a dispatched impl's member word is always in the whole-program poly_env"
+        );
         let next = check_poly_call(
             &word_sym, span, type_args, len_args, stack, ctx, env, scope, arrays, cells, refs,
             slices, prov, live, at, poly,
@@ -2422,11 +2447,37 @@ fn mono_member_no_dispatch_error(
     )
 }
 
-/// P7b.S2 (S2-16, mono caller): the dispatching impl's member word is not in
-/// this module's poly environment -- a member word lives in the module that
-/// declared the impl, and a mono caller there has no route to it. The poly
-/// bound-dispatch path (whole-program tables) has no such limit; the mono
-/// path routes through the module's own `poly_env`.
+/// P7b.S2 (S2-16, mono caller). `poly_env` is in fact built once,
+/// whole-program (`src/check.rs:668-706`), so every member word a found impl
+/// dispatches to is present in it -- the non-inline call site (S2-16's
+/// generic-impl branch of `resolve_mono_member_call`) has no live caller
+/// today and asserts this with a `debug_assert!` instead (P7b.S5 Phase 3, R5).
+///
+/// The remaining call site -- the inline re-entry path, reached only when a
+/// `declares_inline` trait member calls another (or itself) while already on
+/// the active splice stack -- is INCONCLUSIVE (P7b.S5 Phase 3, R5). Four
+/// fixture attempts, none of which reached it:
+///   1. direct cross-member call (`ping` calling `pong` by name in the same
+///      impl body): `error: unknown word `pong` in `ping` (member of trait
+///      `Foo` for `Box['T0]`)` -- members aren't visible to each other by
+///      bare name.
+///   2. via a bounded helper (`ping` calling a `['T: Foo] ( 'T -- 'T )`
+///      helper with the receiver): `error: `ping` (member of trait `Foo` for
+///      `Box['T0]`) cannot pass `Box['T]` to `'T` of the polymorphic word
+///      `helper`` -- a poly call site may pass a type variable only bare.
+///   3. forwarding the receiver bare (`impl: Foo for 'T` calling the same
+///      bounded helper): `error: `'T` of `helper` requires `Foo`, which `'T`
+///      in `ping` (member of trait `Foo` for `'T0`) does not declare` -- the
+///      member's own header lacks the bound its body's call requires.
+///   4. (novel) direct self-recursion (`ping` calling `ping`): `error:
+///      `ping;Foo;0;Box['T0]` in `ping` (member of trait `Foo` for
+///      `Box['T0]`) names the generic type `Box['T]`, which cannot yet be
+///      instantiated at a variable-bearing application` -- grounding a
+///      generic over its own type variable is a separate, unimplemented
+///      case.
+///
+/// Every attempt is intercepted by a distinct upstream guard before reaching
+/// this call site. See `docs/roadmap/P7b/slice5-spec.md` R5.
 fn mono_member_unroutable_error(
     ctx: &Ctx,
     span: Span,
