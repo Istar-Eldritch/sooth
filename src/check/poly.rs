@@ -17268,6 +17268,43 @@ mod tests {
         ));
     }
     #[test]
+    fn unify_member_operand_rejects_a_literal_quotation_operand() {
+        // P7b.S7 REQ-11 (Phase 3 measurement): the fallback (`declared ==
+        // found`) has no case pairing a declared `Quotation` against a
+        // caller's `PolyType::QuotLit` -- measured real against `bind`'s
+        // dogfood shape written directly at a poly member call site
+        // (`error: ... expects ... found a quotation literal in operand
+        // slot 1`). **Not fixed, deliberately deferred**: admitting this
+        // arm would regress `tests/phase7b_slice6.rs`'s
+        // `poly_body_quotation_literal_member_operand_is_located_error`
+        // (S6, M3/R2.b) -- but that test's own docstring scopes the
+        // rejection to "no materialization is attempted at a poly member
+        // call site *this slice*", i.e. a slice-scoped stopgap, not a
+        // permanent contract. Whether to admit a materialized literal here
+        // is S6's call to adjudicate, not this phase's. What *is* settled
+        // this phase: `bind`'s own dogfood (`4 Some [ half ] bind`) never
+        // reaches this arm at all -- it is a mono (non-generic) call,
+        // resolved through explicit instantiation (`bind[i64 i64]`), a
+        // wholly different path that never produces a `QuotLit` slot. That
+        // measurement is why this phase adds no arm here.
+        let declared = PolyType::Quotation(
+            vec![PolyType::Var(1)],
+            vec![PolyType::App {
+                head: 0,
+                args: vec![PolyType::Var(2)],
+            }],
+            false,
+            None,
+            None,
+        );
+        let mut bindings = vec![(0, PolyType::Var(10))];
+        assert!(!unify_member_operand(
+            &declared,
+            &PolyType::QuotLit,
+            &mut bindings
+        ));
+    }
+    #[test]
     fn unify_member_operand_app_row_slot_binds_dispatched_ctor() {
         // P7b.S7 REQ-5 (verification only, no new logic): the caller path
         // for `bind`'s row-nested `'F['U]` output -- an App inside a
