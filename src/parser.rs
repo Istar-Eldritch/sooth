@@ -1564,6 +1564,9 @@ pub fn parse(tokens: &[(Token, Span)]) -> Result<Module, String> {
             imports: HashMap::new(),
             exports: bodies.exports,
             selective: HashMap::new(),
+            // P7b.S10 (R2): no `import:` is resolved on this path, so there
+            // are no named selective entries either.
+            named_selective: HashMap::new(),
             // P8 S2 (R2): the single-file, no-driver path (`parser::parse`,
             // used by every in-process test). It resolves no `import:` at
             // all, so it has nothing to derive a gate from; the driver builds

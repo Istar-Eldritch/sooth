@@ -1486,16 +1486,22 @@ fn bare_generated_word_own_module_grounding(
         true => only.sig.inputs.first(),
         false => only.sig.outputs.first(),
     };
-    let (Some(Type::Struct(id, _)), Some(cell)) = (slot.copied(), ctx.generics()) else {
+    let (Some(Type::Struct(id, instantiated)), Some(cell)) = (slot.copied(), ctx.generics()) else {
         return Ok(None);
     };
     let caller_module = span.module;
     // The registry filters first, and the allocating identity check below
-    // only for a candidate that survives them: every one of these is a plain
-    // `Ok(None)`, so the order is free, and this is the reject route for
+    // only for a candidate that survives them. Every early exit here is a
+    // plain `Ok(None)` -- but the order is no longer free across the whole
+    // function (P7b.S10, REQ-2): a headerless caller must pass through the
+    // candidate-identity check *before* the ambiguity arm can run, so the
+    // "ordinary user word whose output happens to be another module's
+    // instantiation" shape keeps its own resolution even where the new check
+    // would otherwise fire. `struct_instantiation_of` -> `None` and the
+    // own-module reject stay interchangeable; this is the reject route for
     // every generated-word call in a program with no same-named headers at
     // all.
-    let (own_idx, own_ty_vars, declared_lens, args, lens) = {
+    let (gi, declaring_module, args, lens) = {
         let guard = cell.borrow();
         // A hand-written concrete `type:` has no header to re-ground at.
         let Some((gi, owning_module, args, lens)) = guard.struct_instantiation_of(id) else {
@@ -1504,12 +1510,51 @@ fn bare_generated_word_own_module_grounding(
         if owning_module == caller_module {
             return Ok(None);
         }
-        let Some(own_idx) = guard.find_struct(header_name, caller_module) else {
-            return Ok(None);
-        };
-        if own_idx == gi {
-            return Ok(None);
-        }
+        // R2: the header's true *declaring* module (`GenericStructDecl.module`),
+        // not `struct_instantiation_of`'s *instantiating* module -- a qualified
+        // spelling in a foreign module's own signature instantiates a foreign
+        // header, so the two can differ. They coincide across every path that
+        // reaches the exemptions below today, but the exemptions compare
+        // against this component, never the instantiating one.
+        let declaring_module = guard.structs[gi].module;
+        (gi, declaring_module, args.to_vec(), lens.to_vec())
+    };
+    // The candidate must actually *be* that struct's generated word: an
+    // ordinary user word whose output (or operand) happens to be another
+    // module's instantiation keeps its own resolution. Moved ahead of the
+    // own-header branch (P7b.S10, REQ-2): the old control flow returned
+    // `Ok(None)` at the missing-own-header fall-through before ever reaching
+    // this check, so the headerless shape the ambiguity check governs would
+    // never have survived it.
+    let Some((key, symbol, _, _)) = generated_word_entry(ctx, id, destructure) else {
+        return Ok(None);
+    };
+    if key != name || symbol != only.symbol {
+        return Ok(None);
+    }
+    let own_idx = cell.borrow().find_struct(header_name, caller_module);
+    let Some(own_idx) = own_idx else {
+        // P7b.S10 (R1): headerless caller, one foreign env candidate that has
+        // survived both the instantiating-module check and the
+        // candidate-identity check. Either an exemption licenses borrowing it
+        // unchanged, or the grounding is a located compile-time error -- never
+        // a silent pick of whichever module happened to spell the
+        // instantiation eagerly.
+        foreign_single_candidate_grounding(
+            cell,
+            ctx,
+            span,
+            header_name,
+            instantiated,
+            declaring_module,
+        )?;
+        return Ok(None);
+    };
+    if own_idx == gi {
+        return Ok(None);
+    }
+    let (own_ty_vars, declared_lens) = {
+        let guard = cell.borrow();
         let own = &guard.structs[own_idx];
         // Cloned rather than borrowed across the mint below, which needs the
         // cell mutably.
@@ -1519,23 +1564,8 @@ fn bare_generated_word_own_module_grounding(
             .enumerate()
             .map(|(i, v)| (v.clone(), own.ty_kinds.get(i).cloned()))
             .collect();
-        (
-            own_idx,
-            own_ty_vars,
-            own.len_var_names.len(),
-            args.to_vec(),
-            lens.to_vec(),
-        )
+        (own_ty_vars, own.len_var_names.len())
     };
-    // The candidate must actually *be* that struct's generated word: an
-    // ordinary user word whose output (or operand) happens to be another
-    // module's instantiation keeps its own resolution.
-    let Some((key, symbol, _, _)) = generated_word_entry(ctx, id, destructure) else {
-        return Ok(None);
-    };
-    if key != name || symbol != only.symbol {
-        return Ok(None);
-    }
     // `substitute_generic_field` indexes the argument list raw (`args[v]`,
     // `src/ast.rs`), so minting the caller's own header against the
     // *candidate's* argument list panics outright on a header of a different
@@ -1621,6 +1651,255 @@ fn bare_generated_word_own_module_grounding(
         symbol,
         module,
     }))
+}
+
+/// P7b.S10 (R1/R2): a headerless caller's single foreign env candidate, after
+/// it has survived both the instantiating-module check (`owning_module ==
+/// caller_module`) and the candidate-identity check. Either an exemption
+/// licenses borrowing the candidate unchanged (`Ok(())`), or the grounding is
+/// a located compile-time error -- never a silent pick of whichever module
+/// happened to spell the instantiation eagerly (the S9 Residual this slice
+/// closes).
+///
+/// The exemptions (R1, in the spec's order):
+/// 1. own header -- unreachable here (the caller is headerless; the own-header
+///    path branched off above);
+/// 2. at most one same-named header reachable **and** the sole candidate's
+///    declaring module itself reachable, over the fully-resolved reachable set
+///    (raw `imports` ∪ `selective` targets, name-independent -- GO -- plus the
+///    export-origin walk-extension -- GN);
+/// 3. multi-candidate arm -- unreachable here (the caller is in the
+///    single-candidate arm by construction);
+/// 4. a *named* selective import of this surface name (never a wildcard
+///    desugar -- GP) whose raw target, resolved through any hub re-export
+///    chain first (GL), lands on the sole candidate's declaring module.
+fn foreign_single_candidate_grounding(
+    cell: &std::cell::RefCell<crate::ast::GenericTypes>,
+    ctx: &Ctx,
+    span: Span,
+    header_name: &str,
+    instantiated: &str,
+    declaring_module: u32,
+) -> Result<(), String> {
+    // R2: no import-closure data, no check -- the same "reads it and never
+    // fires when it is absent" discipline the D1 `drop` gate follows
+    // (`engine.rs`'s `modules` doc): there is no import set to test
+    // reachability against.
+    let Some(modules) = ctx.modules() else {
+        return Ok(());
+    };
+    let guard = cell.borrow();
+    // The whole-program list of modules declaring a same-named generic header
+    // (`ctx.generics().structs` -- complete at env-build time, probe P6).
+    let declarers: HashSet<u32> = guard
+        .structs
+        .iter()
+        .filter(|d| d.name == header_name)
+        .map(|d| d.module)
+        .collect();
+    let caller = &modules[span.module as usize];
+    // Exemption 2's reachable set: the caller's own import set -- plain
+    // imports and selective targets alike, one hop, regardless of which name
+    // each selective entry was keyed by (GO: a selective import of a
+    // *different* name still makes its target reachable) -- plus, for every
+    // module in that raw set, whatever module the export-origin walk resolves
+    // the surface name to when started there (GN: a re-exporting hub with no
+    // header of its own still chains through to the declaring module).
+    let raw: Vec<u32> = caller
+        .imports
+        .values()
+        .copied()
+        .chain(caller.selective.values().copied())
+        .collect();
+    let mut reachable: HashSet<u32> = raw.iter().copied().collect();
+    for start in &raw {
+        if let Some(origin) = walk_generic_header_origin(*start, header_name, &declarers, modules) {
+            reachable.insert(origin);
+        }
+    }
+    // Exemption 2, both halves required: at most one same-named header
+    // reachable, **and** the sole candidate's declaring module among them. A
+    // reachable header that never mints does not entitle the caller to borrow
+    // an unreachable module's instantiation instead (GM), and a second header
+    // declared by a module the caller never imports does not count toward the
+    // threshold (GH -- the reachability-scoping witness).
+    let reachable_declaring: Vec<u32> = declarers.intersection(&reachable).copied().collect();
+    if reachable_declaring.len() <= 1 && reachable.contains(&declaring_module) {
+        return Ok(());
+    }
+    // Exemption 4: a *named* selective import of this surface name, its raw
+    // target resolved through any hub re-export chain first, landing on the
+    // sole candidate's declaring module. `named_selective` excludes wildcard
+    // desugars (GP); the walk resolves a re-exporting hub down to the true
+    // declaring module (GL); when it cannot resolve (a cycle or dead end)
+    // the exemption does not apply -- the general rule decides (R2's `None`
+    // arm). The match test is soundness-critical: a selective import the
+    // caller believes already disambiguated the shape must not silently hand
+    // it a *different* module's instantiation (GK).
+    if let Some(&raw_target) = caller.named_selective.get(header_name) {
+        if walk_generic_header_origin(raw_target, header_name, &declarers, modules)
+            == Some(declaring_module)
+        {
+            return Ok(());
+        }
+    }
+    // The general rule: a located error. At least two reachable declaring
+    // headers is the ambiguity shape (GA); otherwise the sole candidate's
+    // declaring module is simply unreachable from the caller (GM) -- a reach
+    // failure, not an ambiguity, so the message does not claim several
+    // competing candidates.
+    if reachable_declaring.len() >= 2 {
+        Err(ambiguous_generic_headers_error(
+            ctx,
+            span,
+            header_name,
+            instantiated,
+            caller,
+            &reachable_declaring,
+        ))
+    } else {
+        Err(unreachable_declaring_module_error(
+            ctx,
+            span,
+            header_name,
+            instantiated,
+        ))
+    }
+}
+
+/// P7b.S10 (R2): the generic-header twin of `driver.rs`'s
+/// `walk_type_export_origin` -- the same chase (follow an unqualified
+/// selective re-export, else the first import target that declares the name,
+/// until a module actually declaring it is found; `None` on a cycle or a
+/// dead end), but over the generic header registry rather than the concrete
+/// `StructDecl`/`EnumDecl` scan, which never sees a generic `type:` header
+/// (`parser.rs` excludes it from that scan, and it lives in the generic
+/// registry instead). Structurally the same walk, not a call into that one
+/// -- and not the precomputed `type_origin` table either: both are
+/// concrete-type-only, so neither can resolve a generic header through a hub
+/// at all (GL/GN would fail if built on either).
+fn walk_generic_header_origin(
+    start: u32,
+    name: &str,
+    declarers: &HashSet<u32>,
+    modules: &[ModuleInfo],
+) -> Option<u32> {
+    let mut visited: HashSet<u32> = HashSet::new();
+    let mut current = start;
+    loop {
+        if !visited.insert(current) {
+            return None;
+        }
+        if declarers.contains(&current) {
+            return Some(current);
+        }
+        let info = &modules[current as usize];
+        current = *info
+            .selective
+            .get(name)
+            .or_else(|| info.imports.values().find(|&&dep| declarers.contains(&dep)))?;
+    }
+}
+
+/// P7b.S10 (R4): how the caller names a declaring module in the ambiguity
+/// message. `ModuleInfo` carries no module name of its own, so every
+/// existing diagnostic that names a foreign module renders the caller's own
+/// import qualifier for it (`declarations.rs`/`word_families.rs` precedent);
+/// a module bound only per-export through a `*` wildcard has no qualifier
+/// and falls back to the existing wildcard-import phrasing
+/// (`selective_not_exported_error`'s); a module the caller never imports in
+/// any form (a walk-resolved re-export origin) is named structurally, the
+/// `drop`-visibility diagnostic's precedent for exactly this gap -- never a
+/// fabricated name.
+fn module_display_name(caller: &ModuleInfo, target: u32) -> String {
+    if let Some((qualifier, _)) = caller.imports.iter().find(|(_, &t)| t == target) {
+        format!("`{qualifier}`")
+    } else if caller.selective.values().any(|&t| t == target) {
+        "its wildcard-imported module".to_string()
+    } else {
+        "a module this module never imports directly".to_string()
+    }
+}
+
+/// P7b.S10 (R3/R4/R5): the ambiguity shape's message. Names the surface
+/// name, the call site, and every reachable declaring module by the caller's
+/// own qualifier for it, joined lexicographically (R4 -- not registry,
+/// import, or mint order, so the text is byte-identical across import
+/// orders and minter placements, REQ-5), and points at the remedies that
+/// actually cure the shape (R5's two-part remedy 2 -- selective import alone
+/// cures only when the named module itself instantiates; otherwise the type
+/// must also be spelled in the caller's own signature).
+fn ambiguous_generic_headers_error(
+    ctx: &Ctx,
+    span: Span,
+    header_name: &str,
+    instantiated: &str,
+    caller: &ModuleInfo,
+    reachable_declaring: &[u32],
+) -> String {
+    let mut named: Vec<String> = reachable_declaring
+        .iter()
+        .map(|&m| module_display_name(caller, m))
+        .collect();
+    named.sort();
+    // The remedy example spells the lexically-first bound qualifier. A
+    // declaring module with no bound qualifier at all (the both-wildcard
+    // sub-case, unexercised by the goldens) drops the worked example rather
+    // than fabricating a spelling (R4's flagged, non-blocking gap).
+    let example = named
+        .iter()
+        .find_map(|n| n.strip_prefix('`').and_then(|r| r.strip_suffix('`')));
+    let remedy_tail = match example {
+        Some(q) => format!(
+            "also spell the type in your own word's signature (`import: self::{q} | {header_name} | ;` then `: mk ( i64 -- {instantiated} ) {header_name} ;`)"
+        ),
+        None => "also spell the type in your own word's signature".to_string(),
+    };
+    format!(
+        "error: `{header_name}`{} (line {}, col {}) is ambiguous: declared in modules {}, and {}'s module declares no `{header_name}`\n  note: declare your own `{header_name}` header and impl, or selectively import the module whose `{header_name}` you want -- if that module does not itself instantiate `{instantiated}`, {remedy_tail}",
+        in_word(ctx),
+        span.line,
+        span.col,
+        join_module_display_names(&named),
+        ctx.rendered_word(),
+    )
+}
+
+/// P7b.S10 (R3/R5): the reach-failure shape's message (GM). One candidate
+/// exists, but its declaring module is one the caller's module does not
+/// import in any form -- not "ambiguous", so the wording must not claim
+/// several competing candidates. The module is never named by qualifier: an
+/// unreachable module has none by construction, and fabricating one is
+/// exactly the `drop`-diagnostic's rejected predecessor.
+fn unreachable_declaring_module_error(
+    ctx: &Ctx,
+    span: Span,
+    header_name: &str,
+    instantiated: &str,
+) -> String {
+    format!(
+        "error: `{header_name}`{} (line {}, col {}) is unresolved: the only `{instantiated}` instantiation in scope is declared in a module {}'s module does not import\n  note: import the module that declares the instantiation you want, or declare and instantiate your own `{header_name}` header",
+        in_word(ctx),
+        span.line,
+        span.col,
+        ctx.rendered_word(),
+    )
+}
+
+/// P7b.S10 (R4): join the collected module display names -- two with "and",
+/// three or more comma-separated with a final "and". The caller sorts them
+/// lexicographically before this runs.
+fn join_module_display_names(named: &[String]) -> String {
+    match named.len() {
+        1 => named[0].clone(),
+        2 => format!("{} and {}", named[0], named[1]),
+        _ => format!(
+            "{},{and} {}",
+            named[..named.len() - 1].join(","),
+            named[named.len() - 1],
+            and = " and",
+        ),
+    }
 }
 
 /// P7b.S9 Phase 2 (R1.1a): one struct's own generated constructor (or, with
@@ -3016,13 +3295,28 @@ mod tests {
         cell: &RefCell<GenericTypes>,
         structs: &[StructDecl],
     ) -> Result<Option<Overload>, String> {
+        ground_in_module_3_view(only, name, cell, structs, None)
+    }
+
+    /// The `ground_in_module_3` harness with the caller's import view
+    /// supplied. P7b.S10's units exercise paths only reachable with
+    /// `ctx.modules = Some(..)`: the default harness passes `None`, and the
+    /// ambiguity check reads it and never fires when it is absent (R2's
+    /// D1-gate discipline).
+    fn ground_in_module_3_view(
+        only: &Overload,
+        name: &str,
+        cell: &RefCell<GenericTypes>,
+        structs: &[StructDecl],
+        modules: Option<&[ModuleInfo]>,
+    ) -> Result<Option<Overload>, String> {
         let word = crate::test_support::bare_word("run", 3);
         let ctx = word_ctx(
             &word,
             structs,
             &[],
             &[],
-            None,
+            modules,
             &CombinatorIndex::new(),
             Some(cell),
         );
@@ -3391,5 +3685,436 @@ mod tests {
         assert!(ground_in_module_3(&only, "Widget", &cell, &[])
             .expect("no error")
             .is_none());
+    }
+
+    // ===== P7b.S10 (R1/R2/R3) units: the headerless single-candidate
+    // grounding arm's exemptions and its two error shapes. All of these run
+    // through `ground_in_module_3_view` with `ctx.modules = Some(..)`: the
+    // default harness passes `None`, which never reaches the new check at
+    // all (R2's absent-import-view discipline). Module layout convention
+    // matches the S9 units: the caller is module 3, foreign modules are 4+.
+
+    /// The single env candidate: `minter`'s eagerly minted `Widget[i64]`
+    /// constructor (one `i64` field), the only entry a bare `Widget` call in
+    /// the headerless caller module sees.
+    fn widget_ctor_candidate(borrowed: Type, minter: u32) -> Overload {
+        Overload {
+            sig: Sig {
+                inputs: vec![Type::I64],
+                outputs: vec![borrowed],
+            },
+            symbol: "Widget[i64]".to_string(),
+            module: minter,
+        }
+    }
+
+    /// A `ModuleInfo` view for the S10 units: `imports` are plain
+    /// `import: q ;` bindings (qualifier -> target), `named` are explicit
+    /// `| name |` selective entries, `wild` are `*`-wildcard-desugared
+    /// entries -- they populate `selective` identically but never
+    /// `named_selective` (the assembly-time distinction the raw map cannot
+    /// recover).
+    fn module_view(
+        imports: &[(&str, u32)],
+        named: &[(&str, u32)],
+        wild: &[(&str, u32)],
+    ) -> ModuleInfo {
+        let mut selective = HashMap::new();
+        let mut named_selective = HashMap::new();
+        for (n, t) in named {
+            selective.insert(n.to_string(), *t);
+            named_selective.insert(n.to_string(), *t);
+        }
+        for (n, t) in wild {
+            selective.insert(n.to_string(), *t);
+        }
+        ModuleInfo {
+            imports: imports.iter().map(|(q, t)| (q.to_string(), *t)).collect(),
+            exports: Vec::new(),
+            selective,
+            named_selective,
+            intrinsics: crate::ast::IntrinsicVisibility::None,
+        }
+    }
+
+    /// A minimal view list for `count` modules: the caller's view at 3 and
+    /// `Default::default()` everywhere else (the walks consult only the
+    /// modules a fixture gives qualifiers to).
+    fn module_views(caller: ModuleInfo, count: usize) -> Vec<ModuleInfo> {
+        let mut modules = vec![ModuleInfo::default(); count];
+        modules[3] = caller;
+        modules
+    }
+
+    /// Two same-named `Widget['T]` headers, declared in modules 4 and 5, and
+    /// module 4's eager mint of `Widget[i64]` -- the GA-shape program seen
+    /// from a headerless caller in module 3.
+    fn two_foreign_header_cell() -> (RefCell<GenericTypes>, Type) {
+        let mut generics = GenericTypes::with_bases(0, 0);
+        generics.structs.push(generic_struct_decl(
+            "Widget",
+            4,
+            &["'T"],
+            &[("v", PolyType::Var(0))],
+        ));
+        generics.structs.push(generic_struct_decl(
+            "Widget",
+            5,
+            &["'T"],
+            &[("v", PolyType::Var(0))],
+        ));
+        let mut scratch = ScratchRegs::default();
+        let borrowed = generics.instantiate_struct(0, &[Type::I64], &[], 4, scratch.regs());
+        (RefCell::new(generics), borrowed)
+    }
+
+    /// R1 (GA's shape at unit level): headerless caller, two same-named
+    /// headers from reachable distinct modules, one env candidate -- the
+    /// grounding path errors instead of falling through to the borrowed
+    /// mint.
+    #[test]
+    fn ambiguous_foreign_headers_grounding_is_located_error() {
+        let (cell, borrowed) = two_foreign_header_cell();
+        let only = widget_ctor_candidate(borrowed, 4);
+        let modules = module_views(module_view(&[("a", 4), ("b", 5)], &[], &[]), 6);
+        let err = ground_in_module_3_view(&only, "Widget", &cell, &[], Some(&modules))
+            .expect_err("two reachable headers must not silently borrow the single mint");
+        assert!(
+            err.contains("is ambiguous: declared in modules"),
+            "unexpected message: {err}"
+        );
+    }
+
+    /// R1 exemption 2's permissive half (GD's shape at unit level): a
+    /// foreign single candidate whose declaring module is reachable and the
+    /// only same-named header anywhere -- the existing borrow, unchanged.
+    #[test]
+    fn single_foreign_header_grounding_still_borrows() {
+        let mut generics = GenericTypes::with_bases(0, 0);
+        generics.structs.push(generic_struct_decl(
+            "Widget",
+            4,
+            &["'T"],
+            &[("v", PolyType::Var(0))],
+        ));
+        let mut scratch = ScratchRegs::default();
+        let borrowed = generics.instantiate_struct(0, &[Type::I64], &[], 4, scratch.regs());
+        let cell = RefCell::new(generics);
+        let only = widget_ctor_candidate(borrowed, 4);
+        let modules = module_views(module_view(&[("lib", 4)], &[], &[]), 5);
+        let grounded = ground_in_module_3_view(&only, "Widget", &cell, &[], Some(&modules))
+            .expect("one reachable header whose declaring module mints it exempts the call");
+        assert!(
+            grounded.is_none(),
+            "the exemption borrows the candidate unchanged, never re-grounds"
+        );
+    }
+
+    /// R1 exemption 1 (the caller-owns tier, untouched): the caller declares
+    /// its own header, so R1.1a grounds the call at its own mint no matter
+    /// how many foreign same-named headers its imports can reach.
+    #[test]
+    fn own_header_still_grounded_first() {
+        let mut generics = GenericTypes::with_bases(0, 0);
+        generics.structs.push(generic_struct_decl(
+            "Widget",
+            3,
+            &["'T"],
+            &[("v", PolyType::Var(0))],
+        ));
+        generics.structs.push(generic_struct_decl(
+            "Widget",
+            4,
+            &["'T"],
+            &[("v", PolyType::Var(0))],
+        ));
+        generics.structs.push(generic_struct_decl(
+            "Widget",
+            5,
+            &["'T"],
+            &[("v", PolyType::Var(0))],
+        ));
+        let mut scratch = ScratchRegs::default();
+        let borrowed = generics.instantiate_struct(1, &[Type::I64], &[], 4, scratch.regs());
+        let cell = RefCell::new(generics);
+        let only = widget_ctor_candidate(borrowed, 4);
+        let modules = module_views(module_view(&[("a", 4), ("b", 5)], &[], &[]), 6);
+        let grounded = ground_in_module_3_view(&only, "Widget", &cell, &[], Some(&modules))
+            .expect("the two headers agree on parameter count, so this must not error")
+            .expect("the caller's own header grounds the call before any exemption runs");
+        assert_eq!(
+            grounded.module, 3,
+            "the grounded candidate is the caller's own mint, never the borrowed one"
+        );
+    }
+
+    /// R3/R4: the rendered ambiguity message contains the surface name, both
+    /// declaring modules (lexicographically ordered), and the call site.
+    #[test]
+    fn ambiguous_header_error_names_declaring_modules() {
+        let (cell, borrowed) = two_foreign_header_cell();
+        let only = widget_ctor_candidate(borrowed, 4);
+        // The qualifiers are bound in reverse lexicographic order on purpose:
+        // the message must sort them regardless of import order.
+        let modules = module_views(module_view(&[("beta", 5), ("alpha", 4)], &[], &[]), 6);
+        let err = ground_in_module_3_view(&only, "Widget", &cell, &[], Some(&modules))
+            .expect_err("the GA shape errors");
+        assert!(
+            err.contains("declared in modules `alpha` and `beta`"),
+            "module names must be lexicographically sorted: {err}"
+        );
+        assert!(
+            err.contains("`Widget` in `run` (line 4, col 1)"),
+            "unexpected message: {err}"
+        );
+        assert!(
+            err.contains("and `run`'s module declares no `Widget`"),
+            "unexpected message: {err}"
+        );
+    }
+
+    /// R1 exemption 2's scoping half (GH's mechanism at unit level): a
+    /// second same-named header declared by a module absent from the
+    /// caller's own imports/selective maps does not count toward the >= 2
+    /// threshold -- a program-wide count would wrongly flag this.
+    #[test]
+    fn reachable_header_count_excludes_unimported_declaring_modules() {
+        let (cell, borrowed) = two_foreign_header_cell();
+        let only = widget_ctor_candidate(borrowed, 4);
+        // The caller imports only module 4; module 5 declares a header it
+        // never sees.
+        let modules = module_views(module_view(&[("lib", 4)], &[], &[]), 6);
+        let grounded = ground_in_module_3_view(&only, "Widget", &cell, &[], Some(&modules))
+            .expect("the unimported second header must not count toward the threshold");
+        assert!(
+            grounded.is_none(),
+            "the sole reachable candidate is borrowed unchanged"
+        );
+    }
+
+    /// R1 exemption 4's positive case (GI's mechanism at unit level): the
+    /// caller's `selective` map, resolved through any hub chain, names
+    /// exactly the sole candidate's declaring module -- exempt.
+    #[test]
+    fn matching_selective_import_exempts_the_ambiguity_check() {
+        let (cell, borrowed) = two_foreign_header_cell();
+        let only = widget_ctor_candidate(borrowed, 4);
+        // Two reachable headers (a plain import of 5, a named selective of
+        // 4); the named selective matches the sole minting module.
+        let modules = module_views(module_view(&[("b", 5)], &[("Widget", 4)], &[]), 6);
+        let grounded = ground_in_module_3_view(&only, "Widget", &cell, &[], Some(&modules))
+            .expect("the matching named selective import exempts the ambiguity check");
+        assert!(
+            grounded.is_none(),
+            "the matched candidate is borrowed unchanged"
+        );
+    }
+
+    /// R1 exemption 4's soundness-critical case (GK's mechanism at unit
+    /// level): the caller's selective map names a *different* reachable
+    /// module than the sole candidate's declaring module -- the exemption
+    /// must not fire, and the error must still raise.
+    #[test]
+    fn mismatched_selective_import_does_not_exempt_the_ambiguity_check() {
+        let mut generics = GenericTypes::with_bases(0, 0);
+        generics.structs.push(generic_struct_decl(
+            "Widget",
+            4,
+            &["'T"],
+            &[("v", PolyType::Var(0))],
+        ));
+        generics.structs.push(generic_struct_decl(
+            "Widget",
+            5,
+            &["'T"],
+            &[("v", PolyType::Var(0))],
+        ));
+        let mut scratch = ScratchRegs::default();
+        // Only module 5 ever eagerly mints.
+        let borrowed = generics.instantiate_struct(1, &[Type::I64], &[], 5, scratch.regs());
+        let cell = RefCell::new(generics);
+        let only = widget_ctor_candidate(borrowed, 5);
+        // The caller selectively imported 4's Widget -- but 5 is the sole
+        // actual candidate. The caller's own selection must not silently
+        // override it.
+        let modules = module_views(module_view(&[("b", 5)], &[("Widget", 4)], &[]), 6);
+        let err = ground_in_module_3_view(&only, "Widget", &cell, &[], Some(&modules))
+            .expect_err("a selective import naming a non-minting module must not exempt");
+        assert!(
+            err.contains("is ambiguous: declared in modules"),
+            "unexpected message: {err}"
+        );
+    }
+
+    /// R2/GL's mechanism at unit level: the caller's raw selective value
+    /// names a re-exporting hub with no header of its own; the match test
+    /// must resolve through the hub's own chain to the true declaring
+    /// module before comparing, or a program that resolves correctly today
+    /// would wrongly error.
+    #[test]
+    fn hub_reexported_selective_import_resolves_through_origin_walk() {
+        let mut generics = GenericTypes::with_bases(0, 0);
+        generics.structs.push(generic_struct_decl(
+            "Widget",
+            4,
+            &["'T"],
+            &[("v", PolyType::Var(0))],
+        ));
+        generics.structs.push(generic_struct_decl(
+            "Widget",
+            5,
+            &["'T"],
+            &[("v", PolyType::Var(0))],
+        ));
+        let mut scratch = ScratchRegs::default();
+        let borrowed = generics.instantiate_struct(0, &[Type::I64], &[], 4, scratch.regs());
+        let cell = RefCell::new(generics);
+        let only = widget_ctor_candidate(borrowed, 4);
+        // Module 6 is the hub: it selectively imports Widget from 4 and
+        // re-exports it. The caller selectively imports Widget *from the
+        // hub*, plus plain imports of both headers' modules.
+        let hub = module_view(&[("a", 4)], &[("Widget", 4)], &[]);
+        let mut modules =
+            module_views(module_view(&[("a", 4), ("b", 5)], &[("Widget", 6)], &[]), 7);
+        modules[6] = hub;
+        let grounded = ground_in_module_3_view(&only, "Widget", &cell, &[], Some(&modules))
+            .expect("the hub-resolved selective import matches the sole declaring module");
+        assert!(
+            grounded.is_none(),
+            "the matched candidate is borrowed unchanged"
+        );
+    }
+
+    /// R1 exemption 2's tightened half (GM's mechanism at unit level): at
+    /// most one same-named header is reachable, but the sole env candidate's
+    /// declaring module is a different, unreachable module -- both halves
+    /// are required, so the error still raises, named structurally because
+    /// the caller has no qualifier for that module at all.
+    #[test]
+    fn unreachable_declaring_module_of_the_sole_candidate_is_still_an_error() {
+        let mut generics = GenericTypes::with_bases(0, 0);
+        generics.structs.push(generic_struct_decl(
+            "Widget",
+            4,
+            &["'T"],
+            &[("v", PolyType::Var(0))],
+        ));
+        generics.structs.push(generic_struct_decl(
+            "Widget",
+            6,
+            &["'T"],
+            &[("v", PolyType::Var(0))],
+        ));
+        let mut scratch = ScratchRegs::default();
+        // Only module 6 ever eagerly mints; the caller imports only module 4.
+        let borrowed = generics.instantiate_struct(1, &[Type::I64], &[], 6, scratch.regs());
+        let cell = RefCell::new(generics);
+        let only = widget_ctor_candidate(borrowed, 6);
+        let modules = module_views(module_view(&[("lib", 4)], &[], &[]), 7);
+        let err = ground_in_module_3_view(&only, "Widget", &cell, &[], Some(&modules))
+            .expect_err("an unreachable minter must not be silently borrowed");
+        assert!(
+            err.contains("is unresolved: the only `Widget[i64]` instantiation in scope is declared in a module `run`'s module does not import"),
+            "the reach-failure shape, named structurally: {err}"
+        );
+        assert!(
+            !err.contains("ambiguous"),
+            "one candidate is a reach failure, not an ambiguity: {err}"
+        );
+    }
+
+    /// R1/GO's mechanism at unit level: a module that is the target of a
+    /// selective import for a name *other than* the surface name under check
+    /// is still part of the reachable set -- reachability is name-independent
+    /// at the raw layer.
+    #[test]
+    fn reachable_set_includes_selective_targets_regardless_of_selected_name() {
+        let mut generics = GenericTypes::with_bases(0, 0);
+        generics.structs.push(generic_struct_decl(
+            "Widget",
+            4,
+            &["'T"],
+            &[("v", PolyType::Var(0))],
+        ));
+        let mut scratch = ScratchRegs::default();
+        let borrowed = generics.instantiate_struct(0, &[Type::I64], &[], 4, scratch.regs());
+        let cell = RefCell::new(generics);
+        let only = widget_ctor_candidate(borrowed, 4);
+        // The caller has zero plain imports; module 4 is reachable only as
+        // the target of a selective import of `Gadget`, a different name.
+        let modules = module_views(module_view(&[], &[("Gadget", 4)], &[]), 5);
+        let grounded = ground_in_module_3_view(&only, "Widget", &cell, &[], Some(&modules))
+            .expect("the selective target is reachable regardless of the selected name");
+        assert!(
+            grounded.is_none(),
+            "the sole reachable candidate is borrowed unchanged"
+        );
+    }
+
+    /// R1/GN's mechanism at unit level: a raw-reachable module with no
+    /// header of its own, whose own selective map chases through to a module
+    /// that does declare the surface name, extends the reachable set to
+    /// include that declaring module too -- exemption 2 sees a header behind
+    /// a hub the raw layer alone would miss.
+    #[test]
+    fn reachable_set_extends_through_reexport_origin_walk() {
+        let mut generics = GenericTypes::with_bases(0, 0);
+        generics.structs.push(generic_struct_decl(
+            "Widget",
+            4,
+            &["'T"],
+            &[("v", PolyType::Var(0))],
+        ));
+        let mut scratch = ScratchRegs::default();
+        let borrowed = generics.instantiate_struct(0, &[Type::I64], &[], 4, scratch.regs());
+        let cell = RefCell::new(generics);
+        let only = widget_ctor_candidate(borrowed, 4);
+        // The caller plainly imports only the hub (module 6), which has no
+        // header of its own but selectively imports Widget from 4.
+        let mut modules = module_views(module_view(&[("h", 6)], &[], &[]), 7);
+        modules[6] = module_view(&[("a", 4)], &[("Widget", 4)], &[]);
+        let grounded = ground_in_module_3_view(&only, "Widget", &cell, &[], Some(&modules))
+            .expect("the walk-extension resolves the hub to the declaring module");
+        assert!(
+            grounded.is_none(),
+            "one header exists program-wide, nothing to mis-dispatch to"
+        );
+    }
+
+    /// R2/GP's mechanism at unit level -- the soundness-critical case for the
+    /// wildcard exclusion: a `selective` entry populated by a `*` wildcard's
+    /// per-export desugar does not satisfy exemption 4, even though it is
+    /// indistinguishable from a named selective import in the raw map. The
+    /// match test requires the richer, assembly-time `named_selective`
+    /// signal.
+    #[test]
+    fn wildcard_desugar_is_not_explicit_resolution() {
+        // Module 5's header (gi 1) is the sole eager minter.
+        let mut generics = GenericTypes::with_bases(0, 0);
+        generics.structs.push(generic_struct_decl(
+            "Widget",
+            4,
+            &["'T"],
+            &[("v", PolyType::Var(0))],
+        ));
+        generics.structs.push(generic_struct_decl(
+            "Widget",
+            5,
+            &["'T"],
+            &[("v", PolyType::Var(0))],
+        ));
+        let mut scratch = ScratchRegs::default();
+        let borrowed = generics.instantiate_struct(1, &[Type::I64], &[], 5, scratch.regs());
+        let cell = RefCell::new(generics);
+        let only = widget_ctor_candidate(borrowed, 5);
+        // The caller plainly imports 4 and wildcard-imports 5: the desugar
+        // puts Widget -> 5 into `selective` but never into `named_selective`.
+        let modules = module_views(module_view(&[("a", 4)], &[], &[("Widget", 5)]), 6);
+        let err = ground_in_module_3_view(&only, "Widget", &cell, &[], Some(&modules))
+            .expect_err("a wildcard desugar must not count as explicit resolution");
+        assert!(
+            err.contains("is ambiguous: declared in modules"),
+            "unexpected message: {err}"
+        );
     }
 }

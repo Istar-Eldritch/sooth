@@ -539,6 +539,11 @@ pub(crate) fn assemble_module(closure: &Closure, always_mangle: bool) -> Result<
     // collision shadows to the local decl at parse, never miscompiles).
     let mut import_by_module: Vec<HashMap<String, u32>> = Vec::with_capacity(closure.nodes.len());
     let mut selective_maps: Vec<HashMap<String, u32>> = Vec::with_capacity(closure.nodes.len());
+    // P7b.S10 (R2/GP): the named-selective subset of each module's selective
+    // map -- entries written as an explicit `| name |` clause, excluding a
+    // wildcard's per-export desugar, which populates `selective` identically.
+    let mut named_selective_maps: Vec<HashMap<String, u32>> =
+        Vec::with_capacity(closure.nodes.len());
     // P8 S2 (R2): what each file's `import: intrinsics ...` lines make visible.
     let mut intrinsics_by_module: Vec<IntrinsicVisibility> =
         Vec::with_capacity(closure.nodes.len());
@@ -549,6 +554,7 @@ pub(crate) fn assemble_module(closure: &Closure, always_mangle: bool) -> Result<
     for node in closure.nodes.iter() {
         let mut import_map: HashMap<String, u32> = HashMap::new();
         let mut selective_map: HashMap<String, u32> = HashMap::new();
+        let mut named_selective_map: HashMap<String, u32> = HashMap::new();
         let mut selective_entries: Vec<check::SelectiveName> = Vec::new();
         // P8 slice 1a: where each qualifier was first bound, so a second
         // import binding the same one is a located error at that second import
@@ -593,6 +599,11 @@ pub(crate) fn assemble_module(closure: &Closure, always_mangle: bool) -> Result<
                             continue;
                         }
                         selective_map.insert(name.clone(), target);
+                        // A wildcard-desugared entry is deliberately *not*
+                        // added to `named_selective_map`: the wildcard never
+                        // explicitly resolved the name, so it must not
+                        // satisfy the checker's explicit-resolution exemption
+                        // (P7b.S10, GP).
                         selective_entries.push(check::SelectiveName {
                             name: name.clone(),
                             qualifier: None,
@@ -620,6 +631,7 @@ pub(crate) fn assemble_module(closure: &Closure, always_mangle: bool) -> Result<
             import_map.insert(qualifier.to_string(), target);
             for (name, span) in imp.selective() {
                 selective_map.insert(name.clone(), target);
+                named_selective_map.insert(name.clone(), target);
                 selective_entries.push(check::SelectiveName {
                     name: name.clone(),
                     qualifier: Some(qualifier.to_string()),
@@ -630,6 +642,7 @@ pub(crate) fn assemble_module(closure: &Closure, always_mangle: bool) -> Result<
         }
         import_by_module.push(import_map);
         selective_maps.push(selective_map);
+        named_selective_maps.push(named_selective_map);
         selective_by_module.push(selective_entries);
         intrinsics_by_module.push(intrinsics);
     }
@@ -771,6 +784,7 @@ pub(crate) fn assemble_module(closure: &Closure, always_mangle: bool) -> Result<
             imports: import_map,
             exports: exports_by_module[m].clone(),
             selective: selective_map.clone(),
+            named_selective: named_selective_maps[m].clone(),
             intrinsics: intrinsics_by_module[m].clone(),
         });
     }

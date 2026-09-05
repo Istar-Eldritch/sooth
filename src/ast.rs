@@ -183,6 +183,16 @@ pub struct ModuleInfo {
     /// base name is in this map, with no separate enumeration of its
     /// accessors needed.
     pub selective: std::collections::HashMap<String, u32>,
+    /// P7b.S10 (R2/GP): the named-selective subset of `selective` -- only the
+    /// entries written as an explicit `import: q | name | ;` clause. A `*`
+    /// wildcard's per-export desugar populates `selective` identically (the
+    /// flattened map cannot tell the two apart), but it is not an explicit
+    /// resolution of any name, so the checker's exemption for a named
+    /// selective import reads only this map. Kept in lockstep with
+    /// `selective` at assembly time (every named insert updates both); the
+    /// two maps can only drift if a future population path inserts into
+    /// `selective` alone, which would silently widen the exemption.
+    pub named_selective: std::collections::HashMap<String, u32>,
     /// P8 S2 (R2): which of the compiler-provided intrinsics this module's
     /// `import: intrinsics ...` lines make visible to it.
     pub intrinsics: IntrinsicVisibility,

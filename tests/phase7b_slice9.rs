@@ -550,118 +550,16 @@ fn duplicate_blanket_impl_across_modules_is_a_declared_error() {
     );
 }
 
-/// G4 (Phase 4, R3/REQ-6): the Phase-4 determination. R3 laid out two
-/// candidate outcomes for a third module (`c`) that wildcard-imports `f` and
-/// plainly imports `a`/`b` (both declaring their own `Widget['T]` header and
-/// `impl: Sized for Widget`), then calls a bare, un-annotated `Widget size`
-/// with no `Widget` header of its own: (a) a 2-candidate `select_overload`
-/// ambiguity error, or (b) an earlier `unknown type` error (consistent with
-/// probes P5a-ii's explicitly-annotated variant). Measured against the
-/// Phase-2/3-fixed compiler, NEITHER happens: the build succeeds, exit 0, no
-/// diagnostic, and the binary deterministically prints `2` (b's constant) --
-/// 8/8 rebuild+run cycles, both import orders (both trees below).
-///
-/// Mechanism (this is a determination, not a claim of ideal semantics): `c`
-/// declares no `Widget` header, so R1.1a's own-header grounding has nothing to
-/// ground *at* -- the caller-owned-grounding fix (Phase 2) only reaches a
-/// bare ctor call inside a module that itself declares the type. `a`'s own
-/// `Widget[i64]` grounding (minted mid-check, inside `a::run`'s body) is
-/// never exported as a nameable instantiation across the module boundary --
-/// indeed `b`'s own `Widget[i64]` is not exported either (`export:`ing it is
-/// itself an error, "names private type"); the only `Widget[i64]` visible to
-/// `c`'s env lookup is the single instantiation minted into the shared
-/// whole-program env, `b`'s, because `b`'s `usesize` signature spells it
-/// explicitly. With exactly one such candidate, the pre-existing
-/// single-candidate arm takes it -- silently, without ever detecting that
-/// `a`'s module holds a same-shaped, differently-`impl`'d instantiation of
-/// its own. This is exactly the Phase-1 verdict's corollary: whichever eager
-/// mint exists (and is the sole instantiation visible in the shared
-/// whole-program env) decides for every bare caller with no header of its
-/// own. An export-ambiguity rule for this shape (two modules instantiating
-/// same-shaped impls, third caller with no own header) is out of S9's scope
-/// (R4/REQ-7 forbids new dispatch-time machinery in `find_bound_impl`, and
-/// this is a cross-module import-resolution question, not a dispatch one) --
-/// recorded as roadmap follow-up, not implemented here.
-#[test]
-fn third_module_bare_caller_dispatches_the_single_shared_env_instantiation() {
-    for (first, second) in [("a", "b"), ("b", "a")] {
-        let t = Tree::new(&format!("g4-{first}-{second}"));
-        write_manifest(&t);
-        write_sized_trait(&t);
-        t.write(
-            "a.sth",
-            "import: intrinsics * ; import: self::f * ;\n\
-             type: Widget['T] v 'T ;\n\
-             impl: Sized for Widget : size drop 1 ; ;\n\
-             : run ( i64 -- i64 ) Widget sized ;\n\
-             export: run ;\n",
-        );
-        write_eager_minter(&t);
-        t.write(
-            "c.sth",
-            &format!(
-                "import: intrinsics * ; import: self::f * ;\n\
-                 import: self::{first} ; import: self::{second} ;\n\
-                 : try ( i64 -- i64 ) Widget size ;\n\
-                 export: try ;\n"
-            ),
-        );
-        let entry = t.write(
-            "main.sth",
-            "import: intrinsics * ; import: hosted::show | . | ;\n\
-             import: self::c ;\n\
-             : main ( -- ) 5 c::try . ;\n",
-        );
-        assert_eq!(
-            build_and_run(&entry),
-            "2\n",
-            "c's bare ctor call, with no header of its own, deterministically dispatches the single instantiation minted into the shared whole-program env (b's) -- import order {first}/{second} must not change this"
-        );
-    }
-
-    // Third tree: the two trees above only vary c's import order while a.sth
-    // stays bare and b.sth stays the eager minter, so `2` is equally
-    // consistent with "later-declared module wins" as with "sole shared-env
-    // mint wins". Swap which module spells `Widget[i64]` explicitly -- a
-    // becomes the eager minter (constant 1), b becomes the bare consumer
-    // (constant 2) -- to show the sole shared-env mint is the lever, not
-    // import order: the answer flips to `1`.
-    let t = Tree::new("g4-a-eager");
-    write_manifest(&t);
-    write_sized_trait(&t);
-    t.write(
-        "a.sth",
-        "import: intrinsics * ; import: self::f * ;\n\
-         type: Widget['T] v 'T ;\n\
-         impl: Sized for Widget : size drop 1 ; ;\n\
-         : usesize ( Widget[i64] -- i64 ) size ;\n\
-         : run ( i64 -- i64 ) Widget usesize ;\n\
-         export: run ;\n",
-    );
-    t.write(
-        "b.sth",
-        "import: intrinsics * ; import: self::f * ;\n\
-         type: Widget['T] v 'T ;\n\
-         impl: Sized for Widget : size drop 2 ; ;\n\
-         : run ( i64 -- i64 ) Widget sized ;\n\
-         export: run ;\n",
-    );
-    t.write(
-        "c.sth",
-        "import: intrinsics * ; import: self::f * ;\n\
-         import: self::a ; import: self::b ;\n\
-         : try ( i64 -- i64 ) Widget size ;\n\
-         export: try ;\n",
-    );
-    let entry = t.write(
-        "main.sth",
-        "import: intrinsics * ; import: hosted::show | . | ;\n\
-         import: self::c ;\n\
-         : main ( -- ) 5 c::try . ;\n",
-    );
-    assert_eq!(
-        build_and_run(&entry),
-        "1\n",
-        "a is now the eager minter (its usesize spells Widget[i64] explicitly) and b is now bare -- c's bare ctor call flips to a's constant, confirming the sole shared-env mint decides, not which module was declared or imported first"
-    );
-}
+// G4 (Phase 4, R3/REQ-6) is RETIRED by P7b.S10 (REQ-6): this test used to
+// pin the silent dispatch this slice exists to close -- a third-module bare
+// `Widget` ctor call, no `Widget` header of its own, resolving to whichever
+// module happened to spell the instantiation eagerly (printed `2`/`1` by
+// minter placement). P7b.S10 (`src/check/terms.rs`'s
+// `foreign_single_candidate_grounding`) replaces that silent pick with a
+// located compile-time ambiguity error; the inverted goldens are
+// `third_module_bare_caller_with_ambiguous_headers_is_a_located_error` and
+// `third_module_bare_caller_error_is_independent_of_the_eager_minter` in
+// `tests/phase7b_slice10.rs` (GA/GB). Every other S9 golden stays green and
+// byte-unchanged: the S10 check sits beside R1.1a's grounding and only
+// fires where R1.1a falls through today, on the specific shape S9
+// documented as its Residual.
