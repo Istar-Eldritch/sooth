@@ -1095,3 +1095,167 @@ predicate's every occurrence to "the caller's own import set (its own
 imports and selective imports, one hop)"; the two remaining program-wide
 mentions (GH's rationale, in the spec and the paper-tests) now read
 "elsewhere, program-wide" instead of "elsewhere in the closure".
+
+## Corrections appendix — round-3 review (2026-09-05)
+
+A third review round (two lanes: mechanical, policy) over the round-2-corrected
+spec suite (commit `56864d1`) confirmed all eight round-2 findings resolved,
+the restructure behaviour-preserving, GL/GM byte-faithful, and the 13/9
+name sync clean — mechanical lane: complete/OK-with-notes; policy lane:
+complete/BLOCK on two new P1 predicate holes, plus P2 batch findings. This
+appendix records what changed; the probe log and the round-1/round-2
+appendices above stay verbatim.
+
+**P1 — "reachable" was defined twice, and the two definitions diverged
+(hub-unaware).** R1's exemption 2 (round-2 text) defined the reachable set
+as `imports ∪ selective` target values; a separate paragraph in R2
+("Everything else") and brief's own mirror instead assigned `imports` alone
+to reachability and `selective` only to exemption 4's match test — an
+internal fork paper-tests had already avoided (its own unit sketch already
+read `imports`/`selective` together). Two measured fixtures exposed this as
+load-bearing, not merely cosmetic:
+
+- `/tmp/s10r3/selother` (now paper-tests' GO): `d` declares and mints
+  `Widget`, and separately declares `Gadget`; `c` selectively imports only
+  `Gadget` from `d` (`import: self::d | Gadget | ;` — a *different* name
+  than the surface name under check) and bare-calls `Widget`. Measured:
+  builds, prints `4`, exit 0. Under the union reading `d` stays reachable
+  (it is a raw selective target, regardless of which name was selected) and
+  the fixture stays legal, matching measurement; under the drifted
+  imports-only reading, `c`'s raw imports set is empty (its only import
+  statements are a wildcard of `f` and the selective import of `d` — neither
+  populates `ModuleInfo.imports`), so `d` would be wrongly treated as
+  unreachable and the fixture would wrongly error.
+- `/tmp/s10r3/hubq` (now paper-tests' GN): `a` declares, mints, and exports
+  `Widget`; `h` re-exports it with no header of its own; `c` writes a
+  **plain** `import: self::h ;` (no selective clause at all) and bare-calls
+  `Widget`. Measured: builds, prints `1`, exit 0 — only one header exists
+  program-wide, nothing to mis-dispatch to. Under the round-2 tightening
+  (exemption 2 requiring the sole candidate's declaring module to be
+  reachable), `c`'s raw reachable set is `{h}`, `h` has no header, so `a`
+  (the sole candidate's declaring module) is NOT in the raw reachable set at
+  all — the fixture is newly, wrongly errored, exposing that reachability
+  itself (not just exemption 4) needed the hub-chain walk.
+
+Fix (maintainer-consistent completion of D1's reachability principle): the
+reachable set is the caller's raw import set (`imports ∪ selective` target
+values, name-independent — confirmed sound by GO) **plus**, for every module
+in that raw set, whatever module the export-origin walk resolves the
+surface name to when started there (the same walk exemption 4 uses, over the
+generic header registry — confirmed sound by GN). Re-verified GD, GH, GE, GF,
+GI, GJ, GM are unaffected by this widening (each fixture's sole candidate's
+declaring module was already directly reachable, or already correctly
+unreachable, under the narrower definition too). R1's exemption 2, R2's data
+paragraph, and brief's mirror now state this as a single, non-forking
+definition.
+
+**P1 — a `*` wildcard import must not grant exemption 4.**
+`driver.rs:568-600` desugars a real-target wildcard into a `selective_map`
+entry for every one of the target's exported names — indistinguishable, in
+the raw `ModuleInfo.selective: HashMap<String, u32>`, from a named
+`| name |` selective import. Measured (`/tmp/s10r3/wild`, now paper-tests'
+GP): `a` and `b` both declare `Widget`; only `b` mints; `c` writes
+`import: self::a ; import: self::b * ;` and bare-calls `Widget` — builds,
+silently prints `2`, exit 0, today. The round-2 predicate's exemption 4
+(reading raw `ModuleInfo.selective` alone) would treat `b`'s wildcard-derived
+entry as if `c` had explicitly named `Widget` from `b`, silently exempting
+this case — GK's exact defect class re-entering through the desugar, and
+the round-2 delta had in fact *removed* an R1 sentence (present in an
+earlier draft) that flagged this gap, while R2's own data-source paragraph
+still folded wildcard entries into the same exemption-4 read.
+
+Fix (completion of D1's explicit-resolution principle, matching the cited
+precedent `declarations.rs:972-976`/`:989`, which already refuses to treat a
+wildcard-desugared entry as a named import — `selective_source_phrase`'s
+`None` arm renders it as "wildcard import of `{name}`", never as "selective
+import ... from module"): exemption 4 requires a **named** selective import
+specifically; a wildcard-desugared entry never counts, however identically
+it populates the same map. Since the raw `ModuleInfo.selective` cannot
+itself carry this distinction, the implementing phase threads the
+already-computed `SelectiveName.qualifier` field (`Some` for named, `None`
+for wildcard — computed once, at assembly time, by the same driver code that
+builds `selective_map`, but today discarded after `check_selective_imports`
+runs) through to `Ctx`. Reachability (exemption 2) is unaffected by this
+exclusion — a wildcard-reached module still counts there, confirmed by GP
+itself (`b` is one of its two reachable headers regardless, which is why
+the fixture reaches the general rule rather than exemption 2's
+≤1-reachable-header case).
+
+**P1/P2 — the `type_origin`/`walk_type_export_origin` reuse claim was false
+for generic headers, and the fallback alternative was a dead end.** Generic
+headers are **not** in the concrete type-export registries
+`resolve_type_export_origins`/`walk_type_export_origin` walk
+(`src/driver.rs:364`/`:407`) at all: `parser.rs:81-83` deliberately excludes
+a generic `type:` header from the concrete struct/enum scan
+(`if header_is_generic(...) { continue; }` — it lives in
+`module.generic_structs`/`generic_enums` instead), and
+`resolve_type_export_origins`'s own `declared_types` builder
+(`driver.rs:373-384`) iterates only `StructDecl`/`EnumDecl`. Measured
+(`/tmp/s10r3/hubtype`, built specifically to probe this): `d.sth` writes
+`idw ( Widget[i64] -- Widget[i64] )`, a *type-position* reference to
+`Widget` reached only through a hub (`h`, itself re-exporting `a`'s
+`Widget`) — exactly the shape the round-2 spec claimed the existing walk
+already covers. Measured result: `error: unknown type \`Widget\`` — the
+EXISTING mechanism cannot see a generic header through a hub either, so the
+round-2 claim ("S10 reuses the same hub-hop the checker already performs
+for a type reference in an effect signature") was false for this shape. The
+round-2 spec's stated fallback — "if simpler, thread the already-computed
+`type_origin` table (`driver.rs:651`) through to `Ctx`" — is for the same
+reason unusable: `type_origin` is built from the same concrete-only
+`declared_types`, so it never has an entry for a generic header reached
+through a hub; an implementer choosing this alternative would find no
+resolution for GL at all and fail that golden.
+
+Fix: delete the `type_origin`-threading alternative everywhere it appears
+(spec, brief, paper-tests); the implementing phase builds a walk that is
+**structurally the same as the checker's existing one, but over the generic
+header registry** (`ctx.generics().structs`) instead of `StructDecl`/
+`EnumDecl` — a new, small function, not a call into `walk_type_export_origin`
+itself. Its ingredients (`ctx.generics().structs`, `ctx.modules`'s
+`selective`/`imports` maps) are already reachable from `Ctx`, so this
+remains no new registry. Re-worded the provenance claim throughout to
+"structurally the same walk the checker runs for concrete type names, but
+over the generic header registry".
+
+**P2 batch.**
+
+1. **False "declaring and instantiating coincide in every golden" claim.**
+   `p7c3` (GF) has `c` mint `a`'s header via `c`'s own
+   `: try ( a::Widget[i64] -- i64 ) size ;`, and `p5g2` (GE) has `c` mint it
+   via `c`'s own `: mk ( i64 -- Widget[i64] ) Widget ;` — both declaring `a`,
+   instantiating `c`, the exact divergence the round-2 claim said no golden
+   exercised. The *conclusion* (this distinction changes no current
+   golden's outcome) survives, but for a different reason: GE/GF are
+   exactly the fixtures where declaring and instantiating diverge, and
+   there the divergence is moot, because `c` (the instantiating module) is
+   also the *caller*, so `owning_module == caller_module` and the call
+   exits at `terms.rs:1504` before exemption 2 or 4 is ever reached.
+   Reworded R2's claim to state the corrected, narrower reasoning
+   ("wherever exemption 2/4 actually runs, the two coincide"), so a future
+   unit test for this distinction is not built from a fixture (GE/GF) that
+   in fact never reaches the code being tested.
+2. **GE's (and GF's) stated mechanism was wrong.** Both golden rows read
+   "exemption 2 (≤1 reachable header) fires" / "no second header exists";
+   the actual mechanism is the `:1504` own-instantiating-module
+   short-circuit, unrelated to exemption 2 or to how many headers exist.
+   Relabeled both rows (spec, paper-tests, brief) to pin the `:1504` arm
+   explicitly, and moved GE/GF out of REQ-1's exemption-2 traces
+   accordingly (REQ-4's compat-pins list still includes them, since the
+   golden's *behaviour* — unchanged output — is correct; only the
+   *mechanism* attribution was wrong).
+3. **The origin walk's `None` arm was unruled.** R2 described the walk's
+   success path but not its failure path. Ruled: when the walk cannot
+   resolve (cycle or dead end, `driver.rs:411-427`'s loop shape), the
+   starting module contributes nothing — exemption 4 does not apply on its
+   account, and it adds nothing to reachability's walk-extension either;
+   the general rule (or a different exemption, or a different reachable
+   module) decides.
+4. **GM's draft message wrongly said "ambiguous".** GM's shape is a reach
+   failure (exactly one env candidate exists; the problem is that its
+   declaring module is unreachable, not that several candidates compete).
+   Reworded R5's GM draft contract from "... is ambiguous: the only
+   `Widget[i64]` instantiation in scope belongs to a module ... does not
+   import" to "... is unresolved: the only `Widget[i64]` instantiation in
+   scope is declared in a module ... does not import" — measure-then-pin
+   still governs the exact rendered bytes; only the contract's own claim
+   about what kind of problem this is was corrected.

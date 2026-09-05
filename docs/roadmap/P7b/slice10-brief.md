@@ -71,44 +71,66 @@ resolves unambiguously today (`7`). This was measured during the
 pre-implementation review round, not assumed. A round-2 review measured two
 further gaps this revision closes: reachable-header-count alone is not
 enough (GM), and the explicit-resolution exemption must resolve through a
-re-exporting hub before comparing (GL).
+re-exporting hub before comparing (GL). A round-3 review then measured that
+reachability itself needed the SAME hub-awareness (GN), that a selective
+import of a *different* name still grants reachability (GO), and that a `*`
+wildcard must NOT satisfy the explicit-resolution exemption (GP).
 
 Exemptions (the error must NOT fire when):
 
 - `m` declares its own header — S9's R1.1a grounds the caller's own mint
   (the caller-owns tier, untouched);
-- **[both halves required]** at most one same-named header is reachable
-  through `m`'s own import set, **and** the sole candidate's actual
+- **[both halves required, over the fully-resolved reachable set]** at most
+  one same-named header is reachable, **and** the sole candidate's actual
   **declaring** module (not its instantiating module — R2) is itself among
-  that reachable set — the single-lib compat shape (GD) and the
-  unimported-sibling shape (GH) both stay legal because the sole candidate's
-  own declaring module is reachable; a header that is reachable but never
-  mints does **not** entitle the caller to silently borrow a *different*,
-  unreachable module's instantiation instead (GM, a round-2 case: `app`
-  imports only `lib`, which declares its own header but never mints; the
-  sole instantiation belongs to `z`, never imported by `app` at all — today
-  silently prints `9`, `z`'s value; the tightened exemption no longer covers
-  this);
+  that reachable set. The reachable set is `m`'s raw import set
+  (`imports ∪ selective` target-module values, one hop, **name-independent**
+  — GO, `selother`: `c` selectively imports only `Gadget` from `d`, a
+  *different* name than the surface name under check, yet `d` — where
+  `Widget` is declared and minted — is still reachable, measured `4`, exit
+  0, unchanged) **plus the export-origin walk-extension** (the same walk
+  exemption 4 uses, run from every raw-reachable module — GN, `hubq`: `c`
+  plainly imports `h`, a re-exporting hub with no header of its own; walking
+  `h` for `Widget` resolves to `a`, so `a` joins the reachable set even
+  though `c` never imports it directly — one header exists program-wide,
+  nothing to mis-dispatch to, measured `1`, exit 0, unchanged) — the
+  single-lib compat shape (GD) and the unimported-sibling shape (GH) both
+  stay legal because the sole candidate's own declaring module is reachable;
+  a header that is reachable but never mints does **not** entitle the
+  caller to silently borrow a *different*, unreachable module's
+  instantiation instead (GM, a round-2 case: `app` imports only `lib`,
+  which declares its own header but never mints; the sole instantiation
+  belongs to `z`, never imported by `app` at all — today silently prints
+  `9`, `z`'s value; the tightened exemption no longer covers this);
 - the call reaches the **multi-candidate** arm (≥2 env candidates) — the
   existing S5 `select_overload` path governs there, including tier-2 pinning
   for declared type imports (GJ, P5i2), byte-identical;
-- `m` performs an **explicit resolution** — a selective import naming a
-  target module for this surface name, that target **resolved through any
-  hub re-export chain first** (R2), lands on the sole candidate's actual
-  **declaring** module (GI, `sel1`: the sole-minter case; GL, `hub`, a
-  round-2 case: `h` re-exports `a`'s `Widget` under its own
-  `export: Widget ;`, and `c` selectively imports `Widget` from `h` — `c`'s
-  raw selective value is `h`, not `a`; the match must resolve through `h`'s
-  own chain to `a` first, or this fixture wrongly errors a program that
-  resolves correctly today). The match requirement is load-bearing: a
-  selective import names what the caller *asked for*, not what they *get* —
-  when the two disagree (GK, a case built during the pre-implementation
-  review round), the exemption must not apply, or the exact
-  silent-mis-dispatch defect S10 exists to close survives, merely hidden
-  behind a selective import that looks like it resolved something (GK is
-  curable — R5's two-part remedy 2). A blanket "selective import present ⇒
-  exempt" reading, without the match-against-the-declaring-module test and
-  without resolving hub re-exports first, is unsound.
+- `m` performs an **explicit resolution** — a **named** selective import
+  (the `| Widget |` spelling; a `*` wildcard's per-export desugar never
+  counts, however it happens to populate the same `ModuleInfo.selective`
+  map — GP, `wild`, below) naming a target module for this surface name,
+  that target **resolved through any hub re-export chain first** (R2),
+  lands on the sole candidate's actual **declaring** module (GI, `sel1`: the
+  sole-minter case; GL, `hub`, a round-2 case: `h` re-exports `a`'s `Widget`
+  under its own `export: Widget ;`, and `c` selectively imports `Widget`
+  from `h` — `c`'s raw selective value is `h`, not `a`; the match must
+  resolve through `h`'s own chain to `a` first, or this fixture wrongly
+  errors a program that resolves correctly today). The match requirement is
+  load-bearing: a selective import names what the caller *asked for*, not
+  what they *get* — when the two disagree (GK, a case built during the
+  pre-implementation review round), the exemption must not apply, or the
+  exact silent-mis-dispatch defect S10 exists to close survives, merely
+  hidden behind a selective import that looks like it resolved something
+  (GK is curable — R5's two-part remedy 2). Without the named-vs-wildcard
+  exclusion, the same defect class re-enters through the desugar (GP,
+  `wild`: `a` and `b` both declare `Widget`; only `b` mints; `c` writes
+  `import: self::a ; import: self::b * ;` and bare-calls `Widget` — today
+  this silently prints `2`, exit 0, as if the wildcard had explicitly
+  resolved to `b`, though `c` never named `Widget` anywhere; under this
+  ruling it errors identically to GA/GB). A blanket "selective import
+  present ⇒ exempt" reading, without the match-against-the-declaring-module
+  test, without resolving hub re-exports first, and without excluding
+  wildcard desugars, is unsound.
 
 ## Working ruling R2 (where the check lives, guard ordering, and what data it reads)
 
@@ -132,19 +154,44 @@ candidate's *instantiating* module (where the concrete application syntax was
 written, `ast.rs:2598`'s `Generic::module` doc comment) — not necessarily the
 same as the header's *declaring* module (`guard.structs[gi].module`,
 `GenericStructDecl.module`). R1's exemption 2 and exemption 4 both compare
-against the declaring module. Every existing golden's candidate happens to be
-instantiated inside its own declaring module, so this distinction changes no
-golden's outcome; it matters for GL, where the raw selective target is
-neither.
+against the declaring module. This changes no *current* golden's outcome —
+not because declaring and instantiating always coincide (they do **not**:
+`p5g2`/GE and `p7c3`/GF both have `c` mint `a`'s header via `c`'s own
+signature), but because wherever exemption 2/4 actually *runs* (the
+candidate survives `:1504`), the two coincide; GE/GF diverge but never reach
+exemption 2/4 at all — they exit at `:1504` (corrected mechanism, see the
+goldens). It matters for GL/GN, where the raw selective target (or raw
+reachable module) is neither.
 
-**Hub resolution (GL).** A caller's raw `ModuleInfo.selective` value may name
-a re-exporting hub with no header of its own. The implementing phase resolves
-it through the same hop-walk the checker already runs for a type reference in
-an effect signature (`resolve_type_export_origins`/`walk_type_export_origin`,
-`driver.rs:364`/`:407`) before comparing against the declaring module —
-re-running an equivalent walk at check time, or threading the already-computed
-`type_origin` table through, whichever is simpler; the ingredients either way
-are already reachable from `Ctx`.
+**The export-origin walk (GL, GN): built over the generic header registry,
+not reused from the existing one.** A caller's raw `ModuleInfo.selective`
+value may name a re-exporting hub with no header of its own. Generic headers
+are **not** in the concrete type-export registries
+`resolve_type_export_origins`/`walk_type_export_origin` walks
+(`driver.rs:364`/`:407`): `parser.rs:81-83` excludes a generic `type:`
+header from the concrete struct/enum scan, and `resolve_type_export_origins`'s
+own `declared_types` builder (`driver.rs:373-384`) iterates only
+`StructDecl`/`EnumDecl`. So the existing walk returns `None` for a generic
+header in every case — confirmed by `hubtype` (round-3): a *type-position*
+reference to `Widget`, reached only through a hub, errors `unknown type
+\`Widget\`` today, because even the EXISTING mechanism cannot see a generic
+header through a hub. The implementing phase builds a walk that is
+**structurally the same as the checker's existing one, but over the generic
+header registry** (`ctx.generics().structs`) — not a call into
+`walk_type_export_origin` itself, and **not** the precomputed `type_origin`
+table (`driver.rs:651`) either, since both are concrete-only and would
+silently fail GL/GN. When the walk cannot resolve (cycle/dead end), that
+starting module contributes nothing — no exemption-4 match, no
+reachability-set addition; the general rule decides.
+
+**Wildcard exclusion (GP).** `ModuleInfo.selective` is populated identically
+by a named `| name |` selective import and by a `*` wildcard's per-export
+desugar — the raw map cannot tell them apart. The distinguishing signal
+(`SelectiveName.qualifier`, `Some` for named / `None` for wildcard — already
+used by `declarations.rs:972-976`/`:989`'s own diagnostics) is computed at
+assembly time but not threaded past `check_selective_imports` into
+`ModuleInfo`/`Ctx`. The implementing phase threads it through; exemption 4
+reads only the named entries.
 
 **Naming with no qualifier (GM).** When the sole candidate's declaring module
 has no qualifier in `m`'s own imports at all (never imported, GM), the
@@ -155,9 +202,13 @@ this gap (`word_families.rs:1319-1340`).
 **Everything else.** Caller span, the foreign candidate's owning module
 (already computed), header provenance from `ctx.generics().structs` (complete
 at env-build time per P6). The caller's own import set comes from
-`ctx.modules` (`ModuleInfo.imports` for reachability, `ModuleInfo.selective`
-for the hub-resolved explicit-resolution match test); the check never fires
-when `ctx.modules` is `None` (same discipline as the existing D1 drop gate).
+`ctx.modules`: **reachability reads both** `ModuleInfo.imports` **and**
+`ModuleInfo.selective`, unioned, name-independent (GO) — an earlier draft
+assigned `imports` to reachability and `selective` only to exemption 4,
+which was a drafting fork this corrects, not the design; exemption 4's own
+match test reads `ModuleInfo.selective` filtered to named entries only. The
+check never fires when `ctx.modules` is `None` (same discipline as the
+existing D1 drop gate).
 NOT at `select_overload`/`tier_pick` (cannot see 1-candidate shapes;
 lone-survivor ruling), NOT at env build (no call site to locate an error at),
 NOT in the matcher (`find_bound_impl`/`match_impl_target` — S9's R-NFR2
@@ -171,7 +222,10 @@ A NEW located message (house style: `error: \`Widget\` in \`try\` (line N,
 col M) ...` + `note:` remedy line), naming the relevant declaring module(s)
 by the caller's own qualifier — except when the sole candidate's declaring
 module has no caller-side qualifier at all (GM), where it is named
-structurally instead (R2). The existing 2-candidate
+structurally instead (R2). GM's own shape is a **reach failure**, not an
+ambiguity between competing candidates (one candidate exists, not several),
+so its wording says so rather than reusing the word "ambiguous" (spec's R5
+draft contract, round-3 correction). The existing 2-candidate
 `no_overload_matches_error` text is **not** churned (diagnostics are
 behaviour; GC pins it unchanged).
 
@@ -208,9 +262,11 @@ entirely (it never cures; see the mechanism note above).
    unchanged `7`, exit 0.
 2. GH unimported-sibling compat (`overfire`): two headers program-wide, only
    one reachable → unchanged `7`, exit 0 — the reachability-scoping witness.
-3. GE/GF single-reachable-header compat (`p5g2`, `p7c3`): unchanged `1` — the
-   selective import / qualified signature present in these fixtures is
-   inert (only one header exists to compete with).
+3. GE/GF (`p5g2`, `p7c3`): unchanged `1` — **not** because only one header
+   exists to compete with (an earlier, wrong attribution); `c` is itself the
+   *instantiating* module for its own `mk`/`try` signature, so
+   `owning_module == caller_module` and the call exits at `:1504` before
+   exemption 2 or any other exemption is consulted (round-3 correction).
 4. GI matching selective import (`sel1`): unchanged `1` — exemption 4 fires
    (the selected module is the sole minter).
 5. GJ both-eager selective pinning (`p5i2`): unchanged `1` — multi-candidate
@@ -224,22 +280,35 @@ entirely (it never cures; see the mechanism note above).
    chain first (round-2 correction).
 9. GM unreachable minter (`under`): only one header (`lib`'s) is reachable,
    but the sole minted instantiation belongs to `z`, never imported at all
-   — before: silently prints `9`, exit 0; after: a located ambiguity error,
-   named structurally since `app` has no qualifier for `z` (round-2
-   correction, the tightened exemption 2).
+   — before: silently prints `9`, exit 0; after: a located error, named
+   structurally since `app` has no qualifier for `z` (round-2 correction,
+   the tightened exemption 2).
 10. GK mismatched selective import (new fixture): today silently prints `2`
     (the caller selected `a`, but `b` is the sole minter) — after this ruling,
     errors identically to GA/GB. This is the soundness-critical case: exemption
     4 without the match test would leave this silently wrong. Curable via R5's
     two-part remedy 2 — additionally spelling the type in an own-signature
     intermediate word (`rem2sig`) sidesteps the borrow entirely.
-11. S9's own goldens (G1/G1a–G1f, G2, G2r, G3) and #10/S5 tier-1: untouched.
+11. GN hub-reexport reachable through a plain import (`hubq`, round-3): `c`
+    plainly imports `h` (no selective clause), `h` re-exports `a`'s `Widget`
+    with no header of its own — walking `h` for `Widget` resolves to `a`,
+    extending reachability; unchanged `1`, exit 0.
+12. GO selective import of a different name (`selother`, round-3): `c`
+    selectively imports only `Gadget` from `d`; `d` — where `Widget` is
+    declared and minted — is still reachable, since reachability is
+    name-independent at the raw layer; unchanged `4`, exit 0.
+13. GP wildcard does not exempt (`wild`, round-3): `c` writes
+    `import: self::a ; import: self::b * ;`; only `b` mints — before:
+    silently prints `2`, exit 0, as if the wildcard had explicitly resolved
+    `Widget`; after: the same located error as GA/GB, since a wildcard
+    desugar never satisfies exemption 4.
+14. S9's own goldens (G1/G1a–G1f, G2, G2r, G3) and #10/S5 tier-1: untouched.
     S9's own G4 (`third_module_bare_caller_dispatches_the_single_shared_env_instantiation`)
     is the **one exception** — it is the exact inverse of GA/GB and is retired
     or rewritten in Phase 1.
-12. R-NFR1 (no IR/lowering edits) and R-NFR2 (matcher untouched) carried over
+15. R-NFR1 (no IR/lowering edits) and R-NFR2 (matcher untouched) carried over
     from S9. R-NFR3 (no ratio assertions) for the new goldens.
-13. Out of scope, recorded as pre-existing warts: `export: Widget[i64]` parse
+16. Out of scope, recorded as pre-existing warts: `export: Widget[i64]` parse
     error and the R18 gate's unsatisfiable instantiation remedy (P5a/P5f);
     qualified ctor terms (`a::Widget` → unknown word, P7b2); the concrete-type
     same-name collision dimension. None may be assumed as workarounds; none are
@@ -267,10 +336,13 @@ entirely (it never cures; see the mechanism note above).
 ## Phases (sketch — spec finalizes)
 
 - **Phase 1 — policy + goldens.** Implement R1/R2/R3/R4/R5 at the grounding
-  check (restructured for guard ordering, R2); add GA, GB, GK, GM (new errors)
-  + regression pins GC, GD, GE, GF, GG, GH, GI, GJ, GL to
-  `tests/phase7b_slice10.rs`; retire/rewrite S9's G4 golden; units per
-  the paper-tests sketches; error text pinned byte-exact; full gate green.
+  check (restructured for guard ordering, R2; the export-origin walk built
+  over the generic header registry, not reused from the concrete-only
+  existing one; the wildcard/named distinction threaded through to `Ctx`);
+  add GA, GB, GK, GM, GP (new errors) + regression pins GC, GD, GE, GF, GG,
+  GH, GI, GJ, GL, GN, GO to `tests/phase7b_slice10.rs`; retire/rewrite S9's
+  G4 golden; units per the paper-tests sketches; error text pinned
+  byte-exact; full gate green.
 - **Phase 2 — roadmap + growth re-check + final gate.** Both stale roadmap
   sentences in the S9 entry (the dispatch-mechanism sentence and the trailing
   Residual sentence) updated to "closed by P7b.S10" + a new S10 entry
@@ -279,9 +351,10 @@ entirely (it never cures; see the mechanism note above).
 
 ## Success criteria
 
-GA/GB/GK/GM error deterministically where applicable (byte-exact, both import
-orders and both minter placements, the mismatched-selective-import case, and
-the unreachable-minter case); GD/GE/GF/GG/GH/GI/GJ/GL/GC byte-identical to
-today; S9's G4 retired/rewritten, every other S9 golden +
-#10 + S5 tier-1 green; suite fully green; the roadmap's S9 Exit clause no
-longer describes an open hole.
+GA/GB/GK/GM/GP error deterministically where applicable (byte-exact, both
+import orders and both minter placements, the mismatched-selective-import
+case, the unreachable-minter case, and the wildcard case);
+GD/GE/GF/GG/GH/GI/GJ/GL/GN/GO/GC byte-identical to today (GE/GF pin the
+`:1504` arm, not exemption 2); S9's G4 retired/rewritten, every other S9
+golden + #10 + S5 tier-1 green; suite fully green; the roadmap's S9 Exit
+clause no longer describes an open hole.
