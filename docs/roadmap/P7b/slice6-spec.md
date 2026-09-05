@@ -495,6 +495,10 @@ constructor-identity widening carve out to S6b" — which is a *ruling* and sati
 the exit criterion's own wording. This ordering is insurance that M3/M4 (on the
 critical path, unknown when Q2 was decided) cannot be starved by it.
 
+**R8.4's verdict, exercised (Phase 6): carved out to S6b.** The Phase 6 section below
+carries the inventory this ruling is grounded in, and the measured architectural
+conflict the fence caught before any registry edit was made.
+
 ### R9 — no new machinery for linear consumption inside fold bodies (F3)
 
 F3 is accepted as measured, with the previous draft's fixture count corrected against
@@ -631,6 +635,74 @@ authored in Phase 6; Phase 5 does not claim it.)
 Exit: `array` is a valid `impl:` target with real kinds and a dispatching golden,
 **or** the carve-out ruling to S6b is recorded in the phase doc with the measured
 reason.
+
+**Outcome: carved out to S6b.** No `src/` edit was made; the worktree stays at the
+Phase 5 commit. The counts re-verified clean against HEAD before any edit (`grep -ro`
+over `src/`): `CtorImage` 127 (`check/poly.rs` 78, `ast.rs` 22, `ir/driver.rs` 11,
+`parser.rs` 5, `ir/types.rs` 4, `check/builtins.rs` 4, `check/declarations.rs` 3),
+`GenericId` 31 (`check/poly.rs` 13, `ast.rs` 11, `ir/driver.rs` 4, `check/builtins.rs`
+1, `check.rs` 1, `parser.rs` 1), `PolyType::App` 87 (`check/poly.rs` 35, `parser.rs`
+25, `ast.rs` 15, `ir/driver.rs` 5, `check/declarations.rs` 4, `check/audits.rs` 3) --
+all within a percentage point of the spec's numbers; no drift changed the sizing call.
+
+**R8.2's inventory (the deliverable).** `GenericId { is_enum: bool, idx: u32, module:
+u32 }` and `PolyType::Generic`'s matching `(is_enum, idx, module)` triple are read at
+every site in one of two ways:
+
+- **Read-the-id** (mechanical, safe to widen): sites that only construct or
+  destructure the triple/`CtorImage` to carry it through unchanged (e.g. clone-forward
+  in `substitute_generic_field`/`substitute_generic_variant_field`, the diagnostic
+  render at `ast.rs:2930` `c{idx}m{module}_{name}`, the `App` fold's argument-arity
+  bookkeeping in `parser.rs`). These are the majority of the 127+31 and would take a
+  third `is_enum`-shaped discriminant without incident.
+- **Match-the-shape** (semantic, architecture-load-bearing): every site that uses
+  `is_enum` as a **binary switch into a registry indexed by `idx`**:
+  `ctor_image_type` (`ast.rs:3465-3470`, `generics.enums[idx]` / `generics.structs[idx]`
+  for the display name), `substitute_generic_field`'s `CtorImage` arm (`ast.rs:975-978`,
+  dispatches to `instantiate_enum`/`instantiate_struct`), and -- the two sites R8.2
+  explicitly flagged as easy to miss -- `ir/driver.rs`'s `subst_polytype` `Generic` arm
+  (`:683`, `lookup_enum`/`lookup_struct`) **and** its `App` arm (`:709-721`, the same
+  `gid.is_enum` binary dispatch after destructuring `Type::CtorImage(gid, _)`).
+  `check/audits.rs`'s 3 `PolyType::App` sites are exhaustive `match` arms in the
+  quotation-registry audit (fail-closed per
+  [[project_quotation_registry_audit_fails_closed]]); they do not read `is_enum`
+  directly but do require a new arm the moment `App` gains `len_args`, so they are R8.1
+  fan-out, not R8.2 fan-out, and were re-confirmed enumerable (not wildcarded) before
+  the fence fired.
+
+**The measured reason the fence fired.** The match-the-shape sites are not a wider
+*count* of the same edit -- they are a different *kind* of edit, and this is what R8.2's
+prose ("widen `GenericId`'s discriminant ... rather than adding a parallel `Type`
+variant") did not weigh: `is_enum: false` routes to `generics.structs[idx]`, a
+`GenericStructDecl` carrying `fields: Vec<(String, PolyType)>` that
+`instantiate_struct` walks to substitute and mint a concrete `StructDecl`; `is_enum:
+true` routes to the enum twin. `array` has no such declaration. It is a built-in
+`Type::Array(ArrayId, ..)` whose registry (`arrays: &[ArrayDecl]`) is **content-addressed
+by `(element, count)`** (`ir/driver.rs`'s `Array` arm, `subst_polytype`: `arrays.iter()
+.position(|d| d.element == element && d.count == count)`), not header-indexed by
+`(idx, module)` the way `lookup_struct`/`lookup_enum` are. Making `array` a third
+`GenericId` case that flows through the existing `is_enum`-binary sites would require,
+at minimum, a fourth registry (`GenericArrayDecl` or equivalent) paralleling
+`GenericStructDecl`/`GenericEnumDecl` plus an `instantiate_array`/`lookup_array` pair
+written from scratch to bridge the header-indexed identity onto the shape-indexed
+`ArrayDecl` registry `Type::Array` already uses everywhere else in check and lowering
+-- new machinery, not a widened match arm, at exactly the `ir/driver.rs` sites R8.2
+flagged as easy to miss. That is the fan-out this spec's own effort/difficulty rating
+("L/H") anticipated but did not size: R8.1 (87 occurrences) and the read-the-id half of
+R8.2 are mechanical and were confirmed tractable within the phase; the match-the-shape
+half of R8.2 is a new instantiation subsystem, which is what R8.4's fence exists to
+catch before a partial widening ships half-wired.
+
+**Ruling: arrays do not become Functor/Foldable instances in S6.** The App-len-args
+widening (R8.1) and the constructor-identity widening (R8.2/R8.3) carve out to a future
+S6b, scoped up front as: design the array-constructor registry bridge
+(`GenericArrayDecl` or equivalent, plus `instantiate_array`/`lookup_array`) as its own
+piece, before touching any `is_enum`-binary call site. R8.1's `App.len_args` field can
+land independently of R8.2 in that follow-on (it has no architectural conflict, only
+occurrence count), but landing it alone in S6 with no consumer (no golden needs `Len`
+kind-checking without R8.2/R8.3 behind it) would be unmotivated churn against
+[[feedback_phase_scope_discipline]], so it carves out with the rest. No `src/` file was
+edited to reach this verdict.
 
 ## Signals re-check at phase exit (CLAUDE.md growth structure)
 

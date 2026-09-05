@@ -171,9 +171,8 @@ A compiler slice with a library payload riding on top, not a library slice: the 
 criterion's shared-bound dispatch is a polymorphic body, and three compiler fixes gate it
 — a diagnostic-rendering panic and a cross-representation unifier gap on a quotation-taking
 member called from a poly body, and a twinned `unreachable!` on `List['T]`'s own
-self-reference. `core::option`/`core::result` take ctor-keyed impls; `Bifunctor['F: * ->
-* -> *]` with `bimap ( 'F['A 'B] [ 'A -- 'C ] [ 'B -- 'D ] -- 'F['C 'D] )` unifies
-`map`/`map_err`/`swap` on Result; `Foldable['F: * -> *]` with
+self-reference. `core::option`/`core::result` take ctor-keyed impls; `Bifunctor['F: * -> * -> *]` with `bimap ( 'F['A 'B] [ 'A -- 'C ] [ 'B -- 'D ] -- 'F['C 'D] )` unifies
+`map`/`map_err`/`swap` on Result; `Foldable['F:* -> *]` with
 `fold ( 'F['T] 'A [ 'A 'T -- 'A ] -- 'A )` is the most concatenative abstraction in the
 ladder, and the linear spine is what makes it stronger than its Haskell cousin: every
 element moves into the fold quotation exactly once, and forgetting one (never consuming it,
@@ -196,7 +195,14 @@ construction inside a trait member reproduces it identically. Arrays do not beco
 Functor/Foldable instances in this slice: `impl: ... for array['T 'N]` has no constructor
 representation to dissolve the application into (`array` is a built-in `Type::Array`, never
 wrapped in `Type::CtorImage`), and the impl-target parser discards per-variable kinds
-regardless — a widening carved out to its own follow-on slice.
+regardless — a widening carved out to its own follow-on slice, **S6b**. The carve-out is
+measured, not assumed: `GenericId`'s `(is_enum, idx, module)` triple is a binary switch
+into two header-indexed registries (`GenericStructDecl`/`GenericEnumDecl`, walked by
+`instantiate_struct`/`instantiate_enum`), while `array`'s own registry (`ArrayDecl`) is
+content-addressed by `(element, count)` with no header to index — a third `GenericId`
+case would need a new registry and instantiation pair bridging the two shapes, not a
+widened match arm. See [slice6-spec](./P7b/slice6-spec.md)'s Phase 6 section for the
+full inventory and occurrence counts this ruling rests on.
 **Exit:** a program `map`s and folds over `Option`, `Result`, and `List` through shared
 bounds with impls on the real lib types (`List` folds but does not map, per the
 construction wall above); `combine`/`empty`/`mconcat` goldens for `i64` and
