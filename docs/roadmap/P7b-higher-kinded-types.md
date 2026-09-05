@@ -167,26 +167,42 @@ blocked behind the standing cross-module generic-instantiation limit (P7b.S4).
 
 **P7b.S6 — Container traits: Functor/Bifunctor/Foldable over the real lib types, plus linear
 merge.**
-The tier-1 library slice, unblocked by S4. `core::option`/`core::result` take ctor-keyed
-impls; `Bifunctor['F: * -> * -> *]` with
-`bimap ( 'F['A 'B] [ 'A -- 'C ] [ 'B -- 'D ] -- 'F['C 'D] )` unifies `map`/`map_err`/`swap`
-on Result; `Foldable['F: * -> *]` with `fold ( 'F['T] 'A [ 'A 'T -- 'A ] -- 'A )` is the most
-concatenative abstraction in the ladder, and the linear spine is what makes it stronger than
-its Haskell cousin: every element moves into the fold quotation exactly once and forgetting
-one is a compile error. Carries `Semigroup`/`Monoid` as *linear merge* —
-`combine ( 'T 'T -- 'T )` totally consumes both operands (StrBuf concat, list append,
-numeric add), and `empty ( -- 'T )` is return-type polymorphism grounded bottom-up from the
-consuming stack or pinned by explicit instantiation; `mconcat` falls out as
-Foldable+Monoid. Also promotes a linear cons `List['T]` into core: the monomorphic example
-exists, but whether `^List['T]` self-reference grounds under a generic declaration, and
-whether the fused iterative destructor dispatches per-instantiation payload drops, are S6
-probes. The array-as-`'F: * -> Len -> *` probe (a member-scoped `Len` var in `map`'s
-signature) runs here too: either it grounds and arrays become Functor/Foldable instances, or
-the kind story gets a ruling.
+A compiler slice with a library payload riding on top, not a library slice: the exit
+criterion's shared-bound dispatch is a polymorphic body, and three compiler fixes gate it
+— a diagnostic-rendering panic and a cross-representation unifier gap on a quotation-taking
+member called from a poly body, and a twinned `unreachable!` on `List['T]`'s own
+self-reference. `core::option`/`core::result` take ctor-keyed impls; `Bifunctor['F: * ->
+* -> *]` with `bimap ( 'F['A 'B] [ 'A -- 'C ] [ 'B -- 'D ] -- 'F['C 'D] )` unifies
+`map`/`map_err`/`swap` on Result; `Foldable['F: * -> *]` with
+`fold ( 'F['T] 'A [ 'A 'T -- 'A ] -- 'A )` is the most concatenative abstraction in the
+ladder, and the linear spine is what makes it stronger than its Haskell cousin: every
+element moves into the fold quotation exactly once, and forgetting one (never consuming it,
+never dropping it) is caught by the same general arm-parity/arity machinery every
+quotation-eliminator body already has — explicitly dropping a payload is legal, not a
+linearity violation. `Monoid['T]` carries *linear merge* — `combine ( 'T 'T -- 'T )` totally
+consumes both operands, `empty ( -- 'T )` grounds only from an explicit instantiation
+(`empty[i64]`; bare `empty` is a located error, no consuming-context inference), and
+`mconcat` takes the merge quotation as a bound parameter
+(`( 'F['T] [ 'T 'T -- 'T ] -- 'T ) empty swap fold`) rather than materializing a written
+literal at a poly call site. `List['T]` is promoted into `core`, takes a non-inline trait
+impl, and its fused iterative destructor drops linear payloads per instantiation. `Monoid`
+for `i64` and `mconcat` over `Option`/`List` are measured and grounded; `Monoid for
+List['T]` (a real append) and `Functor for List` both hit a **recorded, unfixed wall**:
+any trait-member body over `List['T]` that *reconstructs* a `Cons` (as opposed to only
+destructuring one, which `Foldable.fold` does and works) panics in
+`poly_bind_construction_arg` on a bare `PolyType::Generic` field the existing `OwnedCell`
+arm does not cover — the wall is unrelated to recursion; a single non-recursive
+construction inside a trait member reproduces it identically. Arrays do not become
+Functor/Foldable instances in this slice: `impl: ... for array['T 'N]` has no constructor
+representation to dissolve the application into (`array` is a built-in `Type::Array`, never
+wrapped in `Type::CtorImage`), and the impl-target parser discards per-variable kinds
+regardless — a widening carved out to its own follow-on slice.
 **Exit:** a program `map`s and folds over `Option`, `Result`, and `List` through shared
-bounds with impls on the real lib types; `combine`/`empty`/`mconcat` goldens; core gains
-`List['T]` with a constant-stack destructor that drops linear payloads per instantiation;
-the array-kind and `^List['T]` probes have recorded rulings.
+bounds with impls on the real lib types (`List` folds but does not map, per the
+construction wall above); `combine`/`empty`/`mconcat` goldens for `i64` and
+`Option`/`List`; core gains `List['T]` with a constant-stack destructor that drops linear
+payloads per instantiation; the array-as-constructor widening and the `List`
+construction wall are recorded rulings, not landed capabilities.
 
 **P7b.S7 — Quotation effects over type constructors (the `call` extension).**
 S2's recorded residual, now its own slice. `bind ( 'F['T] [ 'T -- 'F['U] ] -- 'F['U] )`

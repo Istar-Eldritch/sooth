@@ -652,10 +652,23 @@ Q1 revision removed the lookahead tier that would have.)
   re-entry into `instantiate_struct` (memo-before-substitute, R6) together terminate it;
   see `instantiate_struct_pushes_memo_key_before_substituting_fields`, which already
   builds `type: L['T] v 'T next ^L['T] ;`. No new code needed.
-- **R6a's `mconcat` forwarding** — the bound-parameter spelling forwards through
-  `fold`'s HKT dispatch, or records its wall. Closed by Phase 5's golden.
-- **R6's `List` append** — a real linear merge over two spines. Closed by Phase 5's
-  golden or its recorded wall.
+- **R6a's `mconcat` forwarding** — **verdict (Phase 5): grounds.** The bound-parameter
+  spelling forwards through `fold`'s HKT dispatch for both `Option` and `List`
+  (`mconcat_over_option_dispatches`, `mconcat_over_list_dispatches`,
+  `tests/phase7b_slice6.rs`); no wall.
+- **R6's `List` append** — **verdict (Phase 5): recorded wall, not landed.** A real linear
+  merge over two spines panics in `poly_bind_construction_arg`
+  (`src/check/poly.rs:6072`) on a bare `PolyType::Generic` field the existing `OwnedCell`
+  arm (Phase 3, M4/R3) does not cover — distinct from M4's twinned arms, and *not* about
+  recursion: a single non-recursive `Cons` construction inside any trait-member body over
+  `List` reproduces the identical panic (measured directly; see
+  `monoid_for_list_append_construction_wall_is_recorded`,
+  `tests/phase7b_slice6.rs`). The same wall blocks `Functor for List`'s `map` for the same
+  reason (any reconstruction, not just `combine`'s). `Monoid for List` and `Functor for
+  List` are dropped from the goldens; `Foldable for List` (destructure-only, no
+  reconstruction) is unaffected and already landed in Phase 3. Fixing the wall is a future
+  slice's job, not Phase 5's — its cause (a construction-arm gap distinct from Phase 3's)
+  is out of Phase 5's scope (library work, not compiler work).
 - **R8.4's budget** — Phase 6 lands, or the S6b carve-out ruling does. Ordering and
   fence are settled (last, fenced); only the land-vs-carve outcome is open, closed by
   Phase 6.

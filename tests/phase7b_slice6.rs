@@ -293,3 +293,294 @@ fn bare_nullary_member_without_instantiation_is_located_error() {
         "bare `empty` must not panic, got: {stderr}"
     );
 }
+
+/// Phase 5 (R6): `Monoid for i64` -- the measured checklist row (M1/M2),
+/// exercised as a real `combine`/`combine`/`empty[i64]` chain rather than
+/// the single `empty[i64] combine` shape Phase 4's golden already pins.
+/// `3 + 4 = 7`, `7 + 0 = 7`.
+#[test]
+fn monoid_for_i64_combine_and_empty_dispatch() {
+    let stdout = build_and_run(
+        "p5-monoid-i64",
+        "\
+ trait: Monoid['T] :\n\
+   empty ( -- 'T ) ;\n\
+   : combine ( 'T 'T -- 'T ) ;\n\
+ ;\n\
+ impl: Monoid for i64\n\
+   : empty 0 ;\n\
+   : combine add ;\n\
+ ;\n\
+ : main ( -- ) 3 4 combine empty[i64] combine . ;\n",
+    );
+    assert_eq!(stdout, "7\n");
+}
+
+/// Phase 5 (R6a): `mconcat` per the bound-quotation-parameter spelling,
+/// dispatching `Foldable.fold`/`Monoid.empty`/`combine` together over the
+/// real `core::option`. `Some(5)` folds to `5` (the `None` case never
+/// reached, so `empty`'s `0` never surfaces).
+#[test]
+fn mconcat_over_option_dispatches() {
+    let stdout = build_and_run(
+        "p5-mconcat-option",
+        "\
+ import: core::option * ;\n\
+ trait: Monoid['T] :\n\
+   empty ( -- 'T ) ;\n\
+   : combine ( 'T 'T -- 'T ) ;\n\
+ ;\n\
+ impl: Monoid for i64\n\
+   : empty 0 ;\n\
+   : combine add ;\n\
+ ;\n\
+ trait: Foldable['F: * -> *] :\n\
+   fold ( 'F['T] 'A [ 'A 'T -- 'A ] -- 'A ) ;\n\
+ ;\n\
+ impl: Foldable for Option\n\
+   : fold | f | | acc |\n\
+     ~[ ( Some ) Some> acc swap f call ]\n\
+     ~[ ( None ) drop acc ]\n\
+     Option? ;\n\
+ ;\n\
+ : mkopt ( i64 -- Option[i64] ) Some ;\n\
+ : mconcat['F: Foldable 'T: Monoid] ( 'F['T] [ 'T 'T -- 'T ] -- 'T ) empty swap fold ;\n\
+ : main ( -- ) 5 mkopt [ combine ] mconcat . ;\n",
+    );
+    assert_eq!(stdout, "5\n");
+}
+
+/// Phase 5 (R6a): `mconcat` over the real `core::list`, summing a 3-element
+/// `List[i64]` (`1 + 2 + 3 = 6`) through the same bound-parameter spelling.
+/// `fold`'s body only destructures and never reconstructs a `List`, so it
+/// does not hit the Phase 5 construction wall (see
+/// `monoid_for_list_append_construction_wall` below).
+#[test]
+fn mconcat_over_list_dispatches() {
+    let stdout = build_and_run(
+        "p5-mconcat-list",
+        "\
+ import: core::list * ;\n\
+ trait: Monoid['T] :\n\
+   empty ( -- 'T ) ;\n\
+   : combine ( 'T 'T -- 'T ) ;\n\
+ ;\n\
+ impl: Monoid for i64\n\
+   : empty 0 ;\n\
+   : combine add ;\n\
+ ;\n\
+ trait: Foldable['F: * -> *] :\n\
+   fold ( 'F['T] 'A [ 'A 'T -- 'A ] -- 'A ) ;\n\
+ ;\n\
+ impl: Foldable for List\n\
+   : fold | f | | acc |\n\
+     ~[ ( Nil ) drop acc ]\n\
+     ~[ ( Cons ) Cons> | v rest |\n\
+        acc v f call rest ^> swap f fold ]\n\
+     List? ;\n\
+ ;\n\
+ : mkempty ( -- List[i64] ) Nil ;\n\
+ : mconcat['F: Foldable 'T: Monoid] ( 'F['T] [ 'T 'T -- 'T ] -- 'T ) empty swap fold ;\n\
+ : main ( -- )\n\
+   3 mkempty ^ Cons\n\
+   2 swap ^ Cons\n\
+   1 swap ^ Cons\n\
+   [ combine ] mconcat . ;\n",
+    );
+    assert_eq!(stdout, "6\n");
+}
+
+/// Phase 5 (R6, recorded wall): `Monoid for List['T]` -- a real linear
+/// merge over two spines, `combine` recursing through the self-reference
+/// and reconstructing a `Cons` on the way back out. Unlike Phase 3's
+/// `Foldable.fold` (which only *destructures* `List`, never reconstructs
+/// it), this hits a **new** panic distinct from M4's twinned arms: the
+/// declared field type arriving at `poly_bind_construction_arg`
+/// (`src/check/poly.rs:6072`) is a bare `PolyType::Generic` rather than the
+/// `OwnedCell(Generic)` Phase 3's arm handles, so the catch-all fires. A
+/// minimal reproduction (`monoid_for_list_construction_wall` unit-adjacent
+/// probe, see the manual verification below) shows the wall is not about
+/// recursion at all: *any* trait-member body over `List` that constructs a
+/// `Cons` panics identically, including a non-recursive one. Per R6's own
+/// ruling ("if it does not ground, the phase records the wall ... and drops
+/// the instance from the goldens"), `Monoid for List` is **not** landed as a
+/// golden; this test pins the located panic text so a future slice fixing
+/// the wall gets a regression witness that the wall existed.
+#[test]
+fn monoid_for_list_append_construction_wall_is_recorded() {
+    let (_t, entry) = single_file_hosted(
+        "p5-monoid-list-wall",
+        "\
+ import: core::list * ;\n\
+ trait: Monoid['T] :\n\
+   empty ( -- 'T ) ;\n\
+   : combine ( 'T 'T -- 'T ) ;\n\
+ ;\n\
+ impl: Monoid for List\n\
+   : empty Nil ;\n\
+   : combine\n\
+     swap\n\
+     ~[ ( Nil ) drop ]\n\
+     ~[ ( Cons ) Cons> | v rest | rest ^> swap combine v swap ^ Cons ]\n\
+     List? ;\n\
+ ;\n\
+ : mkempty ( -- List[i64] ) Nil ;\n\
+ : main ( -- )\n\
+   3 mkempty ^ Cons 2 swap ^ Cons 1 swap ^ Cons\n\
+   3 mkempty ^ Cons 5 swap ^ Cons\n\
+   combine drop ;\n",
+    );
+    let build = Command::new(env!("CARGO_BIN_EXE_sooth"))
+        .arg("build")
+        .arg(&entry)
+        .output()
+        .expect("sooth build should spawn");
+    let stderr = String::from_utf8_lossy(&build.stderr);
+    assert!(
+        stderr.contains("a generic `type:` field is never Generic"),
+        "expected the recorded construction-wall panic, got: {stderr}"
+    );
+}
+
+/// Phase 5 (R1 exit criterion): a single program that `map`s and `fold`s
+/// over `Option`, `Result`, and `List` through shared `Functor`/`Foldable`
+/// bounds, with impls on the real lib types. `Functor for List` is omitted
+/// -- it hits the same construction wall as `Monoid for List` above (any
+/// trait-member body over `List` that builds a `Cons`), so this program
+/// witnesses the non-array clauses that ground: `map` over `Option`,
+/// `fold` over all three.
+#[test]
+fn dogfood_maps_and_folds_over_option_result_and_list_through_shared_bounds() {
+    let stdout = build_and_run(
+        "p5-dogfood",
+        "\
+ import: core::option * ;\n\
+ import: core::result * ;\n\
+ import: core::list * ;\n\
+ trait: Functor['F: * -> *] :\n\
+   map ( 'F['T] [ 'T -- 'U ] -- 'F['U] ) ;\n\
+ ;\n\
+ trait: Foldable['F: * -> *] :\n\
+   fold ( 'F['T] 'A [ 'A 'T -- 'A ] -- 'A ) ;\n\
+ ;\n\
+ impl: Functor for Option\n\
+   : map swap ~[ ( Some ) Some> swap call Some ] ~[ ( None ) drop drop None ] Option? ;\n\
+ ;\n\
+ impl: Foldable for Option\n\
+   : fold | f | | acc |\n\
+     ~[ ( Some ) Some> acc swap f call ]\n\
+     ~[ ( None ) drop acc ]\n\
+     Option? ;\n\
+ ;\n\
+ impl: Foldable for Result\n\
+   : fold | f | | acc |\n\
+     ~[ ( Ok ) Ok> acc swap f call ]\n\
+     ~[ ( Err ) drop acc ]\n\
+     Result? ;\n\
+ ;\n\
+ impl: Foldable for List\n\
+   : fold | f | | acc |\n\
+     ~[ ( Nil ) drop acc ]\n\
+     ~[ ( Cons ) Cons> | v rest |\n\
+        acc v f call rest ^> swap f fold ]\n\
+     List? ;\n\
+ ;\n\
+ : mkopt ( i64 -- Option[i64] ) Some ;\n\
+ : mkres ( i64 -- Result[i64 i64] ) Ok ;\n\
+ : mkempty ( -- List[i64] ) Nil ;\n\
+ : main ( -- )\n\
+   3 mkopt [ 1 add ] map[i64 i64] 0 [ add ] fold .\n\
+   10 mkres 0 [ add ] fold .\n\
+   3 mkempty ^ Cons 2 swap ^ Cons 1 swap ^ Cons\n\
+   0 [ add ] fold . ;\n",
+    );
+    assert_eq!(stdout, "4\n10\n6\n");
+}
+
+/// Phase 5 (R9): the first of the two genuinely-rejecting linearity
+/// fixtures the probe log's p3 section measured -- a `Foldable.fold` arm
+/// that never consumes the destructured payload (no `drop`, no call).
+/// Rejected by the pre-existing per-arm variant-consumption / arm-shape-
+/// parity check (`Option?`'s two arms must leave the same stack shape),
+/// not by any Foldable-specific rule -- S6 adds none (R9). No per-rule
+/// mutation claim: deleting the general arm-parity check breaks the whole
+/// suite and cannot discriminate a Foldable-only rule that does not exist.
+#[test]
+fn fold_body_never_consuming_the_payload_is_arm_shape_parity_error() {
+    let stderr = build_error(
+        "p5-r9-never-drop",
+        "\
+ import: core::option * ;\n\
+ trait: Foldable['F: * -> *] :\n\
+   fold ( 'F['T] i64 [ i64 'T -- i64 ] -- i64 ) ;\n\
+ ;\n\
+ impl: Foldable for Option\n\
+   : fold | f | | acc |\n\
+     ~[ ( Some ) Some> acc ]\n\
+     ~[ ( None ) drop acc ]\n\
+     Option? ;\n\
+ ;\n\
+ : mkopt ( i64 -- Option[i64] ) Some ;\n\
+ : main ( -- ) 3 mkopt 10 [ add ] fold . ;\n",
+    );
+    assert!(
+        stderr.contains("leave different stack shapes"),
+        "expected the arm-shape-parity rejection, got: {stderr}"
+    );
+}
+
+/// Phase 5 (R9): the second genuinely-rejecting fixture -- a `Foldable.fold`
+/// arm calling the linear accumulator quotation `f` twice. Rejected by
+/// ordinary `call` arity underflow (the first `call` already consumed the
+/// stack `f` needed), not a linearity rule specific to `Foldable` -- same
+/// no-per-rule-mutation-claim rationale as above (R9).
+#[test]
+fn fold_body_calling_accumulator_quotation_twice_is_arity_error() {
+    let stderr = build_error(
+        "p5-r9-double-use",
+        "\
+ import: core::option * ;\n\
+ trait: Foldable['F: * -> *] :\n\
+   fold ( 'F['T] i64 [ i64 'T -- i64 ] -- i64 ) ;\n\
+ ;\n\
+ impl: Foldable for Option\n\
+   : fold | f | | acc |\n\
+     ~[ ( Some ) Some> acc swap f call f call ]\n\
+     ~[ ( None ) drop acc ]\n\
+     Option? ;\n\
+ ;\n\
+ : mkopt ( i64 -- Option[i64] ) Some ;\n\
+ : main ( -- ) 3 mkopt 10 [ add ] fold . ;\n",
+    );
+    assert!(
+        stderr.contains("needs 2 values, but the stack holds 1"),
+        "expected the `call` arity-underflow rejection, got: {stderr}"
+    );
+}
+
+/// Phase 5 (R9, noted not enforced): forgetting to consume a destructured
+/// payload via an explicit `drop` (as opposed to never touching it at all,
+/// the previous test) is **legal** -- DESIGN.md's explicit-destructor rule
+/// makes `drop` the deliberate discard, not a linearity violation. S6 does
+/// not make this an error, and no golden claims otherwise; this pins the
+/// legal behaviour so a future change does not silently start rejecting it.
+#[test]
+fn fold_body_dropping_the_payload_is_legal_not_an_error() {
+    let stdout = build_and_run(
+        "p5-r9-forget-via-drop",
+        "\
+ import: core::option * ;\n\
+ trait: Foldable['F: * -> *] :\n\
+   fold ( 'F['T] i64 [ i64 'T -- i64 ] -- i64 ) ;\n\
+ ;\n\
+ impl: Foldable for Option\n\
+   : fold | f | | acc |\n\
+     ~[ ( Some ) Some> drop acc ]\n\
+     ~[ ( None ) drop acc ]\n\
+     Option? ;\n\
+ ;\n\
+ : mkopt ( i64 -- Option[i64] ) Some ;\n\
+ : main ( -- ) 3 mkopt 10 [ add ] fold . ;\n",
+    );
+    assert_eq!(stdout, "10\n");
+}
