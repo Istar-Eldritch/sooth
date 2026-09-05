@@ -876,3 +876,112 @@ spellings AND tier-2 ctor pinning); qualified type spelling `a::Widget[i64]`
 effect names the instantiation (gate, unsatisfiable remedy for instantiations);
 double selective import (collision). "Qualify with the module" is therefore a
 TYPE-position remedy only; a ctor-position remedy would need new syntax.
+
+## Corrections appendix — pre-implementation review round (2026-09-05)
+
+A three-reviewer review round over the spec/brief/paper-tests/probes suite
+(base `a9eca84`) returned BLOCK on all three lanes. The maintainer ruled two
+open decisions (interview, 2026-09-05); this appendix records the additional
+measurements a fix pass made while revising the spec suite to match. The
+probe log above stays verbatim; nothing here edits it, only supplements it.
+
+**G4 inversion.** S9's own golden
+`third_module_bare_caller_dispatches_the_single_shared_env_instantiation`
+(`tests/phase7b_slice9.rs`) asserts exactly the silent outputs (`2`/`1`) GA/GB
+replace with a located error, for both import orders and both minter
+placements. REQ-6 in the revised spec makes this explicit: this one S9
+golden is retired/rewritten in Phase 1; every other S9 golden stays
+byte-unchanged.
+
+**Site citation correction.** The silent-pick fall-through is
+`src/check/terms.rs:1507-1509` (the `find_struct(header_name, caller_module)`
+→ `None` arm in `bare_generated_word_own_module_grounding`), not the
+`1516-1523` region an earlier draft cited (that range is the *success* path,
+taken when the caller does have its own header).
+
+**The program-wide predicate is unsound; scope it to reachability.** Two new
+fixtures, built to probe R1's original wording ("≥2 same-named headers
+declared by ≥2 distinct modules, none of them `m`", with no reachability
+filter):
+
+- `sel1` (two reachable headers `a`/`b`; only `a` mints; `c` selectively
+  imports `a`'s `Widget`) — measured: builds, prints `1`, exit 0. The
+  original program-wide predicate would have flagged this as ambiguous
+  (2 headers exist, neither is `c`'s), which would newly reject a program
+  that resolves correctly and unambiguously today.
+- `overfire` (two headers exist program-wide, `lib` and `z`; the caller
+  `app` imports only `lib`, never `z` — `z` is imported only by `main`, a
+  different module) — measured: builds, prints `7`, exit 0. Same problem: a
+  program-wide count would flag this too, even though `z` is entirely
+  unreachable from `app`'s own imports.
+
+Both are now goldens (GI, GH respectively) pinning that the header count is
+scoped to headers reachable through the caller's own `ModuleInfo.imports`/
+`.selective` (R1), not a program-wide count.
+
+**A bare "selective import exists" exemption is separately unsound —
+measured, not assumed.** A third fixture (`/tmp/r2`, now paper-tests' `GK` /
+`p9-mismatched-selective`): two reachable headers `a`/`b`; only `b` ever
+eagerly mints; `c` selectively imports **`a`'s** `Widget` (`import: self::a
+| Widget | ;`) plus a plain import of `b`. Measured: builds, **silently
+prints `2`** (`b`'s impl), exit 0 — `c`'s own selective import named `a`, but
+the checker hands it `b`'s value anyway, undetected. Root cause: the
+single-candidate fall-through never consults `ModuleInfo.selective` at all
+today (env is program-wide and import-blind at this arm); a naive
+implementation of "the caller explicitly resolved this name" as "a selective
+import of this name exists" would exempt this case from the new error,
+silently reproducing the exact defect class S10 exists to close. The revised
+R1 exemption 4 requires the *selected* module to equal the *actual sole
+candidate's* owning module; when they disagree (as here), the exemption does
+not apply and the general rule fires. GK pins this: before, silent `2`;
+after, the same located error as GA/GB.
+
+**Qualified type spelling never cures the single-candidate shape — confirmed
+by two further measurements.** (1) `/tmp/r3`: `a.sth` bare (no eager mint of
+its own), `b.sth` eager via its own `usesize` signature, `c.sth` writing
+`a::Widget[i64]` in *its own* signature. Measured:
+`error: no overload of \`Widget\` in \`main\` (line 3) accepts these
+operands` + two `candidate: \`i64\`` lines — the qualified signature reference
+is itself a second parse-time eager mint (of `a`), pushing the call into the
+**pre-existing, unchanged** 2-candidate arm (GC's error), not a new one and
+not a cure. (2) `qual2`: a variant entangling two call sites (`main`'s own
+bare `Widget` ctor call, and `c`'s separate qualified-signature type
+reference) — measured prints `1` today, but does not cleanly witness any
+single exemption (see paper-tests' "measured but not adopted" section) and
+was not adopted as a golden. Together these are the evidence behind R5's
+decision to drop qualified spelling from the remedy note entirely, rather
+than listing it as a working (if type-position-only) remedy.
+
+**`own_header_still_grounded_first`, re-confirmed.** `/tmp/r1`: `c` declares
+its own `Widget['T]` header and its own `impl: Sized for Widget` (constant 9)
+in addition to `a`/`b`'s headers. Measured: prints `9`, exit 0 — S9's R1.1a
+own-header grounding fires regardless of how many foreign headers exist.
+Not a new golden (S9's own suite already covers this mechanism); recorded
+here as a boundary re-check.
+
+**Fixture correction: GD.** `p3-single-lib` (lib exports `usesize`) trips the
+R18 export gate before ever reaching the ctor-call check at all
+(`error: exported word \`usesize\` ... names private type \`Widget[i64]\`,
+which is not exported`) — it never was a legal single-header witness. GD's
+fixture is corrected to `p3a-single-lib-private` (same shape, `usesize`
+kept private), which measures `7`, exit 0, as the spec always claimed.
+
+**Naming mechanism, resolved by inspection (no fixture needed).**
+`ModuleInfo` (`src/ast.rs:175-189`) carries no canonical module-name field —
+only `imports: HashMap<String, u32>` (qualifier → target) and
+`selective: HashMap<String, u32>` (bare name → target, merging explicit
+`| name |` clauses and `*` wildcard per-export desugaring, confirmed by
+reading `driver.rs`'s import-assembly pass). Every existing diagnostic that
+names a foreign module (`declarations.rs:974`, `:988`, `word_families.rs:1336`)
+renders the *caller's own* qualifier, not a canonical name. S10's new
+diagnostic follows the same precedent (R4) and sorts the collected qualifiers
+lexicographically for import-order-independent determinism (confirmed against
+`p1-a-b` vs `p1-b-a`, which reach the fall-through with the identical
+reachable set `{a, b}` regardless of import order).
+
+**Sequencing (OQ-2), resolved by maintainer ruling, not measurement.**
+Interview, 2026-09-05: S10 is implemented in parallel with P7b.S6 (both
+branch from base `a9eca84`), not strictly before or after. Landing rule: if
+S6's own probes demand a check-stage grounding change in `terms.rs`, or the
+two slices' changes interact at merge time, S10's checker change lands first
+and S6 rebases onto it. Recorded in the spec's REQ-8 and the brief's OQ-2.
