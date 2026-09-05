@@ -1834,12 +1834,16 @@ pub(super) fn resolve_splice_member_call(
                 return Err(str_needs_cstr_conversion_error(ctx, span, name));
             }
             SlotMatch::Mismatch => {
+                // P7b.S6 Phase 1 (R2.a) per-site verdict: both operands are
+                // already `Concrete`, so `expected_sig`/`found_sig` share the
+                // same `sig` -- the split is a no-op here.
                 return Err(trait_member_operand_error(
                     ctx,
                     span,
                     member,
                     &traits[trait_id.index()].name,
                     &PolyType::Concrete(*want),
+                    &sig,
                     &PolyType::Concrete(found.ty),
                     &sig,
                     i,
@@ -2368,12 +2372,18 @@ pub(super) fn resolve_mono_member_call(
                     return Err(str_needs_cstr_conversion_error(ctx, span, name));
                 }
                 SlotMatch::Mismatch => {
+                    // P7b.S6 Phase 1 (R2.a) per-site verdict: this is the mono
+                    // concrete-target branch (`imp.target.is_concrete()`), so
+                    // both operands are already `Concrete` and
+                    // `expected_sig`/`found_sig` share the same `member_decl.sig`
+                    // -- the split is a no-op here.
                     return Err(trait_member_operand_error(
                         ctx,
                         span,
                         member,
                         trait_name,
                         &PolyType::Concrete(*want),
+                        &member_decl.sig,
                         &PolyType::Concrete(found.ty),
                         &member_decl.sig,
                         i,
@@ -2677,12 +2687,23 @@ fn poly_trait_member_call(
     let mut bindings: Vec<(u32, PolyType)> = vec![(0u32, PolyType::Var(var))];
     for (i, (declared, slot)) in inputs.iter().zip(&stack[base..]).enumerate() {
         if !unify_member_operand(declared, &slot.pt, &mut bindings) {
+            // P7b.S6 Phase 1 (R2.a, M3): `declared` is rendered raw, against
+            // the member's own sig -- never rewritten via
+            // `substitute_member_var` into the caller's variable space. That
+            // rewrite left a member-local `Quotation`'s interior vars
+            // untouched (`substitute_member_var`'s `other => other.clone()`
+            // arm), so a member-local `Var(n)` could index off the end of
+            // the caller `sig`'s `ty_var_names` and panic in `poly_type_str`.
+            // Because `declared` is pure member-space and the caller's
+            // operand slot is pure caller-space, each renders against its own
+            // sig and no index can run off either table.
             return Err(trait_member_operand_error(
                 ctx,
                 span,
                 member,
                 &traits[trait_id.index()].name,
-                &substitute_member_var(declared, var),
+                declared,
+                &member_decl.sig,
                 &slot.pt,
                 sig,
                 i,
@@ -10809,20 +10830,27 @@ fn trait_member_operand_error(
     member: &str,
     trait_name: &str,
     expected: &PolyType,
+    expected_sig: &PolySig,
     found: &PolyType,
-    sig: &PolySig,
+    found_sig: &PolySig,
     slot: usize,
 ) -> String {
     let where_ = ctx.rendered_word();
     // P7b.S2 (S2-16): the error names the slot position -- the declared sig
     // is unified slot by slot, so the offending position is knowable and the
     // old position-free wording would leave a multi-input member ambiguous.
+    //
+    // P7b.S6 Phase 1 (R2.a): `expected` and `found` are rendered against
+    // separate sigs by provenance -- `expected` may be pure member-space
+    // (the raw declared input, never rewritten into the caller's variable
+    // space) while `found` is pure caller-space, so a single shared `sig`
+    // can index off the end of whichever table doesn't own the term.
     format!(
         "error: `{member}` of `{trait_name}` in {where_} (line {}, col {}) expects `{}`, found `{}` in operand slot {}",
         span.line,
         span.col,
-        poly_type_str(expected, sig),
-        poly_type_str(found, sig),
+        poly_type_str(expected, expected_sig),
+        poly_type_str(found, found_sig),
         slot,
     )
 }
@@ -16923,6 +16951,47 @@ mod tests {
             args: vec![PolyType::Var(1)],
         };
         assert_eq!(poly_type_str(&app, &sig), "'F['T]");
+    }
+
+    #[test]
+    fn poly_type_str_renders_member_local_var_past_caller_ty_var_names() {
+        // P7b.S6 Phase 1 (R2.a, M3): a member-local `Var(n)` (e.g. `map`'s
+        // own `'U`, index 1 in the member's table) must render against the
+        // *member's* sig, not the caller's -- the caller's `ty_var_names` may
+        // be shorter (here, length 1), which is exactly the index-out-of-
+        // bounds panic `trait_member_operand_error` used to hit by rendering
+        // both sides against one shared (caller) sig.
+        let caller_sig = PolySig {
+            row_in: None,
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            row_out: None,
+            bounds: Vec::new(),
+            ty_var_names: vec!["'F".to_string()],
+            ty_var_spans: Vec::new(),
+            ty_kinds: Vec::new(),
+            len_var_names: Vec::new(),
+            len_var_spans: Vec::new(),
+            row_var_names: Vec::new(),
+        };
+        let member_sig = PolySig {
+            row_in: None,
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            row_out: None,
+            bounds: Vec::new(),
+            ty_var_names: vec!["'T".to_string(), "'U".to_string()],
+            ty_var_spans: Vec::new(),
+            ty_kinds: Vec::new(),
+            len_var_names: Vec::new(),
+            len_var_spans: Vec::new(),
+            row_var_names: Vec::new(),
+        };
+        // Member-local `Var(1)` would index off the end of the caller's
+        // single-entry `ty_var_names`; rendered against the member sig it
+        // resolves cleanly.
+        assert_eq!(poly_type_str(&PolyType::Var(1), &member_sig), "'U");
+        assert_eq!(poly_type_str(&PolyType::Var(0), &caller_sig), "'F");
     }
 
     #[test]
