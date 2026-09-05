@@ -842,6 +842,10 @@ fn check_module_inner(module: &mut Module) -> Result<Vec<WordObligations>, Strin
     // makes, recorded the same way and for the same reason as
     // `trait_obligations`.
     let mut word_enum_sites: Vec<WordEnumSites> = Vec::new();
+    // P7b.S6 (review fix): the poly-body `^` construction sites each of those
+    // bodies makes, recorded the same way and for the same reason as
+    // `word_enum_sites`.
+    let mut word_cell_sites: Vec<WordCellSites> = Vec::new();
     // P7.S3k (R2): the generic-to-generic calls each of those bodies makes,
     // recorded symbolically as it is walked (its own `'T` is still rigid here,
     // so there is no θ to ground them against) and relayed to the module for
@@ -887,6 +891,7 @@ fn check_module_inner(module: &mut Module) -> Result<Vec<WordObligations>, Strin
         }
         let mut obligations = Vec::new();
         let mut enum_sites = Vec::new();
+        let mut cell_sites = Vec::new();
         let mut cross_calls = Vec::new();
         // P7 slice 3a phase 2 (R2): `check_poly_body` rebases itself at entry
         // (to the live registries' current length); flushed right after it
@@ -910,6 +915,7 @@ fn check_module_inner(module: &mut Module) -> Result<Vec<WordObligations>, Strin
                 traits,
                 obligations: &mut obligations,
                 enum_sites: &mut enum_sites,
+                cell_sites: &mut cell_sites,
                 is_combinator_splice: is_combinator(word) && !word.is_trait_member,
             },
             &mut CrossCtx {
@@ -939,6 +945,11 @@ fn check_module_inner(module: &mut Module) -> Result<Vec<WordObligations>, Strin
             sig: (**sig).clone(),
             sites: enum_sites,
         });
+        word_cell_sites.push(WordCellSites {
+            name: word.name.clone(),
+            sig: (**sig).clone(),
+            sites: cell_sites,
+        });
     }
     // P7.S3e (R8): the tables every bound-directed call site below resolves
     // against, complete only now that the pre-pass has recorded every
@@ -956,6 +967,7 @@ fn check_module_inner(module: &mut Module) -> Result<Vec<WordObligations>, Strin
         words,
         recorded: &trait_obligations,
         enum_sites_recorded: &word_enum_sites,
+        cell_sites_recorded: &word_cell_sites,
     };
     for (word_idx, word) in words.iter().enumerate() {
         let mut sites = Vec::new();
@@ -1130,6 +1142,7 @@ fn check_module_inner(module: &mut Module) -> Result<Vec<WordObligations>, Strin
         &symbols,
         &trait_obligations,
         &word_enum_sites,
+        &word_cell_sites,
         std::mem::take(&mut impl_monos),
         Some(&generics_cell),
     )?;

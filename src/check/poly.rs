@@ -48,6 +48,15 @@ pub(crate) struct TraitCtx<'a> {
     /// `obligations` for the identical reason: both are per-word records a
     /// call site grounds later against a concrete θ.
     pub enum_sites: &'a mut Vec<(Span, PolyType)>,
+    /// P7b.S6 (review fix): the poly-body `^` construction sites recorded
+    /// abstractly while this polymorphic body is walked, span -> the
+    /// still-abstract payload type. Mirrors `enum_sites` exactly, but for a
+    /// different reason: a cell's payload need never appear in the word's
+    /// own declared signature (a body-internal temporary, `^ drop`), so
+    /// `apply_subst`'s signature walk alone never grounds and interns it.
+    /// Recording the site here is what lets a later concrete instantiation
+    /// ground it too, exactly as it grounds a declared input/output.
+    pub cell_sites: &'a mut Vec<(Span, PolyType)>,
     /// P7.S12 (R1.5): whether the body currently being walked is a
     /// combinator's -- its own generic construction of an enum can vary per
     /// splice, which `enum_sites`/`CallInst::enum_words` (`Span`-keyed, not
@@ -83,6 +92,7 @@ impl TraitCtx<'_> {
             traits: crate::ast::predicate_traits(),
             obligations,
             enum_sites,
+            cell_sites: Box::leak(Box::new(Vec::new())),
             is_combinator_splice: false,
         }
     }
@@ -113,6 +123,16 @@ pub(crate) struct WordEnumSites {
     pub sites: Vec<(Span, PolyType)>,
 }
 
+/// P7b.S6 (review fix): one polymorphic word's recorded poly-body `^`
+/// construction sites, tagged the same `(name, sig)` way `WordEnumSites` is,
+/// and for the identical reason.
+#[derive(Debug)]
+pub(crate) struct WordCellSites {
+    pub name: String,
+    pub sig: PolySig,
+    pub sites: Vec<(Span, PolyType)>,
+}
+
 /// P7.S3e (R8): the tables `check_poly_call` resolves a recorded obligation
 /// against once θ is concrete -- the trait registry (which the diagnostic for
 /// a missing `impl:` reads), the whole-program `impl:` registry, every word's
@@ -135,6 +155,10 @@ pub(crate) struct TraitResolveCtx<'a> {
     /// non-combinator polymorphic word, resolved against a concrete θ at
     /// `check_poly_call` the same way `recorded` is.
     pub enum_sites_recorded: &'a [WordEnumSites],
+    /// P7b.S6 (review fix): the poly-body `^` construction sites recorded for
+    /// every non-combinator polymorphic word, grounded and interned against a
+    /// concrete θ the same way `enum_sites_recorded` is.
+    pub cell_sites_recorded: &'a [WordCellSites],
 }
 
 impl TraitResolveCtx<'_> {
@@ -152,6 +176,7 @@ impl TraitResolveCtx<'_> {
             words: &[],
             recorded: &[],
             enum_sites_recorded: &[],
+            cell_sites_recorded: &[],
         }
     }
 
@@ -172,6 +197,16 @@ impl TraitResolveCtx<'_> {
     /// site resolved to. Mirrors `obligations_of` exactly.
     fn enum_sites_of(&self, name: &str, sig: &PolySig) -> &[(Span, PolyType)] {
         self.enum_sites_recorded
+            .iter()
+            .find(|w| w.name == name && &w.sig == sig)
+            .map(|w| w.sites.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// The poly-body `^` construction sites recorded for the callee this call
+    /// site resolved to. Mirrors `enum_sites_of` exactly.
+    fn cell_sites_of(&self, name: &str, sig: &PolySig) -> &[(Span, PolyType)] {
+        self.cell_sites_recorded
             .iter()
             .find(|w| w.name == name && &w.sig == sig)
             .map(|w| w.sites.as_slice())
@@ -3033,6 +3068,16 @@ pub(super) fn poly_call_term(
                 sig,
             ));
         }
+        // Review fix (P7b.S6, post-implementation): a body-internal cell --
+        // one whose payload never reaches this word's own declared
+        // input/output signature (`^ drop`, never returned) -- would
+        // otherwise never be interned: `apply_subst` only grounds and
+        // interns a signature type, and this construction is invisible to
+        // it. Recording the site here lets each concrete instantiation
+        // ground and intern it too, the same way `enum_sites` lets a
+        // body-internal generic-enum construction ground later.
+        tctx.cell_sites
+            .push((span, PolyType::OwnedCell(Box::new(payload.clone()))));
         stack.truncate(n - 1);
         stack.push(PolySlot::new(PolyType::OwnedCell(Box::new(payload))));
         return Ok(stack);
@@ -7502,6 +7547,15 @@ pub(super) fn check_poly_call(
             enum_words.insert(*site_span, found);
         }
     }
+    // P7b.S6 (review fix): ground and intern this callee's own body-internal
+    // cell-construction sites (`^` on a value never reaching the declared
+    // signature) against this call site's concrete θ -- the same grounding
+    // `apply_subst`'s `OwnedCell` arm performs for a declared input/output,
+    // run here for a site the signature walk above never reaches. The
+    // grounded `Type` is discarded; only the interning side effect matters.
+    for (_, site_pty) in poly.trait_resolve.cell_sites_of(name, &sig) {
+        apply_subst(&sig, site_pty, &subst, name, span, ctx, arrays, cells, refs)?;
+    }
     // Review fix (P7 slice 1): a polymorphic word consumes its operands
     // exactly as a concrete one does, so it needs the same guard against
     // moving a place a live projection still reaches -- `'T` binds to the
@@ -7635,6 +7689,7 @@ pub(super) fn discover_transitive_instantiations(
     word_symbols: &[String],
     trait_obligations: &[WordObligations],
     word_enum_sites: &[WordEnumSites],
+    word_cell_sites: &[WordCellSites],
     impl_monos: Vec<(String, Subst)>,
     generics: Option<&RefCell<GenericTypes>>,
 ) -> Result<Vec<CallInst>, String> {
@@ -7667,6 +7722,7 @@ pub(super) fn discover_transitive_instantiations(
         words,
         recorded: trait_obligations,
         enum_sites_recorded: word_enum_sites,
+        cell_sites_recorded: word_cell_sites,
     };
     let ground = CrossGround {
         words,
@@ -7949,6 +8005,16 @@ impl CrossGround<'_> {
                 enum_words.insert(*site_span, found);
             }
         }
+        // P7b.S6 (review fix): ground and intern this member word's own
+        // body-internal cell-construction sites, mirroring `enum_words`
+        // above -- the result is discarded, since interning (the
+        // `apply_subst` `OwnedCell` arm's side effect) is the only thing a
+        // body-internal temporary needs from grounding.
+        for (_, site_pty) in self.tr.cell_sites_of(word_name, sig) {
+            apply_subst(
+                sig, site_pty, subst, word_name, word.span, &ctx, arrays, cells, refs,
+            )?;
+        }
         let symbol = instantiation_symbol(word_name, subst);
         Ok(Some(CallInst {
             callee: word_name.to_string(),
@@ -8179,6 +8245,21 @@ impl CrossGround<'_> {
             if let Type::Enum(found, _) = grounded {
                 enum_words.insert(*site_span, found);
             }
+        }
+        // P7b.S6 (review fix): the composed twin of `impl_mono_seed`'s own
+        // cell-site grounding above -- discarded, interning-only.
+        for (_, site_pty) in self.tr.cell_sites_of(&record.callee, sig) {
+            apply_subst(
+                sig,
+                site_pty,
+                &subst,
+                &record.callee,
+                record.span,
+                ctx,
+                arrays,
+                cells,
+                refs,
+            )?;
         }
         let symbol = instantiation_symbol(&record.callee, &subst);
         Ok(CallInst {
@@ -14696,6 +14777,28 @@ mod tests {
         .unwrap_err();
         assert!(err.contains("a reference cannot be stored"), "{err}");
         assert!(err.contains("the payload `^` would store"), "{err}");
+    }
+
+    /// Post-implementation review fix: a poly-body `^`-built cell whose
+    /// payload never reaches this word's own declared input/output
+    /// signature (a body-internal temporary, immediately unwrapped and
+    /// dropped, never returned) must still have its concrete monomorphized
+    /// shape interned into the live `owned_cells` registry once a caller
+    /// grounds `'T` -- otherwise `word_families.rs`'s `cell_id_of` finds no
+    /// structural match at lowering and panics. Pre-fix this word's cell
+    /// shape (`^i64`) was absent from `checked.owned_cells`; post-fix it is
+    /// present.
+    #[test]
+    fn poly_body_internal_owned_cell_temporary_interns_into_live_registry() {
+        let src = ": leak['T] ( 'T -- ) ^ drop ;\n\
+             : main ( -- ) 5 leak ;\n";
+        let (checked, _) =
+            checked_like_a_build(src).expect("leak's body-internal cell should check and intern");
+        assert!(
+            checked.owned_cells.iter().any(|c| c.payload == Type::I64),
+            "the concrete ^i64 cell shape should be interned into the live registry: {:?}",
+            checked.owned_cells
+        );
     }
 
     /// P7 slice 3f (R3): `call` on a genuine ground `Type::Quotation`
@@ -21460,6 +21563,7 @@ mod tests {
             words: &module.words,
             recorded: &recorded,
             enum_sites_recorded: &[],
+            cell_sites_recorded: &[],
         };
         assert!(
             tr.word_sig_of(&member.name).is_some(),

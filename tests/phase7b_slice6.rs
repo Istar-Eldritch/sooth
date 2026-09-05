@@ -584,3 +584,42 @@ fn fold_body_dropping_the_payload_is_legal_not_an_error() {
     );
     assert_eq!(stdout, "10\n");
 }
+
+/// Post-implementation review fix: a poly-body `^`-built `OwnedCell` whose
+/// payload never reaches the word's own declared input/output signature (a
+/// body-internal temporary, immediately unwrapped and dropped) used to
+/// panic at lowering for every monomorphization -- `apply_subst`'s
+/// `OwnedCell` arm, the only place that mints an `OwnedCellId`, runs only
+/// while substituting a *declared* input/output `PolyType`, so a cell shape
+/// invisible to the signature was never interned and `cell_id_of`'s
+/// structural lookup had nothing to match. This pins the minimal repro
+/// (`Copy` payload) building and running clean.
+#[test]
+fn poly_body_internal_owned_cell_temporary_interns_and_runs() {
+    let stdout = build_and_run(
+        "cell-temp-copy",
+        "\
+: leak['T] ( 'T -- )\n\
+  ^ drop\n\
+;\n\
+: main ( -- ) 5 leak \"ok\" . ;\n",
+    );
+    assert_eq!(stdout, "ok");
+}
+
+/// The non-`Copy` variant of the fix above: a heap-owning payload (`str`)
+/// that is never returned to the caller still needs its destructor to run
+/// correctly through the interned-on-demand cell, not just build without
+/// panicking.
+#[test]
+fn poly_body_internal_owned_cell_temporary_str_payload_drops_clean() {
+    let stdout = build_and_run(
+        "cell-temp-str",
+        "\
+: leak['T] ( 'T -- )\n\
+  ^ drop\n\
+;\n\
+: main ( -- ) \"temp\" leak \"ok\" . ;\n",
+    );
+    assert_eq!(stdout, "ok");
+}
