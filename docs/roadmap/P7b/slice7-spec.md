@@ -5,7 +5,7 @@
 > section below supersede it. The frozen companion docs stay as-is:
 > [slice7-brief](./slice7-brief.md) (recon, adjudicated mechanism, scope) and
 > [slice7-paper-tests](./slice7-paper-tests.md) / [slice7-probes](./slice7-probes.md)
-> (fixture text and verbatim probe log). Base `a9eca84`.
+> (fixture text and verbatim probe log). Base `d7ba59c`.
 
 ## Why
 
@@ -49,7 +49,7 @@ new units, zero production changes.
 
 **Dispatch + IR.** `bind` (fixture-local `trait:`, never shipped in `lib/`) is
 `inline`, dispatches per constructor (`Option`/`Result`), and splices with zero
-call frame — equivalent to a hand-written inline `and_then`. Each impl
+call frame — equivalent to a hand-written inline call. Each impl
 short-circuits on the empty/error constructor without consuming the quotation and
 applies it exactly once on the full/ok constructor, structurally enforced by the
 type checker.
@@ -57,8 +57,9 @@ type checker.
 **`Applicative.ap` — measured, not grounded; deferred.** Lifting fence #2 is
 sufficient to *parse* `ap`'s declaration, but declaring `impl: Applicative for
 Option` (no call site needed) hits a second, independent, checker-level fence:
-`reject_poly_quotation_anywhere`'s `Generic` arm (`src/check/audits.rs:431`)
-rejects a quotation nested inside a type application's argument list — the same
+`audit_poly_input_quotation`'s `Generic` arm (`src/check/audits.rs:431`) calls into
+`reject_poly_quotation_anywhere`'s own `Quotation` arm (`src/check/audits.rs:484`),
+which rejects a quotation nested inside a type application's argument list — the same
 rejection class as the pre-existing `Box[['T -- 'T]]` precedent. This is a
 different shape from `bind`'s: `bind`'s quotation is a *direct* member parameter
 (the App only inside the row); `ap`'s quotation is nested *inside* `'F`'s own
@@ -77,7 +78,12 @@ by letting the case through to a worse, unlocated downstream error. Reverted;
 recorded as a unit (`unify_member_operand_rejects_a_literal_quotation_operand`,
 `src/check/poly.rs`) — deferred, belongs to S6's own scope. Orthogonal to this
 slice's goldens: `bind`'s dogfood call is a mono call with explicit instantiation
-(`bind[i64 i64]`), which never produces a `QuotLit` operand.
+(`bind[i64 i64]`), which never produces a `QuotLit` operand. The gap is inherited
+from S6 (shared with `map`, pinned by `tests/phase7b_slice6.rs`'s
+`poly_body_quotation_literal_member_operand_is_located_error`), not introduced
+here, but it does block the literal-quotation spelling of `bind`/`and_then` inside
+a generic body (e.g. `chain['F: Monad] ( 'F[i64] -- 'F[i64] ) [ half ] bind ;`
+fails to type-check today) — not merely "orthogonal to the goldens".
 
 ## Load-bearing rulings
 
@@ -106,8 +112,8 @@ All in `tests/phase7b_slice7.rs`. Fixture text in
 
 | Golden | Test name | Behaviour |
 | --- | --- | --- |
-| G1 | `monad_bind_declares_app_in_quotation_row` | parses to a `TraitDecl`, `bind` effect intact, `'F` kind `* -> *`; exit 0 |
-| G2 | `option_bind_dispatches_and_short_circuits` | dispatches per constructor; short-circuits on `None`; distinguishable output on every arm; IR matches hand-written `and_then` |
+| G1 | `monad_bind_declares_app_in_quotation_row` | the row-nested-App `Monad` trait declaration builds and runs; exit 0 |
+| G2 | `option_bind_dispatches_and_short_circuits` | dispatches per constructor; short-circuits on `None`; distinguishable output on every arm; no `bind` symbol emitted (zero-frame splice) |
 | G3 | `result_bind_dispatches_and_short_circuits_on_err` | dispatches on `Result`, distinct `impl:` from Option's (constructor-keyed); short-circuits on `Err` |
 | G4a | `kind_incorrect_app_in_quotation_row_is_error` | regression pin: pre-existing `arrow_var_used_bare_error` fires independently of the row fence; located, exit 1 |
 | G4b | `member_local_headed_app_in_quotation_row_is_still_unsupported` | the real narrowness witness: a member-local-headed (not trait-var-headed) App in a row is still rejected post-lift; located, exit 1, corrected message |
@@ -129,15 +135,17 @@ All in `tests/phase7b_slice7.rs`. Fixture text in
 
 ## Growth-structure re-check
 
-Re-run at Phase 5 exit on every file touched: `src/parser.rs` (15,326 lines;
-import-divergence and forced-circularity both silent; this slice's own
-contribution is one conjunct deletion, five message/comment corrections, and
-test-only additions — no new responsibility added), `src/ast.rs` /
-`src/check/poly.rs` (comment/test-only diffs), `src/check/audits.rs` (zero diff —
-cited and measured for the `ap` deferral, never edited), `tests/phase7b_slice7.rs`
-(new file, single golden-test responsibility), `tests/phase7b_slice2.rs` (two
-tests retired/inverted in place), roadmap docs (prose-only). No split needed
-anywhere.
+Re-run at Phase 5 exit on every file touched: `src/parser.rs` (15,326 lines; this
+slice's own contribution is one conjunct deletion, five message/comment
+corrections, and test-only additions — no new responsibility added; of
+CLAUDE.md's five signals, import-divergence and forced-circularity are silent,
+which is why the file stays whole despite its size, but a full five-signal audit
+of the file as a whole is not re-run here — only the slice's own delta),
+`src/ast.rs` / `src/check/poly.rs` (comment/test-only diffs), `src/check/audits.rs`
+(zero diff — cited and measured for the `ap` deferral, never edited),
+`tests/phase7b_slice7.rs` (new file, single golden-test responsibility), one
+test retired/inverted in `tests/phase7b_slice2.rs` and its parser-unit twin
+in `src/parser.rs`, roadmap docs (prose-only). No split needed anywhere.
 
 ## Implementation
 

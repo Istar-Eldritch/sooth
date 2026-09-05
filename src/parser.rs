@@ -5218,18 +5218,20 @@ impl<'t> Parser<'t> {
     /// which is exactly the shape S1-6 fences: `'F[[ i64 -- i64 ]]` is a
     /// parse error, not an application argument.
     ///
-    /// P7b.S7 (REQ-2/OQ-2, measured): lifting this fence was tried and
-    /// reverted -- see `docs/roadmap/P7b/slice7-spec.md`'s Open Questions,
-    /// OQ-2. `Applicative.ap`'s shape (`'F[[ 'A -- 'B ]]`, a quotation
-    /// nested inside a type application's argument list) hits a second,
-    /// independent fence at check time regardless
-    /// (`reject_poly_quotation_anywhere`'s `Generic` arm,
-    /// `src/check/audits.rs:431` -- by audit time the trait variable `'F`
-    /// has been substituted to the dispatched constructor, so the node is a
-    /// `Generic`, not an `App`; the `App` arm at `:446` is never reached),
-    /// fired the moment an `impl:` is declared, before any call site.
-    /// Lifting only the parser fence would ship a shape that parses but
-    /// never checks -- reverted rather than shipped half-grounded.
+    /// P7b.S7 (REQ-2, measured): lifting this fence was tried and reverted
+    /// -- see `docs/roadmap/P7b/slice7-spec.md`'s "What shipped" section.
+    /// `Applicative.ap`'s shape (`'F[[ 'A -- 'B ]]`, a quotation nested
+    /// inside a type application's argument list) hits a second,
+    /// independent fence at check time regardless: entered via
+    /// `audit_poly_input_quotation`'s `Generic` arm (`src/check/audits.rs:431`
+    /// -- by audit time the trait variable `'F` has been substituted to the
+    /// dispatched constructor, so the node is a `Generic`, not an `App`; the
+    /// App arm at `:444` is never reached for this shape), which calls into
+    /// `reject_poly_quotation_anywhere`'s own `Quotation` arm
+    /// (`src/check/audits.rs:484`) to raise the error -- fired the moment an
+    /// `impl:` is declared, before any call site. Lifting only the parser
+    /// fence would ship a shape that parses but never checks -- reverted
+    /// rather than shipped half-grounded.
     fn parse_poly_app_arg(
         &mut self,
         builder: &mut PolyBuilder,

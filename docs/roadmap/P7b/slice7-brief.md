@@ -86,7 +86,7 @@ new declaration syntax."* Concretely, in order:
    shape; see slice7-spec.md's REQ-5.
 5. Wire dispatch so `bind ( 'F['T] [ 'T -- 'F['U] ] -- 'F['U] )` through a shared
    `Monad` bound splices/dispatches per constructor and produces IR equivalent to a
-   hand-written `and_then`.
+   hand-written inline call.
 
 Applicative.ap ships only if step 1-4's extension generalizes for free to the mirror
 shape (App-of-quotation rather than quotation-containing-App) — the roadmap allows
@@ -96,8 +96,9 @@ exit requirement.
 **Final ruling (Phase 4, measured): it does not generalize for free.** Lifting the
 second fence is sufficient to *parse* `ap`'s declaration, but `impl: Applicative for Option`
 (no call site needed) immediately hits a second, independent checker-level fence —
-`reject_poly_quotation_anywhere`'s `Generic` arm (`src/check/audits.rs:431`) rejects
-a quotation nested inside a type application's argument list. This is a different
+`audit_poly_input_quotation`'s `Generic` arm (`src/check/audits.rs:431`) calls into
+`reject_poly_quotation_anywhere`'s own `Quotation` arm (`src/check/audits.rs:484`),
+which rejects a quotation nested inside a type application's argument list. This is a different
 mechanism from `bind`'s: `bind`'s quotation is a *direct* member parameter (the `App`
 only nested inside the effect's row), while `ap`'s quotation is nested *inside* `'F`'s
 own application — the same rejection class as the pre-existing
@@ -106,7 +107,7 @@ Grounding `ap` would need new logic in that audit, outside this slice's scope (n
 grounding code beyond what Phase 2 verified for `bind`). Fence #2's lift was reverted;
 `ap` ships no golden and is recorded as future work, gated on whichever slice takes up
 `reject_poly_quotation_anywhere`'s constructor-of-quotation case. See
-slice7-spec.md's OQ-2 for the full citation trail.
+slice7-spec.md's "What shipped" section for the full citation trail.
 
 ## Explicitly out of scope
 
@@ -125,7 +126,8 @@ slice7-spec.md's OQ-2 for the full citation trail.
 
 Matches the roadmap's stated exit: `bind` through a shared `Monad` bound type-checks,
 dispatches per constructor (`Option`/`Result`), and splices to the same IR a
-hand-written inline `and_then` would produce. `and_then` goldens for `Option` and
-`Result` (early-exit error chains — the errors-as-values idiom). Applicative.ap does
+hand-written inline call would produce, zero call frame. Goldens for `Option` and
+`Result` dispatch and short-circuit correctly on each arm (early-exit error handling —
+the errors-as-values idiom). Applicative.ap does
 not ground for free (see the Adjudicated mechanism section's final ruling) and ships
 no golden; this was a bonus, not a requirement, so the slice exit is unaffected.

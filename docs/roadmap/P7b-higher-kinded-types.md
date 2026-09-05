@@ -216,18 +216,19 @@ Option/Result through two already-shipped mechanisms, not new grounding code:
 `ground_member_poly`'s existing `App` arm dissolves the row-nested `'F['U]` into a
 plain `Generic` at parse time (callee side), and `unify_member_operand`/
 `render_member_decl` — already exercised by `Functor.map` — ground the caller side.
-`and_then`-style early-exit chains over Option/Result compose from `bind` and splice
-to the same IR a hand-written inline `and_then` would produce. `Applicative.ap
+A single `bind` call over Option/Result splices to the same IR a hand-written
+inline call would produce, no call frame. `Applicative.ap
 ( 'F[ [ 'A -- 'B ] ] 'F['A] -- 'F['B] )` is deferred: its quotation sits inside `'F`'s
 own argument list, a different shape from `bind`'s direct member parameter, and is
-rejected by `reject_poly_quotation_anywhere`'s `Generic` arm
-(`src/check/audits.rs:431`) the moment an `impl:` is declared, independently of the
-parser's argument-quotation fence. Grounding it needs new logic in that audit; gated
-on whichever slice takes up `reject_poly_quotation_anywhere`'s
-constructor-of-quotation case.
+rejected by `audit_poly_input_quotation`'s `Generic` arm
+(`src/check/audits.rs:431`), which calls into `reject_poly_quotation_anywhere`'s
+own `Quotation` arm (`src/check/audits.rs:484`) the moment an `impl:` is declared,
+independently of the parser's argument-quotation fence. Grounding it needs new logic
+in that audit; gated on whichever slice takes up
+`reject_poly_quotation_anywhere`'s constructor-of-quotation case.
 **Exit:** `bind` through a shared `Monad` bound type-checks, dispatches per
-constructor, and splices to the same IR a hand-written inline `and_then` would
-produce; `and_then` goldens for Option and Result. See
+constructor, and splices to the same IR a hand-written inline call would produce;
+goldens for Option and Result dispatch and short-circuit correctly. See
 [slice7-spec](./P7b/slice7-spec.md) with its [brief](./P7b/slice7-brief.md) for the
 full mechanism verification and the `ap` deferral's citation trail.
 
@@ -309,8 +310,8 @@ units beside the changed `terms.rs` code.
 
 **Dogfood:** S6 — a program that `map`s and folds over `Option`, `Result`, and `List` through
 shared bounds, with the impls declared against the real lib types and output matching
-hand-written inline equivalents. S7 — `and_then` chains over `Option`/`Result` through a shared
-`Monad` bound. S8 — a consuming `map`/`fold` loop over an `Iterator` with no frames between
+hand-written inline equivalents. S7 — `bind` dispatching per constructor over `Option`/`Result`
+through a shared `Monad` bound. S8 — a consuming `map`/`fold` loop over an `Iterator` with no frames between
 elements.
 
 ## Out of scope
