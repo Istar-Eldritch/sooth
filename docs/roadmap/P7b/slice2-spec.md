@@ -148,7 +148,9 @@ flowchart TD
 ## Deliberate limitations and non-goals (S2-14 ledger)
 
 - **App inside member quotation rows is fenced** (S2-15.d) — declarations represent it,
-  `call` cannot see through it; Monad.bind awaits a later slice.
+  `call` cannot see through it; Monad.bind awaits a later slice. **Superseded by P7b.S7**,
+  which lifts this fence for the trait-var-headed case (a member-local-headed App inside
+  a row stays unsupported); see `slice7-spec.md` REQ-1/REQ-3.
 - **Fully-abstract App-headed targets** (`for 'F['T]`) keep their fence
   (`impl_target_app_unsupported_error`); m3 showed they degrade safely, but the focused
   message is better UX and no exit criterion needs them.
