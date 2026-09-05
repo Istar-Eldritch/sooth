@@ -5858,4 +5858,56 @@ mod s2_grounding_tests {
             "{err}"
         );
     }
+
+    /// P7b.S7 REQ-5 (verification only, no new logic): `bind`'s row-nested
+    /// `'F['U]` -- an `App` inside a `Quotation`'s `outs` row, the shape
+    /// fence #1 admits post-Phase-1 -- dissolves through the `Quotation`
+    /// arm recursing into the `App` arm exactly like a plain-slot member
+    /// (S2-6): grounding against `impl: Monad for Option` (target
+    /// `Generic(Option, [Var(0)])`) yields `Generic{Option, [Var(u)]}` where
+    /// `u` is the member's own appended local, not the target's.
+    #[test]
+    fn ground_member_poly_quotation_row_app_dissolves_to_target_generic() {
+        let target = PolyType::Generic {
+            is_enum: true,
+            idx: 0,
+            module: 0,
+            args: vec![PolyType::Var(0)],
+            len_args: vec![],
+            name: "Option",
+        };
+        // bind ( 'F['T] [ 'T -- 'F['U] ] -- 'F['U] ): the quotation row's
+        // output is 'F['U], an App inside the row.
+        let row = PolyType::Quotation(
+            vec![PolyType::Var(1)],
+            vec![PolyType::App {
+                head: 0,
+                args: vec![PolyType::Var(2)],
+            }],
+            false,
+            None,
+            None,
+        );
+        // Member sig id space: 0 = header, 1 = 'T aliasing target slot 0,
+        // 2 = 'U appended as the member's own local.
+        let map = vec![None, Some(PolyType::Var(0)), Some(PolyType::Var(2))];
+        let mut d = dg();
+        d.member = "bind";
+        let grounded = ground_member_poly(&row, &target, &map, &d).unwrap();
+        let PolyType::Quotation(_, outs, ..) = grounded else {
+            panic!("the row shape survives grounding")
+        };
+        assert_eq!(
+            outs[0],
+            PolyType::Generic {
+                is_enum: true,
+                idx: 0,
+                module: 0,
+                args: vec![PolyType::Var(2)],
+                len_args: vec![],
+                name: "Option",
+            },
+            "the row-nested App dissolves into the target ctor, 'U in the leading slot"
+        );
+    }
 }

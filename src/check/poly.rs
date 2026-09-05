@@ -17268,6 +17268,102 @@ mod tests {
         ));
     }
     #[test]
+    fn unify_member_operand_app_row_slot_binds_dispatched_ctor() {
+        // P7b.S7 REQ-5 (verification only, no new logic): the caller path
+        // for `bind`'s row-nested `'F['U]` output -- an App inside a
+        // Quotation's outs row -- reaches the same App/App arm a plain-slot
+        // member (`map`) already exercises. The header is seeded per the
+        // dispatch doc comment: `(0, Var(dispatch_var))`, the member header
+        // bound to the caller's own bound type variable. Unification must
+        // then bind the App's declared head (id 0) to the caller's found
+        // head only when they agree (`dispatch_var`), and the row's local
+        // (`'U`, id 2) to the caller's slot argument.
+        let dispatch_var = 10;
+        let caller_u = 11;
+        let declared = PolyType::Quotation(
+            vec![PolyType::Var(1)],
+            vec![PolyType::App {
+                head: 0,
+                args: vec![PolyType::Var(2)],
+            }],
+            false,
+            None,
+            None,
+        );
+        let found = PolyType::Quotation(
+            vec![PolyType::Var(20)],
+            vec![PolyType::App {
+                head: dispatch_var,
+                args: vec![PolyType::Var(caller_u)],
+            }],
+            false,
+            None,
+            None,
+        );
+        let mut bindings = vec![(0, PolyType::Var(dispatch_var))];
+        assert!(unify_member_operand(&declared, &found, &mut bindings));
+        assert!(bindings.contains(&(2, PolyType::Var(caller_u))));
+
+        // Negative case: the found operand's row-nested App head disagrees
+        // with the seeded dispatch-header binding -- unification must reject
+        // it, proving the seed actually gates agreement rather than being
+        // silently overwritten.
+        let other_head = 99;
+        assert_ne!(other_head, dispatch_var);
+        let found_disagreeing = PolyType::Quotation(
+            vec![PolyType::Var(20)],
+            vec![PolyType::App {
+                head: other_head,
+                args: vec![PolyType::Var(caller_u)],
+            }],
+            false,
+            None,
+            None,
+        );
+        let mut bindings_disagreeing = vec![(0, PolyType::Var(dispatch_var))];
+        assert!(!unify_member_operand(
+            &declared,
+            &found_disagreeing,
+            &mut bindings_disagreeing
+        ));
+    }
+    #[test]
+    fn render_member_decl_app_row_slot_renders_into_caller_space() {
+        // P7b.S7 REQ-5 (verification only, no new logic): the same
+        // row-nested App, rendered back through the binding map the unify
+        // test above produces -- `bind`'s declared output `'F['U]` renders
+        // into the caller's own `dispatch_var`/`caller_u` space, exactly as
+        // `map`'s plain-slot output already does.
+        let dispatch_var = 10;
+        let caller_u = 11;
+        let declared_output = PolyType::Quotation(
+            vec![PolyType::Var(1)],
+            vec![PolyType::App {
+                head: 0,
+                args: vec![PolyType::Var(2)],
+            }],
+            false,
+            None,
+            None,
+        );
+        let bindings = vec![
+            (0, PolyType::Var(dispatch_var)),
+            (2, PolyType::Var(caller_u)),
+        ];
+        let rendered = render_member_decl(&declared_output, &bindings, dispatch_var);
+        let PolyType::Quotation(_, outs, ..) = rendered else {
+            panic!("rendered declared output should stay a Quotation");
+        };
+        assert_eq!(
+            outs[0],
+            PolyType::App {
+                head: dispatch_var,
+                args: vec![PolyType::Var(caller_u)],
+            },
+            "the row-nested App renders back into the caller's own variable space"
+        );
+    }
+    #[test]
     fn quotation_effect_unifies_and_binds_variable() {
         // Criterion 2 (R6): a declared `[ 'T -- ]` unified against a concrete
         // `[ i64 -- ]` binds `'T = i64`; an arity mismatch is a located type
