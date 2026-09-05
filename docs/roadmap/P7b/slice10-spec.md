@@ -28,12 +28,19 @@ header); the only `Widget[i64]` visible to `c`'s env lookup is the single
 eagerly-minted instantiation, so the pre-existing single-candidate arm takes it
 silently. S10 replaces that silent pick with a **located compile-time ambiguity
 error**, at the single-candidate grounding fall-through, keyed on the generic
-header registry **scoped to the caller's own import closure** (R1) — not on the
-trait-impl matcher (R2/R-NFR2 forbid the dispatch-time machinery a naive fix
-would reach for). Reachability-scoping is load-bearing, not a simplification: a
-program-wide header count would flag a header some unrelated, unimported module
-happens to declare, breaking single-lib programs that never see it (GH,
-measured during the pre-implementation review round — see below).
+header registry **scoped to the caller's own import set** (its own imports and
+selective imports, one hop — not the whole-program file closure; R1) — not on
+the trait-impl matcher (R2/R-NFR2 forbid the dispatch-time machinery a naive
+fix would reach for). Reachability-scoping is load-bearing, not a
+simplification: a program-wide header count would flag a header some
+unrelated, unimported module happens to declare, breaking single-lib programs
+that never see it (GH, measured during the pre-implementation review round —
+see below). A round-2 review measured two further gaps this revision closes:
+the reachable-header count alone is not enough (a reachable header that never
+mints its own instantiation must not license silently borrowing a
+*different*, unreachable module's instantiation instead — GM), and the
+explicit-resolution exemption must resolve through a re-exporting hub before
+comparing, or it mismatches a program that resolves correctly today — GL.
 
 ## Adjudicated mechanism (probe round, P6 spike — verbatim in slice10-probes)
 
@@ -66,87 +73,174 @@ measured during the pre-implementation review round — see below).
 
 ## Rulings
 
-### R1 — the policy (reachability-scoped header-level accepted ambiguity)
+### R1 — the policy (accepted ambiguity at the single-candidate arm)
 
-When a bare ctor/destructure call in module `m` reaches the single-candidate
-arm (the fall-through in `bare_generated_word_own_module_grounding`) with
-exactly **one** env candidate whose mint's header belongs to a foreign module
-`M`, the grounding raises a **located compile-time ambiguity error** at the
-call site naming the surface name, the declaring modules, and the call span,
-with remedy pointers — **iff** the generic header registry
-(`ctx.generics().structs`) holds **≥2 same-named headers declared by ≥2
-distinct modules reachable through `m`'s own `import:` declarations**
-(`ModuleInfo.imports` ∪ `ModuleInfo.selective` target sets for `m`; see R2),
-excluding `m` itself.
-
-Reachability, not program-wide existence, is the count: a header declared by a
-module `m` never imports in any form does not count toward the ambiguity,
-regardless of how many instantiations exist elsewhere in the program (GH,
-`overfire`: two headers exist program-wide, `lib` and `z`; `app` imports only
-`lib`, never `z`; only one header is reachable from `app`, so the single-lib
-compat exemption applies even though a second header exists somewhere in the
-closure — measured `7`, exit 0, unchanged).
-
-**Exemptions — the error must NOT fire when:**
+At the single-candidate arm of `bare_generated_word_own_module_grounding`,
+once the sole env candidate has survived **both** the
+instantiating-module-is-foreign check (`owning_module == caller_module` fails,
+`terms.rs:1504`) **and** the candidate-identity check (`generated_word_entry`
+plus the `key`/`symbol` match, `terms.rs:1531-1537` — see R2's guard-ordering
+requirement), the grounding raises a **located compile-time ambiguity error**
+at the call site — naming the surface name, the relevant declaring module(s),
+and the call span, with remedy pointers — **unless one of the following four
+exemptions holds**:
 
 1. `m` declares its own header — S9's R1.1a grounds the caller's own mint (the
    caller-owns tier, untouched);
-2. at most **one** same-named header is reachable through `m`'s own imports
-   (regardless of how many exist program-wide) — the single-lib compat shape
-   (GD) and the unimported-sibling shape (GH) both stay legal and
-   silent-by-design;
+2. **[both halves required]** at most one same-named header is reachable
+   through `m`'s own import set (`ModuleInfo.imports` ∪ `ModuleInfo.selective`
+   target sets for `m`, one hop — see R2), **and** the sole candidate's actual
+   **declaring** module (`guard.structs[gi].module` — R2 clarifies why this,
+   not the *instantiating* module, is the right component) is itself among
+   that reachable set. A header some other, unimported module declares does
+   not count against the ≤1 threshold (GH, `overfire` — the
+   reachability-scoping witness: two headers exist program-wide, but `app`
+   imports only `lib`, never `z`; only `lib` is reachable, so this exemption
+   applies even though a second header exists elsewhere, program-wide,
+   measured `7`, exit 0, unchanged) — **and separately**, a reachable header
+   that never mints its own instantiation does not entitle the caller to
+   silently borrow a *different*, unreachable module's instantiation instead
+   (GM, a case built during the round-2 review specifically to probe this
+   gap: `app` imports only `lib`, which declares its own `Widget` header but
+   never instantiates `Widget[i64]`; the only existing instantiation belongs
+   to `z`, a module `app` never imports at all — today this silently prints
+   `9`, `z`'s value, exit 0; the tightened exemption does not cover this, so
+   the error fires);
 3. the call reaches the **multi-candidate** arm (≥2 env candidates) — the
    existing S5 `select_overload` path governs there unchanged, including
-   tier-2 pinning for declared type imports (GJ, P5i2), byte-identical;
+   tier-2 pinning for declared type imports (GJ, `p5i2`), byte-identical;
 4. `m` performs an **explicit resolution** for this surface name —
-   `ModuleInfo.selective` (populated by a `| Widget |` selective-import clause,
-   or by a `*` wildcard import's per-export desugaring; see R2) names exactly
-   one reachable module for `Widget`, **and that named module is exactly `M`**
-   (the actual sole candidate's owning module) — GI (`sel1`).
+   `ModuleInfo.selective` names a target module for `Widget`, and that
+   target, **resolved through any hub re-export chain first** (see R2), lands
+   on the sole candidate's actual **declaring** module (GI, `sel1`: the
+   sole-minter case; GL, `hub`, a case built during the round-2 review: `h`
+   re-exports `a`'s `Widget` under its own `export: Widget ;`, and `c`
+   selectively imports `Widget` from `h` — `c`'s raw `ModuleInfo.selective`
+   value is `h`, not `a`; the match must resolve through `h`'s own re-export
+   chain to `a` before comparing, or this fixture wrongly errors a program
+   that resolves correctly today, `1`, exit 0).
 
 Exemption 4's match requirement is load-bearing, not decorative:
-`ModuleInfo.selective` records what the caller *asked for*, not what the
-caller *gets* — the two agree only when the module the caller selected happens
-to be the one that eagerly minted. When they disagree (the caller selectively
-imports module `X`'s `Widget`, but the sole existing instantiation belongs to a
-different reachable module `Y`), the exemption must **not** apply: silently
-handing the caller `Y`'s value while they asked for `X`'s is the exact
-V2-class defect S10 exists to close, only relabeled behind a selective import
-the caller believes already disambiguated it. Measured today (GK, a case
-built during the pre-implementation review round specifically to probe this
-gap): `c` selectively imports `a`'s `Widget` (`import: self::a | Widget | ;`)
-while only `b` ever eagerly mints — today this silently prints `2` (`b`'s
-value, contradicting the caller's own selection), exit 0. Under this ruling it
-becomes the **same** located error as GA/GB, naming both reachable modules. **A
-blanket "selective import is present ⇒ exempt" reading, without the match test,
-is unsound and must not be implemented** — it would leave exactly the silent
-mis-dispatch this slice exists to close, merely hidden behind a selective
-import that looks like it resolved something.
+`ModuleInfo.selective` records what the caller *asked for* (after resolving
+any hub re-export), not what the caller *gets* — the two agree only when the
+module the caller ultimately selected happens to be the one that eagerly
+minted. When they disagree (the caller selectively imports module `X`'s
+`Widget`, but the sole existing instantiation belongs to a different
+reachable module `Y`), the exemption must **not** apply: silently handing the
+caller `Y`'s value while they asked for `X`'s is the exact V2-class defect
+S10 exists to close, only relabeled behind a selective import the caller
+believes already disambiguated it. Measured today (GK, a case built during
+the pre-implementation review round specifically to probe this gap): `c`
+selectively imports `a`'s `Widget` (`import: self::a | Widget | ;`) while
+only `b` ever eagerly mints — today this silently prints `2` (`b`'s value,
+contradicting the caller's own selection), exit 0. Under this ruling it
+becomes the **same** located error as GA/GB, naming both reachable modules
+(GK is curable — see R5's two-part remedy 2). **A blanket "selective import
+is present ⇒ exempt" reading, without the match-against-the-declaring-module
+test and without resolving hub re-exports first, is unsound and must not be
+implemented** — it would leave exactly the silent mis-dispatch this slice
+exists to close, merely hidden behind a selective import that looks like it
+resolved something.
 
-### R2 — where the check lives, and what data it reads
+### R2 — where the check lives, guard ordering, and what data it reads
 
-At the single-candidate arm's grounding check in
-`bare_generated_word_own_module_grounding` (`src/check/terms.rs:1507-1509`, the
-`find_struct(header_name, caller_module)` → `None` arm) — reading:
+**Guard ordering (critical, not merely a location anchor).** The new check
+must run only after the sole env candidate has survived, in order: (a) the
+`owning_module == caller_module` check (`terms.rs:1504` — the candidate is
+genuinely foreign), and (b) the candidate-identity check
+(`generated_word_entry(ctx, id, destructure)` plus the `key != name ||
+symbol != only.symbol` comparison, `terms.rs:1531-1537` — confirms the sole
+candidate really *is* this header's own generated ctor/destructure word, not
+an ordinary user word whose output merely happens to be another module's
+instantiation). Today's code returns `Ok(None)` immediately at the
+`find_struct(header_name, caller_module)` → `None` fall-through
+(`terms.rs:1507-1509`, when the caller has no own header) — *before* it ever
+reaches the candidate-identity check at 1531-1537, since that check currently
+sits inside the same block, gated behind `own_idx` being found. **The
+implementing phase restructures this control flow** so a headerless caller's
+call still passes through the candidate-identity check before the new
+ambiguity check can run; `1507-1509` remains the right *semantic* anchor
+(headerless caller, foreign single candidate) but is not, as written today,
+the code location an emitted error can sit at without first surviving
+1531-1537 — emitting there directly would newly reject the "ordinary user
+word whose output happens to be another module's instantiation" shape
+1531-1537 exists to protect. `terms.rs:1492-1497`'s "the order is free"
+comment describes a premise (every early exit here is an interchangeable
+`Ok(None)`) that stops holding the moment one of these arms can instead
+return `Err(...)`; the implementing phase updates that comment.
 
-- the caller's span and module (already in scope);
-- the foreign candidate's owning module, `owning_module` (already computed by
-  `struct_instantiation_of`, line 1501 — no new lookup needed);
-- header provenance from `ctx.generics().structs` (`GenericStructDecl.module`,
-  `GenericStructDecl.name`) — the full, whole-program-declared header list;
-- the caller's own import closure from `ctx.modules` (`Option<&[ModuleInfo]>`,
-  `engine.rs:1133`; `Some` on the whole-program build path, `None` off it —
-  e.g. a retained poly word), indexed by `caller_module`:
-  `ModuleInfo.imports` (qualifier → target module id, `ast.rs:176`) for
-  reachability, and `ModuleInfo.selective` (bare name → target module id,
-  `ast.rs:185` — merging explicit `| name |` clauses and `*` wildcard
-  per-export desugaring, `driver.rs`'s import-assembly pass) for exemption 4's
-  match test.
+**Declaring module vs. instantiating module (critical, not interchangeable).**
+`struct_instantiation_of(id)` returns `(gi, owning_module, args, lens)` where
+`owning_module` is the candidate's *instantiating* module — "the third
+component of `struct_keys`, captured at the naming site" (`ast.rs:2598`'s
+`Generic::module` doc comment) — the module whose file wrote the concrete
+`Widget[i64]` application, which can differ from the module that declared
+`type: Widget['T]` in the first place (a qualified spelling in a *foreign*
+module's own signature instantiates a *foreign* header — see the
+qualified-spelling finding in the probes corrections appendix). The header's
+true **declaring** module is `guard.structs[gi].module`
+(`GenericStructDecl.module`). R1's exemption 2 and exemption 4 both compare
+against the **declaring** module, not `owning_module` — in every existing
+golden fixture the two coincide (each candidate is minted inside the module
+that also declares its own header), so this distinction changes no golden's
+outcome; it is a correctness requirement for shapes no golden happens to
+exercise on its own (a foreign module instantiating someone else's header),
+and it matters directly for GL below, where the raw selective target is
+neither the instantiating nor (yet) the declaring module.
+
+**Resolving a hub re-export before the exemption-4 match (GL).** A caller's
+raw `ModuleInfo.selective` value for a name is the import statement's own
+*target* module — which may itself be a re-exporting hub with no `type:`
+header of its own (GL, `hub`: `h.sth` re-exports `a`'s `Widget` via
+`import: self::a | Widget | ; export: Widget ;`, and `c` writes
+`import: self::h | Widget | ;` — `c`'s raw selective value for `Widget` is
+`h`, not `a`). Comparing this raw value directly against the sole
+candidate's declaring module (`a`) would wrongly mismatch and error a
+program that resolves correctly today. The implementing phase resolves the
+raw target through the same hub-hop the checker already performs for a
+*type* reference in an effect signature — `resolve_type_export_origins`'s
+per-name walk, `walk_type_export_origin` (`src/driver.rs:407`): from the raw
+target, follow `selective`/`imports` chases until landing on a module that
+actually declares the name as a struct/enum, or `None` for a cycle or dead
+end. That walk's own ingredients (declared-type names per module, and each
+module's `selective`/`imports` maps) are exactly `ctx.generics().structs`'
+name/module pairs and `ctx.modules`'s `selective`/`imports` maps, already
+reachable from `Ctx` — no new registry needs threading through; the
+implementing phase either re-runs an equivalent walk at check time or, if
+simpler, threads the already-computed `type_origin` table (`driver.rs:651`)
+through to `Ctx`. Either is an implementation-phase data-plumbing call, not a
+policy one — the *required* behaviour is that exemption 4 always compares
+against the walked-through declaring module, never the raw one-hop value.
+
+**Naming a module the caller has no qualifier for (GM).** When the sole
+candidate's declaring module is not in `m`'s own `ModuleInfo.imports` at all
+(not even via a bound qualifier — GM's shape: `app` never imports `z` in any
+form), there is no qualifier to render it by. This is not a new problem S10
+invents: the existing `drop`-visibility diagnostic
+(`word_families.rs:1319-1322`'s qualifier lookup, `.find(|(_, &target)|
+target == decl.module)`) hits exactly this gap already and falls back to a
+structural phrasing that names no module at all ("a module this module never
+imports directly", `word_families.rs`'s `None` arm, ~line 1334). S10's
+message follows the same precedent: when the sole candidate's declaring
+module has no caller-side qualifier, the message describes it structurally
+rather than fabricating a name (R5).
+
+**Everything else.** Reading: the caller's span and module (already in
+scope); the foreign candidate's `owning_module` (already computed by
+`struct_instantiation_of`, line 1501); header provenance from
+`ctx.generics().structs` (`GenericStructDecl.module`, `.name`) — the full,
+whole-program-declared header list; the caller's own import set from
+`ctx.modules` (`Option<&[ModuleInfo]>`, `engine.rs:1133`; `Some` on the
+whole-program build path, `None` off it — e.g. a retained poly word), indexed
+by `caller_module`: `ModuleInfo.imports` (qualifier → target module id,
+`ast.rs:176`) for reachability, `ModuleInfo.selective` (bare name → target
+module id, `ast.rs:185` — merging explicit `| name |` clauses and `*`
+wildcard per-export desugaring) for exemption 4's (hub-resolved) match test.
 
 When `ctx.modules` is `None`, the check does not fire — the same "reads it and
 never fires when it is absent" discipline the existing D1 drop gate follows
 (`engine.rs:1133`'s doc comment: "the gate reads it and never fires when it is
-absent"), since there is no import closure to test reachability against.
+absent"), since there is no import set to test reachability against.
 
 **NOT** at `select_overload`/`tier_pick` (cannot see 1-candidate shapes; the
 lone-survivor ruling deliberately never errors on one candidate). **NOT** at
@@ -160,7 +254,10 @@ grounding succeeds).
 
 A **NEW** located message in house style (`error: \`Widget\` in \`try\` (line N,
 col M) is ambiguous: ...` + a `note:` remedy line). It names the surface name,
-the declaring modules, and the call site, and points at the remedies that
+the call site, and the relevant declaring module(s) using the caller's own
+import qualifier for each — except when the sole candidate's declaring module
+has no caller-side qualifier at all (GM), where it is named structurally
+instead (R2's `drop`-diagnostic precedent) — and points at the remedies that
 actually cure the shape (R5). The existing 2-candidate `no_overload_matches_error`
 text is **not churned** (diagnostics are behaviour; GC pins it byte-unchanged).
 
@@ -178,11 +275,15 @@ syntax exists for `self::` imports (confirmed: no `as`-style grammar in the
 parser). If `m` reaches a declaring module only through a wildcard import (no
 bound qualifier — `ModuleInfo.imports` has no entry for it, only
 `ModuleInfo.selective` does, per-export), fall back to the existing
-wildcard-import phrasing precedent (`declarations.rs:969`, "its
+wildcard-import phrasing precedent (`declarations.rs:989`, "its
 wildcard-imported module"). No fixture in this spec exercises the
 both-declaring-modules-wildcard-only sub-case, so a distinguishable phrasing
 for 2+ unqualified modules is left to the implementing phase — flagged, not
-blocking; no golden requires it.
+blocking; no golden requires it. A *third* case — `m` has no qualifier for a
+module at all, not even a wildcard-bound one, because `m` never imports it in
+any form (GM) — is not this same fallback; R2/R3/R5 specify it separately,
+following the `drop`-diagnostic's own precedent for exactly this gap
+(`word_families.rs:1319-1340`).
 
 Determinism (REQ-5) follows directly: the message **sorts the collected
 qualifier strings lexicographically** before joining them, rather than using
@@ -198,62 +299,102 @@ The new message follows the measure-then-pin discipline: this spec fixes the
 wording **contract** below; the implementing phase measures the real rendered
 output and pins whatever the formatter actually emits (spacing, the
 parenthetical `(line N, col M)` shape, and how module names are joined all
-follow the existing `terms.rs` diagnostic helpers). Draft contract:
+follow the existing `terms.rs` diagnostic helpers). Draft contract (GA/GB/GK's
+shape — ≥2 reachable declaring headers, none resolved):
 
 ```
 error: `Widget` in `try` (line 3, col 22) is ambiguous: declared in modules `a` and `b`, and `try`'s module declares no `Widget`
-  note: declare your own `Widget` header and impl, or selectively import the module whose `Widget` you want (`import: self::a | Widget | ;` after `export: Widget ;`)
+  note: declare your own `Widget` header and impl, or selectively import the module whose `Widget` you want -- if that module does not itself instantiate `Widget[i64]`, also spell the type in your own word's signature (`import: self::a | Widget | ;` then `: mk ( i64 -- Widget[i64] ) Widget ;`)
+```
+
+Draft contract (GM's shape — the sole candidate's declaring module is
+unreachable, no caller-side qualifier — R2/R3):
+
+```
+error: `Widget` in `try` (line 3, col N) is ambiguous: the only `Widget[i64]` instantiation in scope belongs to a module `try`'s module does not import
+  note: import the module that declares the instantiation you want, or declare and instantiate your own `Widget` header
 ```
 
 Contract, byte-exact wording deferred to the golden:
 
 - lead line: surface name in backticks, the enclosing word in backticks, the
   `(line N, col M)` call site, the word "ambiguous", and the declaring module
-  names, lexicographically sorted (R4);
-- note line: the **two** remedies that actually cure the single-candidate
-  shape — (1) declare your own `Widget` header and `impl`; (2) selectively
-  import the module whose instantiation you want. Remedy 2 is curative **only**
-  when the named module either is the sole eager minter (GI, `sel1`) or both
-  modules mint and tier-2 pins your selection (GJ, `p5i2`) — a selective
-  import naming a module that is *not* the sole minter does **not** cure (GK)
-  and still errors. Qualified type spelling (`a::Widget[i64]`) is **dropped**
-  from the note entirely (OQ-3, revised from "not yet available" to simply
-  omitted): it is a type-position tool only — no term-position ctor syntax
-  exists (`a::Widget` is an unknown word, P7b2) — and using it in a signature
-  to try to pin an operand's type just parse-time-mints a *second* candidate,
+  names, lexicographically sorted (R4) — or, when the sole candidate's
+  declaring module has no caller-side qualifier at all (GM), the structural
+  phrasing R2/R3 describe instead of a fabricated name;
+- note line: the **two-part** remedy 2 is the round-2 correction — (1)
+  declare your own `Widget` header and `impl` (this alone cures); (2)
+  selectively import the module whose instantiation you want, which cures
+  **alone** only when the named module either is the sole eager minter (GI,
+  `sel1`) or both modules mint and tier-2 pins your selection at the
+  multi-candidate arm (GJ, `p5i2`, exemption 3, untouched). When neither
+  holds — the selected module is reachable but has never itself minted the
+  concrete instantiation (GK's shape) — selective import alone does **not**
+  cure (GK still errors); the caller must **additionally** write an
+  intermediate word whose own signature spells the concrete type (e.g.
+  `: mk ( i64 -- Widget[i64] ) Widget ;`) and call that instead of
+  constructing bare inline. This makes the caller's own module the
+  *instantiating* module (`owning_module == caller_module` at
+  `terms.rs:1504`), sidestepping the shared-env borrow entirely rather than
+  merely disambiguating within it — measured to cure GK's exact shape
+  (`rem2sig`, a case built during the round-2 review: `c` selectively
+  imports `a`'s `Widget` and writes `mk`'s signature explicitly; prints `1`,
+  exit 0). Qualified type spelling (`a::Widget[i64]`) is **dropped** from the
+  note entirely (OQ-3, revised from "not yet available" to simply omitted):
+  it is a type-position tool only — no term-position ctor syntax exists
+  (`a::Widget` is an unknown word, P7b2) — and using it in a signature to try
+  to pin an operand's type just parse-time-mints a *second* candidate,
   routing into the pre-existing, unchanged 2-candidate error (GC's shape)
   rather than resolving anything (confirmed by measurement, not a cure).
 
 ## Requirements
 
-- **REQ-1 (policy, R1).** At the single-candidate grounding arm, a bare
-  ctor/destructure call in module `m` with exactly one foreign env candidate
-  fires the located ambiguity error **iff** the generic registry holds ≥2
-  same-named headers from ≥2 distinct modules **reachable through `m`'s own
-  imports**, none of them `m`. The four exemptions (own header; ≤1 reachable
-  header; multi-candidate arm; matching explicit resolution) hold exactly — in
-  particular exemption 4 requires the resolved target to equal the actual sole
-  candidate's owning module, not merely that some selective import exists.
-  Traces to GA, GB, GD, GH, GC, GI, GK; units
-  `ambiguous_foreign_headers_grounding_is_located_error`,
+- **REQ-1 (policy, R1).** At the single-candidate grounding arm, once the
+  sole foreign candidate has survived the ordering in REQ-2, a bare
+  ctor/destructure call in module `m` fires the located ambiguity error
+  **unless** one of the four exemptions holds (own header; ≤1 reachable
+  header **and** the sole candidate's declaring module itself reachable;
+  multi-candidate arm; matching explicit resolution resolved through any hub
+  chain) — exemption 4 compares against the sole candidate's **declaring**
+  module (R2), never its instantiating module, and never the raw,
+  un-walked selective-import target. Traces to GA, GB, GD, GH, GC, GI, GJ,
+  GK, GL, GM; units `ambiguous_foreign_headers_grounding_is_located_error`,
   `single_foreign_header_grounding_still_borrows`, `own_header_still_grounded_first`,
   `reachable_header_count_excludes_unimported_declaring_modules`,
   `matching_selective_import_exempts_the_ambiguity_check`,
-  `mismatched_selective_import_does_not_exempt_the_ambiguity_check`.
-- **REQ-2 (layer, R2).** The check lives at the `terms.rs:1507-1509` grounding
-  fall-through, reading header provenance from `ctx.generics().structs` and the
-  caller's import closure from `ctx.modules` (`ModuleInfo.imports`/`.selective`).
-  No edit to `select_overload`, `tier_pick`, env build (`check.rs:586`), or the
-  matcher (`find_bound_impl`/`match_impl_target`). When `ctx.modules` is
-  `None`, the check never fires. Traces to REQ-7 guardrails; unit
-  `own_header_still_grounded_first`.
+  `mismatched_selective_import_does_not_exempt_the_ambiguity_check`,
+  `hub_reexported_selective_import_resolves_through_origin_walk`,
+  `unreachable_declaring_module_of_the_sole_candidate_is_still_an_error`.
+- **REQ-2 (layer and ordering, R2).** The check lives at the
+  `terms.rs:1507-1509` grounding fall-through (semantic anchor), but only
+  fires once the candidate has survived, in order, the
+  `owning_module == caller_module` check (`:1504`) and the candidate-identity
+  check (`generated_word_entry` + `key`/`symbol` match, `:1531-1537`) — the
+  implementing phase restructures the function's control flow so a
+  headerless caller reaches the candidate-identity check before this new
+  arm, rather than exiting at `:1507-1509` before ever reaching it; the
+  `:1492-1497` "the order is free" comment is updated to match. Reads header
+  provenance from `ctx.generics().structs` (using `GenericStructDecl.module`
+  as the **declaring** module, never `struct_instantiation_of`'s
+  *instantiating*-module component) and the caller's import set from
+  `ctx.modules` (`ModuleInfo.imports`/`.selective`); exemption 4's match
+  resolves the raw selective target through a hub-chain walk
+  (`walk_type_export_origin`-equivalent, `driver.rs:407`) before comparing.
+  No edit to `select_overload`, `tier_pick`, env build (`check.rs:586`), or
+  the matcher (`find_bound_impl`/`match_impl_target`). When `ctx.modules` is
+  `None`, the check never fires. Traces to REQ-7 guardrails; units
+  `own_header_still_grounded_first`,
+  `hub_reexported_selective_import_resolves_through_origin_walk`.
 - **REQ-3 (diagnostic, R3/R5).** A new located message naming surface name,
-  declaring modules, and call site, with the two-remedy note; the existing
-  2-candidate `no_overload_matches_error` text is byte-unchanged. Traces to GA,
-  GB, GC, GK; unit `ambiguous_header_error_names_declaring_modules`.
-- **REQ-4 (compat pins).** GD/GE/GF/GG/GH/GJ byte-identical to today; GC
-  byte-identical; P5i2 tier-2 selective-import pinning untouched (not
-  re-errored). Traces to GC/GD/GE/GF/GG/GH/GJ.
+  the relevant declaring module(s), and call site (or, when the sole
+  candidate's declaring module has no caller-side qualifier at all, the
+  structural phrasing R2 describes — GM), with the two-part remedy note; the
+  existing 2-candidate `no_overload_matches_error` text is byte-unchanged.
+  Traces to GA, GB, GC, GK, GM; unit
+  `ambiguous_header_error_names_declaring_modules`.
+- **REQ-4 (compat pins).** GD/GE/GF/GG/GH/GI/GJ/GL byte-identical to today;
+  GC byte-identical; P5i2 tier-2 selective-import pinning untouched (not
+  re-errored). Traces to GC/GD/GE/GF/GG/GH/GI/GJ/GL.
 - **REQ-5 (determinism and naming, R4).** GA/GB/GK error **identically**
   (byte-exact) regardless of which module is the eager minter and regardless
   of import order — declaring modules are named by the caller's own import
@@ -273,16 +414,21 @@ Contract, byte-exact wording deferred to the golden:
   only), R-NFR2 (matcher untouched), R-NFR3 (no ratio assertions on the new
   goldens). Diagnostics are behaviour: only the NEW message is new; no
   existing diagnostic text churns.
-- **REQ-8 (roadmap + growth + gate).** The roadmap's S9 entry's Exit clause
-  (`docs/roadmap/P7b-higher-kinded-types.md`, its trailing "Residual: ...
-  future work" sentence) updated to state the shape is closed by P7b.S10; a
-  new S10 entry in current-design prose (no history narration), recording that
-  S10 is implemented **in parallel with P7b.S6** (maintainer ruling,
-  2026-09-05; both branch from base `a9eca84`) rather than strictly before or
-  after it, with the landing rule: if S6's own probes demand a check-stage
-  grounding change in `terms.rs`, or the two slices' changes interact at merge
-  time, S10's checker change lands first and S6 rebases onto it. Growth
-  signals (R6) re-run on every touched file at phase exit. Final full gate ×2.
+- **REQ-8 (roadmap + growth + gate).** The roadmap's S9 entry has **two**
+  stale sentences that both go false after S10 lands —
+  (`docs/roadmap/P7b-higher-kinded-types.md:241-244`) the dispatch-mechanism
+  sentence ("A third-module bare caller ... dispatches deterministically on
+  the single instantiation minted into the shared whole-program env") and
+  (`:244-247`) the trailing "Residual: ... future work" sentence — **both**
+  are updated (not merely the Residual sentence) to state the shape is
+  closed by P7b.S10; a new S10 entry in current-design prose (no history
+  narration), recording that S10 is implemented **in parallel with P7b.S6**
+  (maintainer ruling, 2026-09-05; both branch from base `a9eca84`) rather
+  than strictly before or after it, with the landing rule: if S6's own
+  probes demand a check-stage grounding change in `terms.rs`, or the two
+  slices' changes interact at merge time, S10's checker change lands first
+  and S6 rebases onto it. Growth signals (R6) re-run on every touched file
+  at phase exit. Final full gate ×2.
 
 ## Goldens
 
@@ -300,10 +446,12 @@ byte-exact text once the implementing phase measures the rendered output
 | GE | `single_reachable_header_with_selective_import_still_resolves` | prints `1`, exit 0 — **unchanged**. Only module `a` exists in this fixture at all — exemption 2 (≤1 reachable header) fires; the selective import is present but inert, not the reason it stays legal (renamed from the original `selective_type_import_bare_ctor_pins_exporters_impl`, which overclaimed a pinning mechanism this fixture never exercises — no second header exists to pin against) | `p5g2-selective-type` |
 | GF | `single_reachable_header_with_qualified_signature_still_resolves` | prints `1`, exit 0 — **unchanged**, same reasoning as GE (no second header exists; the qualified signature is inert; renamed from `qualified_type_spelling_bare_ctor_pins_exporters_impl`) | `p7c3-qualified-type` |
 | GG | `unimported_foreign_type_annotation_is_still_an_error` | `error: unknown type \`Widget\` at line 3, col 9`, exit 1 — **unchanged** (type-position rule; S10 governs term-position only) | `p4-c-annotates` |
-| GH | `unimported_declaring_module_does_not_count_toward_ambiguity` | prints `7`, exit 0 — **unchanged, both before and after**. Two headers exist program-wide (`lib`, `z`); `app` imports only `lib`; only one header is reachable from `app`, so exemption 2 fires even though a second header exists elsewhere in the closure — the fixture that justifies reachability-scoping the count (R1) rather than a program-wide one | `overfire` |
-| GI | `matching_selective_import_of_the_sole_minter_still_resolves` | prints `1`, exit 0 — **unchanged, both before and after**. Two reachable headers (`a`, `b`); only `a` mints; `c` selectively imports `a`'s `Widget`, matching the sole candidate's owning module — exemption 4 fires | `sel1` |
+| GH | `unimported_declaring_module_does_not_count_toward_ambiguity` | prints `7`, exit 0 — **unchanged, both before and after**. Two headers exist program-wide (`lib`, `z`); `app` imports only `lib`; only one header is reachable from `app`, so exemption 2 fires even though a second header exists elsewhere, program-wide — the fixture that justifies reachability-scoping the count (R1) rather than a program-wide one | `overfire` |
+| GI | `matching_selective_import_of_the_sole_minter_still_resolves` | prints `1`, exit 0 — **unchanged, both before and after**. Two reachable headers (`a`, `b`); only `a` mints; `c` selectively imports `a`'s `Widget`, matching the sole candidate's declaring module — exemption 4 fires | `sel1` |
 | GJ | `selective_import_pins_the_named_exporter_when_both_mint` | prints `1`, exit 0 — **unchanged, both before and after**. Both `a` and `b` mint (multi-candidate arm); existing S5 tier-2 pinning selects `a` — exemption 3, untouched by S10 | `p5i2-selective-one-of-two` |
-| GK | `mismatched_selective_import_is_still_a_located_error` | before: silently prints `2`, exit 0 (`c` selectively imports `a`'s `Widget`, but `b` is the sole eager minter — the caller's own selection is silently overridden) → after: the **same** located error as GA (naming modules `a`/`b`), exit 1 — exemption 4 does not apply since the selected module does not match the sole actual candidate's owning module. Built during the pre-implementation review round specifically to probe exemption 4's soundness; without the match requirement this case would stay silently wrong | `p9-mismatched-selective` (new fixture, see paper-tests) |
+| GK | `mismatched_selective_import_is_still_a_located_error` | before: silently prints `2`, exit 0 (`c` selectively imports `a`'s `Widget`, but `b` is the sole eager minter — the caller's own selection is silently overridden) → after: the **same** located error as GA (naming modules `a`/`b`), exit 1 — exemption 4 does not apply since the selected module does not match the sole actual candidate's declaring module. Built during the pre-implementation review round specifically to probe exemption 4's soundness; without the match requirement this case would stay silently wrong. Curable (unlike a naive reading might suggest) — see R5's two-part remedy 2 and `rem2sig` | `p9-mismatched-selective` (new fixture, see paper-tests) |
+| GL | `hub_reexported_selective_import_still_resolves` | prints `1`, exit 0 — **unchanged, both before and after**. `h` re-exports `a`'s `Widget` (`import: self::a | Widget | ; export: Widget ;`, no header of its own); `c` selectively imports `Widget` from `h`, plus plain imports of `a` and `b`; only `a` mints. `c`'s raw `ModuleInfo.selective` value for `Widget` is `h`, not `a` — exemption 4 fires only because the match is resolved through `h`'s re-export chain to `a` first (R2); built during the round-2 review specifically to probe this gap | `hub` (new fixture, see paper-tests) |
+| GM | `unreachable_minter_bare_call_is_a_located_error` | before: silently prints `9` (`z`'s impl), exit 0 (`app` imports only `lib`, which declares its own `Widget` header but never instantiates `Widget[i64]`; the sole existing instantiation belongs to `z`, a module `app` never imports at all) → after: a located ambiguity error — exemption 2's tightened form requires the sole candidate's declaring module to itself be reachable, which fails here (`z` is unreachable) even though only one header (`lib`'s) is reachable; `app` has no qualifier for `z` at all, so the message names it structurally rather than fabricating a name (R2/R3, the `drop`-diagnostic precedent). Built during the round-2 review specifically to probe this gap | `under` (new fixture, see paper-tests) |
 
 ## Units (beside the changed code)
 
@@ -323,12 +471,25 @@ byte-exact text once the implementing phase measures the rendered output
   declared by a module absent from the caller's own `imports`/`selective` maps
   does not count toward the ≥2 threshold (GH's mechanism at unit level).
 - `matching_selective_import_exempts_the_ambiguity_check` — the caller's
-  `selective` map names exactly the sole candidate's owning module ⇒
-  exemption 4 fires, no error (GI's mechanism at unit level).
+  `selective` map, resolved through any hub chain, names exactly the sole
+  candidate's **declaring** module ⇒ exemption 4 fires, no error (GI's
+  mechanism at unit level).
 - `mismatched_selective_import_does_not_exempt_the_ambiguity_check` — the
-  caller's `selective` map names a *different* reachable module than the sole
-  candidate's owning module ⇒ exemption 4 does **not** fire, the error still
-  raises (GK's mechanism at unit level — the soundness-critical case).
+  caller's `selective` map, resolved through any hub chain, names a
+  *different* reachable module than the sole candidate's declaring module ⇒
+  exemption 4 does **not** fire, the error still raises (GK's mechanism at
+  unit level — the soundness-critical case).
+- `hub_reexported_selective_import_resolves_through_origin_walk` — the
+  caller's raw `selective` value names a re-exporting hub with no header of
+  its own; the match test resolves through the hub's own re-export chain to
+  the true declaring module before comparing ⇒ exemption 4 still fires, no
+  error (GL's mechanism at unit level).
+- `unreachable_declaring_module_of_the_sole_candidate_is_still_an_error` —
+  at most one same-named header is reachable, but the sole env candidate's
+  declaring module is a *different*, unreachable module ⇒ exemption 2 does
+  **not** fire (both halves are required), the error still raises, named
+  structurally when the caller has no qualifier for that module at all
+  (GM's mechanism at unit level).
 
 ## Guardrails (carried from S9, verbatim in intent)
 
@@ -394,50 +555,69 @@ are fixed by S10 (the policy may not assume "export the word over the type").
 
 **Changes.**
 
-- Implement R1/R2/R3/R4/R5 at the single-candidate grounding fall-through in
-  `src/check/terms.rs` (`bare_generated_word_own_module_grounding`,
-  `1507-1509`): when the caller has no own header, the one env candidate is
-  foreign, and `ctx.generics().structs` holds ≥2 same-named headers from ≥2
-  distinct modules *reachable through the caller's own `ModuleInfo.imports`/
-  `.selective`* (none the caller's), emit the new located ambiguity error
-  unless exemption 4 (a matching explicit resolution) applies. No edit to
-  `select_overload`, `tier_pick`, env build, or the matcher.
+- Restructure `bare_generated_word_own_module_grounding` (`src/check/terms.rs`)
+  so a headerless caller survives the candidate-identity check
+  (`generated_word_entry` + `key`/`symbol` match, currently `:1531-1537`)
+  before the new check runs — not the `:1507-1509` fall-through directly,
+  which today exits before ever reaching that check (REQ-2). Update the
+  `:1492-1497` "the order is free" comment to match.
+- Implement R1/R3/R4/R5 at that (restructured) single-candidate arm: once the
+  candidate has survived `:1504` (foreign) and the candidate-identity check,
+  emit the new located ambiguity error unless one of the four exemptions
+  holds — in particular, exemption 2 requires *both* ≤1 reachable header
+  *and* the sole candidate's declaring module (`guard.structs[gi].module`,
+  never `struct_instantiation_of`'s instantiating-module component) itself
+  reachable, and exemption 4 resolves the raw `ModuleInfo.selective` target
+  through any hub re-export chain (`walk_type_export_origin`-equivalent,
+  `driver.rs:407`) before comparing against that same declaring module. No
+  edit to `select_overload`, `tier_pick`, env build, or the matcher.
 - Retire or rewrite S9's `third_module_bare_caller_dispatches_the_single_shared_env_instantiation`
   golden (`tests/phase7b_slice9.rs`) — REQ-6 is explicit that this one S9
   golden inverts (it currently pins the exact silent outputs GA/GB replace
   with an error); every other S9 golden stays green and byte-unchanged.
 
-**Goldens.** GA, GB, GK (new located error, byte-exact, deterministic across
-import orders + minter placement + the mismatched-selective-import case) +
-regression pins GC, GD, GE, GF, GG, GH, GJ — all in `tests/phase7b_slice10.rs`.
+**Goldens.** GA, GB, GK, GM (new located error, byte-exact, deterministic
+across import orders + minter placement + the mismatched-selective-import
+and unreachable-minter cases) + regression pins GC, GD, GE, GF, GG, GH, GI,
+GJ, GL — all in `tests/phase7b_slice10.rs`.
 
 **Units.** `ambiguous_foreign_headers_grounding_is_located_error`,
 `single_foreign_header_grounding_still_borrows`, `own_header_still_grounded_first`,
 `ambiguous_header_error_names_declaring_modules`,
 `reachable_header_count_excludes_unimported_declaring_modules`,
 `matching_selective_import_exempts_the_ambiguity_check`,
-`mismatched_selective_import_does_not_exempt_the_ambiguity_check` (beside the
-changed `terms.rs` code).
+`mismatched_selective_import_does_not_exempt_the_ambiguity_check`,
+`hub_reexported_selective_import_resolves_through_origin_walk`,
+`unreachable_declaring_module_of_the_sole_candidate_is_still_an_error` (beside
+the changed `terms.rs` code).
 
-**Exit.** GA/GB/GK error byte-exact and deterministic (both import orders,
-both minter placements, the mismatched-selective-import case); GC/GD/GE/GF/GG/GH/GJ
-byte-identical to today; S9's G4 golden retired/rewritten, every other S9
-golden + #10 + S5 tier-1 green; new error text pinned; full gate green
-(3175+N / 0, less S9's one retired test if replaced rather than rewritten).
-Growth signals noted on `terms.rs` (deferred to Phase 2's formal re-check).
+**Exit.** GA/GB/GK/GM error byte-exact and deterministic where applicable
+(both import orders, both minter placements, the mismatched-selective-import
+and unreachable-minter cases); GC/GD/GE/GF/GG/GH/GI/GJ/GL byte-identical to
+today; S9's G4 golden retired/rewritten, every other S9 golden + #10 + S5
+tier-1 green; new error text pinned; full gate green (3175+N / 0, less S9's
+one retired test if replaced rather than rewritten). Growth signals noted on
+`terms.rs` (deferred to Phase 2's formal re-check).
 
 **Notes.** Measure-then-pin: pin whatever the formatter renders for the new
 message; the R5 draft is the contract, the golden is the bytes. R-NFR1: no IR
 edit — if the check needs one, stop and escalate. Exemption 4's match test
 (R1) is the soundness-critical piece of this phase — do not implement it as a
-bare "selective import present" check; GK's golden exists specifically to
-catch that regression.
+bare "selective import present" check (GK), and do not compare against the
+raw, un-walked selective target (GL); exemption 2's declaring-module-reachable
+half is equally soundness-critical (GM). Guard ordering (REQ-2) is not
+optional either — emitting at the `:1507-1509` fall-through without first
+restructuring past the candidate-identity check would newly reject the
+"ordinary user word" shape `:1531-1537` protects.
 
 ### Phase 2 — roadmap + growth re-check + final gate (difficulty: standard)
 
-**Changes.** Update the roadmap S9 entry's Exit clause
-(`docs/roadmap/P7b-higher-kinded-types.md`) — its trailing "Residual: ...
-future work" sentence — to state the shape is **closed by P7b.S10**; add a new
+**Changes.** Update **both** stale sentences in the roadmap's S9 entry
+(`docs/roadmap/P7b-higher-kinded-types.md`): the dispatch-mechanism sentence
+(`:241-244`, "A third-module bare caller ... dispatches deterministically on
+the single instantiation minted into the shared whole-program env") and the
+trailing "Residual: ... future work" sentence (`:244-247`) — both now false,
+both updated to state the shape is **closed by P7b.S10**; add a new
 **P7b.S10** entry in current-design prose (no history narration, per
 feedback), pointing at this spec and recording the S10 ∥ S6 parallel
 sequencing and landing rule (REQ-8). No code change.
@@ -465,8 +645,9 @@ outcome recorded; final full gate ×2 green.
       "difficulty": "standard",
       "requirements": ["REQ-1", "REQ-2", "REQ-3", "REQ-4", "REQ-5", "REQ-6", "REQ-7"],
       "changes": [
-        "Implement R1/R2/R3/R4/R5 at the single-candidate grounding fall-through in src/check/terms.rs (bare_generated_word_own_module_grounding, 1507-1509 region): headerless caller + one foreign env candidate + >=2 same-named headers from >=2 distinct modules reachable through the caller's own ModuleInfo.imports/.selective (none the caller's) => new located ambiguity error, unless exemption 4 (a matching explicit resolution via ModuleInfo.selective) applies",
-        "Read header provenance from ctx.generics().structs; read the caller's import closure from ctx.modules (ModuleInfo.imports/.selective); no edit to select_overload, tier_pick, env build (check.rs:586), or the matcher (find_bound_impl / match_impl_target)",
+        "Restructure bare_generated_word_own_module_grounding (src/check/terms.rs) so a headerless caller survives the candidate-identity check (generated_word_entry + key/symbol match, currently 1531-1537) before the new check runs, not the 1507-1509 fall-through directly; update the 1492-1497 'the order is free' comment to match",
+        "Implement R1/R3/R4/R5 at that restructured arm: headerless caller + one foreign env candidate (post 1504 + candidate-identity survival) => new located ambiguity error unless one of four exemptions holds; exemption 2 requires both <=1 reachable header AND the sole candidate's declaring module (GenericStructDecl.module, not struct_instantiation_of's instantiating-module component) itself reachable; exemption 4 resolves the raw ModuleInfo.selective target through any hub re-export chain (walk_type_export_origin-equivalent, driver.rs:407) before comparing against that same declaring module",
+        "Read header provenance from ctx.generics().structs; read the caller's import set from ctx.modules (ModuleInfo.imports/.selective); no edit to select_overload, tier_pick, env build (check.rs:586), or the matcher (find_bound_impl / match_impl_target)",
         "Retire or rewrite S9's third_module_bare_caller_dispatches_the_single_shared_env_instantiation golden (tests/phase7b_slice9.rs), which currently pins the exact silent outputs GA/GB replace with an error"
       ],
       "goldens": [
@@ -480,7 +661,9 @@ outcome recorded; final full gate ×2 green.
         "unimported_declaring_module_does_not_count_toward_ambiguity",
         "matching_selective_import_of_the_sole_minter_still_resolves",
         "selective_import_pins_the_named_exporter_when_both_mint",
-        "mismatched_selective_import_is_still_a_located_error"
+        "mismatched_selective_import_is_still_a_located_error",
+        "hub_reexported_selective_import_still_resolves",
+        "unreachable_minter_bare_call_is_a_located_error"
       ],
       "units": [
         "ambiguous_foreign_headers_grounding_is_located_error",
@@ -489,9 +672,11 @@ outcome recorded; final full gate ×2 green.
         "ambiguous_header_error_names_declaring_modules",
         "reachable_header_count_excludes_unimported_declaring_modules",
         "matching_selective_import_exempts_the_ambiguity_check",
-        "mismatched_selective_import_does_not_exempt_the_ambiguity_check"
+        "mismatched_selective_import_does_not_exempt_the_ambiguity_check",
+        "hub_reexported_selective_import_resolves_through_origin_walk",
+        "unreachable_declaring_module_of_the_sole_candidate_is_still_an_error"
       ],
-      "exit": "GA/GB/GK error byte-exact and deterministic across both import orders, both minter placements, and the mismatched-selective-import case; GC/GD/GE/GF/GG/GH/GJ byte-identical to today; S9's G4 golden retired/rewritten, every other S9 golden (G1/G1a-f/G2/G2r/G3) + #10 + S5 tier-1 green; new error text pinned (measure-then-pin); full gate green."
+      "exit": "GA/GB/GK/GM error byte-exact and deterministic where applicable (both import orders, both minter placements, the mismatched-selective-import and unreachable-minter cases); GC/GD/GE/GF/GG/GH/GI/GJ/GL byte-identical to today; S9's G4 golden retired/rewritten, every other S9 golden (G1/G1a-f/G2/G2r/G3) + #10 + S5 tier-1 green; new error text pinned (measure-then-pin); full gate green."
     },
     {
       "id": 2,
@@ -499,7 +684,7 @@ outcome recorded; final full gate ×2 green.
       "difficulty": "standard",
       "requirements": ["REQ-8"],
       "changes": [
-        "Update the roadmap S9 entry's Exit clause (its trailing Residual sentence) in docs/roadmap/P7b-higher-kinded-types.md to state the shape is closed by P7b.S10",
+        "Update BOTH stale sentences in the roadmap S9 entry in docs/roadmap/P7b-higher-kinded-types.md: the dispatch-mechanism sentence (:241-244, 'A third-module bare caller ... dispatches deterministically on the single instantiation minted into the shared whole-program env') and the trailing Residual sentence (:244-247) -- both to state the shape is closed by P7b.S10",
         "Add a new P7b.S10 roadmap entry in current-design prose (no history narration), pointing at this spec and recording the S10-parallel-with-S6 sequencing and landing rule"
       ],
       "goldens": [],
@@ -514,10 +699,10 @@ outcome recorded; final full gate ×2 green.
 
 | REQ | Phase | Goldens / units |
 | --- | --- | --- |
-| REQ-1 policy | 1 | GA, GB, GD, GH, GC, GI, GK; ambiguous/single/own/reachable/matching/mismatched units |
-| REQ-2 layer | 1 | own_header_still_grounded_first |
-| REQ-3 diagnostic | 1 | GA, GB, GC, GK; ambiguous_header_error_names_declaring_modules |
-| REQ-4 compat pins | 1 | GC, GD, GE, GF, GG, GH, GJ |
+| REQ-1 policy | 1 | GA, GB, GD, GH, GC, GI, GJ, GK, GL, GM; ambiguous/single/own/reachable/matching/mismatched/hub/unreachable units |
+| REQ-2 layer + ordering | 1 | own_header_still_grounded_first, hub_reexported_selective_import_resolves_through_origin_walk |
+| REQ-3 diagnostic | 1 | GA, GB, GC, GK, GM; ambiguous_header_error_names_declaring_modules |
+| REQ-4 compat pins | 1 | GC, GD, GE, GF, GG, GH, GI, GJ, GL |
 | REQ-5 determinism + naming | 1 | GA, GB, GK |
 | REQ-6 S9 goldens (one inverts) | 1 | S9's G4 retired/rewritten; G1/G1a-f, G2, G2r, G3, #10, S5 tier-1 untouched |
 | REQ-7 guardrails | 1 | (R-NFR1/2/3 across all Phase-1 goldens) |

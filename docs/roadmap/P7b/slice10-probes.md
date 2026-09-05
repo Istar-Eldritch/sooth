@@ -985,3 +985,113 @@ branch from base `a9eca84`), not strictly before or after. Landing rule: if
 S6's own probes demand a check-stage grounding change in `terms.rs`, or the
 two slices' changes interact at merge time, S10's checker change lands first
 and S6 rebases onto it. Recorded in the spec's REQ-8 and the brief's OQ-2.
+
+## Corrections appendix — round-2 review (2026-09-05)
+
+A second review round over the round-1-corrected spec suite (commit
+`e9b60d8`) returned fix verdict partial/BLOCK: every round-1 finding
+resolved, but the revision itself introduced one P0 and five P1s, all
+measured against fresh fixtures. This appendix records what changed; the
+probe log and the round-1 appendix above stay verbatim.
+
+**P0 — exemption 4's match test was wired to the wrong datum, two facets.**
+(a) `struct_instantiation_of`'s second component (`owning_module`) is the
+candidate's *instantiating* module (`ast.rs:2598`'s `Generic::module` doc
+comment: "the third component of `struct_keys`... captured at the naming
+site"), not its *declaring* module (`guard.structs[gi].module`,
+`GenericStructDecl.module`) — the round-1 spec's R2 conflated the two. Every
+existing golden's candidate happens to be instantiated inside its own
+declaring module, so no golden's outcome changed; the distinction is
+correctness-critical for GL below, where they differ. (b) **Hub over-fire**,
+measured (`/tmp/s10rev/hub`, now paper-tests' GL): `h.sth` re-exports `a`'s
+`Widget` (`import: self::a | Widget | ; export: Widget ;`, no header of its
+own); `c.sth` selectively imports `Widget` from `h`, plus plain imports of
+`a` and `b` — builds, prints `1`, exit 0 today. `c`'s raw
+`ModuleInfo.selective` value for `Widget` is `h` (the import target), not
+`a` (the declaring module) — comparing the raw value directly against the
+candidate's declaring module would mismatch (`h` ≠ `a`) and wrongly error a
+correctly-resolving program. Fix: resolve the selective target through the
+same hop-walk the checker already runs for a type reference in an effect
+signature (`resolve_type_export_origins`/`walk_type_export_origin`,
+`src/driver.rs:364`/`:407`) before comparing. GL pins the fixed behaviour
+(unchanged, `1`, exit 0, both before and after).
+
+**P1 — exemption 2 kept a silent mis-dispatch when the sole candidate's
+owner is unreachable.** Measured (`/tmp/s10rev/under`, now paper-tests' GM):
+`lib` and `z` both declare their own `Widget` header; only `z` ever eagerly
+mints; `app` imports only `lib`, declares no header of its own, and
+bare-calls `Widget size` — prints `9` (`z`'s impl), exit 0, even though `app`
+never imports `z` in any form. Under the round-1 exemption 2
+("≤1 reachable header", full stop), this stayed silently exempt — exactly
+the defect class S10 exists to close, reappearing through the header-*count*
+check alone not covering "is the *actual* candidate's module one the caller
+can see at all". Fix: exemption 2 additionally requires the sole candidate's
+declaring module to itself be reachable from `m`; when it is not (as here),
+the rule fires regardless of the reachable-header count. Re-measured GD, GH,
+GI unaffected by the tightening (their sole candidate's declaring module was
+already reachable in every case); GM is the new regression pin. `app` has no
+qualifier for `z` at all (never imported, not even via a wildcard), so the
+message names it structurally — the same fallback the existing
+`drop`-visibility diagnostic already uses for exactly this gap
+(`word_families.rs:1319-1340`'s qualifier lookup and its `None` arm).
+
+**P1 — guard ordering was unspecified.** Round-1's R2 cited the
+`terms.rs:1507-1509` fall-through as the emission site, but that fall-through
+returns `Ok(None)` immediately — *before* the candidate-identity check
+(`generated_word_entry` + `key`/`symbol` match, `:1531-1537`) ever runs, since
+that check today sits gated behind an own header being found. Emitting
+directly at `:1507-1509` would newly reject the "ordinary user word whose
+output happens to be another module's instantiation" shape `:1531-1537`
+exists to protect. Fix: the new check fires only after the candidate survives
+both `:1504` and `:1531-1537`; the implementing phase restructures the
+function's control flow accordingly and updates the `:1492-1497` "the order
+is free" comment, which no longer holds once an arm can return `Err(...)`.
+
+**P1 — REQ-8 missed a second stale roadmap sentence.**
+`docs/roadmap/P7b-higher-kinded-types.md:241-244` (the dispatch-mechanism
+sentence, "A third-module bare caller ... dispatches deterministically on
+the single instantiation minted into the shared whole-program env") is
+distinct from the trailing Residual sentence (`:244-247`) and also goes false
+once S10 lands. Fix: REQ-8, Phase-2's changes, and the JSON now name both
+sentences explicitly.
+
+**P1 — GI was missing from several acceptance-criteria enumerations.** GI
+(`sel1`, the only positive exemption-4 witness in round 1) was present in
+the goldens table and JSON `goldens[]` but absent from REQ-4, the REQ-4
+phase-map row, the Phase-1 goldens/exit prose, the JSON Phase-1 exit text,
+and two enumerations in the brief. Fixed everywhere goldens are enumerated,
+alongside the new GL and GM.
+
+**P1 — remedy 2 was a dead end in GA's own shape.** Applying "selectively
+import the module whose Widget you want" to GA's fixture is exactly GK: `c`
+selects `a`, `b` mints, still errors. Measured cure
+(`/tmp/s10rev/rem2sig`): `c` selectively imports `a`'s `Widget` (as GK does)
+**and** additionally writes `: mk ( i64 -- Widget[i64] ) Widget ;`, calling
+`mk` instead of constructing `Widget` bare inline — builds, prints `1`, exit
+0. `mk`'s own signature spells `Widget[i64]` explicitly, making `c` itself
+the *instantiating* module for that construction, so `owning_module ==
+caller_module` short-circuits at `:1504` before any borrow or ambiguity
+check runs — `c`'s selective import of `a`'s `Widget` is what lets the bare,
+unqualified signature reference resolve to `a`'s header at all. R5's remedy
+2 is now a two-part cure: selective import alone cures only when the
+selected module is the sole minter (or tier-2-pinned at the multi-candidate
+arm); otherwise, additionally spelling the type in an own-signature
+intermediate word cures by sidestepping the borrow entirely.
+
+**P2 — miscited precedent.** `declarations.rs:969` (a different helper's doc
+comment, `selective_source_phrase`) was cited for "its wildcard-imported
+module" — the actual site is `declarations.rs:989`
+(`selective_not_exported_error`'s `None` arm). Corrected throughout.
+
+**P2 — "import closure" used in two conflicting senses.** The operative,
+one-hop predicate (the caller's own `imports`/`selective` maps) and the
+program-wide, whole-file-closure sense were both called "the caller's own
+import closure" in places, despite meaning different things (and despite
+`engine.rs:1130`'s own `ctx.modules` field doc comment also saying "the
+import closure's per-module data" for the one-hop sense — the source's own
+usage isn't wrong, but reusing the same word for the *other*, program-wide
+sense within this spec's own prose was the ambiguity). Renamed the one-hop
+predicate's every occurrence to "the caller's own import set (its own
+imports and selective imports, one hop)"; the two remaining program-wide
+mentions (GH's rationale, in the spec and the paper-tests) now read
+"elsewhere, program-wide" instead of "elsewhere in the closure".
