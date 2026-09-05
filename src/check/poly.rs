@@ -1394,6 +1394,35 @@ fn unify_member_operand(
             // structurally; binding one is out of this slice's scope.
             dl == fl && unify_member_operand(de, fe, bindings)
         }
+        // P7b.S6 Phase 2 (R2.b, M3): a declared quotation parameter against
+        // a fully-concrete operand -- the operand's effect is folded into a
+        // `QuotEffect` (`quotation_type`'s doc), so the found side arrives
+        // `Concrete`, not `Quotation`, and never reaches the arm above. Undo
+        // the fold: reconstruct the operand's own input/output rows as
+        // `Concrete` `PolyType`s and unify them structurally against
+        // `dins`/`douts`, exactly as the `Quotation`/`Quotation` arm does.
+        // `Type::OwningQuotation` never matches here -- a member's declared
+        // quotation param can only be spelled plain or `~` (inline), never
+        // "owning" (`raw_to_poly_type`'s fold never produces it either), so
+        // an owning operand is a flavour mismatch like any other.
+        (PolyType::Quotation(dins, douts, dinline, _, _), PolyType::Concrete(found_ty)) => {
+            let (eff, found_inline) = match found_ty {
+                Type::Quotation(eff) => (eff, false),
+                Type::InlineQuotation(eff) => (eff, true),
+                _ => return false,
+            };
+            *dinline == found_inline
+                && dins.len() == eff.inputs.len()
+                && douts.len() == eff.outputs.len()
+                && dins
+                    .iter()
+                    .zip(&eff.inputs)
+                    .all(|(d, f)| unify_member_operand(d, &PolyType::Concrete(*f), bindings))
+                && douts
+                    .iter()
+                    .zip(&eff.outputs)
+                    .all(|(d, f)| unify_member_operand(d, &PolyType::Concrete(*f), bindings))
+        }
         _ => declared == found,
     }
 }
@@ -16723,6 +16752,71 @@ mod tests {
             err,
             "error: `len` is not permitted on a reference in `f` (line 1)"
         );
+    }
+    #[test]
+    fn unify_member_operand_bridges_a_concrete_quotation_and_binds_var() {
+        // P7b.S6 Phase 2 (R2.b): a declared member-space `[ 'T -- 'U ]`
+        // against a caller's fully-folded `Concrete(Type::Quotation([i64 --
+        // i64]))` bridges through the new arm and binds `'T`/`'U` to `i64`
+        // each -- the shape `bump`'s forwarded concrete-effect parameter
+        // takes at `map`'s call site.
+        let declared = PolyType::Quotation(
+            vec![PolyType::Var(1)],
+            vec![PolyType::Var(2)],
+            false,
+            None,
+            None,
+        );
+        let found =
+            PolyType::Concrete(crate::ast::quotation_type(vec![Type::I64], vec![Type::I64]));
+        let mut bindings = Vec::new();
+        assert!(unify_member_operand(&declared, &found, &mut bindings));
+        assert!(bindings.contains(&(1, PolyType::Concrete(Type::I64))));
+        assert!(bindings.contains(&(2, PolyType::Concrete(Type::I64))));
+    }
+    #[test]
+    fn unify_member_operand_rejects_an_arity_mismatched_concrete_quotation() {
+        // A declared one-input/one-output quotation against a found
+        // zero-input/one-output one is a row-arity mismatch, not a bind.
+        let declared = PolyType::Quotation(
+            vec![PolyType::Var(1)],
+            vec![PolyType::Var(2)],
+            false,
+            None,
+            None,
+        );
+        let found = PolyType::Concrete(crate::ast::quotation_type(Vec::new(), vec![Type::I64]));
+        let mut bindings = Vec::new();
+        assert!(!unify_member_operand(&declared, &found, &mut bindings));
+    }
+    #[test]
+    fn unify_member_operand_rejects_a_quotation_flavour_mismatch() {
+        // A declared `~` (inline) quotation against a found plain
+        // `Concrete(Type::Quotation)` is a flavour mismatch; so is a found
+        // `Concrete(Type::OwningQuotation)` against either declared flavour,
+        // since a member's declared quotation param can only ever be spelled
+        // plain or `~`, never "owning".
+        let declared_inline =
+            PolyType::Quotation(vec![PolyType::Var(1)], Vec::new(), true, None, None);
+        let found_plain =
+            PolyType::Concrete(crate::ast::quotation_type(vec![Type::I64], Vec::new()));
+        assert!(!unify_member_operand(
+            &declared_inline,
+            &found_plain,
+            &mut Vec::new()
+        ));
+
+        let declared_plain =
+            PolyType::Quotation(vec![PolyType::Var(1)], Vec::new(), false, None, None);
+        let found_owning = PolyType::Concrete(crate::ast::owning_quotation_type(
+            vec![Type::I64],
+            Vec::new(),
+        ));
+        assert!(!unify_member_operand(
+            &declared_plain,
+            &found_owning,
+            &mut Vec::new()
+        ));
     }
     #[test]
     fn quotation_effect_unifies_and_binds_variable() {
