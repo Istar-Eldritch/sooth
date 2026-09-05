@@ -10750,6 +10750,13 @@ pub(super) fn apply_subst(
         // substituting the application's arguments through the
         // constructor's declared parameters, and delegating to the same
         // instantiator the `Generic` arm above mints through.
+        //
+        // P7b.S7 (REQ-3): the two `sig.ty_var_names[*head as usize]`
+        // indexings below are safe by construction, never bounds-checked --
+        // an `App`'s `head` id is always allocated within the same
+        // `PolySig`'s own variable space it is matched against here
+        // (`apply_subst` is always called with the enclosing word's own
+        // `sig`), so `head` can never point outside `ty_var_names`.
         PolyType::App { head, args } => {
             let ctor = subst.ty_of(*head).ok_or_else(|| {
                 poly_unbound_output_ty_error(

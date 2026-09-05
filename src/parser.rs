@@ -372,10 +372,12 @@ fn invalid_c_symbol_error(symbol: &str, span: Span) -> String {
 ///   application's arity is validated against the target ctor at grounding
 ///   time (S2-7), not here (the target is unknown at member parse). An App
 ///   headed by a member *local* has no dispatch story this slice.
-/// - `Quotation` -- supported iff its rows are App-free (and each row is
-///   itself a supported shape): an `App` inside a member quotation row is a
-///   located fence (S2-15.d, F10 -- declarations represent it, but `call`
-///   cannot see through one; a later slice's extension).
+/// - `Quotation` -- supported iff each row is itself a supported shape
+///   (P7b.S7 REQ-1: a row-nested `App` is no longer fenced unconditionally --
+///   an App headed by the trait's own variable now recurses through this
+///   same predicate and is admitted like any other trait-var-headed App; an
+///   App headed by a member local still fails the recursive check below and
+///   stays rejected).
 fn member_shape_is_supported(t: &PolyType) -> bool {
     match t {
         PolyType::Concrete(_) | PolyType::Var(_) => true,
@@ -385,12 +387,13 @@ fn member_shape_is_supported(t: &PolyType) -> bool {
         // P7b.S2 (S2-3): the HKT dispatchable shape -- only the trait's own
         // variable may head an application in a member signature.
         PolyType::App { head, .. } => *head == 0,
-        // P7b.S2 (S2-3): a declared quotation parameter whose rows stay
-        // App-free (and shape-supported) is representable; anything else in
-        // a row goes through the same predicate recursively.
+        // P7b.S2 (S2-3), narrowed P7b.S7 (REQ-1): a declared quotation
+        // parameter is representable as long as every row element is itself
+        // a supported shape -- including an App headed by the trait's own
+        // variable (the App arm above), not only App-free rows anymore.
+        // Anything else in a row goes through the same predicate recursively.
         PolyType::Quotation(ins, outs, ..) => {
             ins.iter().chain(outs).all(member_shape_is_supported)
-                && !member_quotation_row_mentions_app(t)
         }
         // P7.S3n (R3): the new owned-cell shape is deliberately *not* added
         // to the supported set -- `ground_member_type` has no cell arm, so a
@@ -408,12 +411,14 @@ fn member_shape_is_supported(t: &PolyType) -> bool {
     }
 }
 
-/// P7b.S2 (S2-15.d/F10): whether a type application is reachable anywhere in
-/// `t` -- including `t` itself in plain position (the top-level `App` arm).
-/// `App` *in a plain slot* is the supported dispatchable shape (S2-3); an App
-/// *inside a quotation row* is the fenced one -- the rows are exactly what
-/// `call` will pop and run, and it cannot see through a type-level
-/// application. The S2-15.d dispatch therefore pairs this predicate with
+/// P7b.S2 (S2-15.d/F10), narrowed P7b.S7 (REQ-1): whether a type application
+/// is reachable anywhere in `t` -- including `t` itself in plain position (the
+/// top-level `App` arm). `App` *in a plain slot* is the supported dispatchable
+/// shape (S2-3); an App *inside a quotation row* headed by the trait's own
+/// variable is now admitted too (`member_shape_is_supported`'s Quotation arm
+/// recurses into the App arm), so only a row-nested App headed by anything
+/// else -- a member local -- still fences here. The S2-15.d dispatch
+/// therefore pairs this predicate with
 /// `poly_type_app_head` (which finds a plain-position App head but does not
 /// recurse into rows): `mentions_app && app_head.is_none()` isolates the
 /// row-nested case. Recurses through nested shapes so an App buried under an
@@ -440,18 +445,20 @@ fn member_quotation_row_mentions_app(t: &PolyType) -> bool {
 /// variable-length array) -- see `member_shape_is_supported`.
 fn unsupported_trait_member_shape_error(trait_name: &str, span: Span) -> String {
     format!(
-        "error: trait `{trait_name}`'s member at line {}, col {} has an unsupported signature shape (only concrete, array, and reference types over the trait's type variable -- plus a trait-var-headed application or an App-free quotation -- are supported)",
+        "error: trait `{trait_name}`'s member at line {}, col {} has an unsupported signature shape (only concrete, array, and reference types over the trait's type variable -- plus a trait-var-headed application, in a plain slot or a quotation row -- are supported)",
         span.line, span.col
     )
 }
 
-/// P7b.S2 (S2-15.d, F10): a type application inside a member quotation row.
-/// Declarations *represent* the shape, but body-level `call` cannot see
-/// through it -- fenced at the member grammar rather than left to fail at
-/// the (later-slice) consumer.
+/// P7b.S2 (S2-15.d, F10); message corrected P7b.S7 (REQ-1/REQ-3): a type
+/// application inside a member quotation row headed by anything but the
+/// trait's own type variable. P7b.S7 lifts the row fence for the
+/// trait-var-headed case (dissolved by `ground_member_poly`'s existing App
+/// arm before body-check ever runs), so only a member-local-headed App in a
+/// row still fails here.
 fn app_in_member_quotation_row_error(trait_name: &str, span: Span) -> String {
     format!(
-        "error: trait `{trait_name}`'s member at line {}, col {} applies a type variable inside a quotation row (`'F[...]` may not appear inside `[ ... ]`)\n  note: a type application is supported only in a plain signature slot; keep quotation rows App-free",
+        "error: trait `{trait_name}`'s member at line {}, col {} applies a type variable inside a quotation row (`'G[...]` may not appear inside `[ ... ]` unless `'G` is the trait's own type variable)\n  note: an App inside a quotation row must be headed by the trait's own type variable",
         span.line, span.col
     )
 }
@@ -3951,20 +3958,24 @@ impl<'t> Parser<'t> {
         let sig = builder.finish(inputs, outputs);
         for t in sig.inputs.iter().chain(&sig.outputs) {
             if !member_shape_is_supported(t) {
-                // P7b.S2 (S2-15.d): an App inside a member quotation row is
-                // its own fence (F10 -- declarations represent it, but
-                // `call` cannot see through one), distinct from the general
-                // unsupported-shape rejection. The fence fires only when the
-                // unsupported shape actually routes through a quotation: a
-                // plain-slot App (bare or under array/`&`) headed by a member
-                // local is unsupported too, but no quotation is involved, so
-                // it takes the generic message instead. The row-mentions
-                // predicate answers "an App exists somewhere" -- true for a
-                // plain App too, the S2-3-supported dispatchable shape -- so
-                // the row-nested case is isolated by the *second* conjunct:
-                // `poly_type_app_head` finds a plain-position App head but
-                // does not recurse into quotation rows, so `None` here means
-                // the App is row-nested.
+                // P7b.S2 (S2-15.d), narrowed P7b.S7 (REQ-1): an App inside a
+                // member quotation row headed by anything but the trait's own
+                // variable is its own fence (F10 -- declarations represent
+                // it, but `call` cannot see through one), distinct from the
+                // general unsupported-shape rejection; a row-nested App
+                // headed by the trait's own variable no longer reaches this
+                // branch at all (`member_shape_is_supported` now admits it).
+                // The fence fires only when the unsupported shape actually
+                // routes through a quotation: a plain-slot App (bare or under
+                // array/`&`) headed by a member local is unsupported too, but
+                // no quotation is involved, so it takes the generic message
+                // instead. The row-mentions predicate answers "an App exists
+                // somewhere" -- true for a plain App too, the S2-3-supported
+                // dispatchable shape -- so the row-nested case is isolated by
+                // the *second* conjunct: `poly_type_app_head` finds a
+                // plain-position App head but does not recurse into
+                // quotation rows, so `None` here means the App is
+                // row-nested.
                 if member_quotation_row_mentions_app(t) && poly_type_app_head(t).is_none() {
                     return Err(app_in_member_quotation_row_error(trait_name, member_span));
                 }
@@ -11719,7 +11730,9 @@ mod tests {
     fn parse_trait_decl_member_with_an_app_free_quotation_shape_parses() {
         // P7b.S2 (S2-3): a declared quotation parameter whose rows are
         // App-free is now a supported member shape (the S2-3 Quotation arm);
-        // only an App *inside* a row is fenced (S2-15.d, tested below).
+        // an App inside a row is also admitted when headed by the trait's
+        // own variable, narrowed P7b.S7 (REQ-1) -- a member-local-headed App
+        // in a row is still fenced (S2-15.d, tested below).
         // (A fully-concrete quotation folds to `PolyType::Concrete` at parse
         // time; a variable-bearing one stays `PolyType::Quotation`.)
         let module = parse_src("trait: Apply['T] : run ( &'T [ 'T -- 'T ] -- ) ; ;").unwrap();
@@ -11861,19 +11874,65 @@ mod tests {
     }
 
     #[test]
-    fn parse_trait_decl_app_inside_member_quotation_row_is_fenced() {
-        // P7b.S2 (S2-15.d, F10): an App inside a member quotation row is a
-        // located fence of its own -- declarations *represent* the shape,
-        // but `call` cannot see through one.
-        let err =
-            parse_src("trait: Functor['F: * -> *] : map ( 'F['T] [ 'F['T] -- 'U ] -- 'F['U] ) ; ;")
-                .unwrap_err();
+    fn parse_trait_decl_app_inside_member_quotation_row_is_admitted() {
+        // P7b.S7 (REQ-1), superseding the S2-15.d fence this pinned: an App
+        // inside a member quotation row, headed by the trait's own type
+        // variable, now parses to a `TraitDecl` with the effect intact --
+        // the existing per-element recursion in `member_shape_is_supported`
+        // already gates the head, so no extra logic is needed to admit it.
+        let module =
+            parse_src("trait: Functor['F: * -> *] : map ( 'F['T] [ 'F['T] -- 'U ] -- 'F['U] ) ; ;");
+        assert!(module.is_ok(), "{module:?}");
+    }
+
+    #[test]
+    fn member_quotation_row_admits_app_expected() {
+        // P7b.S7 (REQ-1): the unit beside the changed code -- a row-nested
+        // App headed by the trait's own variable (id 0) is now a supported
+        // shape, including buried under an array element or a nested
+        // quotation; a member-local-headed App in a row is still rejected.
+        let trait_var_headed = PolyType::Quotation(
+            vec![PolyType::App {
+                head: 0,
+                args: vec![PolyType::Var(1)],
+            }],
+            vec![],
+            false,
+            None,
+            None,
+        );
+        let local_headed = PolyType::Quotation(
+            vec![PolyType::App {
+                head: 1,
+                args: vec![PolyType::Var(2)],
+            }],
+            vec![],
+            false,
+            None,
+            None,
+        );
+        assert!(member_shape_is_supported(&trait_var_headed));
+        assert!(!member_shape_is_supported(&local_headed));
+    }
+
+    #[test]
+    fn kind_incorrect_app_in_quotation_row_is_located_error() {
+        // P7b.S7 (REQ-4/OQ-3): lifting the row fence is not a blanket
+        // admit -- a bare post-App-head-mention variable used as a plain
+        // type inside the now-admitted row still produces a located error,
+        // via the pre-existing `arrow_var_used_bare_error`
+        // (`mark_ty_star`), which fires while `raw_to_poly_type` builds the
+        // signature, strictly before `member_shape_is_supported`'s row-shape
+        // gate ever runs -- independent of, and unaffected by, REQ-1's lift.
+        let err = parse_src("trait: Bad['F: * -> *] : m ( 'F['T] [ 'T -- 'F ] -- 'F['T] ) ; ;")
+            .unwrap_err();
         assert!(
-            err.contains("applies a type variable inside a quotation row"),
+            err.contains("is used as a plain type but has kind `* -> *`"),
             "{err}"
         );
-        assert!(err.contains("line 1, col 30"), "{err}");
-        assert!(err.contains("keep quotation rows App-free"), "{err}");
+        // Located at the bare misuse site inside the row (line 1, col 45),
+        // not just named -- pins REQ-4's "located, not silent".
+        assert!(err.contains("line 1, col 45"), "{err}");
     }
 
     #[test]
@@ -11911,10 +11970,12 @@ mod tests {
     }
 
     #[test]
-    fn member_shape_is_supported_quotation_arm_fences_app_rows() {
-        // P7b.S2 (S2-3, Quotation arm): App-free rows are supported; an App
-        // anywhere inside a row -- including buried under an array element
-        // or a nested quotation -- is fenced.
+    fn member_shape_is_supported_quotation_arm_admits_trait_var_headed_app_rows() {
+        // P7b.S7 (REQ-1), superseding this test's S2-era name and
+        // assertions: a trait-var-headed (id 0) App anywhere inside a row --
+        // including buried under an array element or a nested quotation --
+        // is now supported; a member-local-headed App in a row stays
+        // unsupported (the `App` arm's own `head == 0` gate, unchanged).
         let app_free = PolyType::Quotation(
             vec![PolyType::Var(0)],
             vec![PolyType::Var(1)],
@@ -11961,10 +12022,25 @@ mod tests {
             None,
             None,
         );
+        let local_headed_app_in_row = PolyType::Quotation(
+            vec![PolyType::App {
+                head: 1,
+                args: vec![PolyType::Var(2)],
+            }],
+            vec![],
+            false,
+            None,
+            None,
+        );
         assert!(member_shape_is_supported(&app_free));
-        assert!(!member_shape_is_supported(&app_in_row));
-        assert!(!member_shape_is_supported(&app_under_array_in_row));
-        assert!(!member_shape_is_supported(&app_in_nested_row));
+        assert!(member_shape_is_supported(&app_in_row));
+        assert!(member_shape_is_supported(&app_under_array_in_row));
+        assert!(member_shape_is_supported(&app_in_nested_row));
+        assert!(!member_shape_is_supported(&local_headed_app_in_row));
+        // `member_quotation_row_mentions_app` itself is head-blind (its
+        // contract is "an App exists anywhere", unchanged by REQ-1) -- it is
+        // `member_shape_is_supported`'s own recursion that now discriminates
+        // by head.
         assert!(member_quotation_row_mentions_app(&app_in_row));
         assert!(!member_quotation_row_mentions_app(&app_free));
     }

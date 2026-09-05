@@ -2128,9 +2128,12 @@ pub(crate) fn member_ty_mentions_app(t: &PolyType) -> bool {
 /// signature grounded against a concrete target has no mono representation
 /// (the application's arguments are member locals), so the desugar rejects
 /// the shape here -- located, at parse time -- before
-/// `ground_member_type` could see it. Quotation rows never carry an App
-/// (S2-15.d fences those at declaration), but the scan is total anyway:
-/// any App anywhere in a slot takes the fence.
+/// `ground_member_type` could see it. P7b.S7 lifts the declaration-time
+/// row fence for a *generic* target (a row-nested App headed by the trait's
+/// own variable now parses and grounds via `ground_member_poly` instead),
+/// but a concrete target is unaffected -- the fence here stays unconditional
+/// and the scan is total: any App anywhere in a slot, row-nested or not,
+/// still takes this fence when the target is concrete.
 pub fn fence_member_app_against_concrete_target(
     inputs: &[PolyType],
     outputs: &[PolyType],

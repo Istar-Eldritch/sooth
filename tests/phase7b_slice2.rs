@@ -194,14 +194,15 @@ trait: Functor['F: * -> *] :
     assert!(err.contains("line 2, col 16"), "{err}");
 }
 
-/// Golden (error #4, S2-15.d, F10): a type application inside a member
-/// quotation row is a located fence of its own -- the declaration grammar
-/// *represents* the shape, but body-level `call` cannot see through it, so
-/// the member gate rejects it instead of leaving it to fail at a (later
-/// slice's) consumer. A plain-slot App (`'F['T]` as the first input here)
-/// stays legal, pinning that the fence is row-scoped, not signature-scoped.
+/// Golden, superseded (S2-15.d -> P7b.S7 REQ-1): a type application inside a
+/// member quotation row headed by the *trait's own* type variable no longer
+/// fences the declaration -- `ground_member_poly`'s existing `App` arm
+/// dissolves it into a plain `Generic` before any body-check runs, so there
+/// is no dispatch-time gap to leave unadmitted. This was
+/// `app_inside_member_quotation_row_is_fenced`; inverted in place per
+/// S7's own requirement to retire, not just delete, the S2-era pin.
 #[test]
-fn app_inside_member_quotation_row_is_fenced() {
+fn app_inside_member_quotation_row_is_admitted() {
     let src = "\
 trait: Functor['F: * -> *] :
   map ( 'F['T] [ 'F['T] -- 'U ] -- 'F['U] ) ;
@@ -209,16 +210,7 @@ trait: Functor['F: * -> *] :
 : main ( -- ) ;
 ";
     let (_t, entry) = single_file("s2-15d-app-in-row", src);
-    let err = build_error(&entry);
-    assert!(
-        err.contains("applies a type variable inside a quotation row"),
-        "{err}"
-    );
-    // Located at the member (`map`, line 3), with the row-scoped advice.
-    // (The parser-voice errors say "at line L, col C"; the check-side
-    // S2-15.a report parenthesizes -- each keeps its stage's house style.)
-    assert!(err.contains("line 3, col 3"), "{err}");
-    assert!(err.contains("keep quotation rows App-free"), "{err}");
+    build_ok(&entry);
 }
 
 // ---- Phase 2: target and member-word construction + the F14 arm fix ----

@@ -52,9 +52,11 @@ The load-bearing decisions, and why:
   not a type identity, so `&'F['T]` dispatches like S1's `&'F` did — dropping that would
   have broken every S1-style ref-member trait (`Shw`).
 - **Member shape gate with two real arms.** An `App` is supported iff the trait's own
-  variable heads it; a `Quotation` is supported iff its rows are App-free. An App inside
-  a member quotation row is fenced (F10: declarations *represent* it, but body-level
-  `call` cannot see through it — Monad.bind is a later slice's extension).
+  variable heads it; a `Quotation` is supported iff each of its rows is itself a
+  supported shape. **Superseded by P7b.S7:** a row-nested App headed by the trait's own
+  variable is now admitted (dissolved by `ground_member_poly`'s existing App arm before
+  body-check ever runs — no new grounding code needed); only a row-nested App headed by
+  a member local still fences (F10 narrows accordingly).
 - **The member word's `PolySig` union** (S2-5) is the structural heart: target/header
   variables keep their ids and order (so every `where`-bound survives the merge — the
   bounds table is cloned keyed by target ids), member locals append after them and are
