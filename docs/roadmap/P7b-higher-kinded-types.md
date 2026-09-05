@@ -239,12 +239,44 @@ placement-illegal (must-live-in-declaring-module rule), and two such impls surfa
 a duplicate error only because `check_impl_decls`' module-blind duplicate scan runs
 before the placement loop — that scan's own coverage is the same-module duplicate
 shape, not a deliberate cross-module ambiguity check. A third-module bare caller with
-no own header separately dispatches deterministically on the single instantiation
-minted into the shared whole-program env (see [slice9-spec](./P7b/slice9-spec.md)
-Phase 4). Residual: two modules each instantiating a same-shaped type via a
-same-shaped `impl`, consumed by a third module with no header of its own, dispatches
-silently on the single shared-env instantiation; an export-ambiguity rule for this
-shape is future work.
+no own header is governed by **P7b.S10** (see [slice9-spec](./P7b/slice9-spec.md)
+Phase 4 for the shape's original determination): the dispatch on the single
+instantiation minted into the shared whole-program env that S9 left open is closed —
+the bare call is a located compile-time error unless an exemption holds, never a
+deterministic pick.
+
+**P7b.S10 — Header-level export ambiguity for the third-module bare caller.**
+Implemented in parallel with P7b.S6 (both branch from base `a9eca84`; maintainer
+ruling 260905). Landing rule: if S6's own probes demand a check-stage grounding
+change in `terms.rs`, or the two slices' changes interact at merge time, S10's
+checker change lands first and S6 rebases onto it. Closes S9's Residual: a bare
+generic-ctor or destructure call in a module declaring no same-named header of its
+own, whose single `env` candidate is a foreign eager mint, no longer silently
+dispatches on whichever module happened to spell the instantiation. The grounding
+fall-through (`foreign_single_candidate_grounding`, `src/check/terms.rs`) raises a
+located compile-time error unless an exemption holds: the caller's own header grounds
+first (S9's R1.1a); at most one same-named header is reachable **and** the sole
+candidate's declaring module is itself reachable, over the caller's own import set —
+`imports` ∪ `selective` targets, name-independent, extended through a generic-header
+export-origin walk that chases re-exporting hubs; the call reached the multi-candidate
+arm (S5's tier policy, untouched); or a *named* selective import — never a `*`
+wildcard desugar — hub-resolved to the sole candidate's declaring module.
+Reachability is scoped to the caller's own import set, never the whole-program
+closure; the check runs after the candidate-identity guard, so an ordinary user word
+returning another module's instantiation keeps its own resolution; and the exemptions
+compare against the header's *declaring* module (`GenericStructDecl.module`), never
+the instantiating one. Two located shapes: the ambiguity error (every reachable
+declaring module named by the caller's own import qualifier, lexicographically
+sorted; wildcard-bound modules phrased structurally) and the reach-failure error
+(sole candidate's declaring module unreachable, named structurally). See
+[slice10-spec](./P7b/slice10-spec.md) with its frozen
+[brief](./P7b/slice10-brief.md), [paper tests](./P7b/slice10-paper-tests.md), and
+[probes](./P7b/slice10-probes.md).
+**Exit:** GA-GP goldens (`tests/phase7b_slice10.rs`): the ambiguity and reach-failure
+errors byte-exact and deterministic across import order and minter placement; the
+existing 2-candidate error and every single-header, hub, and selective-import shape
+byte-identical; S9's G4 golden retired (GA/GB are its inverted replacements); 12
+units beside the changed `terms.rs` code.
 
 **Dogfood:** S6 — a program that `map`s and folds over `Option`, `Result`, and `List` through
 shared bounds, with the impls declared against the real lib types and output matching
