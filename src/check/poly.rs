@@ -2284,8 +2284,51 @@ pub(super) fn resolve_mono_member_call(
             viable.push((*tid, m, imp_idx));
         }
     }
+    // P7b.S6 Phase 4 (R4): a member with no dispatchable input (a nullary
+    // trait member such as `Monoid.empty`) can never win the loop above --
+    // `dispatchable_input_pos` returned `None` for every such candidate, so
+    // each was `continue`d. If exactly one candidate is of that shape and the
+    // call site supplies an explicit type argument, that argument is the only
+    // way to ground the trait's own type variable; ground it directly and run
+    // the same `find_bound_impl` the operand path uses.
+    if viable.is_empty() {
+        if let (Some(&ty), [(zero_tid, zero_m)]) = (
+            type_args.first(),
+            candidates
+                .iter()
+                .filter(|(_, m)| dispatchable_input_pos(&m.sig).is_none())
+                .copied()
+                .collect::<Vec<_>>()
+                .as_slice(),
+        ) {
+            let mut visited: Vec<(TraitId, Type)> = Vec::new();
+            if let Some((imp_idx, _)) = find_bound_impl(
+                *zero_tid,
+                ty,
+                None,
+                span,
+                ctx,
+                &poly.trait_resolve,
+                arrays,
+                cells,
+                refs,
+                &mut visited,
+            )? {
+                viable.push((*zero_tid, *zero_m, imp_idx));
+            }
+        }
+    }
     match viable.len() {
         0 => {
+            if type_args.is_empty()
+                && candidates
+                    .iter()
+                    .any(|(_, m)| dispatchable_input_pos(&m.sig).is_none())
+            {
+                return Err(mono_nullary_member_no_instantiation_error(
+                    ctx, span, member,
+                ));
+            }
             return Err(mono_member_no_dispatch_error(
                 ctx,
                 span,
@@ -2333,7 +2376,17 @@ pub(super) fn resolve_mono_member_call(
         // list (via `check_poly_call`'s θ seeding); the widened
         // `poly_call_takes_type_args` clause admits the spelling for member
         // names on its behalf.
-        if !type_args.is_empty() || !len_args.is_empty() {
+        //
+        // P7b.S6 Phase 4 (R4): narrow carve-out. A zero-dispatchable-input
+        // member (`dispatchable_input_pos` is `None`) has no operand to
+        // dispatch on at all, so an explicit type argument is the *only* way
+        // to reach this branch in the first place -- it is not "meaningless",
+        // it is load-bearing. `mono_concrete_member_call_with_explicit_type_args_is_error`
+        // pins `size ( 'F -- i64 )`, which has a dispatchable input, so this
+        // exception never touches it.
+        if (!type_args.is_empty() || !len_args.is_empty())
+            && dispatchable_input_pos(&member_decl.sig).is_some()
+        {
             return Err(no_type_arguments_error(
                 span,
                 name,
@@ -2482,6 +2535,19 @@ fn mono_member_no_dispatch_error(
         span.col,
         trait_names.join(", "),
         ops.join(" "),
+        name = ctx.rendered_word(),
+    )
+}
+
+/// P7b.S6 Phase 4 (R5): bare `empty`-shaped call from a mono body -- a
+/// zero-dispatchable-input member with no explicit type argument to ground
+/// its trait variable. Q1 rules out consuming-context inference for this
+/// slice, so this is a located error naming the remedy, not a lookahead.
+fn mono_nullary_member_no_instantiation_error(ctx: &Ctx, span: Span, member: &str) -> String {
+    format!(
+        "error: `{member}` in {name} (line {}, col {}) is a trait member with no operand to dispatch on\n  a monomorphic body cannot infer the trait's type here; write an explicit type argument, e.g. `{member}[i64]`",
+        span.line,
+        span.col,
         name = ctx.rendered_word(),
     )
 }
@@ -12266,6 +12332,77 @@ mod tests {
         assert!(
             err.contains("takes no type arguments"),
             "the collision restores the pre-widening rejection: {err}"
+        );
+    }
+
+    /// P7b.S6 Phase 4 (R4): `empty` is nullary -- `Monoid`'s own type
+    /// variable never appears in an input, so `dispatchable_input_pos`
+    /// returns `None` for every candidate and the ordinary operand-dispatch
+    /// loop never wins. An explicit `empty[i64]` grounds the trait variable
+    /// directly from the call site's type argument instead.
+    #[test]
+    fn mono_nullary_member_grounds_from_explicit_type_args() {
+        check_src(
+            "trait: Monoid['T] :\n\
+             empty ( -- 'T ) ;\n\
+             : combine ( 'T 'T -- 'T ) ;\n\
+             ;\n\
+             impl: Monoid for i64\n\
+               : empty 5 ;\n\
+               : combine add ;\n\
+             ;\n\
+             : main ( -- ) 7 empty[i64] combine drop ;\n",
+        )
+        .expect("empty[i64] grounds Monoid's 'T from the explicit type argument");
+    }
+
+    /// P7b.S6 Phase 4 (R5): Q1 rules out consuming-context inference for this
+    /// slice -- bare `empty` with no explicit instantiation is a located
+    /// error naming the `empty[i64]` remedy, not a lookahead and not a panic.
+    #[test]
+    fn bare_nullary_member_without_instantiation_is_located_error() {
+        let err = check_src(
+            "trait: Monoid['T] :\n\
+             empty ( -- 'T ) ;\n\
+             : combine ( 'T 'T -- 'T ) ;\n\
+             ;\n\
+             impl: Monoid for i64\n\
+               : empty 5 ;\n\
+               : combine add ;\n\
+             ;\n\
+             : main ( -- ) empty drop ;\n",
+        )
+        .expect_err("bare empty cannot ground Monoid's 'T from context");
+        assert!(err.contains("no operand to dispatch on"), "{err}");
+        assert!(
+            err.contains("empty[i64]"),
+            "the remedy names explicit instantiation: {err}"
+        );
+    }
+
+    /// P7b.S6 Phase 4 (R4) scope fence: an operand-carrying member (`size`
+    /// has a dispatchable input) never falls into the zero-dispatchable-input
+    /// branch, even when the call carries an explicit type argument and the
+    /// ordinary operand-dispatch loop finds no impl -- it still reports the
+    /// ordinary no-dispatch error rather than wrongly grounding on the type
+    /// argument and picking an unrelated impl.
+    #[test]
+    fn mono_operand_carrying_member_with_type_args_and_no_operand_match_is_no_dispatch_error() {
+        let err = check_src(
+            "type: Opt['T] | None | Some 'T ;\n\
+             type: P2 n i64 ;\n\
+             trait: Sizer['F] : size ( 'F -- i64 ) ; ;\n\
+             impl: Sizer for Opt[i64]\n\
+               : size drop 1 ;\n\
+             ;\n\
+             : main ( -- ) 3 P2 size[i64] drop ;\n",
+        )
+        .expect_err(
+            "P2 has no Sizer impl; the explicit i64 argument must not ground it via P2's operand",
+        );
+        assert!(
+            err.contains("no `impl:`"),
+            "the ordinary no-dispatch error, not a wrongly grounded dispatch: {err}"
         );
     }
 

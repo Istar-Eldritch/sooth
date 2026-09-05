@@ -241,3 +241,55 @@ fn list_self_reference_builds_across_the_core_import() {
     );
     assert_eq!(stdout, "");
 }
+
+/// Phase 4 (R4): `Monoid.empty` has no dispatchable input -- `'T` never
+/// appears in an input position, so a mono body's ordinary operand-dispatch
+/// loop can never win a candidate for it. An explicit `empty[i64]` grounds
+/// `'T` directly from the call site's type argument instead, dispatching to
+/// the `i64` impl (`empty` = 5) and feeding `combine` (`add`): `7 + 5 = 12`.
+#[test]
+fn nullary_trait_member_grounds_from_explicit_instantiation() {
+    let stdout = build_and_run(
+        "p4-nullary-explicit",
+        "\
+ trait: Monoid['T] :\n\
+   empty ( -- 'T ) ;\n\
+   : combine ( 'T 'T -- 'T ) ;\n\
+ ;\n\
+ impl: Monoid for i64\n\
+   : empty 5 ;\n\
+   : combine add ;\n\
+ ;\n\
+ : main ( -- ) 7 empty[i64] combine . ;\n",
+    );
+    assert_eq!(stdout, "12\n");
+}
+
+/// Phase 4 (R5): Q1 rules out consuming-context inference for this slice --
+/// bare `empty` (no explicit instantiation) in a mono body is a located
+/// error citing the `empty[i64]`-style remedy, not a panic and not a silent
+/// accept.
+#[test]
+fn bare_nullary_member_without_instantiation_is_located_error() {
+    let stderr = build_error(
+        "p4-nullary-bare",
+        "\
+ trait: Monoid['T] :\n\
+   empty ( -- 'T ) ;\n\
+   : combine ( 'T 'T -- 'T ) ;\n\
+ ;\n\
+ impl: Monoid for i64\n\
+   : empty 5 ;\n\
+   : combine add ;\n\
+ ;\n\
+ : main ( -- ) empty drop ;\n",
+    );
+    assert!(
+        stderr.contains("empty[i64]"),
+        "expected the explicit-instantiation remedy, got: {stderr}"
+    );
+    assert!(
+        !stderr.contains("panicked"),
+        "bare `empty` must not panic, got: {stderr}"
+    );
+}
