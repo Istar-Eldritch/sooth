@@ -361,13 +361,39 @@ reclassified.
   is already rejected before body-check). See the "Why" section's revised
   finding and REQ-5 for the full citation trail. Kept here only as a resolved
   record, not a live gate.
-- **OQ-2 (G5 / Applicative.ap — in-phase or deferred). Genuine user decision
-  — the only one left.** Should `ap` be attempted in-phase (REQ-2 + REQ-8) or
-  explicitly deferred if it does not ground for free? Default (taken):
-  attempt fence #2's lift in Phase 4; ship G5 only if it grounds under the
-  same mechanism, else record it as future work and close the slice on
-  `bind` alone. The roadmap permits either. **User: confirm whether `ap` is
-  worth a Phase-4 attempt or should be deferred outright.**
+- **OQ-2 (G5 / Applicative.ap — in-phase or deferred). RESOLVED, measured in
+  Phase 4: does not ground for free; deferred as future work.** Fence #2
+  (`app_arg_quotation_error`, `src/parser.rs:5213`) was lifted for
+  `parse_poly_app_arg` and `ap`'s declaration
+  (`ap ( 'F[ [ 'A -- 'B ] ] 'F['A] -- 'F['B] ) ;`) then parsed to a
+  `TraitDecl` with no other change. But declaring `impl: Applicative for
+  Option` (no call site needed) immediately hits a second, independent
+  fence: `reject_poly_quotation_anywhere`'s `Generic` arm
+  (`src/check/audits.rs:431` -- by audit time the trait variable `'F` has
+  been substituted to the dispatched constructor, so the node is a
+  `Generic`, not an `App`; the `App` arm at `:446` is never reached) rejects
+  a quotation nested inside a type application's argument list — exactly `ap`'s shape, since `'F[ [ 'A
+  -- 'B ] ]` is an `App` whose own `args` carry a `Quotation`. Measured
+  error: `` a quotation type `[ 'ctor0 -- 'B ]` cannot appear as a generic
+  type argument: a quotation is only legal as a direct parameter of a word
+  this slice, and a runtime quotation value is slice 7 ``. This is a
+  different mechanism from `bind`'s: `bind`'s quotation is a *direct*
+  parameter of the member word (`[ 'T -- 'F['U] ]` sits at the top level of
+  the effect, with the `App` only inside the row), never nested inside
+  another type's argument list; `ap`'s quotation is nested *inside* `'F`'s
+  own application, which `reject_poly_quotation_anywhere` treats the same as
+  any other generic-argument-carried quotation (e.g. `Box[['T -- 'T]]`,
+  already rejected pre-S7 — see `quotation_smuggled_as_generic_arg_is_rejected`,
+  `src/check/audits.rs:665`). Grounding `ap` would need new logic in that
+  audit (or an exemption for constructor-headed quotation arguments), which
+  is new grounding machinery beyond what Phase 2 verified for `bind` and
+  outside this slice's scope (brief: no new grounding code beyond the
+  already-shipped mechanism). **Decision: fence #2's lift is reverted**
+  (`parse_poly_app_arg` is byte-identical to pre-Phase-4 HEAD); `ap` ships
+  no golden and is recorded here as future work, gated on whichever slice
+  takes up `reject_poly_quotation_anywhere`'s constructor-of-quotation case.
+  REQ-2 is not satisfied; REQ-8's bonus is declined by measurement, per its
+  own gating clause.
 - **OQ-3 (G4 kind check) — RESOLVED, a lookup, not a decision.** Measured this
   pass: the kind-incorrectness check the original G4 fixture needs already
   exists and fires independently of, and earlier than, the row-shape gate.
@@ -626,7 +652,7 @@ recorded — split only if 2+ signals fire together; final full gate ×2 green.
 | REQ-6 dispatch + IR | 3 | G2, G3 |
 | REQ-7 regression pin | 3 | Reg |
 | REQ-11 QuotLit measurement | 3 | (measurement; unit only if gap is real) |
-| REQ-2 lift fence #2 | 4 | G5; poly_app_arg_admits_quotation_at_member_site |
-| REQ-8 Applicative.ap bonus | 4 | G5 |
+| REQ-2 lift fence #2 | 4 | Deferred, see OQ-2 -- does not ground for free; fence #2's lift reverted, no G5/unit shipped |
+| REQ-8 Applicative.ap bonus | 4 | Deferred, see OQ-2 -- bonus declined by measurement, no G5 shipped |
 | REQ-9 guardrails | 1-5 | (across all goldens) |
 | REQ-10 roadmap + growth + gate | 5 | (docs; final gate x2) |
