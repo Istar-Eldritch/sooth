@@ -1769,9 +1769,12 @@ fn foreign_single_candidate_grounding(
 
 /// P7b.S10 (R2): the generic-header twin of `driver.rs`'s
 /// `walk_type_export_origin` -- the same chase (follow an unqualified
-/// selective re-export, else the first import target that declares the name,
-/// until a module actually declaring it is found; `None` on a cycle or a
-/// dead end), but over the generic header registry rather than the concrete
+/// selective re-export, else the declaring import target whose qualifier
+/// key sorts lexicographically smallest -- keys are source text (the same
+/// strings the diagnostic renderer uses as display names), while module
+/// ids follow import-discovery order, so keying the single origin on ids
+/// would flip it with the hub's source import order; `None` on a cycle or
+/// a dead end), but over the generic header registry rather than the concrete
 /// `StructDecl`/`EnumDecl` scan, which never sees a generic `type:` header
 /// (`parser.rs` excludes it from that scan, and it lives in the generic
 /// registry instead). Structurally the same walk, not a call into that one
@@ -1794,10 +1797,22 @@ fn walk_generic_header_origin(
             return Some(current);
         }
         let info = &modules[current as usize];
-        current = *info
-            .selective
-            .get(name)
-            .or_else(|| info.imports.values().find(|&&dep| declarers.contains(&dep)))?;
+        current = info.selective.get(name).copied().or_else(|| {
+            // Several plain imports may declare the same header name; the
+            // single origin this walk yields must be deterministic. Module
+            // ids follow import-discovery order, so a smallest-id pick
+            // would flip with the hub's source import order; the qualifier
+            // *key* is source text -- the same strings the diagnostic
+            // renderer uses as display names -- so pick the declaring
+            // target whose qualifier sorts lexicographically smallest.
+            // Keys are unique, so the pick is total and HashMap iteration
+            // order never leaks in (both call sites above share this walk).
+            info.imports
+                .iter()
+                .filter(|(_, &target)| declarers.contains(&target))
+                .min_by_key(|(qualifier, _)| qualifier.as_str())
+                .map(|(_, &target)| target)
+        })?;
     }
 }
 
@@ -1887,17 +1902,17 @@ fn unreachable_declaring_module_error(
 }
 
 /// P7b.S10 (R4): join the collected module display names -- two with "and",
-/// three or more comma-separated with a final "and". The caller sorts them
-/// lexicographically before this runs.
+/// three or more with `, ` between items and a final `, and`. The caller
+/// sorts them lexicographically before this runs.
 fn join_module_display_names(named: &[String]) -> String {
     match named.len() {
         1 => named[0].clone(),
         2 => format!("{} and {}", named[0], named[1]),
         _ => format!(
-            "{},{and} {}",
-            named[..named.len() - 1].join(","),
+            "{}, {and} {}",
+            named[..named.len() - 1].join(", "),
             named[named.len() - 1],
-            and = " and",
+            and = "and",
         ),
     }
 }
@@ -3848,6 +3863,25 @@ mod tests {
         );
     }
 
+    /// Three same-named `Widget['T]` headers, declared in modules 4, 5, and
+    /// 6, and module 4's eager mint of `Widget[i64]` -- the 3+-reachable
+    /// shape no golden exercises (reviewer note carried forward from the
+    /// S10 review).
+    fn three_foreign_header_cell() -> (RefCell<GenericTypes>, Type) {
+        let mut generics = GenericTypes::with_bases(0, 0);
+        for module in [4u32, 5, 6] {
+            generics.structs.push(generic_struct_decl(
+                "Widget",
+                module,
+                &["'T"],
+                &[("v", PolyType::Var(0))],
+            ));
+        }
+        let mut scratch = ScratchRegs::default();
+        let borrowed = generics.instantiate_struct(0, &[Type::I64], &[], 4, scratch.regs());
+        (RefCell::new(generics), borrowed)
+    }
+
     /// R3/R4: the rendered ambiguity message contains the surface name, both
     /// declaring modules (lexicographically ordered), and the call site.
     #[test]
@@ -3870,6 +3904,24 @@ mod tests {
         assert!(
             err.contains("and `run`'s module declares no `Widget`"),
             "unexpected message: {err}"
+        );
+    }
+
+    /// R4's 3+-branch rendering, pinned byte-exact through the same harness:
+    /// three reachable declaring modules join with `, ` between items and a
+    /// final `, and` -- the spacing no golden exercises (reviewer note
+    /// carried forward from the S10 review).
+    #[test]
+    fn ambiguous_header_error_joins_three_declaring_modules_with_commas() {
+        let (cell, borrowed) = three_foreign_header_cell();
+        let only = widget_ctor_candidate(borrowed, 4);
+        let modules = module_views(module_view(&[("a", 4), ("b", 5), ("c", 6)], &[], &[]), 7);
+        let err = ground_in_module_3_view(&only, "Widget", &cell, &[], Some(&modules))
+            .expect_err("three reachable headers must not silently borrow the single mint");
+        assert_eq!(
+            err,
+            "error: `Widget` in `run` (line 4, col 1) is ambiguous: declared in modules `a`, `b`, and `c`, and `run`'s module declares no `Widget`\n  note: declare your own `Widget` header and impl, or selectively import the module whose `Widget` you want -- if that module does not itself instantiate `Widget[i64]`, also spell the type in your own word's signature (`import: self::a | Widget | ;` then `: mk ( i64 -- Widget[i64] ) Widget ;`)",
+            "the 3-module join must render `a`, `b`, and `c` byte-exact"
         );
     }
 

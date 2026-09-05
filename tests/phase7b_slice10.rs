@@ -248,7 +248,6 @@ fn single_declaring_header_bare_caller_still_resolves() {
         ": usesize ( Widget[i64] -- i64 ) size ;\n",
         "",
     );
-    write_widget_module(&t, "app.sth", "", "", "");
     // app.sth is not a Widget module here: write it directly.
     t.write(
         "app.sth",
@@ -575,6 +574,55 @@ fn hub_reexport_reachable_through_plain_import_still_resolves() {
         build_and_run(&entry),
         "1\n",
         "the walk-extension sees the header behind the hub: nothing to mis-dispatch to"
+    );
+}
+
+/// FIX-A2 (`s10nd`): a hub that plain-imports two same-name declarers must
+/// resolve a downstream bare call identically under both hub import orders.
+/// The origin walk's fallback picks the declaring import target whose
+/// qualifier key sorts lexicographically smallest -- keys are source text;
+/// module ids follow import-discovery order, so an id-keyed pick flipped
+/// the resolution with `h`'s import order (measured: exit 0 with
+/// `import: self::a ; import: self::b ;`, exit 1 with the reverse). GA
+/// pattern: `a` and `b` both declare `Widget`, `a` is the sole eager
+/// minter, `h` plain-imports both, `c` imports only `h` and bare-calls;
+/// the walk resolves `h` to `a` under both orders, so the call grounds
+/// and prints `1`.
+#[test]
+fn hub_two_declarer_imports_resolve_identically_under_both_import_orders() {
+    let mut outputs = Vec::new();
+    for (first, second) in [("a", "b"), ("b", "a")] {
+        let t = Tree::new(&format!("s10nd-{first}-{second}"));
+        write_manifest(&t);
+        write_sized_trait(&t);
+        write_widget_module(&t, "a.sth", "1", EAGER_MINTER_BODY, "export: run ;\n");
+        write_widget_module(&t, "b.sth", "2", BARE_RUN_BODY, "export: run ;\n");
+        t.write(
+            "h.sth",
+            &format!(
+                "import: intrinsics * ;\n\
+                 import: self::{first} ; import: self::{second} ;\n\
+                 : hrun ( i64 -- i64 ) a::run ;\n\
+                 export: hrun ;\n"
+            ),
+        );
+        t.write(
+            "c.sth",
+            "import: intrinsics * ; import: self::f * ;\n\
+             import: self::h ;\n\
+             : try ( i64 -- i64 ) Widget size ;\n\
+             export: try ;\n",
+        );
+        write_main_c(&t);
+        outputs.push(build_and_run(&t.0.join("main.sth")));
+    }
+    assert_eq!(
+        outputs[0], "1\n",
+        "the walk must resolve `h` to `a` (the sole minter, qualifier `a`)"
+    );
+    assert_eq!(
+        outputs[0], outputs[1],
+        "the hub's import order must not change the resolution"
     );
 }
 
