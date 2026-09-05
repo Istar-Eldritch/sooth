@@ -2922,6 +2922,74 @@ pub(super) fn poly_call_term(
     if name == "+!" {
         return Err(poly_unsupported_accessor_error(ctx, span, name));
     }
+    // P7b.S6 (R3/R7): the poly-body twin of `check_owned_cell_word`'s `^`/
+    // `^>` -- needed so a self-referencing generic constructor
+    // (`^List['T]`) can be built and walked from inside a poly body (a
+    // recursive `impl:` member over `List['T]`, M4's own exit criterion).
+    // `^|>`'s Copy-payload peek has no fixture needing it this slice and is
+    // left unrouted, same as `poly_reference_word`'s treatment of `&^`.
+    //
+    // Review fix (Phase 3, P2): no `consumed_place_conflict` check guards
+    // `^`'s consumption of `stack[n - 1]` below, unlike the mono path's `^`
+    // arm. This is not a gap: the poly checker has no stack-position
+    // provenance/liveness system over anonymous `PolySlot`s at all (see
+    // `PolyScope`'s `moves`/`borrows`, both keyed by local *name*, not stack
+    // position) -- `drop`, the plain consuming word right above this one,
+    // has no such check either. A value born from a live-borrowed local is
+    // already caught earlier, when that local is read by name
+    // (`scope.live_borrow_of` above in this function); by the time it is an
+    // anonymous stack slot, that gate has already run. Porting a
+    // stack-position check here alone, with no such system anywhere else
+    // in the poly checker, would be inconsistent rather than a fix.
+    if name == "^" {
+        let n = stack.len();
+        if n < 1 {
+            return Err(need(1, n));
+        }
+        if stack[n - 1].quot.is_some() {
+            return Err(poly_unsupported_accessor_error(ctx, span, name));
+        }
+        let payload = stack[n - 1].pt.clone();
+        // Review fix (P7b.S6 Phase 3, P0): the poly-side twin of
+        // `check_owned_cell_word`'s `contains_reference` guard -- without it
+        // a generic word taking `&'T` and calling `^` on it interns a
+        // reference-shaped cell that has no equivalent panic-free shape at
+        // lowering time (`word_families.rs`'s `^` assumes the checker never
+        // let a reference-carrying payload through).
+        if ctx.with_extended_type_slices(|structs, enums| {
+            contains_poly_reference(&payload, structs, enums, arrays)
+        }) {
+            return Err(poly_constructed_reference_error(
+                ctx,
+                span,
+                "the payload `^` would store",
+                &payload,
+                sig,
+            ));
+        }
+        stack.truncate(n - 1);
+        stack.push(PolySlot::new(PolyType::OwnedCell(Box::new(payload))));
+        return Ok(stack);
+    }
+    if name == "^>" {
+        let n = stack.len();
+        if n < 1 {
+            return Err(need(1, n));
+        }
+        let top = stack[n - 1].pt.clone();
+        let PolyType::OwnedCell(payload) = top else {
+            return Err(poly_rendered_type_mismatch_error(
+                ctx,
+                span,
+                name,
+                "^_",
+                &poly_type_str(&top, sig),
+            ));
+        };
+        stack.truncate(n - 1);
+        stack.push(PolySlot::new(*payload));
+        return Ok(stack);
+    }
     // The five core shuffles move `PolySlot` slots verbatim; `dup`/`over` gate
     // on `Copy` (a bare variable answers from its bound set, X7).
     match name {
@@ -5914,6 +5982,26 @@ fn poly_bind_construction_arg(
                 poly_bind_construction_arg(fa, oa, args, sig, ctx, span, name)?;
             }
             Ok(())
+        }
+        // P7b.S6 (M4/R3): the exact dual of `substitute_generic_variant_field`'s
+        // new `OwnedCell` arm -- `^List['T]`'s payload binds header
+        // variables from the operand's own `OwnedCell` payload, recursing
+        // one level in rather than grounding (grounding is `apply_subst`'s
+        // job, same rationale as the sibling function).
+        PolyType::OwnedCell(payload) => {
+            let mismatch = || {
+                poly_rendered_type_mismatch_error(
+                    ctx,
+                    span,
+                    name,
+                    &poly_type_str(field_pty, sig),
+                    &poly_type_str(operand, sig),
+                )
+            };
+            let PolyType::OwnedCell(op_payload) = operand else {
+                return Err(mismatch());
+            };
+            poly_bind_construction_arg(payload, op_payload, args, sig, ctx, span, name)
         }
         other => unreachable!("a generic `type:` field is never {other:?}"),
     }
@@ -10239,6 +10327,26 @@ pub(super) fn poly_app_len_domain_unsupported_error(
 /// `RefId` until its referent grounds, so neither can be rendered as a `Type`.
 /// The *found* side is rendered too, for the same reason: a poly-body operand
 /// (`&>`'s receiver) is a `PolyType` that may never ground to a `Type`.
+/// The poly-body twin of `constructed_reference_error` (`check.rs`): a
+/// construction site with no declaration for `check_no_stored_references` to
+/// have caught, reached from a generic body where the payload may still
+/// carry an unbound type variable, so it renders through `poly_type_str`
+/// rather than `Type`'s `Display`.
+pub(super) fn poly_constructed_reference_error(
+    ctx: &Ctx,
+    span: Span,
+    position: &str,
+    ty: &PolyType,
+    sig: &PolySig,
+) -> String {
+    format!(
+        "error: a reference cannot be stored{} (line {})\n  {position} has type `{}`\n  a `&T`/`&!T` borrows a local and may not outlive it, so it cannot be put anywhere that survives the borrow",
+        in_word(ctx),
+        span.line,
+        poly_type_str(ty, sig)
+    )
+}
+
 pub(super) fn poly_rendered_type_mismatch_error(
     ctx: &Ctx,
     span: Span,
@@ -14219,6 +14327,55 @@ mod tests {
         );
     }
 
+    /// P7b.S6 (M4/R3): the arm this phase adds -- `^List['T]`'s own shape,
+    /// binding a header variable through the constructed operand's own
+    /// `OwnedCell` payload rather than panicking on the previously-
+    /// `unreachable!` catch-all.
+    #[test]
+    fn poly_bind_construction_arg_owned_cell_binds_var_from_payload() {
+        let word = probe_word();
+        let ctx = probe_ctx(&word);
+        let sig = bare_sig();
+        let field_pty = PolyType::OwnedCell(Box::new(PolyType::Var(0)));
+        let operand = PolyType::OwnedCell(Box::new(PolyType::Concrete(Type::I64)));
+        let mut args: Vec<Option<PolyType>> = vec![None];
+        poly_bind_construction_arg(
+            &field_pty,
+            &operand,
+            &mut args,
+            &sig,
+            &ctx,
+            Span::default(),
+            "Cons",
+        )
+        .expect("an OwnedCell field over an OwnedCell operand binds");
+        assert_eq!(args[0], Some(PolyType::Concrete(Type::I64)));
+    }
+
+    /// The rejecting half: an operand that is not itself an `OwnedCell`
+    /// (a plain concrete value where the field declares `^'T`) is a type
+    /// mismatch, not a panic.
+    #[test]
+    fn poly_bind_construction_arg_owned_cell_operand_mismatch_is_error() {
+        let word = probe_word();
+        let ctx = probe_ctx(&word);
+        let sig = ref_sig();
+        let field_pty = PolyType::OwnedCell(Box::new(PolyType::Var(0)));
+        let operand = PolyType::Concrete(Type::I64);
+        let mut args: Vec<Option<PolyType>> = vec![None];
+        let err = poly_bind_construction_arg(
+            &field_pty,
+            &operand,
+            &mut args,
+            &sig,
+            &ctx,
+            Span::default(),
+            "Cons",
+        )
+        .unwrap_err();
+        assert!(err.contains("type mismatch"), "{err}");
+    }
+
     /// Slice 10a (R1): a fully-concrete `~` folds to `Concrete(InlineQuotation)`,
     /// which the routing predicate must recognize -- else the word is not a
     /// combinator, is lowered as an ordinary call, and reaches `ir_type_of`'s
@@ -14359,6 +14516,51 @@ mod tests {
             "{err}"
         );
     }
+    /// P7b.S6 (R3/R7): `^`/`^>` newly routed in a poly body -- `^` wraps a
+    /// generic self-reference, `^>` unwraps it back, the pair this phase's
+    /// `List['T]` recursion needs (`Cons> | v rest | ... rest ^> ... fold`).
+    #[test]
+    fn poly_body_owned_cell_wrap_and_unwrap_round_trips() {
+        check_src(
+            "import: intrinsics * ;\n\
+             : wrap_unwrap['T: Copy] ( 'T -- 'T ) ^ ^> ;\n\
+             : main ( -- ) 7 wrap_unwrap drop ;\n",
+        )
+        .expect("a poly-body `^`/`^>` round trip should type-check");
+    }
+
+    /// The rejecting half: `^>` on an operand that is not itself an
+    /// `OwnedCell` (here a bare type variable) is a located type mismatch,
+    /// not a panic and not a silent unknown-word fallthrough.
+    #[test]
+    fn poly_body_owned_cell_unwrap_of_non_cell_operand_is_error() {
+        let err = check_src(
+            "import: intrinsics * ;\n\
+             : bad_unwrap['T] ( 'T -- 'T ) ^> ;\n\
+             : main ( -- ) 7 bad_unwrap drop ;\n",
+        )
+        .unwrap_err();
+        assert!(err.contains("type mismatch"), "{err}");
+        assert!(err.contains("^>"), "{err}");
+    }
+
+    /// Review fix (P7b.S6 Phase 3, P0): a poly-body `^` over a reference-
+    /// typed payload is a located error, the poly-side twin of
+    /// `check_owned_cell_word`'s `contains_reference` rejection -- without
+    /// this guard the same shape reached `word_families.rs`'s lowering-time
+    /// panic ("^'s payload shape is interned by the checker") instead.
+    #[test]
+    fn poly_body_owned_cell_construction_rejects_reference_payload() {
+        let err = check_src(
+            "type: Pt x i64 y i64 ;\n\
+             : bad['T] ( &'T -- ) ^ ^> drop ;\n\
+             : main ( -- ) 1 2 Pt | p | &p bad ;\n",
+        )
+        .unwrap_err();
+        assert!(err.contains("a reference cannot be stored"), "{err}");
+        assert!(err.contains("the payload `^` would store"), "{err}");
+    }
+
     /// P7 slice 3f (R3): `call` on a genuine ground `Type::Quotation`
     /// parameter -- a real value with no interned body to splice -- honours the
     /// declared effect, popping its inputs and pushing its outputs.

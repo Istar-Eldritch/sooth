@@ -1,0 +1,4 @@
+type: List['T] | Nil | Cons 'T rest ^List['T] ;
+export: List ;
+export: Nil ;
+export: Cons ;

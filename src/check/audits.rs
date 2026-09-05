@@ -349,7 +349,7 @@ fn audit_poly_reference_free_signature(
 /// `audit_poly_input_quotation`), and this whole audit is skipped for a
 /// combinator above -- so a non-combinator word can never reach this arm
 /// with a `Quotation` at all, let alone one hiding a reference.
-fn contains_poly_reference(
+pub(super) fn contains_poly_reference(
     pt: &PolyType,
     structs: &[StructDecl],
     enums: &[EnumDecl],

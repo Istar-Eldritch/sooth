@@ -647,6 +647,11 @@ Q1 revision removed the lookahead tier that would have.)
 
 - **R3's struct twin** — reachable via `^Self['T]` in a generic struct field, or
   structurally unreachable. Closed by Phase 3, with the parse error if the latter.
+  **Verdict (Phase 3): reachable, already covered pre-existing this slice.**
+  `substitute_generic_field`'s `OwnedCell` arm (`src/ast.rs`) and the `Generic` arm's
+  re-entry into `instantiate_struct` (memo-before-substitute, R6) together terminate it;
+  see `instantiate_struct_pushes_memo_key_before_substituting_fields`, which already
+  builds `type: L['T] v 'T next ^L['T] ;`. No new code needed.
 - **R6a's `mconcat` forwarding** — the bound-parameter spelling forwards through
   `fold`'s HKT dispatch, or records its wall. Closed by Phase 5's golden.
 - **R6's `List` append** — a real linear merge over two spines. Closed by Phase 5's

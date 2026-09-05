@@ -919,6 +919,14 @@ impl GenericTypes {
                 let referent = self.substitute_generic_field(referent, args, lens, regs.reborrow());
                 intern_ref_type(regs.refs, referent, *mutable)
             }
+            // P7b.S6 Phase 3 verdict (R3's struct-twin open question): a
+            // `^Self['T]`-style self-reference through a struct field is
+            // reachable, not structurally blocked, and was already covered
+            // pre-existing this slice -- this arm recurses into the payload
+            // and the `Generic` arm below re-enters `instantiate_struct`,
+            // whose memo-before-substitute ordering (R6) is what terminates
+            // it. See `instantiate_struct_pushes_memo_key_before_substituting_
+            // fields`, which already builds `type: L['T] v 'T next ^L['T] ;`.
             PolyType::OwnedCell(payload) => {
                 let payload = self.substitute_generic_field(payload, args, lens, regs.reborrow());
                 intern_owned_cell_type(regs.cells, payload)
@@ -2687,12 +2695,15 @@ pub fn generic_variant_type(
 /// R4.2: the identical arm set to `poly_bind_construction_arg`
 /// (`src/check/poly.rs`), its dual -- construction binds header variables
 /// from operands, destructure applies them to fields -- which is required: a
-/// field shape one accepts and the other rejects is a defect. A generic enum
-/// *variant* field can only be `Var` or `Concrete` at HEAD (measured:
-/// `array['A 2]`, `Inner['A]`, `Cell2['A]`, `&'A` and `^'A` are all parser
-/// rejections for a variant field; generic *struct* fields admit a wider set,
-/// which is why `substitute_generic_field` carries it -- this function is
-/// called only on enum variant fields).
+/// field shape one accepts and the other rejects is a defect. P7b.S6 (M4/R3):
+/// the premise that a variant field is only ever `Var`/`Concrete`/`App` was
+/// false -- `^List['T]` (an `OwnedCell` wrapping a still-polymorphic
+/// `Generic`) is a parser-accepted variant field (the self-referencing
+/// `List['T] | Nil | Cons 'T rest ^List['T]` shape), so this now carries an
+/// `OwnedCell` arm too; `array['A N]`, `Inner['A]`, `&'A` remain parser
+/// rejections for a variant field. Generic *struct* fields admit a wider set
+/// still, which is why `substitute_generic_field` carries it -- this
+/// function is called only on enum variant fields.
 ///
 /// R4.3: takes no `MutRegistries` and interns nothing -- folding an
 /// all-`Concrete` result is `apply_subst`'s job at grounding time, which
@@ -2715,8 +2726,42 @@ pub fn substitute_generic_variant_field(field_pty: &PolyType, args: &[PolyType])
                 .map(|a| substitute_generic_variant_field(a, args))
                 .collect(),
         },
+        // P7b.S6 (M4/R3): `^List['T]` -- a self-referencing recursive enum,
+        // the wall this arm removes -- is exactly `OwnedCell(Generic { .. })`.
+        // Plain substitution, mirroring the `App` arm above: recurse into
+        // the cell's payload and re-wrap the `OwnedCell`, not `apply_subst`'s
+        // grounding (`substitute_generic_field`'s own `OwnedCell` arm does
+        // that for structs; this function interns nothing, per its own doc).
+        PolyType::OwnedCell(payload) => PolyType::OwnedCell(Box::new(
+            substitute_generic_variant_field(payload, args),
+        )),
+        // P7b.S6 (M4/R3): `^List['T]`'s own payload -- a *named* header
+        // reference (`List`, not an abstract `'F`) parses directly to
+        // `PolyType::Generic`, not `App` (the `App` arm above is only for an
+        // abstract application head). Substitute its own arguments
+        // positionally, symbolically, exactly as the `App` arm does one
+        // level up; `is_enum`/`idx`/`module` name a fixed header and pass
+        // through unchanged.
+        PolyType::Generic {
+            is_enum,
+            idx,
+            module,
+            args: gargs,
+            len_args,
+            name,
+        } => PolyType::Generic {
+            is_enum: *is_enum,
+            idx: *idx,
+            module: *module,
+            args: gargs
+                .iter()
+                .map(|a| substitute_generic_variant_field(a, args))
+                .collect(),
+            len_args: len_args.clone(),
+            name,
+        },
         other => unreachable!(
-            "a generic enum variant field is never {other:?}: `array['A N]`, `Inner['A]`, `&'A` and `^'A` are all parser rejections for a variant field"
+            "a generic enum variant field is never {other:?}: `array['A N]` and `&'A` are parser rejections for a variant field"
         ),
     }
 }
@@ -5181,6 +5226,44 @@ mod tests {
         let concrete_field =
             substitute_generic_variant_field(&PolyType::Concrete(Type::I64), &args);
         assert_eq!(concrete_field, PolyType::Concrete(Type::I64));
+    }
+
+    /// P7b.S6 (M4/R3): the arm this phase adds -- `^List['T]`'s own shape,
+    /// an `OwnedCell` wrapping a still-polymorphic self-reference. Recurses
+    /// into the payload and re-wraps, rather than panicking on the
+    /// previously-`unreachable!` catch-all.
+    #[test]
+    fn substitute_generic_variant_field_owned_cell_recurses_into_payload() {
+        let args = vec![PolyType::Concrete(Type::U32)];
+        let field = PolyType::OwnedCell(Box::new(PolyType::Var(0)));
+
+        let substituted = substitute_generic_variant_field(&field, &args);
+        assert_eq!(
+            substituted,
+            PolyType::OwnedCell(Box::new(PolyType::Concrete(Type::U32)))
+        );
+    }
+
+    /// The still-symbolic case: a self-referencing field whose payload is
+    /// itself an ungrounded `Generic` (exactly `^List['T]`'s own shape
+    /// before grounding) recurses one level and leaves the inner `Generic`
+    /// untouched, per this function's own doc (`apply_subst` grounds it
+    /// later).
+    #[test]
+    fn substitute_generic_variant_field_owned_cell_of_generic_stays_symbolic() {
+        let args = vec![PolyType::Var(0)];
+        let inner = PolyType::Generic {
+            is_enum: true,
+            idx: 0,
+            module: 0,
+            args: vec![PolyType::Var(0)],
+            len_args: vec![],
+            name: "List",
+        };
+        let field = PolyType::OwnedCell(Box::new(inner.clone()));
+
+        let substituted = substitute_generic_variant_field(&field, &args);
+        assert_eq!(substituted, PolyType::OwnedCell(Box::new(inner)));
     }
 
     /// Round-2 review fix (R4): a struct argument's bare name is the plain

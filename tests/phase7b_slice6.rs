@@ -169,3 +169,75 @@ impl: Functor for Option\n\
         "the quotation-literal fixture must not panic, got: {stderr}"
     );
 }
+
+/// Phase 3 (M4/R3/R7): the exit-criterion fixture -- `impl: Foldable for
+/// List` with a non-inline body that actually recurses through the
+/// self-referencing `^List['T]` field (`Cons> | v rest | ... rest ^> ...
+/// fold`), pre-fix an `unreachable!` panic on the missing `OwnedCell` arm
+/// in both `substitute_generic_variant_field` and `poly_bind_construction_arg`.
+/// Sums a 3-element `List[i64]`; no recursion wall per R3 (a non-inline
+/// member's self-call mints an ordinary `IrFunc`, no combinator budget).
+#[test]
+fn impl_foldable_for_list_dispatches() {
+    let stdout = build_and_run(
+        "p3-foldable-list",
+        "\
+ import: core::list * ;\n\
+ trait: Foldable['F: * -> *] :\n\
+   fold ( 'F['T] i64 [ i64 'T -- i64 ] -- i64 ) ;\n\
+ ;\n\
+ impl: Foldable for List\n\
+   : fold | f | | acc |\n\
+     ~[ ( Nil ) drop acc ]\n\
+     ~[ ( Cons ) Cons> | v rest |\n\
+        acc v f call rest ^> swap f fold ]\n\
+     List? ;\n\
+ ;\n\
+ : mkempty ( -- List[i64] ) Nil ;\n\
+ : main ( -- )\n\
+   3 mkempty ^ Cons\n\
+   2 swap ^ Cons\n\
+   1 swap ^ Cons\n\
+   0 [ add ] fold . ;\n",
+    );
+    assert_eq!(stdout, "6\n");
+}
+
+/// Phase 3 (R7): the destructor witness -- a multi-element `List[str]`
+/// (a linear payload, unlike `i64`) disposed via a trailing `drop`. Verbatim
+/// the probe round's `p5_list_str_payload.sth` (`slice6-probes.md`), but
+/// importing `core::list` rather than declaring the type inline, so this
+/// also exercises the promoted module. Builds, runs, exits 0 with no
+/// output -- no leak, no double-free.
+#[test]
+fn multi_element_list_of_str_drops_clean() {
+    let stdout = build_and_run(
+        "p3-list-str-drop",
+        "\
+ import: core::list * ;\n\
+ : mkempty ( -- List[str] ) Nil ;\n\
+ : main ( -- )\n\
+   \"c\" mkempty ^ Cons\n\
+   \"b\" swap ^ Cons\n\
+   \"a\" swap ^ Cons\n\
+   drop ;\n",
+    );
+    assert_eq!(stdout, "");
+}
+
+/// Phase 3 (R7): the promotion witness -- `List['T]` is usable from an
+/// importing module (not just declared inline in the same file), pinning
+/// the `sooth.pkg` `module:` wiring. The self-reference builds and runs
+/// exactly as the probe round's `p5_list_selfref.sth` did with an inline
+/// declaration.
+#[test]
+fn list_self_reference_builds_across_the_core_import() {
+    let stdout = build_and_run(
+        "p3-list-core-import",
+        "\
+ import: core::list * ;\n\
+ : mklist ( i64 -- List[i64] ) Nil ^ Cons ;\n\
+ : main ( -- ) 5 mklist drop ;\n",
+    );
+    assert_eq!(stdout, "");
+}
