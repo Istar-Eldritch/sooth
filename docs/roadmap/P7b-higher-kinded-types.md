@@ -211,18 +211,25 @@ payloads per instantiation; the array-as-constructor widening and the `List`
 construction wall are recorded rulings, not landed capabilities.
 
 **P7b.S7 — Quotation effects over type constructors (the `call` extension).**
-S2's recorded residual, now its own slice. `bind ( 'F['T] [ 'T -- 'F['U] ] -- 'F['U] )`
-needs `call` to ground a quotation whose effect contains a constructor application with an
-unbound head; `ap`'s first operand `'F[ [ 'A -- 'B ] ]` asks the mirror question (a
-constructor application over an *effect type*). Probe-first per the fragile-slice
-convention: one probe round answers both shapes before the brief. Scope is the
-quotation-effect grounding paths only — no new trait surface, no new declaration syntax.
-Dogfood: `Monad` for Option/Result (`bind`, `and_then`, early-exit chains over
-errors-as-values); `Applicative.ap` if shape (b) grounds for free in the same extension.
-**Exit:** `bind` through a shared bound type-checks, dispatches per constructor, and
-splices to the same IR a hand-written inline `and_then` would produce; `and_then` goldens
-for Option and Result; the probe round's rulings on which effect shapes ground are
-recorded in the brief.
+`Monad.bind ( 'F['T] [ 'T -- 'F['U] ] -- 'F['U] )` declares and dispatches over
+Option/Result through two already-shipped mechanisms, not new grounding code:
+`ground_member_poly`'s existing `App` arm dissolves the row-nested `'F['U]` into a
+plain `Generic` at parse time (callee side), and `unify_member_operand`/
+`render_member_decl` — already exercised by `Functor.map` — ground the caller side.
+`and_then`-style early-exit chains over Option/Result compose from `bind` and splice
+to the same IR a hand-written inline `and_then` would produce. `Applicative.ap
+( 'F[ [ 'A -- 'B ] ] 'F['A] -- 'F['B] )` is deferred: its quotation sits inside `'F`'s
+own argument list, a different shape from `bind`'s direct member parameter, and is
+rejected by `reject_poly_quotation_anywhere`'s `Generic` arm
+(`src/check/audits.rs:431`) the moment an `impl:` is declared, independently of the
+parser's argument-quotation fence. Grounding it needs new logic in that audit; gated
+on whichever slice takes up `reject_poly_quotation_anywhere`'s
+constructor-of-quotation case.
+**Exit:** `bind` through a shared `Monad` bound type-checks, dispatches per
+constructor, and splices to the same IR a hand-written inline `and_then` would
+produce; `and_then` goldens for Option and Result. See
+[slice7-spec](./P7b/slice7-spec.md) with its [brief](./P7b/slice7-brief.md) for the
+full mechanism verification and the `ap` deferral's citation trail.
 
 **P7b.S8 — Linear iterators (HKT as the associated-type substitute).**
 Associated types stay out of scope and are not needed: make the iterator itself the type
@@ -309,11 +316,7 @@ elements.
 ## Out of scope
 
 GATs (generic associated types), associated types, dependent types, polymorphic kind recursion,
-kind polymorphism. S2's brief answered the `Monad.bind` open question by *recording* it:
-`call` cannot see through an HKT member (`slice2-spec.md`, "Monad.bind awaits a later slice"),
-so `Monad` is **not** free library work — S7 is its checker extension. `Applicative.ap` asks
-the same quotation-effect machinery the mirror question (a constructor application over an
-*effect type*, `'F[ [ 'A -- 'B ] ]`); `pure` alone is library work once S6 settles
+kind polymorphism. `Applicative.pure` alone is library work once S6 settles
 grounding for return-type-polymorphic words. A general `Default` trait for construction stays
 out (S6's `Monoid.empty` is scoped to merge identities, not defaults). Drop-forwarding for
 user-declared generic containers (a `Drop` trait) rides with P9's alloc layer where the need
