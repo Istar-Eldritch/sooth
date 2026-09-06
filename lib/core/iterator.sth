@@ -5,7 +5,7 @@
 \ packed together in one `Step` value. `Done` carries nothing, so the
 \ exhausted case's final drop lives inside `next`'s own `Done` arm -- the one
 \ canonical site, never a remainder construction (this is why the S6
-\ construction wall, `src/check/poly.rs:6116-6117`, is never reached by any
+\ construction wall, `src/check/poly.rs:6187`, is never reached by any
 \ shape in this module). The Option-shaped alternative
 \ (`next ( 'It['T] -- Option['T] 'It['T] )`) was considered and rejected: arm
 \ parity would force the dead iterator out to every caller and the final drop

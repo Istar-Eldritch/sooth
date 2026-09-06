@@ -3,6 +3,8 @@
 //! (`Step`, `Iterator`, `impl: Iterator for List`, REQ-3/REQ-4/REQ-NFR3).
 //! Phase 2: the consumers written once against the bound (`for_each`/`fold`,
 //! REQ-5/REQ-6) and the linearity teeth (REQ-NFR4).
+//! Phase 3: the S2-6 lift (`impl: Iterator for Range[i64]`, REQ-7/REQ-9) and
+//! its fences (REQ-8), with `Range` shipped in `core::range`.
 //! Harness style from `tests/phase7b_slice4.rs`/`tests/phase7b_slice6.rs`.
 
 use std::path::PathBuf;
@@ -464,6 +466,236 @@ fn consumer_arm_leaving_the_step_shell_undropped_is_a_compile_error() {
     assert!(
         stderr.contains(
             "error: an arm of `Step?` leaves `Step.Done` on the stack in `leaky` (line 8)\n  a variant-typed value is reachable only inside the arm that bound it; consume it there, or leave its fields instead"
+        ),
+        "{stderr}"
+    );
+}
+
+/// (phase 3, REQ-7/REQ-9) the phase's first artifact and its whole
+/// justification: `next` over `Range[i64]` dispatches at a **plain mono call
+/// site**. `Range[i64]` is a fully-applied all-concrete ctor impl target --
+/// the S2-6 shape that was a located rejection before Delta B ("the impl
+/// target `Range[i64]` is concrete") -- and its App-headed member now
+/// grounds as a monomorphic instantiation. Both arms are observable: two
+/// `More` steps print `0` and `1`, then the exhausted `Done` arm prints
+/// `999`, so the drain is not merely "does not crash".
+///
+/// This shape panicked `resolve_mono_member_call`'s else-branch
+/// `debug_assert!` ("a dispatched impl's member word is always in the
+/// whole-program poly_env") before the lifted-target arm landed: the member
+/// word is `poly: None`, and `poly_env` holds only `poly: Some` words.
+#[test]
+fn range_next_dispatches_at_a_mono_call_site() {
+    let src = "\
+import: core::iterator | Step Done More Iterator | ;
+import: core::range | Range | ;
+: report ( Range[i64] -- )
+  next
+  ~[ ( Done ) drop 999 . ]
+  ~[ ( More ) More> | v rest | v . rest report ]
+  Step? ;
+: main ( -- ) 0 2 Range report ;
+";
+    let (_t, _binary, stdout) = build_run_keep("p3-range-mono-call-site", src);
+    assert_eq!(stdout, "0\n1\n999\n");
+}
+
+/// (phase 3, REQ-10 in golden form) the consumers written once against the
+/// bound drain and fold `Range[i64]` with no per-impl copy: `0\n1\n2`, and
+/// `0 [ add ] fold` sums it to 3. Dispatch here is the *bound* path, not the
+/// mono one: `for_each`'s `'It` is bound to a `Type::CtorImage`, so
+/// `resolve_user_bound`'s ctor-image arm serves the site -- and a lifted
+/// target's mono member word dispatches under its **bare** symbol there,
+/// because there is nothing to monomorphize (`impl_mono_seed` only ever
+/// seeds `poly: Some` words). Without that, the build failed with
+/// "`impl: Iterator for Range` binds no word for member `next`".
+#[test]
+fn for_each_and_fold_drain_a_range_through_the_iterator_bound() {
+    let src = "\
+import: core::iterator | for_each fold | ;
+import: core::range | Range | ;
+: main ( -- )
+  0 3 Range [ . ] for_each
+  0 3 Range 0 [ add ] fold . ;
+";
+    let (_t, _binary, stdout) = build_run_keep("p3-range-through-the-bound", src);
+    assert_eq!(stdout, "0\n1\n2\n3\n");
+}
+
+/// (phase 3, REQ-8) the first fence pin: a **plain** concrete target keeps
+/// today's byte-exact S2-6 message. `impl: Iterator for i64` names no
+/// constructor at all, so the trait's App-headed `next` still has no
+/// monomorphic representation there -- the lift admits ctor applications,
+/// not concreteness.
+#[test]
+fn app_headed_member_over_plain_concrete_target_still_raises_the_s2_6_error() {
+    let stderr = build_error_located(
+        "p3-fence-plain-concrete-target",
+        "import: core::iterator | Step Done More Iterator | ;\n\
+         impl: Iterator for i64\n\
+           : next drop Done ;\n\
+         ;\n\
+         : main ( -- ) ;\n",
+    );
+    assert!(
+        stderr.contains(
+            "error: trait member `next` of `Iterator` (line 5, col 3) applies the trait variable `'It`, but the impl target `i64` is concrete\n  an application-headed member has no monomorphic representation (its applied arguments are member locals); implement the trait for a constructor target with a type variable instead"
+        ),
+        "{stderr}"
+    );
+}
+
+/// (phase 3, REQ-8) the second fence pin: an **App-headed** impl target
+/// (`for 'F['T]`, a constructor-abstract target) still raises
+/// `impl_target_app_unsupported_error` byte-exact. Delta B intercepts the
+/// target *fold*, never this fence, which sits after it.
+#[test]
+fn app_headed_impl_target_still_raises_the_unsupported_target_error() {
+    let stderr = build_error_located(
+        "p3-fence-app-headed-target",
+        "import: core::iterator | Step Done More Iterator | ;\n\
+         impl: Iterator for 'F['T]\n\
+           : next drop Done ;\n\
+         ;\n\
+         : main ( -- ) ;\n",
+    );
+    assert!(
+        stderr.contains(
+            "error: an `impl:` target may not apply its own type variable (`'F[...]` at line 4, col 20); a constructor-abstract impl target is not supported this slice"
+        ),
+        "{stderr}"
+    );
+}
+
+/// (phase 3, REQ-8) the third fence pin, in runnable form: a **mixed**
+/// (partially-applied) target keeps the generic path -- its padded slot is a
+/// variable, so its member word stays polymorphic and dispatches through the
+/// existing generic machinery. `Pair[i64 'ctor1]` here implements the
+/// non-HKT `Peek`, and the golden proves the pre-lift route still runs end
+/// to end. (The parse-level twin is
+/// `parse_impl_target_plain_and_partial_shapes_are_not_lifted`,
+/// `src/parser.rs`.)
+#[test]
+fn partially_applied_ctor_target_still_dispatches_through_the_generic_path() {
+    let src = "\
+type: Pair['A 'B] a 'A b 'B ;
+trait: Peek['T] : peek ( 'T -- i64 ) ; ;
+impl: Peek for Pair[i64]
+  : peek drop 7 ;
+;
+: mkpair ( i64 i64 -- Pair[i64 i64] ) Pair ;
+: main ( -- ) 7 8 mkpair peek . ;
+";
+    let (_t, _binary, stdout) = build_run_keep("p3-partial-target-generic-path", src);
+    assert_eq!(stdout, "7\n");
+}
+
+/// (phase 3 review, finding 1) the ICE repro itself: a lifted-target
+/// member's grounded signature can itself be `PolyType::Quotation` (`ap`'s
+/// `~[ 'T -- ]` parameter, its `'T` identified with `Box[i64]`'s own
+/// concrete argument through the dispatchable-input union), and
+/// `ground_mono_member_slots` (`src/parser.rs`) hands that var-free
+/// quotation slot to `ground_var_free` -> `substitute_generic_field`
+/// (`src/ast.rs`), which had no `Quotation` arm and panicked at its
+/// wildcard `unreachable!`. Declaration only, no call site -- the panic
+/// fired grounding the member body's own effect, before any caller exists.
+/// Fixed by giving `substitute_generic_field` a `Quotation` arm mirroring
+/// `ground_member_type`'s S2-3 arm (honoring `is_inline`). The member's
+/// `~[ 'T -- ]` (an inline-quotation parameter) additionally requires `ap`
+/// itself to declare `inline` -- a real, located, pre-existing rule
+/// (`declares_inline`, `src/parser.rs`) the trait member here does not
+/// satisfy, so the fixed grounding reaches that ordinary diagnostic rather
+/// than building.
+#[test]
+fn lifted_target_member_with_inline_quotation_slot_grounds_mono_not_panics() {
+    let stderr = build_error_located(
+        "p3-quotation-slot-mono-ground",
+        "type: Box['T] v 'T ;\n\
+         trait: Apply['T] : ap ( 'T ~[ 'T -- ] -- ) ; ;\n\
+         impl: Apply for Box[i64]\n\
+           : ap | q | | b | b q call ;\n\
+         ;\n",
+    );
+    assert!(
+        stderr.contains(
+            "error: word `ap` (member of trait `Apply` for `Box[i64]`) declares an inline-quotation parameter `~[ Box[i64] -- ]` but is not `inline`; a `~[ ... ]` quotation can only be spliced, so the word must declare `inline` (line 6, col 3)"
+        ),
+        "{stderr}"
+    );
+}
+
+/// (phase 3 review, finding 1) the non-lifted twin: the identical shape over
+/// a hand-written concrete struct (`for Pt`, not a ctor-application target)
+/// reaches the same diagnostic, byte for byte but for the target name --
+/// proof the fix restores parity with the pre-lift concrete route rather
+/// than special-casing the lifted one.
+#[test]
+fn inline_quotation_slot_over_plain_concrete_target_reaches_the_same_diagnostic() {
+    let stderr = build_error_located(
+        "p3-quotation-slot-plain-concrete",
+        "type: Pt x i64 y i64 ;\n\
+         trait: Apply2['T] : ap2 ( 'T ~[ 'T -- ] -- ) ; ;\n\
+         impl: Apply2 for Pt\n\
+           : ap2 | q | | b | b q call ;\n\
+         ;\n",
+    );
+    assert!(
+        stderr.contains(
+            "error: word `ap2` (member of trait `Apply2` for `Pt`) declares an inline-quotation parameter `~[ Pt -- ]` but is not `inline`; a `~[ ... ]` quotation can only be spliced, so the word must declare `inline` (line 6, col 3)"
+        ),
+        "{stderr}"
+    );
+}
+
+/// (phase 3 review, finding 1) the HKT twin, literally as the review named
+/// it: an App-headed slot (`'It['T]`) at the same top-level position that
+/// *identifies* `'T` with the target's own concrete argument (`Box[i64]`'s
+/// `i64`) -- so the whole signature grounds var-free, exactly like
+/// `core::iterator`'s `next`/`Range[i64]` (REQ-7's own golden,
+/// `range_next_dispatches_at_a_mono_call_site` above). This reaches an
+/// ordinary, located, mono type error (never a panic, never the S2-6 fence):
+/// grounding a var-free HKT member dispatches mono by design, the same as
+/// any other identified local.
+#[test]
+fn hkt_member_with_identified_local_grounds_mono_reaches_ordinary_type_error() {
+    let stderr = build_error_located(
+        "p3-hkt-identified-local-mono",
+        "type: Box['T] v 'T ;\n\
+         trait: Each['It: * -> *] : each ( 'It['T] [ 'T -- ] -- ) ; ;\n\
+         impl: Each for Box[i64]\n\
+           : each | q | | b | b q call ;\n\
+         ;\n",
+    );
+    assert!(
+        stderr.contains(
+            "error: type mismatch in `each` (member of trait `Each` for `Box[i64]`) (line 6)\n  `call` expected `i64`, found `Box[i64]`"
+        ),
+        "{stderr}"
+    );
+}
+
+/// (phase 3 review, finding 1) the HKT twin that genuinely reaches the S2-6
+/// fence: `'U` never occurs in an identifying (dispatchable-input App
+/// argument) position, so the union build appends it unbound, the grounded
+/// signature is *not* var-free, and the lifted-target route falls through
+/// to the plain concrete-target checks below it -- the same fence
+/// `app_headed_member_over_plain_concrete_target_still_raises_the_s2_6_error`
+/// pins for a non-ctor target, here firing for a ctor one instead. Proof the
+/// fence survives the lift for the shape it actually guards (an
+/// ungroundable member local), not just the identified-local shape above.
+#[test]
+fn hkt_member_with_unidentified_local_still_raises_the_s2_6_fence() {
+    let stderr = build_error_located(
+        "p3-hkt-unidentified-local-fence",
+        "type: Box['T] v 'T ;\n\
+         trait: Each['It: * -> *] : each ( 'It['T] ~[ 'U -- ] -- ) ; ;\n\
+         impl: Each for Box[i64]\n\
+           : each | q | | b | b q call ;\n\
+         ;\n",
+    );
+    assert!(
+        stderr.contains(
+            "error: trait member `each` of `Each` (line 6, col 3) applies the trait variable `'It`, but the impl target `Box[i64]` is concrete\n  an application-headed member has no monomorphic representation (its applied arguments are member locals); implement the trait for a constructor target with a type variable instead"
         ),
         "{stderr}"
     );

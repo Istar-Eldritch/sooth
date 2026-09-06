@@ -18,13 +18,14 @@
 
 use crate::ast::{
     fence_member_app_against_concrete_target, ground_member_poly, ground_member_type,
-    intern_array_type, is_name_dispatched_builtin, member_app_abstract_target_error, ArrayDecl,
-    Bound, EnumDecl, ExternDecl, GenericTypes, GlobalEntry, GlobalMode, ImplDecl, ImplTarget,
-    Import, ImportAnchor, ImportBinding, ImportTarget, IntrinsicVisibility, Kind, Len,
-    MemberGrounding, MemberVarMap, Module, ModuleInfo, ModuleName, MutRegistries, OwnedCellDecl,
-    PolySig, PolyType, QuotAnnot, RefDecl, SliceDecl, Span, StackEffect, StaticDecl, StaticInit,
-    StructDecl, Term, TermKind, TraitDecl, TraitId, TraitKind, TraitMember, Type, TypedSlot,
-    VariantDecl, VariantTag, VariantTagMode, WordDef, OWNING_QUOTATION_KEYWORD,
+    intern_array_type, is_name_dispatched_builtin, member_app_abstract_target_error,
+    poly_type_is_var_free, ArrayDecl, Bound, EnumDecl, ExternDecl, GenericTypes, GlobalEntry,
+    GlobalMode, ImplDecl, ImplTarget, Import, ImportAnchor, ImportBinding, ImportTarget,
+    IntrinsicVisibility, Kind, Len, MemberGrounding, MemberVarMap, Module, ModuleInfo, ModuleName,
+    MutRegistries, OwnedCellDecl, PolySig, PolyType, QuotAnnot, RefDecl, SliceDecl, Span,
+    StackEffect, StaticDecl, StaticInit, StructDecl, Term, TermKind, TraitDecl, TraitId, TraitKind,
+    TraitMember, Type, TypedSlot, VariantDecl, VariantTag, VariantTagMode, WordDef,
+    OWNING_QUOTATION_KEYWORD,
 };
 use crate::lexer::Token;
 use std::collections::HashMap;
@@ -4190,7 +4191,7 @@ impl<'t> Parser<'t> {
         if builder.row_in.is_some() || builder.row_out.is_some() {
             return Err(impl_target_row_var_error());
         }
-        let pattern = self.raw_to_poly_type(parsed.raw)?;
+        let pattern = self.impl_target_pattern_poly_type(parsed.raw)?;
         if let Some(head) = poly_type_app_head(&pattern) {
             let var = builder.ty_names[head as usize].clone();
             let span = builder.ty_var_spans[head as usize];
@@ -4214,6 +4215,57 @@ impl<'t> Parser<'t> {
             len_var_spans: builder.len_var_spans,
             user_spelling,
             bounds: Vec::new(),
+        })
+    }
+
+    /// P7b.S8 (REQ-7, Delta B): the impl-target fold. The shared fold runs
+    /// first -- so the D5 nesting rule, the argument walk and the
+    /// instantiation *mint* are all exactly `raw_to_poly_type`'s -- and only
+    /// its all-concrete collapse is undone here: a fully-applied ctor
+    /// application whose every type and length argument is concrete keeps a
+    /// `PolyType::Generic` pattern (`impl: Iterator for Range[i64]`) instead
+    /// of standing in the target as a bare `Concrete` monomorph. Ctor
+    /// identity is what the target has to carry: a collapsed `Concrete` has
+    /// no head for an App-headed member to dissolve into (S2-6, the reason
+    /// such a target was rejected before this slice) and no head for the
+    /// dispatch matcher's identity arm.
+    ///
+    /// The collapse is undone by reverse lookup rather than by suppressing
+    /// the fold, which keeps two things true: the mint still happens (an
+    /// impl target is the only site naming `Box[i64]` in some programs --
+    /// `tests/phase7b_slice2.rs`'s W6 control depends on it), and a
+    /// hand-written concrete struct (`for Point`) has no instantiation
+    /// record at all, so it correctly stays `Concrete`. The interception is
+    /// impl-target-local by design: `raw_to_poly_type`'s own Generic arm
+    /// keeps folding, because an ordinary signature's `Range[i64]` must stay
+    /// `Concrete` to share the instantiation mint (REQ-NFR2, S4-1).
+    fn impl_target_pattern_poly_type(&mut self, raw: RawTy) -> Result<PolyType, String> {
+        let folded = self.raw_to_poly_type(raw)?;
+        let PolyType::Concrete(t) = folded else {
+            return Ok(folded);
+        };
+        let (is_enum, inst) = match t {
+            Type::Struct(id, _) => (false, self.generics.struct_instantiation_of(id)),
+            Type::Enum(id, _) => (true, self.generics.enum_instantiation_of(id)),
+            _ => return Ok(folded),
+        };
+        let Some((idx, module, args, len_args)) = inst else {
+            return Ok(folded);
+        };
+        let args: Vec<PolyType> = args.iter().copied().map(PolyType::Concrete).collect();
+        let len_args = len_args.to_vec();
+        let header = if is_enum {
+            self.generics.enums[idx].name.clone()
+        } else {
+            self.generics.structs[idx].name.clone()
+        };
+        Ok(PolyType::Generic {
+            is_enum,
+            idx: idx as u32,
+            module,
+            args,
+            len_args,
+            name: Box::leak(header.into_boxed_str()),
         })
     }
 
@@ -4362,6 +4414,29 @@ impl<'t> Parser<'t> {
     /// declared effect is the trait member's signature grounded at the `for`
     /// type through `ast`'s `ground_member_type`; there is no `(` to parse,
     /// since restating the inherited signature is rejected.
+    /// P7b.S8 (REQ-7): the variable-free grounded slots of a lifted-target
+    /// member, as the mono member word's own `StackEffect` row -- each
+    /// shape grounded (and its monomorph minted) through the instantiator
+    /// the all-concrete fold uses.
+    fn ground_mono_member_slots(&mut self, slots: &[PolyType]) -> Vec<TypedSlot> {
+        slots
+            .iter()
+            .map(|pty| {
+                let regs = MutRegistries {
+                    structs: self.structs,
+                    enums: self.enums,
+                    arrays: self.arrays,
+                    cells: self.owned_cells,
+                    refs: self.refs,
+                };
+                TypedSlot {
+                    name: None,
+                    ty: self.generics.ground_var_free(pty, regs),
+                }
+            })
+            .collect()
+    }
+
     fn parse_impl_member_body(
         &mut self,
         trait_id: TraitId,
@@ -4421,6 +4496,65 @@ impl<'t> Parser<'t> {
                 _ => None,
             },
         };
+        // P7b.S8 (REQ-7/REQ-8, Delta B): the lifted-target route. A
+        // fully-applied all-concrete ctor target (`for Range[i64]`) grounds
+        // its members monomorphically, but through the *generic* machinery:
+        // the union build binds the member's identified locals to the
+        // target's (concrete) slots, and `ground_member_poly`'s App arm
+        // dissolves `'It['T]` against the ctor head a `Concrete` target does
+        // not have. The grounded signature is then variable-free, so it
+        // converts to the same mono member word the concrete path below
+        // synthesizes (`poly: None`, a concrete `StackEffect`) -- D5 forbids
+        // the generic alternative (a `Range[i64]` local in poly space is not
+        // a borrowable aggregate, `src/check/poly.rs:6649`, so a poly-bodied
+        // member could never read `cur`).
+        //
+        // A member the dissolve leaves a free variable in is exactly S2-6's
+        // condition -- no monomorphic representation, because the leftover
+        // variable is a member local no target slot names (`map`'s `'F['U]`)
+        // -- so it takes the same two fences a plain concrete target does,
+        // byte-identically. Only a shape that trips neither fence (a free
+        // variable reachable in a quotation row alone) falls through, to the
+        // generic path below.
+        if target.is_mono_ctor_app() {
+            let union = build_member_var_union(target, &sig, &dg)?;
+            let ground = |slots: &[PolyType]| {
+                slots
+                    .iter()
+                    .map(|t| ground_member_poly(t, &target.pattern, &union.map, &dg))
+                    .collect::<Result<Vec<_>, String>>()
+            };
+            let inputs = ground(&sig.inputs)?;
+            let outputs = ground(&sig.outputs)?;
+            if inputs.iter().chain(&outputs).all(poly_type_is_var_free) {
+                let effect = StackEffect {
+                    inputs: self.ground_mono_member_slots(&inputs),
+                    outputs: self.ground_mono_member_slots(&outputs),
+                };
+                return Ok((
+                    member_name,
+                    WordDef {
+                        name,
+                        effect,
+                        body,
+                        poly: None,
+                        declares_inline,
+                        module: self.module,
+                        span: member_span,
+                        declared_globals: None,
+                        is_trait_member: true,
+                    },
+                ));
+            }
+            fence_member_app_against_concrete_target(&sig.inputs, &sig.outputs, &dg)?;
+            fence_member_ctor_application_against_concrete_target(
+                &sig.inputs,
+                &sig.outputs,
+                &dg,
+                &sig.ty_var_names,
+                &sig.len_var_names,
+            )?;
+        }
         if target.is_concrete() {
             // R5 concrete path: the existing monomorphic member word, with
             // the trait member's signature grounded at the concrete `Type`.
@@ -15185,6 +15319,186 @@ mod tests {
                     ..Span::default()
                 }
             ))
+        );
+    }
+
+    /// P7b.S8 (REQ-7, Delta B): a fully-applied ctor target whose every
+    /// argument is concrete keeps its `Generic` pattern -- ctor identity is
+    /// what an App-headed member dissolves into and what the dispatch
+    /// matcher identifies on -- instead of collapsing to the `Concrete`
+    /// monomorph the shared fold produces.
+    #[test]
+    fn parse_impl_target_fully_applied_concrete_ctor_keeps_its_ctor_pattern() {
+        let module = parse_src(
+            "type: Box['T] v 'T ;\n\
+             trait: Show['T] : show ( &'T -- ) ; ;\n\
+             impl: Show for Box[i64]\n\
+               : show | a | a drop ;\n\
+             ;",
+        )
+        .unwrap();
+        let target = &module.impls[0].target;
+        let PolyType::Generic { name, args, .. } = &target.pattern else {
+            panic!("a fully-applied all-concrete ctor target keeps its ctor pattern")
+        };
+        assert_eq!(*name, "Box");
+        assert_eq!(args, &vec![PolyType::Concrete(Type::I64)]);
+        assert!(!target.is_concrete(), "the pattern is no longer Concrete");
+        assert!(target.is_mono_ctor_app(), "and it is a lifted mono target");
+        // The fold still ran, so the monomorph is still minted: an impl
+        // target is the only site naming `Box[i64]` in this fixture.
+        assert!(
+            module
+                .structs
+                .iter()
+                .any(|s| s.name == "Box[i64]" || s.name == "Box"),
+            "the target's own parse mints the monomorph: {:?}",
+            module.structs.iter().map(|s| &s.name).collect::<Vec<_>>()
+        );
+    }
+
+    /// P7b.S8 (REQ-7): the interception's two fences, from the other side.
+    /// A hand-written concrete type has no instantiation record to recover a
+    /// ctor head from, so it stays `Concrete` (the mono path it always
+    /// took); a partially-applied target keeps a variable in its padded
+    /// slot, so it is generic, not a lifted mono target.
+    #[test]
+    fn parse_impl_target_plain_and_partial_shapes_are_not_lifted() {
+        let plain = parse_src(
+            "type: Point x i64 y i64 ;\n\
+             trait: Show['T] : show ( &'T -- ) ; ;\n\
+             impl: Show for Point\n\
+               : show | a | a drop ;\n\
+             ;",
+        )
+        .unwrap();
+        let target = &plain.impls[0].target;
+        assert!(target.is_concrete(), "a hand-written struct stays Concrete");
+        assert!(!target.is_mono_ctor_app());
+
+        let partial = parse_src(
+            "type: Result['T 'E] | Ok 'T | Err 'E ;\n\
+             trait: Show['T] : show ( &'T -- ) ; ;\n\
+             impl: Show for Result[i64]\n\
+               : show | a | a drop ;\n\
+             ;",
+        )
+        .unwrap();
+        assert!(
+            !partial.impls[0].target.is_mono_ctor_app(),
+            "a padded slot is a variable, so the target is not mono"
+        );
+    }
+
+    /// P7b.S8 (REQ-NFR2, the mint-sharing regression pin): the interception
+    /// is impl-target-local. `Range[i64]` spelled in an *ordinary* word
+    /// signature still folds to `Concrete` -- two words spelling it share
+    /// one instantiation, and the lifted impl target's own member word
+    /// grounds to that same monomorph rather than forking a second mint.
+    #[test]
+    fn range_i64_in_an_ordinary_signature_still_folds_and_shares_the_mint() {
+        let module = parse_src(
+            "type: Range['T] cur 'T limit 'T ;\n\
+             trait: Peek['T] : peek ( &'T -- ) ; ;\n\
+             impl: Peek for Range[i64]\n\
+               : peek | a | a drop ;\n\
+             ;\n\
+             : one ( Range[i64] -- ) drop ;\n\
+             : two ( Range[i64] -- ) drop ;",
+        )
+        .unwrap();
+        let sig_of = |name: &str| {
+            let w = module
+                .words
+                .iter()
+                .find(|w| w.name == name)
+                .expect("the fixture declares it");
+            assert!(w.poly.is_none(), "`{name}` is monomorphic");
+            w.effect.inputs[0].ty
+        };
+        let one = sig_of("one");
+        assert!(
+            matches!(one, Type::Struct(..)),
+            "an ordinary signature's `Range[i64]` still folds to a concrete monomorph, got {one:?}"
+        );
+        assert_eq!(one, sig_of("two"), "both spellings share the mint");
+        // The member word's `&Range[i64]` referent is the same monomorph.
+        let member = module
+            .words
+            .iter()
+            .find(|w| w.is_trait_member)
+            .expect("the impl synthesizes one");
+        let Type::Ref(id, _, _) = member.effect.inputs[0].ty else {
+            panic!("the member takes `&'T`")
+        };
+        assert_eq!(
+            module.refs[id.index()].referent,
+            one,
+            "the lifted target's member grounds to the shared mint"
+        );
+    }
+
+    /// P7b.S8 (REQ-7): a lifted mono target's App-headed member synthesizes
+    /// a *monomorphic* member word -- `poly: None` and a concrete
+    /// `StackEffect` whose slots are the dissolved instantiation (`'It['T]`
+    /// -> `Range[i64]`) -- which is what D5 requires (a generic body could
+    /// not borrow the target's fields at all). The member sig here is
+    /// App-in/App-out rather than the protocol's `Step`-headed row because
+    /// naming a *second* generic type inside a trait member signature needs
+    /// the driver's type pre-pass, which this parse-only harness does not
+    /// run; the real `Step['T 'It['T]]` output is covered end to end by
+    /// `tests/phase7b_slice8.rs`.
+    #[test]
+    fn parse_impl_member_over_mono_ctor_target_synthesizes_a_mono_word() {
+        let module = parse_src(
+            "type: Range['T] cur 'T limit 'T ;\n\
+             trait: Iterator['It: * -> *] : next ( 'It['T] -- 'It['T] ) ; ;\n\
+             impl: Iterator for Range[i64]\n\
+               : next ;\n\
+             ;",
+        )
+        .unwrap();
+        let member = module
+            .words
+            .iter()
+            .find(|w| w.is_trait_member)
+            .expect("the impl synthesizes one");
+        assert!(
+            member.poly.is_none(),
+            "a lifted target's member word is monomorphic"
+        );
+        for slot in member.effect.inputs.iter().chain(&member.effect.outputs) {
+            assert!(
+                matches!(slot.ty, Type::Struct(..)),
+                "the App slots dissolved to the target's own monomorph, got {:?}",
+                slot.ty
+            );
+        }
+    }
+
+    /// P7b.S8 (REQ-8): the lift's fence, from the member side. An
+    /// *applied-var* target (`List['L]`) is not all-concrete, so it keeps
+    /// today's polymorphic member word -- the lift admits fully-applied
+    /// all-concrete targets only.
+    #[test]
+    fn parse_impl_member_over_applied_var_target_stays_polymorphic() {
+        let module = parse_src(
+            "type: List['T] | Nil | Cons 'T ;\n\
+             trait: Iterator['It: * -> *] : next ( 'It['T] -- 'It['T] ) ; ;\n\
+             impl: Iterator for List['L]\n\
+               : next ;\n\
+             ;",
+        )
+        .unwrap();
+        assert!(!module.impls[0].target.is_mono_ctor_app());
+        let member = module
+            .words
+            .iter()
+            .find(|w| w.is_trait_member)
+            .expect("the impl synthesizes one");
+        assert!(
+            member.poly.is_some(),
+            "an applied-var target's member word stays polymorphic"
         );
     }
 

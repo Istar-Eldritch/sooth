@@ -265,7 +265,7 @@ bound-instantiated-at-unsupported-type case). Fence (2) is a defensive
 arm's fallback at `src/ast.rs:2239`) — the one deliberate `src/ast.rs` change phase 1
 makes, so the caller's existing missing-impl diagnostic fires instead of a panic.
 
-**The protocol (R1).** One new core module carries the whole protocol: the two-param
+**The protocol (R1).** The protocol module carries the core protocol: the two-param
 `Step` enum, the single-type-variable `Iterator` trait (multi-var headers are fenced
 by design — `multi_variable_trait_error`, `src/parser.rs:493`), the List impl, the
 Range type and impl, and the two consumers. List's `next` works entirely on today's
@@ -396,8 +396,9 @@ All anchors re-verified on base `54414cb`, 2026-09-06.
 | `lib/core/list.sth:1` | `List['T]` (Nil/Cons, `rest ^List['T]`) | List impl target — destructure-only |
 | `lib/core/option.sth:1` | `Option['T]` | Consumed as-is; the Option-row rejected alternative is a record only |
 | `lib/core/cmp.sth` | `Ord` trait + derived members | House pattern for a core trait module (header comment, exports) |
-| `lib/core/sooth.pkg` | `module:` list | Gains the new protocol module (append `iterator`) |
-| `lib/core/iterator.sth` (new) | — | The protocol module: Step, Iterator, List impl, Range, Range[i64] impl, for_each, fold |
+| `lib/core/sooth.pkg` | `module:` list | Gains the protocol module (append `iterator`) and the Range module (append `range`) |
+| `lib/core/iterator.sth` (new) | — | The protocol module: Step, Iterator, List impl, for_each, fold |
+| `lib/core/range.sth` (new, phase-3 review deviation, recorded) | — | Range + its `impl: Iterator for Range[i64]`, in its own module rather than the protocol module: each core module owns its type; the trait module stays protocol-only. Legal via the orphan rule's target-ctor-module arm (`declarations.rs:500-513`, Generic arm). Rationale recorded at the 260906 phase-3 review |
 | `tests/fixtures/sooth.pkg` | fixture manifest | Invocation contract for CLI-shaped fixtures (`--manifest`) |
 | `tests/phase7b_slice8.rs` (new) | — | S8 goldens + diagnostic pins; `build_run_keep` is a **per-file helper** (`tests/phase7b_slice4.rs:70` is the pattern; also `:71` in slice3, `:91` in slice7); `tests/common/mod.rs` provides `fixture_manifest`/`manifest_for`/`fixture_package` |
 | `tests/phase7b_slice4.rs:199` | `shared_bound_poly_word_dispatches_over_the_real_core_option` | The bound-dispatch (`q map`, `:212-213`) precedent |
@@ -604,9 +605,13 @@ Load-bearing constraints:
     concrete-winner-style route for lifted targets — exact mechanism measured first
     (the mono call-site golden is the phase's first artifact); if the obligation/mint
     work cannot land within S8, the recorded option-B fallback applies (REQ-7).
-  - Modify `lib/core/iterator.sth`: add `type: Range['T] cur 'T limit 'T ;` and
-    `impl: Iterator for Range[i64]` (REQ-9: count-up, `1 add` on i64, advanced Range
-    constructed in the `More` arm, iterator dropped inside the `Done` arm).
+  - Create `lib/core/range.sth` (registered in `lib/core/sooth.pkg` after
+    `iterator`; reviewed deviation from the original single-protocol-module plan,
+    recorded in the Codebase Map): `type: Range['T] cur 'T limit 'T ;` (REQ-9:
+    count-up, `1 add` on i64, advanced Range constructed in the `More` arm,
+    iterator dropped inside the `Done` arm) and `impl: Iterator for Range[i64]` —
+    the impl is legal in the type's own module via the orphan rule's
+    target-ctor-module arm (`src/check/declarations.rs:500-513`).
   - Modify `tests/phase7b_slice8.rs`: (a) Range mono golden — `next` at a plain mono
     call site yields `More` then `Done`; (b) byte-exact pins: `impl: Iterator for
     i64` still raises the S2-6 message (`src/ast.rs:2095` text), an App-headed
