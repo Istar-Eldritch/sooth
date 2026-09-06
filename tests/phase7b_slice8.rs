@@ -5,11 +5,15 @@
 //! REQ-5/REQ-6) and the linearity teeth (REQ-NFR4).
 //! Phase 3: the S2-6 lift (`impl: Iterator for Range[i64]`, REQ-7/REQ-9) and
 //! its fences (REQ-8), with `Range` shipped in `core::range`.
+//! Phase 4: the REQ-11 IR pin (one-frame loop with a back-edge, `next` a real
+//! frame — facts only, no fusion verdict; REQ-10/REQ-12/REQ-13 verification).
 //! Harness style from `tests/phase7b_slice4.rs`/`tests/phase7b_slice6.rs`.
 
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
+
+mod common;
 
 struct Tree(PathBuf);
 
@@ -698,5 +702,132 @@ fn hkt_member_with_unidentified_local_still_raises_the_s2_6_fence() {
             "error: trait member `each` of `Each` (line 6, col 3) applies the trait variable `'It`, but the impl target `Box[i64]` is concrete\n  an application-headed member has no monomorphic representation (its applied arguments are member locals); implement the trait for a constructor target with a type variable instead"
         ),
         "{stderr}"
+    );
+}
+
+/// (phase 4, REQ-11) the IR evidence pin, recorded facts only -- no fusion
+/// verdict. Captured through `driver::emit_ssa_with_manifest`
+/// (`src/driver.rs:897`) rather than `ir::lower` directly: this fixture
+/// `import:`s the real `core::iterator`/`core::range` library modules, and
+/// assembling a real import closure is a `driver`-internal step
+/// (`assemble_module` is `pub(crate)`) that only the `emit_ssa*` entry
+/// points expose to an external test crate; `poly_self_tail_call_lowers_to_
+/// loop_back_edge` (`src/ir/driver.rs:1093`) is the pattern this pin
+/// follows, not its placement, so `src/ir/` itself stays diff-empty
+/// (REQ-NFR2).
+///
+/// The consuming loop is `for_each`'s monomorphized instantiation over
+/// `Range[i64]`: its self-call in `for_each`'s own `More` arm sits in tail
+/// position (`lib/core/iterator.sth`'s `for_each`), so P7.S3g's transform
+/// applies exactly as it does for an ordinary self-tail poly word -- one
+/// emitted function, no `call` back into itself, and a backward `jmp`
+/// closing the loop. `next` over `Range[i64]` is asserted as its own,
+/// separate emitted function, called (not inlined/spliced) from inside the
+/// loop: the P8-6 fact that the consuming loop is one frame while `next` is
+/// a real monomorphized frame of its own, not a claim about whether the two
+/// fuse.
+#[test]
+fn consuming_loop_over_range_is_one_frame_with_a_back_edge_and_next_is_a_real_frame() {
+    let src = "\
+import: core::iterator | for_each | ;
+import: core::range | Range | ;
+: main ( -- )
+  0 3 Range [ drop ] for_each ;
+";
+    let path = std::env::temp_dir().join(format!("sooth-p7bs8-ir-pin-{}.sth", std::process::id()));
+    common::write_fixture(&path, src).expect("writing the fixture should succeed");
+    let ssa = sooth::driver::emit_ssa_with_manifest(&path, common::manifest_for(&path).as_deref())
+        .unwrap_or_else(|e| panic!("emitting the fixture should succeed: {e}"));
+    std::fs::remove_file(&path).ok();
+
+    // Every `export function`/`function` header line in the emitted module,
+    // paired with its whole block (through the closing `\n}\n`), so a header
+    // substring search cannot also match an unrelated `call` inside some
+    // other function's body.
+    fn function_blocks(ssa: &str) -> Vec<&str> {
+        let mut header_starts = Vec::new();
+        for prefix in ["\nexport function ", "\nfunction "] {
+            let mut idx = 0;
+            while let Some(rel) = ssa[idx..].find(prefix) {
+                header_starts.push(idx + rel + 1);
+                idx += rel + prefix.len();
+            }
+        }
+        header_starts.sort_unstable();
+        header_starts
+            .into_iter()
+            .map(|start| {
+                let rel_end = ssa[start..]
+                    .find("\n}\n")
+                    .expect("every emitted function block closes");
+                &ssa[start..start + rel_end + 3]
+            })
+            .collect()
+    }
+    fn header_line(b: &str) -> &str {
+        b.lines().next().unwrap_or("")
+    }
+    fn only_block_with<'a>(blocks: &[&'a str], needles: &[&str]) -> &'a str {
+        let hits: Vec<&&str> = blocks
+            .iter()
+            .filter(|b| needles.iter().all(|n| header_line(b).contains(n)))
+            .collect();
+        assert_eq!(
+            hits.len(),
+            1,
+            "expected exactly one emitted function header containing {needles:?}, found {}: {:?}",
+            hits.len(),
+            blocks.iter().map(|b| header_line(b)).collect::<Vec<_>>()
+        );
+        hits[0]
+    }
+
+    let blocks = function_blocks(&ssa);
+
+    // The consuming loop: `for_each`'s monomorphized instantiation over
+    // `Range[i64]` -- one emitted function.
+    let loop_fn = only_block_with(&blocks, &["for_each", "Range"]);
+    let loop_symbol = loop_fn
+        .lines()
+        .next()
+        .unwrap()
+        .split(|c: char| c == '(' || c.is_whitespace())
+        .find(|tok| tok.starts_with('$'))
+        .expect("the header line names the function's own symbol");
+    assert!(
+        !loop_fn.contains(&format!("call {loop_symbol}(")),
+        "the loop must not recurse by call, its self-call is the back-edge: {loop_fn}"
+    );
+    // The entry falls into `@blk1` once (`@start`'s own `jmp`); a *second*
+    // `jmp @blk1` appearing after the `@blk1:` label itself is the back-edge.
+    let header_pos = loop_fn
+        .find("\n@blk1\n")
+        .expect("the loop opens a `@blk1` header block");
+    assert!(
+        loop_fn[header_pos..].contains("\tjmp @blk1\n"),
+        "the loop must back-edge to its header block: {loop_fn}"
+    );
+
+    // `next` over `Range[i64]`: its own separate, real monomorphized frame,
+    // called (not spliced) from inside the loop above.
+    let next_fn = only_block_with(&blocks, &["next", "Range"]);
+    assert_ne!(
+        next_fn, loop_fn,
+        "`next` must be a distinct frame from the consuming loop"
+    );
+    assert!(
+        next_fn.lines().count() > 3,
+        "`next` must be a real body, not a trivial/spliced stub: {next_fn}"
+    );
+    let next_symbol = next_fn
+        .lines()
+        .next()
+        .unwrap()
+        .split(|c: char| c == '(' || c.is_whitespace())
+        .find(|tok| tok.starts_with('$'))
+        .expect("the header line names the function's own symbol");
+    assert!(
+        loop_fn.contains(&format!("call {next_symbol}(")),
+        "the loop must call `next` as a real function, not inline it: {loop_fn}"
     );
 }

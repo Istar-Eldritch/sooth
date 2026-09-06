@@ -53,7 +53,7 @@ lines. Each phase file is self-contained: exit criteria, dogfood, slice breakdow
 | **P5** | [Errors as values](./P5-errors-as-values.md) | `[S]`  ✅ done |
 | **P6** | [Term-level enum elimination](./P6-enum-elimination.md) | `[L]`  ✅ done (S5 deferred by design) |
 | **P7** | [Language prerequisites for the stdlib](./P7-language-prereqs.md) | `[L]` — in progress (S3u/S3w parked; S6c brief outstanding) |
-| **P7b** | [Higher-kinded types](./P7b-higher-kinded-types.md) | `[L]` — in progress (S1–S3 landed; S4/S5 plumbing, S6–S8 trait ladder pending) |
+| **P7b** | [Higher-kinded types](./P7b-higher-kinded-types.md) | `[L]` — in progress (S1–S8 landed; S8b follow-up — the S6 wall fix + traitful `List` members — pending) |
 | **P8** | [Packages and modules](./P8-packages-modules.md) | `[L]` |
 | **P9** | [The stdlib layers](./P9-stdlib-layers.md) | `[L]` |
 | **P10** | [Concurrency (library)](./P10-concurrency.md) | `[M]` |
