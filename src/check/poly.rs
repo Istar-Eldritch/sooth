@@ -6546,16 +6546,22 @@ pub(super) fn poly_reference_word(
                 ));
             }
             let count = match len {
-                Len::Concrete(count) => count,
-                // D6: a fully generic-length array's element cannot be
-                // statically bounds-checked; a dependent-bounds problem this
-                // slice defers (its own slice, `'N`-length element access).
+                Len::Concrete(count) => Some(count),
+                // P7.S6c (R1.1): a literal index against an unknown length
+                // still cannot be statically bounds-checked, so it is still
+                // rejected here. Anything else (a `usize` local, a `>usize`
+                // conversion's result, or a computed non-literal `i64`)
+                // defers to the runtime guard exactly as a `Len::Concrete`
+                // computed index already does.
                 Len::Var(v) => {
-                    return Err(poly_generic_length_index_error(
-                        ctx,
-                        span,
-                        &sig.len_var_names[v as usize],
-                    ));
+                    if index_lit.is_some() {
+                        return Err(poly_generic_length_index_error(
+                            ctx,
+                            span,
+                            &sig.len_var_names[v as usize],
+                        ));
+                    }
+                    None
                 }
             };
             check_poly_array_index(&index_pt, index_lit, count, ctx, span, name, sig)?;
@@ -6678,12 +6684,14 @@ fn poly_ref_array_parts(pt: &PolyType, arrays: &[ArrayDecl]) -> Option<(bool, Po
 /// count, the poly-body twin of the monomorphic `check_array_index`. The
 /// caller passes the index slot's `int_val` alongside its `PolyType`; this is
 /// the only consumer of that field, which is why every operator but a bare
-/// shuffle leaves it `None`.
+/// shuffle leaves it `None`. P7.S6c (R2.1): `count` is `None` for a
+/// generic-length array (`Len::Var`), deferring entirely to the runtime
+/// bounds guard the same way a `Len::Concrete` computed index already does.
 #[allow(clippy::too_many_arguments)]
 fn check_poly_array_index(
     index_pt: &PolyType,
     index_lit: Option<i64>,
-    count: u32,
+    count: Option<u32>,
     ctx: &Ctx,
     span: Span,
     op: &str,
@@ -6692,8 +6700,17 @@ fn check_poly_array_index(
     match index_pt {
         PolyType::Concrete(Type::Usize) => Ok(()),
         PolyType::Concrete(Type::I64) => match index_lit {
-            Some(idx) if idx >= 0 && idx < i64::from(count) => Ok(()),
-            Some(idx) => Err(array_index_out_of_range_error(ctx, span, count, idx)),
+            Some(idx) => match count {
+                Some(c) if idx >= 0 && idx < i64::from(c) => Ok(()),
+                Some(c) => Err(array_index_out_of_range_error(ctx, span, c, idx)),
+                // P7.S6c (R2.2): a literal index against an unknown length is
+                // intercepted at the `Len::Var` call site (R1.1) before this
+                // function is ever reached.
+                None => unreachable!(
+                    "a literal index against an unknown length is intercepted at the \
+                     Len::Var call site (R1.1) before this function is ever reached"
+                ),
+            },
             // A computed (non-literal) `i64` index needs the explicit
             // `>usize` conversion the monomorphic checker also requires;
             // there is no value here to bounds-check at compile time.
@@ -11702,12 +11719,16 @@ pub(super) fn poly_arm_local_not_consumed_error(
     )
 }
 
-/// Slice 13 (E3/D6): `&>`/`&!>` on a generic-length array (`array['T 'N]`) -- the
-/// element cannot be statically bounds-checked without a known count.
+/// P7.S6c (R3): `&>`/`&!>` on a generic-length array (`array['T 'N]`) with a
+/// **literal** `i64` index -- a `usize` index (bare local, or `>usize`
+/// conversion's result) is admitted and defers to the runtime bounds guard;
+/// only a literal index against an unknown length still cannot be
+/// range-checked at all, since there is no count to check it against and no
+/// value to convert.
 pub(super) fn poly_generic_length_index_error(ctx: &Ctx, span: Span, len_var: &str) -> String {
     let where_ = ctx.rendered_word();
     format!(
-        "error: cannot index a generic-length array in {where_} (line {}, col {})\n  the array's length is the type variable `{len_var}`, so its element cannot be statically bounds-checked; index a concrete-length array (`array['T 4]`), or use a fixed length in this word's signature",
+        "error: cannot index a generic-length array with a literal index in {where_} (line {}, col {})\n  the array's length is the type variable `{len_var}`, so a literal index cannot be statically bounds-checked; use a `usize` index instead (a bound local, or `>usize` on a computed value), which defers the check to runtime",
         span.line, span.col
     )
 }
@@ -18898,15 +18919,16 @@ mod tests {
     }
 
     #[test]
-    fn poly_reference_word_rejects_indexing_a_generic_length_array() {
-        // E3/D6: `array['T 'N]` has no known count, so its element cannot be
-        // statically bounds-checked; only a concrete-length array's element
-        // is accessible this slice.
+    fn poly_array_index_literal_unknown_length_requires_usize_conversion() {
+        // P7.S6c (R1.1/R3.1): a *literal* index into a generic-length array
+        // still cannot be statically bounds-checked -- there is no count to
+        // check it against. A `usize` index, or a computed value converted
+        // with `>usize`, is admitted instead and defers to runtime.
         let err = check_src(": badidx ( array['T 'N] -- 'T )\n  | a |\n  &a 0\n  &>\n  @\n;\n")
             .unwrap_err();
         assert_eq!(
             err,
-            "error: cannot index a generic-length array in `badidx` (line 4, col 3)\n  the array's length is the type variable `'N`, so its element cannot be statically bounds-checked; index a concrete-length array (`array['T 4]`), or use a fixed length in this word's signature"
+            "error: cannot index a generic-length array with a literal index in `badidx` (line 4, col 3)\n  the array's length is the type variable `'N`, so a literal index cannot be statically bounds-checked; use a `usize` index instead (a bound local, or `>usize` on a computed value), which defers the check to runtime"
         );
     }
 
@@ -19275,7 +19297,7 @@ mod tests {
         check_poly_array_index(
             &PolyType::Concrete(Type::I64),
             Some(2),
-            4,
+            Some(4),
             &ctx,
             span,
             "&>",
@@ -19285,7 +19307,7 @@ mod tests {
         check_poly_array_index(
             &PolyType::Concrete(Type::I64),
             Some(9),
-            4,
+            Some(4),
             &ctx,
             span,
             "&>",
@@ -19295,7 +19317,7 @@ mod tests {
         check_poly_array_index(
             &PolyType::Concrete(Type::I64),
             None,
-            4,
+            Some(4),
             &ctx,
             span,
             "&>",
@@ -19305,13 +19327,37 @@ mod tests {
         check_poly_array_index(
             &PolyType::Concrete(Type::Usize),
             None,
-            4,
+            Some(4),
             &ctx,
             span,
             "&>",
             &sig,
         )
         .expect("an already-usize index needs no literal at all");
+        // P7.S6c (R2.4): an unknown length (`count = None`, the
+        // generic-length deferral case) admits a `usize` index the same way
+        // a known length does, and still requires the explicit `>usize`
+        // conversion for a computed `i64` index.
+        check_poly_array_index(
+            &PolyType::Concrete(Type::Usize),
+            None,
+            None,
+            &ctx,
+            span,
+            "&>",
+            &sig,
+        )
+        .expect("a usize index needs no known length either");
+        check_poly_array_index(
+            &PolyType::Concrete(Type::I64),
+            None,
+            None,
+            &ctx,
+            span,
+            "&>",
+            &sig,
+        )
+        .expect_err("a computed i64 needs >usize even against an unknown length");
     }
 
     /// P7 slice 1 (R1): a field projection inside a generic body. `&f` carries
