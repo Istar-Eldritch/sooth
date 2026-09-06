@@ -2562,7 +2562,7 @@ impl ImplTarget {
     /// is concrete (`impl: Iterator for Range[i64]`). Such a target names no
     /// variable, so its members ground monomorphically (D5 forbids a
     /// generic body: a `Range[i64]` local in poly space is not a borrowable
-    /// aggregate, `src/check/poly.rs:6649`), while the pattern still carries
+    /// aggregate, `src/check/poly.rs:6656`), while the pattern still carries
     /// the ctor head an App-headed member dissolves into and the dispatch
     /// matcher identifies on. A partially-applied target keeps a variable in
     /// the padded slots (`Result[i64 'ctor1]`), so it is not one of these.

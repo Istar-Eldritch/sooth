@@ -230,6 +230,10 @@ fn row_nested_member_local_headed_app_is_quotation_row_error() {
         ),
         "{stderr}"
     );
+    assert!(
+        stderr.contains("at line 3, col 30"),
+        "the S7 twin pins locatedness; this pin must too: {stderr}"
+    );
 }
 
 /// (b) REQ-2: a nested `'F['G['T]]` member row (trait-var-headed outer App
@@ -346,6 +350,10 @@ fn bound_over_ctor_headed_member_trait_at_unimplemented_hkt_type_is_located_not_
         stderr.contains("does not satisfy `Iterator`: no `( 'It['T] -- Step['T 'It['T]] )` found"),
         "{stderr}"
     );
+    assert!(
+        stderr.contains("(line 7, col 21)"),
+        "locatedness: the bound-unsatisfied diagnostic names its site: {stderr}"
+    );
 }
 
 /// (c) review finding 1/2: the non-HKT twin -- a plain (non-`* -> *`) trait
@@ -363,6 +371,10 @@ fn bound_over_ctor_headed_member_trait_at_unimplemented_concrete_type_is_located
     assert!(
         stderr.contains("does not satisfy `Wrapper`: no `( i64 -- Option['T] )` found"),
         "{stderr}"
+    );
+    assert!(
+        stderr.contains("(line 6, col 17)"),
+        "locatedness: the bound-unsatisfied diagnostic names its site: {stderr}"
     );
 }
 
@@ -829,5 +841,83 @@ import: core::range | Range | ;
     assert!(
         loop_fn.contains(&format!("call {next_symbol}(")),
         "the loop must call `next` as a real function, not inline it: {loop_fn}"
+    );
+}
+
+/// P7b.S8 integrated review: the three behavioral claims the write-downs make
+/// about the module surface, pinned so a regression cannot ship silently.
+/// (1) `fold` is exported by both `core::combinators` (array fold) and
+/// `core::iterator`; wildcard-importing both fails closed with a
+/// duplicate-binding error at the import site, never a silent shadow.
+#[test]
+fn wildcard_importing_both_fold_exporters_fails_closed_at_the_import_site() {
+    let stderr = build_error_located(
+        "p4-fold-wildcard-collision",
+        "import: intrinsics * ;\n\
+         import: core::combinators * ;\n\
+         import: core::iterator * ;\n\
+         : main ( -- ) ;\n",
+    );
+    assert!(
+        stderr.contains(
+            "error: wildcard import of `fold` (line 5, col 1) collides with the wildcard import of `fold`"
+        ),
+        "{stderr}"
+    );
+}
+
+/// (2) The import-surface rule: a trait member's synthesized word is never
+/// the bare member name, so naming `next` in an import list fails located —
+/// import the trait and call the bare name at the dispatch site instead.
+#[test]
+fn naming_the_member_in_an_import_list_is_not_exported_error() {
+    let stderr = build_error_located(
+        "p4-next-not-exported",
+        "import: intrinsics * ;\n\
+         import: core::iterator | Step Done More Iterator next | ;\n\
+         : main ( -- ) ;\n",
+    );
+    assert!(
+        stderr.contains("error: `next` is not exported from module `iterator` at line 4, col 50"),
+        "{stderr}"
+    );
+}
+
+/// (3) The other half of the import surface: a consumer that never imports
+/// `core::iterator` cannot resolve `next` at all — `unknown word`, located.
+#[test]
+fn bare_next_without_the_iterator_import_is_unknown_word_error() {
+    let stderr = build_error_located(
+        "p4-next-unknown-word",
+        "import: intrinsics * ;\n\
+         import: core::list | List Nil Cons | ;\n\
+         : f ( List[i64] -- ) next drop ;\n\
+         : main ( -- ) Nil f ;\n",
+    );
+    assert!(
+        stderr.contains("error: unknown word `next` in `f` (line 5)"),
+        "{stderr}"
+    );
+}
+
+/// P7b.S8 integrated review: the positive twin of the Quotation-arm pins —
+/// an inline-declared lifted member whose quotation slot GROUNDS. The trait
+/// row carries `inline` (impl members inherit it); the member body checks
+/// through `substitute_generic_field`'s Quotation arm (the phase-3 ICE fix's
+/// build path), and the impl builds. The member cannot yet be *called* with
+/// a quotation (the P7-era rule that only `call` accepts one fires at the
+/// call site, pre-existing, out of S8's scope) — this pin witnesses the
+/// grounding/build path the error twins don't reach.
+#[test]
+fn inline_declared_lifted_member_with_quotation_slot_builds_not_panics() {
+    build_ok(
+        "p4-inline-quotation-slot-build-path",
+        "import: intrinsics * ;\n\
+         type: Box['T] v 'T ;\n\
+         trait: Apply['T] : ap inline ( 'T ~[ 'T -- ] -- ) ; ;\n\
+         impl: Apply for Box[i64]\n\
+           : ap | q | | b | b q call ;\n\
+         ;\n\
+         : main ( -- ) ;\n",
     );
 }

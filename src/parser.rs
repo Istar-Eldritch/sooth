@@ -4506,7 +4506,7 @@ impl<'t> Parser<'t> {
         // converts to the same mono member word the concrete path below
         // synthesizes (`poly: None`, a concrete `StackEffect`) -- D5 forbids
         // the generic alternative (a `Range[i64]` local in poly space is not
-        // a borrowable aggregate, `src/check/poly.rs:6649`, so a poly-bodied
+        // a borrowable aggregate, `src/check/poly.rs:6656`, so a poly-bodied
         // member could never read `cur`).
         //
         // A member the dissolve leaves a free variable in is exactly S2-6's

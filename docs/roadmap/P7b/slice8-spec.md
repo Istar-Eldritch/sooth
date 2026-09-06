@@ -42,7 +42,7 @@ when measured in phase 2.
 - **R2 — the S2-6 concrete-impl-target lift lands in S8**; `impl: Iterator for Range[i64]` is
   a golden. Landed as *design A*: the member grounds **monomorphically** (a `poly: None` word
   with a concrete `StackEffect`). D5 forces this: the borrow gate admits only `Concrete`
-  aggregates as borrowable locals (`src/check/poly.rs:6649`), so a *poly*-bodied member over a
+  aggregates as borrowable locals (`src/check/poly.rs:6656`), so a *poly*-bodied member over a
   `Generic`-pattern `Range[i64]` could never read `cur`. **Option B** — routing lifted targets
   through the existing generic path with a var-free fully-concrete grounded `PolySig`
   (`poly: Some`) — was the documented fallback and was **not needed**; it would have threaded
@@ -78,9 +78,9 @@ when measured in phase 2.
   argument-by-argument (OQ-1, answered by the code). The work was the *continuations*: a
   lifted-mono arm in `resolve_mono_member_call` (`src/check/poly.rs:2456` — fenced by the
   member word's own mono flag, so it covers exactly the words the desugar grounded) and a
-  mono route in `resolve_user_bound` (`:9048`) so a lifted target's mono member word
+  mono route in `resolve_user_bound` (the lifted-mono candidate branch `:8944-8966`, bare-symbol pick at the `if is_mono` at `:9057`) so a lifted target's mono member word
   dispatches at obligation sites instead of falling into `impl_mono_seed`'s `poly: Some`
-  requirement (`:8003`).
+  requirement (`:8020`).
 - **The protocol module and the Range module.** `lib/core/iterator.sth` (78 lines) carries
   `Step`, the `Iterator` trait, the List impl, and the consumers; `lib/core/range.sth`
   (38 lines) carries `Range['T]` (real `cur`/`limit` fields, no phantoms) and its
@@ -106,7 +106,7 @@ flowchart TD
     B -->|App-headed target| F["impl_target_app_unsupported_error"]
     D --> G{"member call site"}
     G -->|plain mono call| H["resolve_mono_member_call<br/>lifted-mono arm, poly.rs:2456"]
-    G -->|through an Iterator bound| I["resolve_user_bound mono route, poly.rs:9048<br/>(impl_mono_seed's poly-Some gate bypassed)"]
+    G -->|through an Iterator bound| I["resolve_user_bound lifted-mono route, poly.rs:8944-8966<br/>(impl_mono_seed's poly-Some gate bypassed)"]
     E --> J["generic dispatch via impl_monos"]
 ```
 
@@ -195,7 +195,7 @@ alias import, or a rename).
   (`ImplTarget::is_mono_ctor_app` `:2569`, `ground_var_free` `:1191`,
   `poly_type_is_var_free` `:2174`, review finding 1's Quotation arm `:1009`);
   `src/check/poly.rs` (`resolve_mono_member_call` lifted-mono arm `:2456`;
-  `resolve_user_bound` mono route `:9048`; finding-2a doc `:567`); `lib/core/range.sth` +
+  `resolve_user_bound` mono route `:8944-8966`; finding-2a doc `:567`); `lib/core/range.sth` +
   `sooth.pkg` registration; `tests/phase7b_slice8.rs` (Range mono golden, byte-exact fence
   pins, generic-path pin, quotation-slot and HKT-local pins).
 - **Phase 4 — evidence + written record (`1c54b5a`)**: the IR pin in
@@ -206,7 +206,11 @@ alias import, or a rename).
 **Verification (checked at condensation time, 2026-09-06):** full gate green on `1c54b5a` —
 `cargo fmt --check` clean; `cargo clippy -- -D warnings` clean; `cargo test` 3286 passed /
 0 failed across 87 test binaries, including `tests/phase7b_slice8.rs` 24/24 (the new S8
-goldens, the byte-exact diagnostic pins, both panic-path fences, and the IR pin). The range
+goldens, the byte-exact diagnostic pins, both panic-path fences, and the IR pin). The
+shipped branch tip additionally carries the merge of main (P7b.S6c, `7ec6c44`); the full
+gate is green on the merged tree (88 test binaries — the +1 is S6c's
+`tests/phase7_slice6c.rs`), and an integrated-state review verified the S6c interaction
+semantically clean (no shared function edited by both slices). The range
 diff `86ca5eb..1c54b5a` contains no `src/ir/` change and leaves the S6 wall
 (`poly_bind_construction_arg`) untouched; the wall witness
 (`tests/phase7b_slice6.rs:410`, `monoid_for_list_append_construction_wall_is_recorded`) is

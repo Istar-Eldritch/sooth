@@ -15,7 +15,7 @@ export: Range ;
 \ fully-applied `Range[i64]`: a ctor application with all-concrete arguments,
 \ which is the shape Delta B admits and grounds monomorphically. Mono is not
 \ a preference here: D5 admits only `Concrete` aggregates as borrowable
-\ locals (`src/check/poly.rs:6649`), so a *poly*-bodied member could not read
+\ locals (`src/check/poly.rs:6656`), so a *poly*-bodied member could not read
 \ `cur` at all.
 type: Range['T]
   cur 'T
