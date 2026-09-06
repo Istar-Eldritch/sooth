@@ -247,6 +247,14 @@ a question, not an answer.
 **Exit:** `next`/`map`/`fold` through an Iterator bound over List and Range goldens; a
 consuming loop runs with one frame total; the exhausted-case ruling and the fusion
 evidence from a small chain are written down.
+Rulings of 260905 (probe round P8, [slice8-probes](./P7b/slice8-probes.md)): the
+protocol row is the **Step shape** (`Step['T 'It['T]]`, `Done` carries nothing, the
+final drop inside `next`'s `Done` arm); the **S2-6 concrete-target lift lands in S8**
+(`impl: Iterator for Range[i64]`, members grounded as instantiations); the exit's
+"map/fold" reads as consuming **`for_each`/`fold`**. **P7b.S8b** (carved out, same
+date): the S6 construction-wall fix (`poly_bind_construction_arg`'s bare-`Generic`
+`^Self['T]` self-reference-field arm, refined by the P8 round) plus per-impl
+traitful `List` members (`map`, `append`) over the Iterator protocol.
 
 **P7b.S9 — Module-aware trait-impl matching.**
 Carved out of S5's review (260904): `find_bound_impl` (`poly.rs:8235`) matches a

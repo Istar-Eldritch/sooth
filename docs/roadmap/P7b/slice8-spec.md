@@ -1,0 +1,573 @@
+# Spec: P7b.S8 — Linear iterators (HKT as the associated-type substitute)
+
+**Status:** Draft
+**Created:** 2026-09-06
+**Discovery:** [slice8-brief](./slice8-brief.md) (rulings R1–R4 + the S8b carve-out, decided 260905 — settled, do not reopen) and the verbatim probe log [slice8-probes](./slice8-probes.md) (round P8, four workers, P8-1..P8-6). Roadmap entry: [P7b-higher-kinded-types.md](../P7b-higher-kinded-types.md), section "P7b.S8". Base: `54414cb` (P7b.S7 landed and merged; suite green — fmt, clippy, 2600+ tests).
+
+> **Anchor provenance.** The probe log's `path:line` citations are `ae6fdd7`-era. Every
+> anchor in this spec was re-verified against the current tree (`54414cb`) on 2026-09-06.
+> Where the probe era and the current tree disagree, this spec's numbers win. S7 also
+> **reworded** the member-shape fence message (now "...plus a trait-var-headed
+> application, in a plain slot or a quotation row..."); S8's diagnostic pins use the
+> current text (`src/parser.rs:446`), not the probe log's.
+
+## Problem Statement
+
+Sooth has container types (`List`, `Option` in `lib/core/`) and a working trait system
+with shared bounds (S2/S4/S6/S7), but no iteration protocol: there is no way to write
+one generic `for_each` or `fold` that drains a `List` or a count-up `Range` without
+hand-rolling a per-type recursive word. Associated types stay out of scope by design —
+the roadmap's answer is to make the iterator itself the type constructor
+(`trait: Iterator['It: * -> *] : next ( 'It['T] -- Step['T 'It['T]] ) ;`), with
+linearity *as* the protocol: `next` consumes the iterator and yields
+element-plus-remainder, `drop` is the explicit destructor, and the exhausted case is
+exactly the question of where the final drop lives. The probe round (P8, 260905)
+refuted the old "delta ≈ zero" premise and located the real blockers: the trait cannot
+even be **declared** today (the member-row gate rejects every ctor-headed App,
+`src/parser.rs:403`), and a count-up `Range` has **no legal impl target** (the S2-6
+concrete-impl-target fence, `src/ast.rs:2137` via `src/parser.rs:4334`). Until these
+two compiler deltas land, the Iterator trait is undeclarable and the roadmap exit —
+`next`/`for_each`/`fold` through a bound over List and Range goldens — is unreachable.
+
+## Requirements
+
+Rulings R1–R4 (260905) are settled user decisions; they are encoded below as
+requirements, not reopened.
+
+- **REQ-1.** (Delta A — member-row gate lift, prerequisite for the trait.) The
+  member-row gate `member_shape_is_supported` (`src/parser.rs:381`) must admit a
+  ctor-headed application (`PolyType::Generic`) in a trait member signature when every
+  one of its type arguments is itself a supported member-row shape, recursing through
+  the existing arms. Consequently `Option['T]`, `Step['T 'It['T]]`, and the non-nested
+  `Step['T 'T]` must all declare (probe P8-1a/P8-1c/b7 refusals today).
+- **REQ-2.** The gate lift must stay admission-shaped: a member-local-headed nested
+  application (`'F['G['T]]`), `PolyType::OwnedCell`, `QuotLit`, `GenericVariant`, and
+  var-length arrays must remain rejected with the byte-unchanged, S7-reworded message
+  (`unsupported_trait_member_shape_error`, `src/parser.rs:446`) and the row-App message
+  (`app_in_member_quotation_row_error`, `src/parser.rs:459`).
+- **REQ-3.** (R1 — the Step row is the protocol.) Core must gain the protocol vehicle:
+  `type: Step['T 'Rest] | Done | More 'T 'Rest ;` and the trait
+  `trait: Iterator['It: * -> *] : next ( 'It['T] -- Step['T 'It['T]] ) ;` in a new
+  `no_std` core-layer module. `Done` carries nothing. The Option row
+  (`next ( 'It['T] -- Option['T] 'It['T] )`) is the recorded rejected alternative and
+  must not be implemented (arm parity forces the dead iterator to the caller and the
+  final drop to every `None` path — probe P8-1d1b/d2).
+- **REQ-4.** (List impl, no wall.) The system must provide
+  `impl: Iterator for List` (generic target, today's generic path): the `Cons` arm
+  destructures and packs `More` (element deepest, remainder on top); the exhausted
+  `Nil` arm consumes the matched List and returns only the `Done` shell — the final
+  drop lives inside `next`'s `Done` arm as the one canonical site, and no remainder is
+  constructed (so the S6 construction wall is never reached).
+- **REQ-5.** (R4 — consumers through the bound, List.) The system must provide generic
+  `for_each['It: Iterator 'T] ( 'It['T] [ 'T -- ] -- )` and a generic `fold` (accumulator
+  under the element; `[ 'A 'T -- 'A ]`), written once against the Iterator bound,
+  self-recursive with the self-call in tail position (the P7.S3g loop-back-edge
+  precedent, `src/ir/driver.rs:1093`), dispatching `next` through the bound over the
+  List impl.
+- **REQ-6.** (Bound-dispatch verification — the explicit early verification point.)
+  A poly body's member call through an Iterator bound over a ctor-headed compound
+  member return (the Step row) must be **measured** the moment REQ-1 lands: if
+  `poly_cross_call_unsupported_error` (`src/check/poly.rs:4371`) fences it, the phase
+  stops and escalates with a verbatim repro — no silent reshape of `next`, no
+  unsanctioned lift of the cross-call gate. The S4 `q map` precedent
+  (`shared_bound_poly_word_dispatches_over_the_real_core_option`,
+  `tests/phase7b_slice4.rs:199`, `q map` at `:212-213`) predicts it works; it is
+  unmeasured for the Step row until REQ-1 lands.
+- **REQ-7.** (Delta B — the S2-6 concrete-impl-target lift, R2.) An impl target that
+  is a fully-applied ctor application with all-concrete arguments
+  (`impl: Iterator for Range[i64]`) must become legal: `'It` unifies with the ctor
+  head, the member's App arguments bind to the target's concrete arguments (the union
+  builder already renders concrete slots as themselves, `src/parser.rs:668`), and the
+  member body must check **monomorphically** — a mono member word with a concrete
+  `StackEffect`, not a `PolySig` (a poly-bodied member would die at the D5 borrow gate,
+  `src/check/poly.rs:6579`, which stays untouched).
+- **REQ-8.** (Fence boundaries byte-exact.) Mixed and partial applications keep
+  today's behavior: an App-headed member against a plain concrete target (`for i64`)
+  still raises `member_app_concrete_target_error` (`src/ast.rs:2095` text byte-exact
+  via `fence_member_app_against_concrete_target`, `src/ast.rs:2137`, called from
+  `src/parser.rs:4334`); an App-headed impl target still raises
+  `impl_target_app_unsupported_error` (`src/parser.rs:902`); an applied-var ctor
+  target (`List['L]`) keeps the generic path with a poly member word.
+- **REQ-9.** (R2 — the Range golden.) Core must gain
+  `type: Range['T] cur 'T limit 'T ;` (stays generic; no phantom parameters — those
+  are dead by design, `phantom_ty_var_error`, `src/parser.rs:2519`) and
+  `impl: Iterator for Range[i64]`: a count-up `next` doing arithmetic on `i64`
+  (`1 add`), constructing the advanced `Range` inside the `More` arm (plain fields —
+  the wall is not reached, probe P8-2a) and dropping the consumed iterator inside the
+  `Done` arm. `next` over `Range[i64]` must dispatch at a plain mono call site. No D5
+  changes, no numeric trait, no phantom params.
+- **REQ-10.** (R4 — consumers through the bound, Range.) `for_each` and `fold` must
+  drain and fold `Range[i64]` through the Iterator bound (0 1 2; sum 3), with no
+  per-impl copies of the consumers.
+- **REQ-11.** (IR evidence — recorded, no verdict.) The suite must contain an
+  automated pin that a consuming loop lowers to **one frame whose self-call is a
+  back-edge** (pattern: `poly_self_tail_call_lowers_to_loop_back_edge`,
+  `src/ir/driver.rs:1093`), and the written record must state the P8-6 facts as
+  evidence only — the loop is one frame, `next`/`list-next` is a real monomorphized
+  frame (not spliced), a two-consumer chain is two dedicated frames — with no fusion
+  verdict ("one frame total" is true of the loop, not of loop+`next`).
+- **REQ-12.** (Write-downs + roadmap correction.) The exhausted-case ruling (R1: Step
+  row, `Done` carries nothing, the final drop inside `next`'s `Done` arm; the Option
+  row rejected) and the fusion evidence must be written into the roadmap's S8 entry,
+  and the entry corrected at the final phase per house convention (exit wording to the
+  landed `for_each`/`fold` outcome, implemented-reference link to this spec).
+- **REQ-13.** (R3 / S8b carve-out — the wall stays.) The S6 construction-wall arm —
+  the `poly_bind_construction_arg` catch-all at `src/check/poly.rs:6116-6117` (fn at
+  `:5998`) — must remain untouched, and the wall witness
+  `monoid_for_list_append_construction_wall_is_recorded` (`tests/phase7b_slice6.rs:410`)
+  must stay green. The wall fix plus per-impl traitful `List` members (`map`,
+  `append`) are **P7b.S8b**, out of this slice.
+
+Non-functional requirements:
+
+- **REQ-NFR1.** (Green gate.) Every phase exits with `cargo fmt --check &&
+  cargo clippy -- -D warnings && cargo test` green (2600+ baseline tests plus the new
+  goldens); the final phase re-verifies the whole gate. Diagnostics are behaviour: any
+  new error text is measured-then-pinned byte-exact.
+- **REQ-NFR2.** (Stage discipline.) Both compiler deltas are parser/check-stage only:
+  no IR or lowering changes (`src/ir/` diff-empty), the QBE backend untouched, `Ptr[T]`
+  stays an opaque handle. The target-fold interception lives in the **impl-target
+  path only** — `raw_to_poly_type`'s Generic-arm fold (`src/parser.rs:5640-5680`) is
+  not changed globally, because ordinary signatures depend on the Concrete fold for
+  instantiation mint-sharing (S4-1).
+- **REQ-NFR3.** (Layering.) The new protocol module is `core`-layer `no_std` (no
+  `hosted` imports), registered in `lib/core/sooth.pkg`'s module list, following the
+  `lib/core/cmp.sth` house pattern for a core trait module. Nothing becomes implicit:
+  consumers `import:` it explicitly.
+- **REQ-NFR4.** (Linear spine respected.) `next` consumes the iterator exactly once;
+  `Done` carries nothing; no auto-drop is added (never-moved frame locals keep today's
+  implicit reclamation, probe P8-1d4/n1); the enforced teeth stay compile-time —
+  leaving a `Step` value undropped across dispatch arms is an arm-parity compile error
+  (`src/check.rs:2983` join, poly arm `src/check/poly.rs:11551`), measured-then-pinned
+  through the new protocol.
+
+## Success Criteria
+
+- [ ] `trait: Iterator['It: * -> *] : next ( 'It['T] -- Step['T 'It['T]] ) ;` compiles
+      (today it fails with the unsupported-signature message — probe P8-1a/P8-1c).
+- [ ] A List built as 1,2,3 drains via `for_each` through the Iterator bound, printing
+      `1\n2\n3`, exit 0; `[ 0 add ]`-style fold over it yields 6.
+- [ ] `0 3 Range` drains via `for_each` printing `0\n1\n2`; `fold` sums it to 3.
+- [ ] `next` dispatches over `Range[i64]` at a plain mono call site (one `More`, then
+      `Done`, observable).
+- [ ] `impl: Iterator for i64` with the App-headed member still fails with today's
+      byte-exact S2-6 message; an App-headed impl target still fails with
+      `impl_target_app_unsupported_error`; `List['L]` as a target still yields a poly
+      member word.
+- [ ] A member row `'F['G['T]]` (member-local-headed nested App) still fails with the
+      byte-exact S7-reworded unsupported-shape message.
+- [ ] An IR-level check in the suite shows the consuming loop's monomorphized
+      `for_each` is one frame with a self back-edge; the written record states the
+      loop+`next` facts with no fusion verdict.
+- [ ] `docs/roadmap/P7b-higher-kinded-types.md`'s S8 entry carries the exhausted-case
+      ruling, the fusion evidence, the `for_each`/`fold` exit wording, and a link to
+      this spec; a growth-structure re-check is documented.
+- [ ] `src/check/poly.rs`'s construction-wall catch-all is diff-empty and the S6 wall
+      witness test passes.
+- [ ] Full gate green: fmt, clippy `-D warnings`, all tests (2600+ baseline + new).
+
+## Scope & Boundaries
+
+**In scope:**
+
+- Delta A: the `member_shape_is_supported` `Generic` arm lift (ctor-headed Apps in
+  member rows, recursively argued).
+- The core protocol module: `Step['T 'Rest] | Done | More 'T 'Rest`, the
+  `Iterator['It: * -> *]` trait with the Step-row `next`, impls for `List` (generic
+  target) and `Range[i64]` (R2), and the generic `for_each`/`fold` consumers.
+- Delta B: the S2-6 concrete-impl-target lift — fully-applied (all-concrete-arg) ctor
+  targets legal; App-headed members grounded as monomorphic instantiations.
+- Goldens (`tests/phase7b_slice8.rs`, new), diagnostic pins (measure-then-pin,
+  byte-exact), the one-frame IR pin, the write-downs, the roadmap correction, and the
+  growth-structure re-check.
+
+**Out of scope** (per the brief's "Explicitly out of scope" and the decided rulings):
+
+- **P7b.S8b (carved out, decided 260905):** the S6 construction-wall fix
+  (`poly_bind_construction_arg`'s bare-`Generic` `^Self['T]` self-reference-field arm,
+  `src/check/poly.rs:6116-6117`) plus per-impl traitful `List` members (`map`,
+  `append`). Nothing in S8's Step-row `next` shapes needs the wall (probe P8-2a/2b/2c).
+- Associated types / GATs — the slice exists to show they are not needed.
+- Borrow-based iteration (`&!`, lifetimes, exclusivity) — linearity replaces it.
+- Lazy/streaming iterators and an adaptor library (`zip`/`take`/`rev`/...) — no free
+  library work; the trait is the dogfood, not a stdlib slice. `map` is **not** in S8
+  (R4): a bound-generic body cannot produce `'It['U]` (P8-5b) and cannot `dup` the
+  abstract iterator (`poly_copy_generic_error`, `src/check/poly.rs:10954`).
+- Fusion as an answered question — evidence recorded (REQ-11), ruling deferred.
+- Iterator for `array` — S6b territory.
+- Any change to `Option`'s shape or `core::option`'s surface — consumed as-is.
+- The D5 borrow gate (`src/check/poly.rs:6579`), any arithmetic trait, and phantom
+  parameters (R2's scope fences — the generic-target route is not taken).
+
+## Solution Approach
+
+The slice is two compiler deltas plus one core module, in that dependency order.
+
+**Delta A (member-row gate).** `member_shape_is_supported` (`src/parser.rs:381`) is a
+pure shape predicate enforced from `parse_trait_member_effect`'s post-parse sig walk
+(`src/parser.rs:3958-3986`). Today its combined rejection arm bundles
+`PolyType::Generic { .. }` with `OwnedCell`/`QuotLit`/`GenericVariant`
+(`src/parser.rs:408-414`); S8 splits `Generic` out and admits it when every type
+argument is itself supported — the same recursion the `Quotation` arm gained in S7.
+This admits all three refuted rows at once (`Option['T]`, `Step['T 'It['T]]`,
+`Step['T 'T]`) and changes nothing about grounding; it is admission-only, so the
+lift's safety must be swept: every newly-admitted shape either grounds through the
+existing generic path or fails with a located error, never a panic (pin one
+non-Iterator admitted shape, e.g. the probe's Interlude-B `Box2['T]` member row).
+
+**The protocol (R1).** One new core module carries the whole protocol: the two-param
+`Step` enum, the single-type-variable `Iterator` trait (multi-var headers are fenced
+by design — `multi_variable_trait_error`, `src/parser.rs:493`), the List impl, the
+Range type and impl, and the two consumers. List's `next` works entirely on today's
+generic-target path: enum destructuring over a poly target is permitted, and
+enum-ctor construction (`More`/`Done`) inside a member body is the verified S6
+precedent (probe P8-2c) — and because `Done` carries nothing, the exhausted `Nil` arm
+needs no remainder construction at all, which is exactly why S8's shapes never touch
+the S6 wall (R3). The List impl lives in the protocol module (the module owns the
+trait; S9/S10's cross-module impl machinery exists for concrete targets, so
+implementing a foreign type with an own-module trait is expected to pass
+`check_impl_decls` — verified as a phase-1 exit item).
+
+**Delta B (the S2-6 lift, R2).** The decisive constraint is R2's own scope fence: the
+D5 borrow gate stays untouched, and D5 only admits `Concrete` aggregates as borrowable
+locals (`src/check/poly.rs:6579-6588`). A `Range[i64]` local in *poly* space is
+`PolyType::Generic` — not borrowable — so a poly-bodied member can never read `cur`.
+Therefore the lifted target **must** ground its members monomorphically. The mechanism:
+intercept the fold in the impl-target path (`parse_impl_target`,
+`src/parser.rs:4085-4095`) so a fully-applied all-concrete ctor application keeps its
+`PolyType::Generic { args: all-concrete }` pattern instead of collapsing to
+`Concrete` — which preserves ctor identity for diagnostics and dispatch, and leaves
+`raw_to_poly_type`'s global fold (and S4-1's mint-sharing) untouched (REQ-NFR2). Then
+`parse_impl_member_body` (`src/parser.rs:4266`) routes such targets through the
+existing grounding machinery — `build_member_var_union` (`src/parser.rs:668`) already
+binds a member local named in a dispatchable input's application argument to the
+target slot's contents (a concrete slot renders as itself), and `ground_member_poly`'s
+App arm (`src/ast.rs:2366-2402`) already dissolves `'It['T]` against a `Generic`
+target — and, seeing the grounded signature is var-free, synthesizes the concrete
+path's mono member word (`poly: None`, concrete `StackEffect`) via the same
+instantiation machinery the fold uses. The S2-6 fence
+(`fence_member_app_against_concrete_target`, `src/ast.rs:2137`) stays exactly where it
+is for everything else: plain concrete targets (`for i64`), App-headed targets, and
+mixed/partial applications keep today's byte-exact behavior (REQ-8, S6b-style
+fencing). Dispatch: `find_bound_impl` (`src/check/poly.rs:8520`) /
+`match_impl_target_rec` (`src/check/poly.rs:9131`) must resolve a member call on the
+mono `Range[i64]` instantiation against the concrete-arg Generic pattern — measured
+first (a direct mono call-site golden), extended only within the fully-applied-only
+fence if the comparison is missing.
+
+**Consumers (R4).** `for_each` and `fold` are ordinary poly words with one
+`Iterator` bound, self-recursive with the self-call in tail position so the P7.S3g
+self-tail-call transform makes the loop a single frame with a back-edge
+(`src/ir/driver.rs:1093`). Member dispatch through a bound has the S4 `q map`
+precedent (`tests/phase7b_slice4.rs:212-213`) — `map` returns the compound `'F['U]`
+and dispatches fine — but the Step row's ctor-headed compound return is unmeasured,
+which is why REQ-6 makes it the first thing measured after Delta A, with
+`poly_cross_call_unsupported_error` (`src/check/poly.rs:4371`) as the named risk.
+
+## Codebase Map
+
+All anchors re-verified on base `54414cb`, 2026-09-06.
+
+| Location | Symbol | Role in this work |
+|----------|--------|-------------------|
+| `src/parser.rs:381` | `member_shape_is_supported()` | Delta A target; `PolyType::Generic` arm at `:403` (inside the combined false arm `:408-414`) lifts |
+| `src/parser.rs:446` | `unsupported_trait_member_shape_error()` | S7-reworded message — REQ-2/REQ-NFR1 pin against this text |
+| `src/parser.rs:459` | `app_in_member_quotation_row_error()` | S7's row fence — stays byte-unchanged |
+| `src/parser.rs:3927` | `parse_trait_member_effect()` | Enforcement loop `:3958-3986` picks up the lift automatically |
+| `src/parser.rs:4085` | `parse_impl_target()` | Delta B interception at the fold `:4095`; App-head target fence `:4096-4101` stays |
+| `src/parser.rs:902` | `impl_target_app_unsupported_error()` | App-headed-target message — REQ-8 pin |
+| `src/parser.rs:4126` | `parse_impl_target_pattern()` | Ctor intercept with `UnderApplication::PadImplTarget` (`:4152`) — the target ctor path the lift rides |
+| `src/parser.rs:4266` | `parse_impl_member_body()` | Concrete branch `:4327`; S2-6 fence call `:4334`; generic path `:4350-4360` — Delta B adds the fully-applied-ctor mono grounding here |
+| `src/parser.rs:668` | `build_member_var_union()` | Binds member locals to target slots; concrete slots render as themselves (verified) |
+| `src/parser.rs:5564` | `raw_to_poly_type()` | Generic-arm fold `:5640-5680` — **do not change globally** (REQ-NFR2); only the impl-target path intercepts |
+| `src/parser.rs:2519` | `phantom_ty_var_error()` | Phantom parameters dead by design — Range keeps real fields |
+| `src/parser.rs:493` | `multi_variable_trait_error()` | Single-type-variable traits only — the trait header shape is fixed |
+| `src/ast.rs:2095` | `member_app_concrete_target_error()` | S2-6 message — REQ-8 byte-exact pin for non-lifted targets |
+| `src/ast.rs:2137` | `fence_member_app_against_concrete_target()` | The S2-6 fence (scan `member_ty_mentions_app`, `:2123`), called from `src/parser.rs:4334` |
+| `src/ast.rs:2085` | `member_app_abstract_target_error()` | The abstract-target twin (unaffected) |
+| `src/ast.rs:2051` | `member_app_arity_error()` | Arity gate on the App dissolve — reused by the lift |
+| `src/ast.rs:2283` | `ground_member_poly()` | App arm `:2366-2402` dissolves `'It['T]` against a `Generic` target — the dissolve Delta B reuses |
+| `src/ast.rs:2482` | `ImplTarget::is_concrete()` | `matches!(pattern, PolyType::Concrete(_))` — the test the lifted targets stop satisfying (no change needed) |
+| `src/check/poly.rs:5998` | `poly_bind_construction_arg()` | **Do not touch** (S8b): catch-all `:6116-6117` is the S6 wall |
+| `src/check/poly.rs:6235` | `poly_construct_generic()` | Poly construction path — plain-field ctors construct fine in member bodies (P8-2a) |
+| `src/check/poly.rs:4371` | `poly_cross_call_unsupported_error()` | Named risk for REQ-6 (compound-return cross-call fence) |
+| `src/check/poly.rs:6579` | D5 `is_aggregate` match | Why the Range member must be mono; message `poly_borrow_of_non_aggregate_local_error` `:11250` — **do not extend** |
+| `src/check/poly.rs:8520` | `find_bound_impl()` | Member-call dispatch through the bound |
+| `src/check/poly.rs:9131` | `match_impl_target_rec()` | Impl-target matching — must match concrete-arg Generic patterns (phase 3 measures, extends if missing) |
+| `src/check/poly.rs:10954` | `poly_copy_generic_error()` | Conservative `dup` fence over bounds — consumers never duplicate the iterator |
+| `src/check/poly.rs:11551` | variant-escape rule (poly arm) | Matched variants cannot escape their arm — the Nil arm's discipline |
+| `src/check.rs:2983` | arm-parity join error | The linearity teeth (d5 evidence) — REQ-NFR4 pin site |
+| `src/ir/driver.rs:1093` | `poly_self_tail_call_lowers_to_loop_back_edge` | Precedent + pattern for REQ-11's one-frame pin |
+| `src/driver.rs:897` | `emit_ssa_with_manifest()` | IR evidence capture path (P8-6 method) |
+| `lib/core/list.sth:1` | `List['T]` (Nil/Cons, `rest ^List['T]`) | List impl target — destructure-only |
+| `lib/core/option.sth:1` | `Option['T]` | Consumed as-is; the Option-row rejected alternative is a record only |
+| `lib/core/cmp.sth` | `Ord` trait + derived members | House pattern for a core trait module (header comment, exports) |
+| `lib/core/sooth.pkg` | `module:` list | Gains the new protocol module (append `iterator`) |
+| `lib/core/iterator.sth` (new) | — | The protocol module: Step, Iterator, List impl, Range, Range[i64] impl, for_each, fold |
+| `tests/fixtures/sooth.pkg` | fixture manifest | Invocation contract for CLI-shaped fixtures (`--manifest`) |
+| `tests/phase7b_slice8.rs` (new) | — | S8 goldens + diagnostic pins; harness per `tests/common/mod.rs` (`build_run_keep`), pattern `tests/phase7b_slice4.rs` |
+| `tests/phase7b_slice4.rs:199` | `shared_bound_poly_word_dispatches_over_the_real_core_option` | The bound-dispatch (`q map`, `:212-213`) precedent |
+| `tests/phase7b_slice6.rs:410` | `monoid_for_list_append_construction_wall_is_recorded` | Wall witness — must stay green (REQ-13) |
+
+Load-bearing constraints:
+
+- `src/parser.rs:5640-5680` (`raw_to_poly_type`'s Generic-arm fold): do not change
+  globally — ordinary signatures fold `Range[i64]` to `Concrete` and share the S4-1
+  mint; the interception is impl-target-scoped only.
+- `src/check/poly.rs:6116-6117`: the S6 wall — S8b's, not S8's (REQ-13).
+- `src/check/poly.rs:6579-6588`: the D5 aggregate gate — not extended; it is the
+  *reason* Delta B grounds monomorphically.
+- Single-type-variable traits (`src/parser.rs:493`): the `'O['T]` two-var alternative
+  is dead by design (probe P8-4a2) — do not revisit.
+
+## Open Questions
+
+- [x] ~~Exhausted case: Option row vs Step row~~ — **R1 (260905):** Step row; `Done`
+  carries nothing; the final drop inside `next`'s `Done` arm. Option row recorded as
+  the rejected alternative.
+- [x] ~~Range impl target: phantom vs concrete-target lift vs demote~~ — **R2
+  (260905):** the S2-6 lift lands in S8; `impl: Iterator for Range[i64]` is a golden.
+- [x] ~~Does S8 carry the S6 construction-wall fix?~~ — **R3 (260905):** no; wall fix
+  - traitful List `map`/`append` carved out to P7b.S8b.
+- [x] ~~Does the exit mean `map`?~~ — **R4 (260905):** no; consuming `for_each` +
+  `fold` through the bound.
+- [ ] Does `match_impl_target_rec` already compare a concrete-arg Generic pattern
+  against a mono operand instantiation, or must the comparison be added? Phase 3
+  measures first (direct mono call-site golden); any extension stays fenced to
+  fully-applied targets.
+- [ ] Does `check_impl_decls`' placement rule accept `impl: Iterator for List` in
+  `lib/core/iterator.sth` (own-module trait, foreign type)? Expected yes (the S9/S10
+  cross-module impl machinery exists); phase 1 verifies; the fallback (impls declared
+  in the goldens' fixtures, protocol module carrying only Step + trait) is a
+  recorded adjustment, not a redesign.
+- [ ] The exact `import:` surface a consumer module needs for the member name
+  (`next`) to resolve through the bound — trivial, measured at phase 2.
+
+## Risks & Mitigations
+
+| Risk | Likelihood | Mitigation |
+|------|------------|------------|
+| Member dispatch through the bound is fenced by `poly_cross_call_unsupported_error` (Step-row compound return is unmeasured) | Low–Med | REQ-6 makes it the first measurement after Delta A; the `q map` precedent (S4-5) predicts success; if fenced: stop, escalate with verbatim repro + evidence (named site `src/check/poly.rs:4371`) — no silent reshape of `next`, no unsanctioned gate lift |
+| `match_impl_target_rec` lacks concrete-arg pattern comparison → `Range[i64]` impl undebuggable-at-dispatch | Med | Phase 3 leads with the direct mono call-site golden; extension is in scope but fenced to fully-applied targets only (REQ-8 pins keep everything else byte-exact) |
+| Delta B's fold interception leaks beyond impl targets and breaks ordinary-signature mint-sharing suite-wide | Low (high impact) | Interception lives only in `parse_impl_target` (`src/parser.rs:4085`); REQ-NFR2 + a regression pin (`Range[i64]` in an ordinary signature still folds/shares the mint) |
+| The gate lift admits shapes whose grounding was never exercised (e.g. `Box2['T]` member rows now declare) and something downstream panics | Med | Lift is admission-only; phase 1 runs an admission-safety sweep — every newly-admitted shape grounds or fails located, never panics; pin one non-Iterator shape |
+| Diagnostic drift: pins written against the probe log's superseded `ae6fdd7`-era message text | Low | This spec pins against the current S7-reworded text (`src/parser.rs:446`); measure-then-pin from the live binary (REQ-NFR1) |
+| Sequential-phase merge friction in `member_shape_is_supported` (S7 + S8 edits accumulate in one function) | Low | Phases are strictly sequential (no parallel work declared); growth-structure re-check at phase 4 exit per CLAUDE.md |
+| IR evidence over-read as a fusion claim | Low | REQ-11 records facts only (loop = one frame; `next` = real frame; chain = two frames); the roadmap wording stays "evidence recorded, ruling deferred" |
+
+## Delivery Plan
+
+### Phase 1: Declare the Iterator protocol — member-row gate lift + core Step/Iterator/List
+
+- **Goal**: A program builds that declares the Step-row `Iterator` trait and calls
+  `next` on a List at a mono call site, printing element-plus-remainder observables —
+  the trait that errors today now declares.
+- **Requirements Covered**: REQ-1, REQ-2, REQ-3, REQ-4, REQ-NFR3
+- **Scope**:
+  - Modify `src/parser.rs:403` (`member_shape_is_supported`, the `PolyType::Generic
+    { .. }` arm inside the combined false arm `:408-414`): split `Generic` out and
+    admit it when every type argument recurses to a supported shape. Nothing else in
+    the function changes; the enforcement loop (`:3958-3986`) picks it up.
+  - Create `lib/core/iterator.sth` (register in `lib/core/sooth.pkg`'s `module:` list;
+    pattern: `lib/core/cmp.sth`): the `Step['T 'Rest] | Done | More 'T 'Rest` enum
+    (REQ-3), `trait: Iterator['It: * -> *] : next ( 'It['T] -- Step['T 'It['T]] ) ;`,
+    and `impl: Iterator for List` (REQ-4: Cons arm destructures + packs `More`; Nil
+    arm consumes and returns only `Done` — no remainder construction). Export the
+    type, its ctors, the trait, and the member name; explicit imports only (no
+    prelude change).
+  - Create `tests/phase7b_slice8.rs` (harness per `tests/common/mod.rs`, e.g.
+    `build_run_keep`; golden style per `tests/phase7b_slice4.rs`): (a) trait-declares
+    - List `next` at a mono call site runs (the P8-4a3 shape through the trait
+    member); (b) byte-exact pin: member row `'F['G['T]]` still raises
+    `unsupported_trait_member_shape_error` with the S7 text (`src/parser.rs:446`);
+    (c) admission-safety sweep: one newly-admitted non-Iterator shape (a `Box2['T]`
+    member row over a dispatchable `'F['T]` input, per probe Interlude B) grounds or
+    fails located — never panics; (d) the cross-module-impl placement check
+    (`impl: Iterator for List` in the protocol module) passes.
+  - Unit tests beside the changed parser function for the new gate arm (happy +
+    rejected shapes; naming per CLAUDE.md `thing_condition_expected`).
+  - Explicitly out of scope for this phase: Range, Delta B, `for_each`/`fold`, any
+    `src/check/` or `src/ir/` change, `src/ast.rs` changes.
+- **Entry Conditions**: Worktree green on `54414cb`; slice8-brief and slice8-probes
+  read; R1–R4 treated as settled.
+- **Exit Criteria / Verifiable Artifacts**:
+  - `cargo test` green including the new `tests/phase7b_slice8.rs` goldens (a)–(d).
+  - A CLI-fixture build of the declaring trait + List `next` exits 0 (the probe-log
+    P8-1a fixture, fixed by the lift).
+  - Existing S7 diagnostics byte-identical (pins b passes; full suite green = no
+    churn elsewhere).
+- **Parallelism**: SEQUENTIAL — first phase; nothing to run beside.
+- **Relative Effort**: M — one gate arm plus a new core module, impl, and golden
+  suite; the module and pins are the bulk, the gate change itself is small.
+- **Difficulty**: `standard` — a scoped predicate change with existing enforcement;
+  no concurrency, migration, or shared-control-flow work.
+- **Open Questions / Blockers**: The placement-rule question (Open Questions item 2)
+  resolves here; if it fails, record and fall back to fixture-declared impls for the
+  phase-1 goldens (protocol module keeps Step + trait).
+
+### Phase 2: Consume List through the bound — `for_each` + `fold`
+
+- **Goal**: A generic `for_each` and `fold`, written once against the Iterator bound,
+  drain and fold a List — printing `1\n2\n3` and summing 6 — with the bound-dispatch
+  question measured and answered.
+- **Requirements Covered**: REQ-5, REQ-6, REQ-NFR4
+- **Scope**:
+  - Modify `lib/core/iterator.sth`: add `for_each['It: Iterator 'T]
+    ( 'It['T] [ 'T -- ] -- )` and `fold['It: Iterator 'T 'A]
+    ( 'It['T] 'A [ 'A 'T -- 'A ] -- 'A )` — self-recursive, self-call in tail
+    position (the `src/ir/driver.rs:1093` transform), `next` dispatched through the
+    bound, the `Done` arm dropping only the shell.
+  - Modify `tests/phase7b_slice8.rs`: goldens for `for_each` over List (`1\n2\n3`)
+    and `fold` over List (6); the REQ-NFR4 teeth pin (a consumer dispatch arm that
+    leaves the `Step` shell undropped fails with the arm-parity error, measured-then-
+    pinned byte-exact).
+  - Measure REQ-6 first with the minimal bound-dispatch fixture; if
+    `poly_cross_call_unsupported_error` (`src/check/poly.rs:4371`) fires, **stop and
+    escalate** with the verbatim repro — do not lift the gate in this phase and do
+    not reshape `next`.
+  - Explicitly out of scope for this phase: Range and anything in `src/parser.rs`,
+    `src/ast.rs`, `src/check/`, `src/ir/`; the Option row; per-impl consumer copies.
+- **Entry Conditions**: Phase 1 landed — `Iterator`/`Step` exported from
+  `lib/core/iterator.sth`, List `next` dispatching at mono call sites
+  (`tests/phase7b_slice8.rs` phase-1 goldens green).
+- **Exit Criteria / Verifiable Artifacts**:
+  - `for_each`/`fold` List goldens pass through the bound (no List-specific word in
+    the consumers).
+  - REQ-6 answered in writing: either the goldens pass (bound dispatch works) or an
+    escalation record exists with the verbatim fence output.
+  - Linearity-teeth pin passes; full gate green.
+- **Parallelism**: SEQUENTIAL after Phase 1 (the bound needs the trait; consumers
+  share `lib/core/iterator.sth` and the new test file with later phases).
+- **Relative Effort**: S — two small generic words plus goldens, *provided* the
+  expected mechanism holds; the verification discipline is the work.
+- **Difficulty**: `hard` — the core interaction (member dispatch through a bound over
+  a ctor-headed compound return) is unmeasured; its contingency touches the P7.S3k
+  cross-call gate in the poly checker's shared control flow, an ambiguous integration
+  point that warrants the stronger model.
+- **Open Questions / Blockers**: The REQ-6 verdict itself; the consumer-module import
+  surface (Open Questions item 3) measured here.
+
+### Phase 3: Ground `Range[i64]` monomorphically — the S2-6 lift
+
+- **Goal**: `impl: Iterator for Range[i64]` declares, its App-headed member grounds
+  as a mono instantiation, and `next` over `Range[i64]` dispatches at a plain mono
+  call site — while every non-lifted target shape fails byte-exactly as today.
+- **Requirements Covered**: REQ-7, REQ-8, REQ-9, REQ-NFR2
+- **Scope**:
+  - Modify `src/parser.rs:4085` (`parse_impl_target`): intercept at the fold
+    (`:4095`) so a fully-applied ctor application with all-concrete type and length
+    arguments keeps `PolyType::Generic { args: concrete }` in `ImplTarget.pattern`.
+    Do **not** touch `raw_to_poly_type` (`:5640-5680`) — REQ-NFR2.
+  - Modify `src/parser.rs:4266` (`parse_impl_member_body`): route Generic-pattern
+    targets with all-concrete args through mono grounding — union build
+    (`:668` `build_member_var_union`) + `ground_member_poly`'s App dissolve
+    (`src/ast.rs:2366-2402`), then the var-free grounded sig converts (via the same
+    instantiation machinery the fold uses) to the concrete-path's mono member word
+    (`poly: None`, concrete `StackEffect`).
+  - Measure then, if needed, extend `match_impl_target_rec`
+    (`src/check/poly.rs:9131`) to match concrete-arg Generic patterns against mono
+    operand instantiations — fenced to fully-applied targets only;
+    `find_bound_impl` (`:8520`) untouched otherwise.
+  - Modify `lib/core/iterator.sth`: add `type: Range['T] cur 'T limit 'T ;` and
+    `impl: Iterator for Range[i64]` (REQ-9: count-up, `1 add` on i64, advanced Range
+    constructed in the `More` arm, iterator dropped inside the `Done` arm).
+  - Modify `tests/phase7b_slice8.rs`: (a) Range mono golden — `next` at a plain mono
+    call site yields `More` then `Done`; (b) byte-exact pins: `impl: Iterator for
+    i64` still raises the S2-6 message (`src/ast.rs:2095` text), an App-headed
+    target still raises `impl_target_app_unsupported_error` (`src/parser.rs:902`),
+    an applied-var target (`List['L]`) still yields a poly member word; (c) the
+    regression pin — `Range[i64]` spelled in an ordinary word signature still folds
+    to `Concrete` and shares the mint.
+  - Unit tests beside `parse_impl_target`/`parse_impl_member_body` for the new
+    target shape and its fences.
+  - Explicitly out of scope for this phase: the D5 gate (`src/check/poly.rs:6579`),
+    arithmetic traits, phantom parameters, the S6 wall (`:6116-6117`), consumers
+    over Range, any `src/ir/` change.
+- **Entry Conditions**: Phase 1 landed (Step/Iterator exist — the lift's test
+  subject); Phase 2 landed (sequencing discipline: both phases edit
+  `lib/core/iterator.sth` and `tests/phase7b_slice8.rs`).
+- **Exit Criteria / Verifiable Artifacts**:
+  - The Range mono golden passes (`next` dispatches at a mono call site).
+  - The three byte-exact fence pins and the mint-sharing regression pin pass.
+  - Full gate green with no `src/ir/` diff (REQ-NFR2 verified from the diff).
+- **Parallelism**: SEQUENTIAL after Phase 2 (shared files; the dispatch measurement
+  also wants the phase-2-stable suite).
+- **Relative Effort**: M — two parser touch points plus matcher measurement and a
+  new type+impl; the fencing/pinning discipline is the bulk.
+- **Difficulty**: `hard` — an impl-target representation change flowing into
+  member grounding and dispatch matching; the surrounding fences are load-bearing
+  and the shared fold is mint-critical suite-wide.
+- **Open Questions / Blockers**: The matcher question (Open Questions item 1)
+  resolves here by measurement.
+
+### Phase 4: Range through the bound, IR evidence, and the written record
+
+- **Goal**: The full exit runs — `for_each`/`fold` drain and fold `Range[i64]`
+  through the bound (`0 1 2`; sum 3) — and the slice's evidence, ruling, and roadmap
+  record are written down with the final gate green.
+- **Requirements Covered**: REQ-10, REQ-11, REQ-12, REQ-13, REQ-NFR1
+- **Scope**:
+  - Modify `tests/phase7b_slice8.rs`: goldens for `for_each` over `Range[i64]`
+    (`0\n1\n2`) and `fold` over it (3).
+  - Add the REQ-11 IR pin following the `poly_self_tail_call_lowers_to_loop_back_edge`
+    pattern (`src/ir/driver.rs:1093`) or an `emit_ssa_with_manifest`-based check
+    (`src/driver.rs:897`): the consuming loop's monomorphized `for_each` is one frame
+    whose self-call is a back-edge, and `next` remains a real monomorphized frame.
+  - Modify `docs/roadmap/P7b-higher-kinded-types.md` (S8 entry): exhausted-case
+    ruling (R1) + fusion evidence written down; exit wording to the landed
+    `for_each`/`fold` outcome; implemented-reference link to this spec (house
+    convention, cf. the S9/S10 roadmap corrections).
+  - Growth-structure re-check per CLAUDE.md at phase exit over every touched file —
+    especially `member_shape_is_supported`'s region of `src/parser.rs` (S7 + S8
+    edits accumulate there); document the signal check in the roadmap entry.
+  - Verify REQ-13 from the diff: `src/check/poly.rs:6116-6117` untouched;
+    `tests/phase7b_slice6.rs:410` green.
+  - Explicitly out of scope for this phase: any further compiler delta, fusion
+    verdicts, adaptor words, S8b work.
+- **Entry Conditions**: Phase 2 artifacts (`for_each`/`fold` through the bound over
+  List) and Phase 3 artifacts (`Range[i64]` impl dispatching at mono call sites)
+  both landed and green.
+- **Exit Criteria / Verifiable Artifacts**:
+  - Range consumer goldens pass; the full Success Criteria checklist of this spec is
+    demonstrable.
+  - The IR pin passes and the roadmap entry carries the ruling, evidence, and
+    corrections (reviewable by reading the file).
+  - Final gate green: `cargo fmt --check && cargo clippy -- -D warnings &&
+    cargo test` (2600+ baseline + all new goldens).
+- **Parallelism**: SEQUENTIAL after Phases 2 and 3 (needs both; owns the final gate).
+- **Relative Effort**: S — goldens for existing consumers plus documentation and
+  one IR pin; no new compiler surface.
+- **Difficulty**: `standard` — evidence capture and write-downs against
+  well-precedented patterns.
+- **Open Questions / Blockers**: None identified.
+
+### Parallelism Summary
+
+None: Phase 1 → Phase 2 → Phase 3 → Phase 4, strictly sequential. Phase 2 and 3 share
+`lib/core/iterator.sth` and `tests/phase7b_slice8.rs`; Phase 3 also edits the same
+parser neighborhood Phase 1 touches; Phase 4 owns the final gate over everything.
+(The S7-sequencing note's parallel-edit risk is closed on base `54414cb` — S7 landed
+its own arm; this spec's phases avoid recreating the hazard.)
+
+### Effort Summary
+
+- Phase 1: M (standard)
+- Phase 2: S (hard)
+- Phase 3: M (hard)
+- Phase 4: S (standard)
+- Total: 2×S + 2×M — roughly 2–3 weeks of sequential work, front-loaded with the
+  two verification points (bound dispatch in Phase 2, mono dispatch in Phase 3)
+  that retire the slice's named risks.
+
+## Phases (JSON)
+
+```json
+{
+  "phases": [
+    { "phase": 1, "focus": "member-row gate lift and core Iterator protocol over List", "effort": "M", "difficulty": "standard" },
+    { "phase": 2, "focus": "for_each and fold through the Iterator bound over List", "effort": "S", "difficulty": "hard" },
+    { "phase": 3, "focus": "S2-6 lift and Range[i64] impl grounded monomorphically", "effort": "M", "difficulty": "hard" },
+    { "phase": 4, "focus": "Range consumers, IR evidence, write-downs and roadmap correction", "effort": "S", "difficulty": "standard" }
+  ]
+}
+```
