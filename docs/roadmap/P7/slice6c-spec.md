@@ -60,26 +60,47 @@ Checker-only, at one call site plus its helper:
    `poly_generic_length_index_error` and instead defers to runtime, the same
    treatment a `Len::Concrete` computed index already gets (`R1`).
 2. `check_poly_array_index` widens `count: u32` to `Option<u32>`; its `usize`
-   arm is untouched (it never read `count`), and its `i64`-literal arm defers to
-   runtime when the count is unknown instead of range-checking against a count
-   it does not have (`R2`).
-3. `poly_generic_length_index_error` becomes dead and is deleted with its
-   now-unreachable call site (`R3`).
+   arm is untouched (it never read `count`). Its `i64` arm's non-literal
+   sub-case (a computed value, needing `>usize`) is likewise untouched by an
+   unknown count -- it already ignores `count`. The literal sub-case never
+   actually sees `count = None`: R1.1 intercepts a literal index against an
+   unknown length before this function is ever called (`R2`).
+3. `poly_generic_length_index_error`'s call site does not move: it stays in
+   `poly_reference_word`'s `Len::Var(v)` arm, where `sig`/`v` are already in
+   scope to build the message. That arm now calls it only for a **literal**
+   index; a **non-literal** index at that same arm defers to
+   `check_poly_array_index` with `count = None`, the same treatment a
+   `Len::Concrete` computed index already gets. Its text is narrowed to this
+   residual case -- the old blanket "cannot index a generic-length array"
+   wording is no longer true once a `usize` index is admitted, so the message
+   is rewritten in place, not relocated (`R3`).
 4. Integration goldens: a non-inline word indexing a generic-length array,
    called at a known length via S6b syntax, plus a runtime out-of-bounds case
    that traps via `sooth_oob_trap` (`R4`).
 
 ## Requirements
 
-### R1 -- the `Len::Var` arm defers instead of rejecting
+### R1 -- the `Len::Var` arm defers for a non-literal index, rejects for a literal one
 
 - **R1.1** In `poly_reference_word`'s `">"` arm, the `count` match
-  (`src/check/poly.rs:6299`) no longer distinguishes `Len::Var` as fatal. It
-  yields `None` (unknown count) for `Len::Var` and `Some(count)` for
-  `Len::Concrete`, feeding the widened `check_poly_array_index` (R2). The rest
-  of the arm is unchanged: `poly_ref_array_parts` already returns the element
-  type and `Len`, the mutability check already fired above, and the resulting
-  slot is still `PolyType::Ref(elem, mutable)`.
+  (`src/check/poly.rs:6299`) no longer treats every `Len::Var` as fatal. The
+  arm already has `index_lit` (`stack[n - 1].int_val`, bound at `:6251`) in
+  scope at this point, so the `Len::Var(v)` case (`:6304`) decides directly:
+  a **literal** index (`index_lit.is_some()`) still calls
+  `poly_generic_length_index_error` immediately -- `sig`/`v` are already in
+  scope here to name the length variable (R3) -- and anything else (a `usize`
+  local, a `usize` produced by `>usize`, or a non-literal `i64`) yields
+  `count = None`. The `Len::Concrete` case is unchanged and yields
+  `Some(count)`. Both feed the same widened `check_poly_array_index` call
+  (R2). `int_val` is only ever `Some` for a bare `IntLit` term
+  (`TermKind::IntLit`, `:1126`, always typed `Concrete(Type::I64)`); a
+  `usize`-typed slot -- whether a local or a `>usize` conversion's result --
+  is built through `PolySlot::new` and so always carries `int_val: None`.
+  Checking `index_lit.is_some()` is therefore exactly the literal-`i64`
+  predicate, with no risk of misfiring on a `usize` value. The rest of the arm
+  is unchanged: `poly_ref_array_parts` already returns the element type and
+  `Len`, the mutability check already fired above, and the resulting slot is
+  still `PolyType::Ref(elem, mutable)`.
 - **R1.2** The `Len::Concrete` path stays byte-identical: it still passes a
   concrete count and still statically range-checks an `i64` literal. This slice
   adds a case, it does not move the existing one.
@@ -92,44 +113,121 @@ Checker-only, at one call site plus its helper:
   admitted exactly as it is over a concrete-length one, deferring entirely to
   the runtime `bounds_check`. This is the normal shape for a loop counter or a
   `usize` parameter.
-- **R2.2** The `i64`-literal arm keeps its today behaviour when `count` is
-  `Some`: an in-range literal passes, an out-of-range literal is
-  `array_index_out_of_range_error`, a computed `i64` needs the explicit `>usize`
-  conversion (`size_conversion_needed_error`). When `count` is `None`, a
-  *literal* `i64` index against an as-yet-unknown `'N` cannot be range-checked
-  at declaration-check time, so it falls through to the same
-  `size_conversion_needed_error` "cannot verify statically, convert to `usize`"
-  outcome the computed case already gets. This is not a new permissiveness: it
-  is a strict subset of today's already-open literal-vs-computed split, at a
-  length that happens to be a variable rather than a constant.
+- **R2.2** The `i64`-literal sub-branch keeps its today behaviour when `count`
+  is `Some`: an in-range literal passes, an out-of-range literal is
+  `array_index_out_of_range_error`, a computed (non-literal) `i64` needs the
+  explicit `>usize` conversion (`size_conversion_needed_error`, whose actual
+  text is `` `>usize` first (a bare integer literal coerces automatically, a
+  computed value does not) `` -- `src/check.rs:3032`). By construction (R1.1),
+  **this function is never called with a literal index and `count = None`**:
+  R1.1's `Len::Var(v)` arm intercepts that exact combination and errors
+  itself, in scope for `sig`/`v`, before this function is ever reached. Match
+  that invariant explicitly rather than assume it silently, e.g.:
+
+  ```rust
+  PolyType::Concrete(Type::I64) => match index_lit {
+      Some(idx) => match count {
+          Some(c) if idx >= 0 && idx < i64::from(c) => Ok(()),
+          Some(c) => Err(array_index_out_of_range_error(ctx, span, c, idx)),
+          None => unreachable!(
+              "a literal index against an unknown length is intercepted at the \
+               Len::Var call site (R1.1) before this function is ever reached"
+          ),
+      },
+      None => Err(size_conversion_needed_error(ctx, span, op, Type::Usize)),
+  }
+  ```
+
+  (Exact match arms are an implementation choice; the invariant the
+  `unreachable!` documents is the requirement.) `count = None`'s only two live
+  paths are this `None => size_conversion_needed_error` arm and the untouched
+  `usize` arm above -- neither reads `count` at all, so this function's only
+  change for an unknown count is the parameter's type and this documented
+  dead branch. `poly_generic_length_index_error` is **not** called from this
+  function; R1.1 places that call at the original `Len::Var` arm instead,
+  where `sig`/`v` are already in scope and no threading is needed.
 - **R2.3** The `poly_op_on_variable_error` catch-all (`other =>`) is unchanged.
 - **R2.4** The one internal caller of `check_poly_array_index` is R1.1's call
-  site; there is no other. The existing unit test
+  site; there is no other. By construction (R1.1) that caller never passes a
+  literal index alongside `count = None`. The existing unit test
   `check_poly_array_index_bounds_checks_a_literal_and_requires_conversion_otherwise`
-  (`src/check/poly.rs:18521`) updates its four calls to wrap `count` in `Some`,
-  and gains an `i64`-literal-with-`None`-count case asserting the deferral (R4.3).
+  (`src/check/poly.rs:18521`) updates its four existing calls to wrap `count`
+  in `Some(..)`, and gains two new cases for `count = None`: a `usize` index
+  (admitted, mirroring the untouched arm) and a computed (non-literal) `i64`
+  index (`size_conversion_needed_error`, mirroring the `Some`-count case's
+  existing behaviour for the same shape). It does **not** gain a
+  literal-index-with-`None`-count case -- that combination is unreachable from
+  this function's one real caller, so exercising it here would test dead code
+  rather than the actual diagnostic. The narrowed `poly_generic_length_index_error`
+  message is asserted by the migrated R3.1 test instead (R4.3), which drives
+  it through `poly_reference_word`'s own `Len::Var` arm, its real call site.
 
-### R3 -- delete the dead diagnostic
+### R3 -- narrow the diagnostic to its residual case (not delete)
 
 - **R3.1** `poly_generic_length_index_error` (`src/check/poly.rs:11388`) has
-  exactly one call site (the `:6305` arm R1.1 removes) and zero test assertions
-  on its message anywhere in `src/` or `tests/` (confirmed by grep: the only
-  `tests/` hit, `phase7_slice6a.rs:91`, is a comment on the pre-existing `len`
-  read-back, not this message). Once R1.1 lands, it is unreachable and is
-  deleted outright, not kept as an unused diagnostic. This follows the
-  mutation-test-the-guards convention: a diagnostic that never fires is deleted,
-  not preserved as false safety.
-- **R3.2** S6a's spec and the `poly_ref_array_parts` neighbourhood carry prose
-  ("workaround is `inline`", "`poly_generic_length_index_error` stands") that
-  this slice makes false. Update those comments where they sit; do not leave a
-  dangling reference to a deleted function.
+  exactly one call site today (the `:6305` arm R1.1 narrows, not removes --
+  it still fires, now only for a literal index), and zero assertions on its
+  message in `tests/` (confirmed by grep: the only `tests/` hit,
+  `phase7_slice6a.rs:91`, is a comment on the pre-existing `len` read-back,
+  not this message). **It does have a test assertion in `src/`**:
+  `poly_reference_word_rejects_indexing_a_generic_length_array`
+  (`src/check/poly.rs:18156`) `assert_eq!`s the exact message against a
+  `` &a 0 &> @ `` fixture -- an `i64` **literal** (`0`) index into an
+  `array['T 'N]`. Under R1.1 this exact program still errors (a literal index
+  against an unknown length still cannot be range-checked), just with the
+  narrowed message from R2.2's wording, built at the same call site (R1.1),
+  so this is the only test in the suite this slice's checker change touches,
+  and it is migrated, not deleted: **in Phase 1** (not Phase 2), rename it to
+  reflect the narrower behaviour (e.g.
+  `poly_array_index_literal_unknown_length_requires_usize_conversion`,
+  following this project's `thing_condition_expected` convention) and update
+  its `assert_eq!` to the new message text. Phase 1's exit criteria (below)
+  name this migration explicitly so an implementer following the phase plan
+  does not land red on it.
+- **R3.2** Once R1.1 lands, `poly_generic_length_index_error` is not dead --
+  it is still called from the same site (`poly_reference_word`'s `Len::Var(v)`
+  arm, `:6304-6305`), just under a narrower condition (only when the index is
+  a literal, R1.1) and with revised text (R2.2's message, built at this same
+  call site since `sig`/`v` are already in scope there -- no threading into
+  `check_poly_array_index` is needed). No deletion, no relocation: the
+  function and its doc comment are updated in place to describe the residual
+  case, not the blanket one. This is a **Phase 1** change, not Phase 2
+  bookkeeping -- the doc comment goes stale the moment R1.1 lands, so leaving
+  it for Phase 2 would land Phase 1 with a self-contradicting comment in the
+  tree it just edited.
+- **R3.3** S6a's spec and the roadmap carry prose ("workaround is `inline`",
+  "`poly_generic_length_index_error` stands") that this slice makes false in
+  the general case (a `usize` index no longer needs the workaround; only a
+  literal one still triggers this diagnostic, and for a narrower reason). Two
+  in-repo comments are stale, and **Phase 1 already rewrites both**, as a
+  direct consequence of R1.1/R3.2, not as separate work: the `Len::Var(v)`
+  arm's own doc comment (`src/check/poly.rs:6299-6301`, "a dependent-bounds
+  problem this slice defers" -- no longer accurate once this slice resolves
+  it for the non-literal case) and `poly_generic_length_index_error`'s own
+  doc comment (`:11386-11387`, "the element cannot be statically
+  bounds-checked without a known count" -- true only for the literal-index
+  residual case now). Phase 2's check on these two comments (see the Phase 2
+  exit criterion) is **confirmatory** -- verifying Phase 1's own rewrite
+  landed, not new work. What Phase 2 actually does: update the **live
+  roadmap doc** (`P7-language-prereqs.md`'s S6c entry, marking it `[ done ]`
+  and replacing its now-stale "unscoped, needs discovery" / "cross-layer
+  change" framing with the landed reality -- current design only, per this
+  project's no-history convention for ROADMAP/DESIGN). **Do not** rewrite the
+  historical mentions in already-landed, condensed specs/briefs
+  (`docs/roadmap/P4/slice13-spec.md:195`, `docs/roadmap/P7/slice6a-spec.md:200`,
+  `docs/roadmap/P7/slice6a-brief.md:104`, `docs/roadmap/P7/slice6b-brief.md:195`)
+  -- those are frozen historical record of what was true when each was written,
+  not live claims, and are out of this phase's scope.
 
 ### R4 -- tests
 
 Integration goldens run through the real `sooth` binary
-(`tests/phase7_slice6c.rs`), mirroring `tests/phase7_slice6b.rs`'s harness. All
-accept goldens assert `status.success()` and stdout; the trap golden asserts a
-non-zero exit and the trap's stderr.
+(`tests/phase7_slice6c.rs`). The accept goldens (R4.1) reuse
+`tests/phase7_slice6b.rs`'s `build_and_run` shape (asserts `status.success()`
+and stdout); the trap golden (R4.2) does **not** reuse it as-is, since that
+helper asserts a zero exit -- it needs its own assertion path (or a
+parameterized variant) checking a non-zero exit and the trap's stderr text
+instead.
 
 - **R4.1 (accept, exit criterion)** A non-inline word declaring `array['T 'N]`
   in its signature indexes it with `&>` at a **non-literal** (computed) index,
@@ -147,18 +245,74 @@ non-zero exit and the trap's stderr.
   called `at[i64 4]` over a length-4 array with an in-bounds index, asserting
   the read element on stdout. The index is a `usize` local, so R2.1's `usize`
   arm admits it and the count is `None` at check time; lowering grounds `'N = 4`
-  per monomorph and `bounds_check` fires with `count = 4`.
+  per monomorph and `bounds_check` fires with `count = 4`. The fixture's
+  `main.sth` needs `import: intrinsics * ;` at its head -- `>usize` (used in
+  R4.2's out-of-range variant) is an intrinsic, not a bare word, and every
+  existing integration golden that uses it prepends this import
+  (`tests/phase7_slice6b.rs:79`'s `single_file` helper does this
+  automatically; reuse that helper or its equivalent rather than writing a
+  bare `.sth` file and hitting an avoidable unknown-word compile error).
+
+  **Substitution note.** The live roadmap's decided exit demo
+  (`P7-language-prereqs.md:1135`) is a non-inline **by-index sum**
+  (`sum['T 'N: Len] ( array['T 'N] -- 'T )` "that actually sums by index",
+  called `sum[i64 4]`), not a single-element `at`. This spec substitutes the
+  latter because the former needs a loop over the array, and `while` on a
+  quotation literal is rejected inside any poly body -- verified directly
+  (`` : sum['T: Copy] ( array['T 4] -- 'T ) 0 [ dup 4 lt ] [ 1 + ] while drop
+  ; `` fails with `` error: `while` is not permitted on a quotation literal in
+  `sum` (line 1) ``). A by-index loop is not currently expressible in a
+  non-inline poly body regardless of this slice, so `at` is the smallest
+  fixture that still exercises indexing at a bound `'N`; a real `sum` demo is
+  blocked on the loop-combinator gap, not on anything this slice controls.
+
+  **`&!>` golden.** `poly_reference_word`'s `mutable` flag
+  (`src/check/poly.rs:6231`) is computed once, ahead of the count match both
+  sigils share, so `&!>` reaches the identical R1.1/R2 path as `&>`. Add a
+  second small accept fixture using `&!>` to mutate an element in place (e.g.
+  `&!arr i &!> v !`) and assert the mutation is visible on stdout, so the exit
+  criterion's `&>`/`&!>` claim has a witness for both sigils, not one.
 - **R4.2 (runtime out-of-bounds trap)** The same word (or a second fixture if
   R4.1's accept body cannot be driven out of range) called with an
-  out-of-range index, e.g. `9` against a length-4 array. `emit_oob_trap` prints
-  to stderr and `exit(1)`, so the golden asserts the built binary exits
-  non-zero and did **not** corrupt memory / return a garbage value. Two
-  instantiations are not required here (the trap is layout-independent), but the
-  index must be a genuine runtime value, not a literal the checker could fold.
-- **R4.3 (unit, beside the stage)** `check_poly_array_index` with an `i64`
-  literal and `count = None` defers (returns the `size_conversion_needed_error`
-  outcome) rather than panicking on `i64::from(count)`; with `count = Some(k)` it
-  is unchanged. Both directions in one test (R2.4).
+  out-of-range index against a length-4 array. `emit_oob_trap` prints to
+  stderr and `exit(1)`. The golden asserts concrete things, not the
+  unfalsifiable "did not corrupt memory": (1) the built binary's exit code is
+  non-zero, and (2) stderr contains the trap's message. Model this directly on
+  the existing pure-array (not slice) `bounds_check` precedent,
+  `runtime_out_of_range_array_index_traps_and_aborts_native`
+  (`tests/phase0.rs:1355`), which is the same guard this slice's monomorph
+  reaches and already establishes the right shape: a deliberately **distinct**
+  length and index (so a swapped or duplicated trap arg would still be caught,
+  not pass a same-valued assertion by accident), plus a `.` sentinel placed
+  *before* the out-of-range access and a second one placed *after* it,
+  asserting the first prints and the second does not -- proof the process
+  aborted at the trap rather than merely happening to exit nonzero for an
+  unrelated reason. Two instantiations are not required here (the trap is
+  layout-independent), but the index must be a genuine runtime value (e.g.
+  produced by `>usize` on a computed value or read from a local), not a
+  literal the checker could fold -- `bounds_check` skips its guard entirely for
+  a `const_vals`-known index (`word_families.rs:934`), which is pre-existing
+  `Len::Concrete` behaviour this slice does not change, but it means a bare
+  out-of-range literal here would silently not exercise the guard at all. Same
+  `import: intrinsics * ;` requirement as R4.1 (the `>usize` conversion that
+  makes the index a genuine runtime value needs it).
+- **R4.3 (unit, beside the stage)** Two witnesses, matching R1.1's own new
+  decision and R2.4's two new cases:
+  - `check_poly_array_index` with `count = None`: a `usize` index is admitted
+    (`Ok(())`), and a computed (non-literal) `i64` index still rejects with
+    `size_conversion_needed_error` -- both **defer**, one to the runtime
+    guard and one to the pre-existing conversion diagnostic; neither reads
+    `count`. With `count = Some(k)` its four existing cases are unchanged.
+  - The migrated R3.1 test
+    (`poly_array_index_literal_unknown_length_requires_usize_conversion`) is
+    the witness for the one case that **rejects** rather than defers: a
+    literal `i64` index against an unbound length, asserted by its
+    `assert_eq!` on the narrowed `poly_generic_length_index_error` text (not
+    a bare `expect_err`, so the test can distinguish the correct diagnostic
+    from any other error a naive fix might produce), driven through
+    `poly_reference_word`'s own `Len::Var` arm (R1.1) -- not through
+    `check_poly_array_index`, which this literal-plus-unknown-length
+    combination never reaches (R2.4).
 - **R4.4 (no false rejection)** The S6a and S6b integration files
   (`tests/phase7_slice6a.rs`, `tests/phase7_slice6b.rs`) pass unmodified: the
   `Len::Concrete` path (R1.2) and the `len` read-back are untouched.
@@ -167,27 +321,38 @@ non-zero exit and the trap's stderr.
   confirmed rebuild:
   1. revert R1.1's `Len::Var` arm to return an error again -- R4.1's accept
      golden must fail (the index is rejected at check time).
-  2. make R2.2's `None`-count `i64`-literal arm index `i64::from(count.unwrap())`
-     -- if any test fails, R2.2 has a witness; if all stay green, no fixture
-     reaches an `i64` *literal* index over a generic-length array (the R4.1
-     candidate uses a `usize` index), so R2.2's literal deferral is untested and
-     the phase report says so rather than claiming coverage. Add an `i64`-literal
-     fixture only if it is reachable without the `>usize` conversion.
-  3. delete the runtime `bounds_check` call reached by R4.1's monomorph -- R4.2's
-     trap golden must fail (the OOB access no longer traps). If this guard is
-     shared with the concrete path, this mutation is not this slice's to own;
-     note it and rely on the pre-existing concrete-path coverage instead.
+  2. delete R1.1's `index_lit.is_some()` guard in the `Len::Var(v)` arm, so it
+     always defers to `check_poly_array_index` with `count = None` instead of
+     ever calling `poly_generic_length_index_error` directly -- the migrated
+     R3.1 test
+     (`poly_array_index_literal_unknown_length_requires_usize_conversion`, née
+     `poly_reference_word_rejects_indexing_a_generic_length_array`) is already
+     this witness: its fixture (`` &a 0 &> @ ``) is an `i64` **literal** index,
+     so under the mutation it now reaches `check_poly_array_index` with
+     `index_lit = Some(0)` and `count = None`, hitting R2.2's documented
+     `unreachable!()` branch -- the test panics rather than returning the
+     expected message, still a `FAILED` (or aborted) result under `cargo
+     test`. No new fixture is needed; it is reachable by a test this slice
+     already migrates in Phase 1.
+  3. delete the runtime `bounds_check` call reached by R4.1's monomorph --
+     R4.2's trap golden must fail (the OOB access no longer traps), regardless
+     of whether the deleted call is also reached by the pre-existing
+     concrete-length path. Sharing the guard with another path does not excuse
+     this slice from proving its own golden can detect the guard's removal;
+     require R4.2 in this mutation's failure list.
 
   **Paper pre-check obligation (Phase 1):** before locking R4.1's fixture, hand-
-  check the candidate against the parser and checker, three points the brief did
+  check the candidate against the parser and checker, four points the brief did
   not resolve: (a) whether an `array['T 'N]` **owning** signature parameter plus
   a `&arr` borrow of the bound local is accepted in a non-inline body (the
   combinators borrow a local too, but they are `inline`); (b) whether `@`
   loading a `Copy`-bounded generic element out of `&'T` is admitted, and whether
-  the `'T: Copy` bound is required; (c) the `arr drop` / borrow-release ordering.
-  If any point fails, adjust the fixture (e.g. an `&!array['T 'N]` mutate-in-
-  place shape `&!arr i &!> v !`, which avoids the `Copy` load) rather than
-  widening this slice's checker scope.
+  the `'T: Copy` bound is required; (c) the `arr drop` / borrow-release ordering;
+  (d) that `import: intrinsics * ;` is present at the top of the fixture source
+  before `>usize` is used (R4.1/R4.2). If any of (a)-(c) fails, adjust the
+  fixture (e.g. an `&!array['T 'N]` mutate-in-place shape `&!arr i &!> v !`,
+  which avoids the `Copy` load) rather than widening this slice's checker
+  scope.
 
 ## Out of scope
 
@@ -204,30 +369,51 @@ non-zero exit and the trap's stderr.
 
 ## Phasing
 
-**Phase 1 -- R1 + R2 + R4 (S).** The checker change is one arm plus a signature
-widening; land it with the goldens and the unit test in one phase, because the
-accept golden is the only end-to-end witness that the deferral reaches the
-runtime guard, and neither half is meaningful alone. The paper pre-check (R4.5)
-runs first, before the fixture is written. Exit: R4.1 builds and runs; R4.2
-traps; R4.3's unit test; R4.4's regression files pass; mutations 1 and 3 (and 2
-if reachable).
+**Phase 1 -- R1 + R2 + R3.1 + R3.2 + R4 (S).** The checker change is one arm's
+decision plus a signature widening; the diagnostic's call site never moves
+(R3.2), only the condition under which it fires and its text narrow. Land it
+with the goldens, the unit test, and the migrated R3.1 test in one phase,
+because the accept golden is the only end-to-end witness that the deferral
+reaches the runtime guard, and the migrated test is the only pre-existing
+test this change touches -- leaving either for Phase 2 would land Phase 1 red
+or with a self-contradicting stale doc comment. The paper pre-check (R4.5)
+runs first, before the fixture is written. Exit: R4.1 builds and runs (both
+`&>` and `&!>` goldens); R4.2 traps with the exact stderr text; R4.3's two
+unit-level witnesses both assert their message text; R4.4's regression files
+pass unmodified; the migrated R3.1 test
+(`poly_array_index_literal_unknown_length_requires_usize_conversion`) asserts
+the new message; mutations 1, 2, and 3 (R4.5) all confirmed to fail the named
+test; `poly_generic_length_index_error`'s own doc comment and the
+`Len::Var(v)` arm's doc comment (R3.2) both describe the residual
+literal-only case, not the old blanket rejection.
 
-**Phase 2 -- R3 + bookkeeping (S).** Delete `poly_generic_length_index_error`
-and its now-dead call site, fix the stale S6a/`poly_ref_array_parts` prose (R3.2),
-mark S6c `[ done ]` in `P7-language-prereqs.md`, and re-run the growth signals
-over `src/check/poly.rs` (already at 3/5 per `poly_rs_split_deferred`; this slice
-removes lines rather than adding, so it does not tip the count). Exit: `cargo
-fmt --check && cargo clippy -- -D warnings && cargo test` green with no
-reference to the deleted function anywhere.
+**Phase 2 -- R3.3 + bookkeeping (S).** No further checker change: R3.1's
+diagnostic narrowing and R3.2's in-place doc-comment update both already
+landed in Phase 1. This phase is prose-only -- confirm the two in-repo
+comments R3.2 already rewrote read correctly (R3.3, confirmatory only), mark
+S6c `[ done ]` in `P7-language-prereqs.md` and replace its stale "unscoped,
+needs discovery" framing with the landed design (current state only;
+historical specs/briefs are explicitly not touched, R3.3), and re-run the
+growth signals over `src/check/poly.rs` (already at 3/5 per
+`poly_rs_split_deferred`; this slice nets a handful of lines moved, not a
+large addition, so it does not tip the count). Exit: `cargo fmt --check &&
+cargo clippy -- -D warnings && cargo test` green, `P7-language-prereqs.md`'s
+S6c entry reads `[ done ]`, and no in-repo comment still claims indexing a
+generic-length array is rejected outright (re-confirming Phase 1's own
+rewrite, not new work).
 
 ## Exit criteria
 
-- A non-inline word declaring `array['T 'N]` can index it with `&>`/`&!>` using a
-  runtime (non-literal) index; a call site binds `'N` explicitly (S6b) or by
-  inference.
-- An out-of-range access at runtime traps via `sooth_oob_trap` (`exit(1)`,
-  stderr message) rather than corrupting memory or returning a garbage value.
-- `poly_generic_length_index_error` is deleted; nothing references it.
+- A non-inline word declaring `array['T 'N]` can index it with `&>`/`&!>`
+  using a runtime (non-literal) index (R4.1); a call site binds `'N`
+  explicitly (S6b) or by inference.
+- An out-of-range access at runtime traps via `sooth_oob_trap`: a non-zero exit
+  code, and stderr contains the trap's located `line`/`index`/`len` message
+  (R4.2) -- not an unfalsifiable "did not corrupt memory" claim.
+- `poly_generic_length_index_error` is narrowed to the one residual case it
+  still covers (a literal index against an unknown length) with accurate text,
+  called from the same site it always was; no code path claims a
+  `usize`-typed generic-length index is rejected outright (R3).
 - `cargo fmt --check && cargo clippy -- -D warnings && cargo test` is green.
 
 ## Phases (JSON)
@@ -235,8 +421,8 @@ reference to the deleted function anywhere.
 ```json
 {
   "phases": [
-    { "phase": 1, "focus": "defer generic-length indexing to the runtime guard; accept and trap goldens", "effort": "S", "difficulty": "standard" },
-    { "phase": 2, "focus": "delete the dead diagnostic and bookkeeping", "effort": "S", "difficulty": "standard" }
+    { "phase": 1, "focus": "defer generic-length indexing to the runtime guard for a non-literal index; narrow the literal-index diagnostic in place; accept and trap goldens; migrate the affected unit test", "effort": "S", "difficulty": "standard" },
+    { "phase": 2, "focus": "prose bookkeeping: stale comments, live roadmap entry, growth-signal re-check", "effort": "S", "difficulty": "standard" }
   ]
 }
 ```
