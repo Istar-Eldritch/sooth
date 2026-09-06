@@ -162,9 +162,12 @@ Non-functional requirements:
 - **REQ-NFR4.** (Linear spine respected.) `next` consumes the iterator exactly once;
   `Done` carries nothing; no auto-drop is added (never-moved frame locals keep today's
   implicit reclamation, probe P8-1d4/n1); the enforced teeth stay compile-time —
-  leaving a `Step` value undropped across dispatch arms is an arm-parity compile error
-  (`src/check.rs:2983` join, poly arm `src/check/poly.rs:11551`), measured-then-pinned
-  through the new protocol.
+  leaving a `Step` value undropped across dispatch arms is a compile error,
+  measured-then-pinned through the new protocol: the variant-escape rule fires
+  first (`poly_eliminator_variant_escape_error`, `src/check/poly.rs:11544`; mono
+  twin `eliminator_variant_escape_error`, `src/check.rs:2832`), and if the arms
+  instead differ only in stack shape, the arm-parity join error
+  (`src/check.rs:2983`) applies.
 
 ## Success Criteria
 

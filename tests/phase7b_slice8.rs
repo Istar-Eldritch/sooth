@@ -1,6 +1,8 @@
-//! P7b.S8 Phase 1 exit goldens: the `member_shape_is_supported` `Generic`
+//! P7b.S8 exit goldens. Phase 1: the `member_shape_is_supported` `Generic`
 //! arm lift (REQ-1/REQ-2) plus the new `core::iterator` protocol module
 //! (`Step`, `Iterator`, `impl: Iterator for List`, REQ-3/REQ-4/REQ-NFR3).
+//! Phase 2: the consumers written once against the bound (`for_each`/`fold`,
+//! REQ-5/REQ-6) and the linearity teeth (REQ-NFR4).
 //! Harness style from `tests/phase7b_slice4.rs`/`tests/phase7b_slice6.rs`.
 
 use std::path::PathBuf;
@@ -385,4 +387,84 @@ import: core::iterator | Step Done More Iterator | ;
 ";
     let (_t, _binary, stdout) = build_run_keep("p1-core-iterator-cross-module-drain", src);
     assert_eq!(stdout, "1\n2\n");
+}
+
+/// (phase 2, REQ-5/REQ-6) `for_each` written once against the `Iterator`
+/// bound -- it names no List word -- drains a `List[i64]` built 1,2,3,
+/// printing `1\n2\n3`. This is REQ-6's answer in golden form: the member
+/// call `next` inside a poly body, dispatched through the bound over the
+/// ctor-headed compound return `Step['T 'It['T]]`, is *not* fenced by
+/// `poly_cross_call_unsupported_error` (`src/check/poly.rs:4371`). The
+/// import line is the measured surface for a pure consumer: `for_each`
+/// alone, no trait and no ctors, since this fixture writes no dispatch arm.
+#[test]
+fn for_each_drains_a_list_through_the_iterator_bound() {
+    let src = "\
+import: core::list | List Nil Cons | ;
+import: core::iterator | for_each | ;
+: mkempty ( -- List[i64] ) Nil ;
+: main ( -- )
+  3 mkempty ^ Cons
+  2 swap ^ Cons
+  1 swap ^ Cons
+  [ . ] for_each ;
+";
+    let (_t, _binary, stdout) = build_run_keep("p2-for-each-list", src);
+    assert_eq!(stdout, "1\n2\n3\n");
+}
+
+/// (phase 2, REQ-5) the generic `fold` over the same List sums to 6. The
+/// spelling is the house one -- accumulator under the element, so the
+/// quotation is `[ 'A 'T -- 'A ]` and the call reads `0 [ add ] fold`
+/// (`lib/core/combinators.sth:53`). `[ 0 add ]` is *not* an alternative
+/// spelling: it cannot type against that row.
+#[test]
+fn fold_sums_a_list_through_the_iterator_bound() {
+    let src = "\
+import: core::list | List Nil Cons | ;
+import: core::iterator | fold | ;
+: mkempty ( -- List[i64] ) Nil ;
+: main ( -- )
+  3 mkempty ^ Cons
+  2 swap ^ Cons
+  1 swap ^ Cons
+  0 [ add ] fold . ;
+";
+    let (_t, _binary, stdout) = build_run_keep("p2-fold-list", src);
+    assert_eq!(stdout, "6\n");
+}
+
+/// (phase 2, REQ-NFR4) the linearity teeth. This fixture is
+/// `lib/core/iterator.sth`'s shipped `for_each` verbatim but for one
+/// deleted `drop`: its `Done` arm leaves the `Step` shell on the stack.
+/// That is a located compile error, so the protocol's "the final drop lives
+/// in one canonical site" is enforced, not merely intended -- the passing
+/// twin is `for_each_drains_a_list_through_the_iterator_bound` above.
+///
+/// The live text is the *variant-escape* rule (the poly arm the spec names,
+/// `src/check/poly.rs:11551`), not the quotation-shape join
+/// (`src/check.rs:2983`): the escape check runs first and catches the
+/// undropped shell before the arms' shapes are joined. Pinned byte-exact
+/// from the binary, including the line, which locates the offending arm
+/// (line 8 is `~[ ( Done ) ]`, counting the harness's two prelude lines).
+#[test]
+fn consumer_arm_leaving_the_step_shell_undropped_is_a_compile_error() {
+    let stderr = build_error_located(
+        "p2-teeth-undropped-step-shell",
+        "import: core::list | List Nil Cons | ;\n\
+         import: core::iterator | Step Done More Iterator | ;\n\
+         : leaky ['It: Iterator 'T] ( 'It['T] [ 'T -- ] -- )\n\
+           | f |\n\
+           next\n\
+           ~[ ( Done ) ]\n\
+           ~[ ( More ) More> | v rest | v f call rest f leaky ]\n\
+           Step? ;\n\
+         : main ( -- ) Nil [ drop ] leaky ;\n",
+    );
+    assert!(
+        stderr.contains(
+            "error: an arm of `Step?` leaves `Step.Done` on the stack in `leaky` (line 8)\n  a variant-typed value is reachable only inside the arm that bound it; consume it there, or leave its fields instead"
+        ),
+        "{stderr}"
+    );
 }

@@ -22,6 +22,12 @@ import: self::list | List Nil Cons | ;
 \ name `next`; bare `next` then resolves through trait dispatch at the
 \ call site.
 export: Step Done More Iterator ;
+\ `for_each` and `fold` are ordinary exported words, imported by name. A
+\ consumer that only *calls* them needs nothing else -- the
+\ `Step Done More Iterator` surface above is required only of a consumer
+\ that writes its own `Step?` dispatch arms or its own `Iterator`-bounded
+\ word (measured, P7b.S8 phase 2).
+export: for_each fold ;
 
 type: Step['T 'Rest]
 | Done
@@ -45,3 +51,28 @@ impl: Iterator for List
     ~[ ( Cons ) Cons> | v rest | v rest ^> More ]
     List? ;
 ;
+
+\ The consumers (P7b.S8 R4). Written once against the `Iterator` bound: they
+\ name no List word, so every future impl gets them for free. The self-call
+\ sits in tail position in the `More` arm, so the P7.S3g transform turns the
+\ recursion into a loop back-edge and the drain runs in one frame
+\ (`src/ir/driver.rs:1093`). The `Done` arm drops only the `Step` shell: the
+\ exhausted iterator was already disposed of inside `next`'s own `Done` arm,
+\ the protocol's one canonical final-drop site. Leaving that shell undropped
+\ is a compile error (the variant-escape rule), which is what makes the
+\ protocol's linearity enforced rather than merely intended.
+: for_each ['It: Iterator 'T] ( 'It['T] [ 'T -- ] -- )
+  | f |
+  next
+  ~[ ( Done ) drop ]
+  ~[ ( More ) More> | v rest | v f call rest f for_each ]
+  Step? ;
+
+\ Accumulator under the element, matching `lib/core/combinators.sth`'s array
+\ `fold`, so a call reads `acc [ ... ] fold`.
+: fold ['It: Iterator 'T 'A] ( 'It['T] 'A [ 'A 'T -- 'A ] -- 'A )
+  | f | | acc |
+  next
+  ~[ ( Done ) drop acc ]
+  ~[ ( More ) More> | v rest | rest acc v f call f fold ]
+  Step? ;
