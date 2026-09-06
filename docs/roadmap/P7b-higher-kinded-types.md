@@ -261,7 +261,10 @@ are **`for_each`/`fold`** — `map` is not in S8 (a bound-generic body cannot pr
 `'It['U]` and cannot `dup` the abstract iterator). **P7b.S8b** (carved out, same
 date): the S6 construction-wall fix (`poly_bind_construction_arg`'s bare-`Generic`
 `^Self['T]` self-reference-field arm, refined by the P8 round) plus per-impl
-traitful `List` members (`map`, `append`) over the Iterator protocol.
+traitful `List` members (`map`, `append`) over the Iterator protocol. A second
+follow-up, **P7b.S8c** (260906): the located-fence fix for member signatures with
+unbindable free type variables — the `src/ir/driver.rs:579` unification-expect ICE
+surfaced by the integrated review (pre-existing; reproducible at the S8 base).
 Fusion evidence (REQ-11, recorded facts only — no fusion verdict): a consuming loop's
 monomorphized `for_each` over `Range[i64]` lowers to **one emitted function** whose
 self-call in the `More` arm is a backward `jmp` to its own loop header (the P7.S3g
@@ -359,6 +362,27 @@ errors byte-exact and deterministic across import order and minter placement; th
 existing 2-candidate error and every single-header, hub, and selective-import shape
 byte-identical; S9's G4 golden retired (GA/GB are its inverted replacements); 12
 units beside the changed `terms.rs` code.
+
+**P7b.S8c — Located fence for member signatures with unbindable free type variables.**
+Found by the P7b.S8 integrated review (260906); pre-existing, not introduced by S8 — the
+repro reproduces at the S8 base `86ca5eb`. A trait member whose signature carries a free
+INPUT type variable — not the trait's header variable, not bound by any bound bracket —
+passes checking and panics at IR instantiation: the unification `expect` in
+`subst_polytype` (`src/ir/driver.rs:579`, "checked: unification bound every input type
+variable"). Shape (verified 260906, panics at `src/ir/driver.rs:579:14` on tip and at the
+S8 base `86ca5eb` alike): a struct type with a `mkbox`-style constructor word (ctor names
+resolve under a declared-type expectation), a trait member carrying a free input variable
+(`trait: Odd['T] : odd ( 'U &'T -- ) ;` — `'U` is bound by nothing), an impl, and a
+bound-dispatched consumer (`: consume ['T: Odd] ( 'U &'T -- ) odd ;` called as
+`mkbox | b | 7 &b consume`); the build succeeds and the PANIC fires at run/IR time. Fix
+direction, to be settled by the slice's own discovery:
+either a check-stage located fence (a member type variable that neither the header nor
+its bounds binds is rejected where it is declared — measure-then-pin, diagnostics are
+behaviour, the IR `expect` remains as a backstop) or a binding rule that grounds free
+member variables at the impl target/call site like `'B` above. Scope: `src/check/` only,
+no `src/ir/` change, unit tests beside the changed checker code, goldens for both
+dispatch routes (mono call site and bound dispatch), and the S8-review repro twins
+panicked→located. Size: `S`.
 
 **Dogfood:** S6 — a program that `map`s and folds over `Option`, `Result`, and `List` through
 shared bounds, with the impls declared against the real lib types and output matching
