@@ -1118,23 +1118,19 @@ cargo clippy -- -D warnings && cargo test` is green. Detail:
 [slice6b-brief](./P7/slice6b-brief.md), [slice6b-spec](./P7/slice6b-spec.md).
 
 **P7.S6c -- Runtime bounds-checked indexing of a generic-length array in a non-inline poly
-body.** `[ unscoped, needs discovery ]` Not a small guard removal: probed and confirmed a real
-cross-layer change, not scheduled or briefed yet. `poly_generic_length_index_error`
-(`src/check/poly.rs:9312`, call site `:4941`) rejects `&>` on `array['T 'N]` inside a
-non-inline poly body because the body is checked once, generically, before `'N` is ever
-concrete: statically proving `i < 'N` needs a dependent bound, which DESIGN.md rules out
-("Dependent types: never"). The workaround, `inline` (the body re-splices and re-checks per
-call site, where `'N` is concrete), is the pattern every combinator in `lib/core/combinators.sth`
-already relies on. Lifting it for a non-inline body means a runtime bounds check, not a static
-proof, and touches three layers: the checker (stop rejecting `Len::Var` there), lowering
-(thread the runtime length value through the monomorphization substitution instead of a
-compile-time `u32`), and the QBE backend (emit an actual trap call before the address
-computation; the trap infrastructure, `emit_oob_trap`, `src/backend/qbe.rs:898`, already
-exists and is unused on this path). Decided: once this slice lands, its own exit criterion
-should include an indexing demo using S6b's explicit-length-argument syntax (e.g. a non-inline
-`sum['T 'N: Len] ( array['T 'N] -- 'T )` that actually sums by index, called as `sum[i64 4]`) --
-S6b's own golden deliberately avoids indexing (reads `len` back instead) precisely because this
-slice doesn't exist yet. Needs a brief before it becomes a real slice.
+body.** `[ done ]` Checker-only, not the three-layer change originally scoped: lowering already
+ran per-monomorph with `'N` grounded to a concrete `u32`, and the IR-level `bounds_check`/
+`emit_oob_trap` guard already fired for any monomorphic array indexed by a computed index --
+only the checker unconditionally rejected `Len::Var` before either was ever reached.
+`poly_reference_word`'s `">"` arm now defers a **non-literal** index (a `usize` local, a
+`>usize` conversion's result, or a computed `i64`) to the runtime guard, the same treatment a
+`Len::Concrete` computed index already got; a **literal** index against an unknown length still
+rejects, since no static bound can range-check it. `poly_generic_length_index_error`
+(`src/check/poly.rs:11409`, call site `:6309`) is narrowed to that one residual case, not
+removed. Growth signals re-checked on `src/check/poly.rs` at phase exit: still 3/5 (the pre-
+existing count) -- this slice moved a handful of lines within the existing `">"` arm and
+widened one helper's signature, no new import divergence or file growth, so the split stays
+deferred. Detail: [slice6c-brief](./P7/slice6c-brief.md), [slice6c-spec](./P7/slice6c-spec.md).
 
 **P7.S7 -- A testing vocabulary, and what it exposed about printing's layer.** `[ done ]`
 All four subslices landed, retiring the intrinsic `.` onto `hosted::show` (S7d). Split
