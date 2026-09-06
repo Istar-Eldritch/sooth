@@ -234,19 +234,74 @@ full mechanism verification and the `ap` deferral's citation trail.
 
 **P7b.S8 — Linear iterators (HKT as the associated-type substitute).**
 Associated types stay out of scope and are not needed: make the iterator itself the type
-constructor — `trait: Iterator['It: * -> *] : next ( 'It['T] -- Option['T] 'It['T] ) ;`.
-The "associated type" is just the constructor's own parameter, and linearity *is* the
+constructor — `trait: Iterator['It: * -> *] : next ( 'It['T] -- Step['T 'It['T]] ) ;`,
+where `type: Step['T 'Rest] | Done | More 'T 'Rest ;` is the protocol row. The
+"associated type" is just the constructor's own parameter, and linearity *is* the
 protocol: `next` consumes the iterator and yields element-plus-remainder, so no borrows,
-no lifetimes, no `&!` exclusivity puzzles. The exhausted case's linear shape — `None`
-with the iterator dropped inside `next`, versus a
-`type: Step['T 'Rest] | Done | More 'T 'Rest ;` instantiated as `Step['T 'It['T]]` — is
-an S8 probe (the `Step` shape exercises nested constructor applications as type
-arguments). One real impl each for List and a count-up `Range`; `map`/`fold` over an
-Iterator through bounds; whether chained splices actually fuse in the IR is recorded as
-a question, not an answer.
-**Exit:** `next`/`map`/`fold` through an Iterator bound over List and Range goldens; a
-consuming loop runs with one frame total; the exhausted-case ruling and the fusion
-evidence from a small chain are written down.
+no lifetimes, no `&!` exclusivity puzzles. The Option-shaped alternative
+(`next ( 'It['T] -- Option['T] 'It['T] )`) was considered and rejected (probe round P8,
+260905): arm parity would force the dead iterator out to every caller and the final
+drop to every `None` path, instead of the Step shape's single canonical site — the
+final drop lives inside `next`'s own `Done` arm, and `Done` carries nothing. One real
+impl each for List (generic target) and a count-up `Range[i64]` (the S2-6
+concrete-impl-target lift, Delta B); `for_each`/`fold` over the Iterator bound, written
+once against neither impl; whether chained splices actually fuse in the IR is recorded
+as evidence, not a ruling.
+**Exit:** `for_each`/`fold` through the Iterator bound over List and Range goldens (no
+per-impl copy of either consumer); `next` over `Range[i64]` dispatches at a plain mono
+call site; the exhausted-case ruling and the fusion evidence below are written down.
+See [slice8-spec](./P7b/slice8-spec.md) with its [brief](./P7b/slice8-brief.md) and
+[probes](./P7b/slice8-probes.md) for the full mechanism verification.
+Rulings of 260905 (probe round P8, [slice8-probes](./P7b/slice8-probes.md)): the
+protocol row is the **Step shape** (`Step['T 'It['T]]`, `Done` carries nothing, the
+final drop inside `next`'s `Done` arm; the Option row above is the recorded rejected
+alternative); the **S2-6 concrete-target lift lands in S8** (`impl: Iterator for
+Range[i64]`, members grounded as instantiations, not a poly word); the exit's consumers
+are **`for_each`/`fold`** — `map` is not in S8 (a bound-generic body cannot produce
+`'It['U]` and cannot `dup` the abstract iterator). **P7b.S8b** (carved out, same
+date): the S6 construction-wall fix (`poly_bind_construction_arg`'s bare-`Generic`
+`^Self['T]` self-reference-field arm, refined by the P8 round) plus per-impl
+traitful `List` members (`map`, `append`) over the Iterator protocol. A second
+follow-up, **P7b.S8c** (260906): the located-fence fix for member signatures with
+unbindable free type variables — the `src/ir/driver.rs:579` unification-expect ICE
+surfaced by the integrated review (pre-existing; reproducible at the S8 base).
+Fusion evidence (REQ-11, recorded facts only — no fusion verdict): a consuming loop's
+monomorphized `for_each` over `Range[i64]` lowers to **one emitted function** whose
+self-call in the `More` arm is a backward `jmp` to its own loop header (the P7.S3g
+self-tail transform, `src/ir/driver.rs:1093`, unchanged by this slice); `next` over
+`Range[i64]` remains its own, separate, real monomorphized function, called (not
+spliced) from inside that loop — and per element the loop body also calls the
+consumer's own quotation, its own frame; the one-frame claim excludes the caller's
+quotation. "One frame" is true of the loop, not of loop-plus-`next`
+together; a two-consumer chain (e.g. two dispatches through the bound in sequence) is
+two dedicated frames, not one fused one. Whether that residual per-`next`-call frame is
+worth eliminating is left open for a future slice — this one only measures it.
+(`tests/phase7b_slice8.rs`'s
+`consuming_loop_over_range_is_one_frame_with_a_back_edge_and_next_is_a_real_frame` is
+the automated pin, captured via `driver::emit_ssa_with_manifest` rather than any
+`src/ir/` change, which stays diff-empty.)
+Known follow-up (not a change made in S8): `core::iterator`'s `fold` and
+`core::combinators`' array `fold` share the bare name `fold`; a consumer that
+wildcard-imports both gets a fails-closed duplicate-binding error at the import site,
+not a silent shadow. Left as a naming collision for whichever future slice wants a
+disambiguation convention (an alias import, or a rename), not addressed here.
+Growth-structure re-check (CLAUDE.md, at this phase's exit) over every file this slice
+touched — `src/parser.rs`, `src/ast.rs`, `src/check/poly.rs`, `lib/core/iterator.sth`,
+`lib/core/range.sth`, and `tests/phase7b_slice8.rs`: `lib/core/iterator.sth` (78 lines) and `lib/core/range.sth` (38 lines) are each
+one cohesive thing — the protocol vehicle plus its List impl and consumers, and the
+mono `Range[i64]` impl beside its own type, respectively (`range.sth`'s separation from
+the original single-protocol-module plan is itself the split this convention asks for,
+recorded in the spec's Codebase Map) — neither shows the X+Y+Z or import-divergence
+signal. `src/check/poly.rs`'s and `src/parser.rs`'s S7+S8-accumulated edits (the
+member-row gate lift, the impl-target/member-body continuations) sit beside their
+existing neighbors as more pure-predicate/parse-continuation functions of the same
+kind already there (recursive shape predicates beside `member_shape_is_supported`;
+impl-target grounding beside `parse_impl_target`/`parse_impl_member_body`) — no forced
+circularity, no functions added that never call their neighbors. Both files are large
+overall (parser.rs and poly.rs are each one compiler-stage module, per CLAUDE.md's
+"group by responsibility" convention), which is a standing size fact about the parse
+and check stages generally, not a signal this slice's own edits introduced — no split
+is warranted from this phase's diff alone.
 
 **P7b.S9 — Module-aware trait-impl matching.**
 Carved out of S5's review (260904): `find_bound_impl` (`poly.rs:8235`) matches a
@@ -308,11 +363,32 @@ existing 2-candidate error and every single-header, hub, and selective-import sh
 byte-identical; S9's G4 golden retired (GA/GB are its inverted replacements); 12
 units beside the changed `terms.rs` code.
 
+**P7b.S8c — Located fence for member signatures with unbindable free type variables.**
+Found by the P7b.S8 integrated review (260906); pre-existing, not introduced by S8 — the
+repro reproduces at the S8 base `86ca5eb`. A trait member whose signature carries a free
+INPUT type variable — not the trait's header variable, not bound by any bound bracket —
+passes checking and panics at IR instantiation: the unification `expect` in
+`subst_polytype` (`src/ir/driver.rs:579`, "checked: unification bound every input type
+variable"). Shape (verified 260906, panics at `src/ir/driver.rs:579:14` on tip and at the
+S8 base `86ca5eb` alike): a struct type with a `mkbox`-style constructor word (ctor names
+resolve under a declared-type expectation), a trait member carrying a free input variable
+(`trait: Odd['T] : odd ( 'U &'T -- ) ;` — `'U` is bound by nothing), an impl, and a
+bound-dispatched consumer (`: consume ['T: Odd] ( 'U &'T -- ) odd ;` called as
+`mkbox | b | 7 &b consume`); the build succeeds and the PANIC fires at run/IR time. Fix
+direction, to be settled by the slice's own discovery:
+either a check-stage located fence (a member type variable that neither the header nor
+its bounds binds is rejected where it is declared — measure-then-pin, diagnostics are
+behaviour, the IR `expect` remains as a backstop) or a binding rule that grounds free
+member variables at the impl target/call site like `'B` above. Scope: `src/check/` only,
+no `src/ir/` change, unit tests beside the changed checker code, goldens for both
+dispatch routes (mono call site and bound dispatch), and the S8-review repro twins
+panicked→located. Size: `S`.
+
 **Dogfood:** S6 — a program that `map`s and folds over `Option`, `Result`, and `List` through
 shared bounds, with the impls declared against the real lib types and output matching
 hand-written inline equivalents. S7 — `bind` dispatching per constructor over `Option`/`Result`
-through a shared `Monad` bound. S8 — a consuming `map`/`fold` loop over an `Iterator` with no frames between
-elements.
+through a shared `Monad` bound. S8 — a consuming `for_each`/`fold` loop over an `Iterator`, real `List` and `Range`
+impls, no per-impl copy of either consumer.
 
 ## Out of scope
 

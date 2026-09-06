@@ -563,6 +563,35 @@ pub(super) fn ground_into_word_scoped_registries<T>(
 /// whole-program registry in source order, and the first matching entry is
 /// pinned by a unit test, so which representative instance a body is checked
 /// against does not drift with unrelated edits.
+///
+/// P7b.S8 (phase 3 review, finding 2a): the match below is on `i.target.
+/// pattern`'s shape alone (`PolyType::Generic{is_enum, idx, module, ..}`),
+/// never on whether `args` are all concrete. Before Delta B, a fully-applied
+/// ctor target (`Box[i64]`) folded to `PolyType::Concrete` at parse time
+/// (`is_concrete()` true) and so never matched this arm; Delta B keeps such
+/// a target's `Generic` pattern instead (`is_concrete()` now false for it,
+/// `parse_impl_target_fully_applied_concrete_ctor_keeps_its_ctor_pattern`,
+/// `src/parser.rs`), so it now falls into this arm too, alongside the
+/// applied-var targets (`Box['ctor1]`) this doc's "concrete-target impl is
+/// skipped" line describes. Measured safe, not fenced: `ctor_image_type`
+/// carries only `gid` (the constructor *header*'s identity), never the
+/// candidate impl's own argument spelling, so which impl of the *same*
+/// header wins declaration order cannot change the grounded shape a
+/// standalone check runs against -- only which *header* wins can, and
+/// picking a different header's ctor image only ever changes which impl's
+/// body the standalone precheck opportunistically dispatches into; the real
+/// bound member call at every actual splice site re-resolves against the
+/// caller's own concrete argument, independent of this choice. Of
+/// `check_poly_combinator_standalone`'s two rescues, the first is blanket
+/// but the second is tag-gated (`strip_stand_in_tag`): a stand-in-caused
+/// body failure that arrives untagged stays a hard error. The admit is
+/// nonetheless safe for pre-existing programs: every member of an
+/// Arrow-kinded trait must App-head on the trait variable (a bare
+/// higher-kinded variable is rejected outright, and a member with no
+/// dispatchable input is rejected -- both measured), so before Delta B every
+/// lifted-target impl of an Arrow-kinded trait was rejected by the S2-6
+/// fence -- the new admit is unreachable for any program that compiled
+/// before.
 fn arrow_stand_in(
     v: u32,
     sig: &PolySig,
@@ -1997,7 +2026,19 @@ pub(super) fn resolve_splice_member_call(
         // earlier guard first (see the four attempts recorded beside
         // `mono_member_unroutable_error`'s doc comment and R5 in
         // `docs/roadmap/P7b/slice5-spec.md`). No live trigger is known.
-        if !tr.impls[imp_idx].target.is_concrete() {
+        // P7b.S8 (phase 3): a lifted ctor target's `is_concrete()` is false,
+        // so without this test the gate below would admit it and raise a
+        // false "not visible from this module" on a member that dispatches
+        // fine from a mono caller. Mirror `resolve_mono_member_call`'s
+        // `lifted_mono` test (the non-inline lifted arm): the desugar
+        // grounded the member word, so it is monomorphic, absent from
+        // `poly_env`, and reached by bare symbol through `env` -- the record
+        // path below. The word's own mono flag is the test rather than the
+        // target shape alone: a lifted target whose member kept a free
+        // variable stays polymorphic and still belongs to the generic branch.
+        let lifted_mono = tr.impls[imp_idx].target.is_mono_ctor_app()
+            && resolved_idx.is_some_and(|widx| tr.words[widx].poly.is_none());
+        if !tr.impls[imp_idx].target.is_concrete() && !lifted_mono {
             if !poly.env.contains_key(&symbol) {
                 return Err(mono_member_unroutable_error(
                     ctx,
@@ -2403,7 +2444,22 @@ pub(super) fn resolve_mono_member_call(
         ));
     };
     let word_sym = poly.trait_resolve.word_symbols[*widx].clone();
-    if imp.target.is_concrete() {
+    // P7b.S8 (REQ-7, Delta B dispatch (a)): the lifted-target arm. A
+    // fully-applied all-concrete ctor target (`for Range[i64]`) keeps a
+    // `Generic` pattern, so `is_concrete()` is false, but its member word is
+    // monomorphic (the desugar grounded it, `parse_impl_member_body`) and so
+    // is absent from `poly_env` -- the else branch's `debug_assert!` below.
+    // The word's own mono flag is the test rather than the target shape
+    // alone, which fences this to exactly the words the desugar grounded:
+    // a lifted target whose member kept a free variable stays polymorphic
+    // and still belongs to the generic branch.
+    let lifted_mono = imp.target.is_mono_ctor_app()
+        && poly
+            .trait_resolve
+            .words
+            .get(*widx)
+            .is_some_and(|w| w.poly.is_none());
+    if imp.target.is_concrete() || lifted_mono {
         // S2-16 (final-review fix): a concrete target's member sig has no
         // free variables to bind, so an explicit type/length-argument list
         // is provably meaningless here -- reject it instead of silently
@@ -2435,19 +2491,39 @@ pub(super) fn resolve_mono_member_call(
         // span-keyed lowering record an operator overload rides, which
         // `lower_call` reads ahead of the name-keyed `env` (the bare member
         // name has no `env` entry).
-        let target_ty = imp.target.concrete_ty().expect("checked is_concrete above");
-        let input_types: Vec<Type> = member_decl
-            .sig
-            .inputs
-            .iter()
-            .map(|t| crate::ast::ground_member_type(t, target_ty, arrays, refs))
-            .collect();
-        let output_types: Vec<Type> = member_decl
-            .sig
-            .outputs
-            .iter()
-            .map(|t| crate::ast::ground_member_type(t, target_ty, arrays, refs))
-            .collect();
+        // P7b.S8 (REQ-7): a lifted target's grounded effect is read off the
+        // member word the desugar already built, not re-derived here. The
+        // trait's own member signature cannot be re-grounded at one: it is
+        // App-headed (that is the point of the lift) and
+        // `ground_member_type`'s App arm is an `unreachable!` with no ctor
+        // head to dissolve into. Reading the word is also the stronger
+        // guarantee -- the effect a body was checked against and the effect
+        // a call site is checked against are then one object, which is
+        // exactly what `ground_member_type`'s shared-grounding rule (S3r R2)
+        // buys the concrete path.
+        let (input_types, output_types): (Vec<Type>, Vec<Type>) = match imp.target.concrete_ty() {
+            Some(target_ty) => (
+                member_decl
+                    .sig
+                    .inputs
+                    .iter()
+                    .map(|t| crate::ast::ground_member_type(t, target_ty, arrays, refs))
+                    .collect(),
+                member_decl
+                    .sig
+                    .outputs
+                    .iter()
+                    .map(|t| crate::ast::ground_member_type(t, target_ty, arrays, refs))
+                    .collect(),
+            ),
+            None => {
+                let word = &poly.trait_resolve.words[*widx];
+                (
+                    word.effect.inputs.iter().map(|s| s.ty).collect(),
+                    word.effect.outputs.iter().map(|s| s.ty).collect(),
+                )
+            }
+        };
         let n_in = input_types.len();
         if stack.len() < n_in {
             return Err(underflow_error(ctx, span, member, n_in, stack.len()));
@@ -2490,8 +2566,8 @@ pub(super) fn resolve_mono_member_call(
                 }
                 SlotMatch::Mismatch => {
                     // P7b.S6 Phase 1 (R2.a) per-site verdict: this is the mono
-                    // concrete-target branch (`imp.target.is_concrete()`), so
-                    // both operands are already `Concrete` and
+                    // branch (a concrete target, or P7b.S8's lifted mono one),
+                    // so both operands are already `Concrete` and
                     // `expected_sig`/`found_sig` share the same `member_decl.sig`
                     // -- the split is a no-op here.
                     return Err(trait_member_operand_error(
@@ -8844,7 +8920,10 @@ fn resolve_user_bound(
                 .iter()
                 .map(|s| apply_subst(sig, s, caller_subst, name, span, ctx, arrays, cells, refs))
                 .collect::<Result<Vec<_>, _>>()?;
-            let mut picked: Option<(usize, Subst, String)> = None;
+            // The trailing flag is P7b.S8 (REQ-7): whether the picked
+            // candidate's member word is a lifted target's *mono* word, and
+            // so dispatches under its bare symbol with nothing to mint.
+            let mut picked: Option<(usize, Subst, String, bool)> = None;
             let mut picked_pins = 0usize;
             let mut survived: Vec<usize> = Vec::new();
             for &(_, cidx) in &ctor_candidates {
@@ -8862,6 +8941,32 @@ fn resolve_user_bound(
                     ));
                 };
                 let word_sym = &tr.word_symbols[*widx];
+                // P7b.S8 (REQ-7, Delta B dispatch (b)): a lifted target
+                // (`for Range[i64]`) matched this site on ctor identity, and
+                // its member word is monomorphic -- there is no `PolySig` to
+                // unify and nothing to monomorphize. Compatibility is plain
+                // type equality against the effect the desugar grounded, and
+                // the dispatch symbol is the bare one: the word is lowered
+                // once, under its own name, exactly as a concrete target's
+                // member word is.
+                let lifted_mono = cimp
+                    .target
+                    .is_mono_ctor_app()
+                    .then(|| tr.words.get(*widx).filter(|w| w.poly.is_none()))
+                    .flatten();
+                if let Some(word) = lifted_mono {
+                    let ins: Vec<Type> = word.effect.inputs.iter().map(|s| s.ty).collect();
+                    if ins != site_slots {
+                        continue;
+                    }
+                    let pins = ctor_pin_count(&cimp.target.pattern);
+                    survived.push(cidx);
+                    if picked.as_ref().is_none_or(|_| pins > picked_pins) {
+                        picked = Some((cidx, Subst::default(), word_sym.clone(), true));
+                        picked_pins = pins;
+                    }
+                    continue;
+                }
                 let Some(word_sig) = tr.word_sig_of(word_sym) else {
                     return Err(unresolved_trait_obligation_error(
                         ctx,
@@ -8908,7 +9013,7 @@ fn resolve_user_bound(
                     let pins = ctor_pin_count(&cimp.target.pattern);
                     survived.push(cidx);
                     if picked.as_ref().is_none_or(|_| pins > picked_pins) {
-                        picked = Some((cidx, theta, word_sym.clone()));
+                        picked = Some((cidx, theta, word_sym.clone(), false));
                         picked_pins = pins;
                     }
                 }
@@ -8937,7 +9042,7 @@ fn resolve_user_bound(
                     ob.span,
                 ));
             }
-            let Some((_, theta, word_sym)) = picked else {
+            let Some((_, theta, word_sym, is_mono)) = picked else {
                 // Every candidate's member word refused this site's grounded
                 // operands: the located member-call operand error, naming the
                 // site (the obligation span) and the grounded slot types.
@@ -8949,17 +9054,29 @@ fn resolve_user_bound(
                     &site_slots,
                 ));
             };
-            let s = instantiation_symbol(&word_sym, &theta);
-            impl_monos.push((word_sym, theta));
-            s
-        } else if is_generic {
+            if is_mono {
+                word_sym
+            } else {
+                let s = instantiation_symbol(&word_sym, &theta);
+                impl_monos.push((word_sym, theta));
+                s
+            }
+        } else if is_generic
+            && !(imp.target.is_mono_ctor_app()
+                && tr.words.get(*idx).is_some_and(|w| w.poly.is_none()))
+        {
             // P7.S4 (R6): mint the dispatched symbol as the instantiation of
             // the member word at the matched substitution.
             let s = instantiation_symbol(word_sym, &subst);
             impl_monos.push((word_sym.clone(), subst.clone()));
             s
         } else {
-            // A concrete winner keeps the bare symbol path (P7.S4).
+            // A concrete winner keeps the bare symbol path (P7.S4) -- and so
+            // does a lifted target's mono member word (P7b.S8, REQ-7): it is
+            // a monomorphic word already, lowered under its own symbol, so
+            // minting an instantiation of it would name a body that no
+            // monomorphization pass will ever emit (`impl_mono_seed`
+            // requires `poly: Some`).
             word_sym.clone()
         };
         trait_calls.insert(ob.span, symbol);
@@ -9051,11 +9168,13 @@ fn unsatisfied_user_bound_error(
 ) -> String {
     let callee = crate::resolve::demangle_call(callee);
     // P7b.S2 (S2-15.f): the error builder grounds member sigs at a ty that
-    // can be a `CtorImage` (the dispatch just failed on one) or face an
+    // can be a `CtorImage` (the dispatch just failed on one), or face an
     // App-headed member slot (an HKT trait's declared signature, which has
-    // no mono representation at all -- S2-6). Both are the non-raising
-    // twin's `None`; the builder falls back to the declared `PolyType`'s own
-    // rendering rather than raising from inside the error it is building.
+    // no mono representation at all -- S2-6), or a ctor-headed one
+    // (`Step['T 'It['T]]`, admitted by P7b.S8's Generic gate lift, equally
+    // unrepresentable). All three are the non-raising twin's `None`; the
+    // builder falls back to the declared `PolyType`'s own rendering rather
+    // than raising from inside the error it is building.
     let sigs: Vec<String> = trait_decl
         .members
         .iter()

@@ -1,0 +1,78 @@
+\ core::iterator -- the linear iteration protocol (HKT as the associated-type
+\ substitute; P7b.S8 R1). `Iterator['It: * -> *]` makes the iterator itself
+\ the type constructor rather than naming an associated element type: `next`
+\ consumes the iterator and yields the element plus the advanced iterator
+\ packed together in one `Step` value. `Done` carries nothing, so the
+\ exhausted case's final drop lives inside `next`'s own `Done` arm -- the one
+\ canonical site, never a remainder construction (this is why the S6
+\ construction wall, `src/check/poly.rs:6193`, is never reached by any
+\ shape in this module). The Option-shaped alternative
+\ (`next ( 'It['T] -- Option['T] 'It['T] )`) was considered and rejected: arm
+\ parity would force the dead iterator out to every caller and the final drop
+\ to every `None` path instead of living in one place.
+import: intrinsics | drop | ;
+import: self::list | List Nil Cons | ;
+
+\ `next` is deliberately absent from this list: a trait member's own
+\ synthesized word is named `member;Trait;module;Type` (never the bare
+\ member name, `src/parser.rs`'s `synth_member_word_name`), so `export:`
+\ has no bare `next` to promise -- `exportable_names` only ever sees the
+\ mangled spelling. A consumer imports the trait and its ctors
+\ (`import: core::iterator | Step Done More Iterator | ;`) and does *not*
+\ name `next`; bare `next` then resolves through trait dispatch at the
+\ call site.
+export: Step Done More Iterator ;
+\ `for_each` and `fold` are ordinary exported words, imported by name. A
+\ consumer that only *calls* them needs nothing else -- the
+\ `Step Done More Iterator` surface above is required only of a consumer
+\ that writes its own `Step?` dispatch arms or its own `Iterator`-bounded
+\ word (measured, P7b.S8 phase 2).
+export: for_each fold ;
+
+type: Step['T 'Rest]
+| Done
+| More 'T 'Rest
+;
+
+trait: Iterator['It: * -> *]
+  : next ( 'It['T] -- Step['T 'It['T]] ) ;
+;
+
+\ The `Cons` arm destructures the matched list (`Cons>` disposes of the
+\ matched cell and hands back its fields, element deepest, the still-cell-
+\ wrapped remainder on top) and packs `More` with the element deepest and
+\ the (unwrapped) remainder on top -- the same field order `Cons` itself
+\ constructs with. The exhausted `Nil` arm consumes the matched (empty) list
+\ via `drop` and returns only the `Done` shell: no remainder to construct, so
+\ the S6 wall is never in play here.
+impl: Iterator for List
+  : next
+    ~[ ( Nil ) drop Done ]
+    ~[ ( Cons ) Cons> | v rest | v rest ^> More ]
+    List? ;
+;
+
+\ The consumers (P7b.S8 R4). Written once against the `Iterator` bound: they
+\ name no List word, so every future impl gets them for free. The self-call
+\ sits in tail position in the `More` arm, so the P7.S3g transform turns the
+\ recursion into a loop back-edge and the drain runs in one frame
+\ (`src/ir/driver.rs:1093`). The `Done` arm drops only the `Step` shell: the
+\ exhausted iterator was already disposed of inside `next`'s own `Done` arm,
+\ the protocol's one canonical final-drop site. Leaving that shell undropped
+\ is a compile error (the variant-escape rule), which is what makes the
+\ protocol's linearity enforced rather than merely intended.
+: for_each ['It: Iterator 'T] ( 'It['T] [ 'T -- ] -- )
+  | f |
+  next
+  ~[ ( Done ) drop ]
+  ~[ ( More ) More> | v rest | v f call rest f for_each ]
+  Step? ;
+
+\ Accumulator under the element, matching `lib/core/combinators.sth`'s array
+\ `fold`, so a call reads `acc [ ... ] fold`.
+: fold ['It: Iterator 'T 'A] ( 'It['T] 'A [ 'A 'T -- 'A ] -- 'A )
+  | f | | acc |
+  next
+  ~[ ( Done ) drop acc ]
+  ~[ ( More ) More> | v rest | rest acc v f call f fold ]
+  Step? ;

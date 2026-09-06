@@ -1,0 +1,38 @@
+\ core::range -- the count-up range, and `core::iterator`'s second impl
+\ (P7b.S8 R2/REQ-9). It lives beside the protocol rather than inside it
+\ because the impl's member word is *monomorphic* and so mints its
+\ `Step[i64 Range[i64]]` at parse time, which a consumer of the protocol's
+\ own List impl must not have to see.
+import: intrinsics | drop add | ;
+import: self::prelude | if lt Bool | ;
+import: self::iterator | Step Done More Iterator | ;
+
+export: Range ;
+
+\ `Range` is a half-open count-up, and the slice's second impl (P7b.S8 R2 /
+\ REQ-9). The header stays *generic* -- `Range['T]`, both fields real, no
+\ phantom parameter (`phantom_ty_var_error`) -- while the impl target is the
+\ fully-applied `Range[i64]`: a ctor application with all-concrete arguments,
+\ which is the shape Delta B admits and grounds monomorphically. Mono is not
+\ a preference here: D5 admits only `Concrete` aggregates as borrowable
+\ locals (`src/check/poly.rs:6656`), so a *poly*-bodied member could not read
+\ `cur` at all.
+type: Range['T]
+  cur 'T
+  limit 'T
+;
+
+\ Count-up `next`: `1 add` on the cursor, the advanced `Range` constructed
+\ inside the `More` arm out of plain scalar fields -- no self-reference
+\ field, so the S6 construction wall is not in play here either. The
+\ exhausted arm drops the consumed iterator, `Done` carrying nothing: the
+\ protocol's one canonical final-drop site, exactly as in the List impl.
+impl: Iterator for Range[i64]
+  : next
+    | r |
+    &r &cur @ &r &limit @ lt
+    ~[ &r &cur @   &r &cur @ 1 add &r &limit @ Range   More ]
+    ~[ r drop Done ]
+    if ;
+;
+

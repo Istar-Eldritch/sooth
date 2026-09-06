@@ -874,11 +874,13 @@ impl GenericTypes {
     /// recursive; R6's mint-and-memo-before-substitute ordering is what makes
     /// a self-referential header terminate there.
     ///
-    /// The remaining panic is truthful, not a deferral. Two shapes reach it
-    /// and neither is constructible: a `PolyType::Quotation` (R7 rejects a
-    /// quotation field naming a type variable at the parser, and a *concrete*
-    /// quotation field folds to `Concrete` instead) and a `QuotLit` (a
-    /// poly-body marker that never reaches a declaration).
+    /// The remaining panic is truthful, not a deferral, for the struct-field
+    /// route this function also serves: that route cannot deliver a
+    /// `PolyType::Quotation` (a var-bearing quotation field is rejected at
+    /// the parser, and a *concrete* one folds to `PolyType::Concrete`) --
+    /// only the member route can, and the `Quotation` arm above now serves
+    /// it. A `QuotLit` (a poly-body marker) never reaches a declaration at
+    /// all.
     fn substitute_generic_field(
         &mut self,
         pty: &PolyType,
@@ -1002,6 +1004,33 @@ impl GenericTypes {
                         }
                     }
                     not_ctor_image => not_ctor_image,
+                }
+            }
+            // P7b.S8 (phase 3 review, finding 1): a variable-free
+            // quotation slot reaches this router too -- a lifted-target
+            // member's grounded signature (`ground_mono_member_slots`,
+            // `src/parser.rs`) hands `ground_var_free` a member slot that
+            // may itself be `PolyType::Quotation` (e.g. `ap`'s `~[ 'T -- ]`
+            // parameter), not only a struct/enum field. Mirrors
+            // `ground_member_type`'s S2-3 arm: recurse into the rows,
+            // honoring `is_inline`, rather than falling through to the
+            // field-shape `unreachable!` below (a real `type:` field still
+            // cannot spell a quotation -- the parser rejects that shape at
+            // declaration -- so this arm only ever fires from the member
+            // route).
+            PolyType::Quotation(ins, outs, is_inline, ..) => {
+                let gins = ins
+                    .iter()
+                    .map(|t| self.substitute_generic_field(t, args, lens, regs.reborrow()))
+                    .collect();
+                let gouts = outs
+                    .iter()
+                    .map(|t| self.substitute_generic_field(t, args, lens, regs.reborrow()))
+                    .collect();
+                if *is_inline {
+                    inline_quotation_type(gins, gouts)
+                } else {
+                    quotation_type(gins, gouts)
                 }
             }
             other => unreachable!(
@@ -1150,6 +1179,17 @@ impl GenericTypes {
             .position(|t| matches!(t, Type::Enum(eid, _) if *eid == id))?;
         let (gi, m, args, lens) = &self.enum_keys[i];
         Some((*gi, *m, args, lens))
+    }
+
+    /// P7b.S8 (REQ-7): ground a variable-free `PolyType` to a real `Type`,
+    /// minting (or memo-hitting) every monomorph it names. This is the same
+    /// bottom-up walk a generic declaration's own field takes, run with an
+    /// empty binding list because a variable-free shape indexes into none --
+    /// the machinery `raw_to_poly_type`'s all-concrete fold mints through,
+    /// reached from a shape that is already a `PolyType` rather than a
+    /// `RawTy`. The caller proves var-freeness (`poly_type_is_var_free`).
+    pub(crate) fn ground_var_free(&mut self, pty: &PolyType, regs: MutRegistries) -> Type {
+        self.substitute_generic_field(pty, &[], &[], regs)
     }
 
     /// P7.S3n (R2): register a generic struct header with an empty field
@@ -2124,6 +2164,31 @@ pub(crate) fn member_ty_mentions_app(t: &PolyType) -> bool {
     }
 }
 
+/// P7b.S8 (REQ-7): whether `t` names no variable at all -- no type
+/// variable, no length variable, and no application (an application is
+/// headed by one). A member signature grounded against a lifted mono target
+/// (`ImplTarget::is_mono_ctor_app`) satisfies this exactly when it has a
+/// monomorphic representation, which is what routes it to a `poly: None`
+/// member word. `GenericTypes::ground_var_free` requires it: its walk
+/// indexes an empty binding list.
+pub(crate) fn poly_type_is_var_free(t: &PolyType) -> bool {
+    match t {
+        PolyType::Concrete(_) => true,
+        PolyType::Var(_) | PolyType::App { .. } | PolyType::QuotLit => false,
+        PolyType::Array(elem, len) => {
+            matches!(len, Len::Concrete(_)) && poly_type_is_var_free(elem)
+        }
+        PolyType::Ref(referent, _) => poly_type_is_var_free(referent),
+        PolyType::OwnedCell(payload) => poly_type_is_var_free(payload),
+        PolyType::Generic { args, len_args, .. }
+        | PolyType::GenericVariant { args, len_args, .. } => {
+            args.iter().all(poly_type_is_var_free)
+                && len_args.iter().all(|l| matches!(l, Len::Concrete(_)))
+        }
+        PolyType::Quotation(ins, outs, ..) => ins.iter().chain(outs).all(poly_type_is_var_free),
+    }
+}
+
 /// P7b.S2 (S2-6): the concrete-path App fence. An App-headed member
 /// signature grounded against a concrete target has no mono representation
 /// (the application's arguments are member locals), so the desugar rejects
@@ -2237,6 +2302,14 @@ pub fn try_ground_member_type(
         // S2-6's fence, as a `None`: an App-headed member slot never grounds
         // to a concrete `Type` (member locals are not representable).
         PolyType::App { .. } => None,
+        // P7b.S8 (phase 1, review finding 1): a ctor-headed member slot
+        // (`Step['T 'It['T]]`, admitted by the Generic gate lift) has no
+        // mono representation either -- same reasoning as the App arm
+        // above, just a different application spelling. Without this arm
+        // the fallthrough below hands a `Generic` to `ground_member_type`'s
+        // `_ => unreachable!`, live the moment `unsatisfied_user_bound_error`
+        // renders a bound over such a trait at a type with no impl.
+        PolyType::Generic { .. } => None,
         // S2-15.f: a quotation slot at a constructor image -- grounding its
         // rows would flow the image into the effect's value positions, the
         // exact misclassification S1-15.g rejects. (At a real type the
@@ -2482,6 +2555,25 @@ impl ImplTarget {
     /// (`Var`, `Array`, `Ref`, `OwnedCell`, `Generic`, `Quotation`) is generic.
     pub fn is_concrete(&self) -> bool {
         matches!(self.pattern, PolyType::Concrete(_))
+    }
+
+    /// P7b.S8 (REQ-7, Delta B): whether this is a *lifted mono* target -- a
+    /// fully-applied ctor application whose every type and length argument
+    /// is concrete (`impl: Iterator for Range[i64]`). Such a target names no
+    /// variable, so its members ground monomorphically (D5 forbids a
+    /// generic body: a `Range[i64]` local in poly space is not a borrowable
+    /// aggregate, `src/check/poly.rs:6656`), while the pattern still carries
+    /// the ctor head an App-headed member dissolves into and the dispatch
+    /// matcher identifies on. A partially-applied target keeps a variable in
+    /// the padded slots (`Result[i64 'ctor1]`), so it is not one of these.
+    pub fn is_mono_ctor_app(&self) -> bool {
+        match &self.pattern {
+            PolyType::Generic { args, len_args, .. } => {
+                args.iter().all(|a| matches!(a, PolyType::Concrete(_)))
+                    && len_args.iter().all(|l| matches!(l, Len::Concrete(_)))
+            }
+            _ => false,
+        }
     }
 
     /// The concrete `Type` of a concrete target, or `None` for a generic one.
