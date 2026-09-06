@@ -2237,6 +2237,14 @@ pub fn try_ground_member_type(
         // S2-6's fence, as a `None`: an App-headed member slot never grounds
         // to a concrete `Type` (member locals are not representable).
         PolyType::App { .. } => None,
+        // P7b.S8 (phase 1, review finding 1): a ctor-headed member slot
+        // (`Step['T 'It['T]]`, admitted by the Generic gate lift) has no
+        // mono representation either -- same reasoning as the App arm
+        // above, just a different application spelling. Without this arm
+        // the fallthrough below hands a `Generic` to `ground_member_type`'s
+        // `_ => unreachable!`, live the moment `unsatisfied_user_bound_error`
+        // renders a bound over such a trait at a type with no impl.
+        PolyType::Generic { .. } => None,
         // S2-15.f: a quotation slot at a constructor image -- grounding its
         // rows would flow the image into the effect's value positions, the
         // exact misclassification S1-15.g rejects. (At a real type the

@@ -378,6 +378,13 @@ fn invalid_c_symbol_error(symbol: &str, span: Span) -> String {
 ///   same predicate and is admitted like any other trait-var-headed App; an
 ///   App headed by a member local still fails the recursive check below and
 ///   stays rejected).
+///
+/// P7b.S8 (REQ-1) adds a third: `Generic` (a ctor-headed application,
+/// `Option['T]`/`Step['T 'It['T]]`) is supported iff every one of its type
+/// arguments is itself a supported shape, recursing through this same
+/// predicate -- type arguments only, so a `Len::Var` among the ctor
+/// application's own length arguments still stays rejected (mirrors the
+/// Array arm's `Len::Var` refusal).
 fn member_shape_is_supported(t: &PolyType) -> bool {
     match t {
         PolyType::Concrete(_) | PolyType::Var(_) => true,
@@ -400,7 +407,6 @@ fn member_shape_is_supported(t: &PolyType) -> bool {
         // `^'T` member would ground to nothing. A located rejection, not a
         // wildcard fall-through.
         PolyType::OwnedCell(_)
-        | PolyType::Generic { .. }
         | PolyType::QuotLit
         // P7.S12 (R3.5): unconstructible outside an eliminator arm's own
         // input row, never in a trait member signature.
@@ -408,6 +414,20 @@ fn member_shape_is_supported(t: &PolyType) -> bool {
         // (P7b.S2 S2-3: an application headed by anything but the trait var
         // -- a member local, say -- is unsupported; that is the `App` arm
         // above returning `*head == 0`, not a wildcard fall-through.)
+        //
+        // P7b.S8 (REQ-1): a ctor-headed application (`Option['T]`,
+        // `Step['T 'It['T]]`) is supported when every one of its *type*
+        // arguments is itself a supported shape -- the same recursion the
+        // Quotation arm already does over rows. Type arguments only: any
+        // `Len::Var` among the ctor application's own length arguments stays
+        // rejected (mirrors the Array arm's `Len::Var` refusal) because the
+        // grounded `PolySig` takes its `len_var_names` from the *target*
+        // (`:4528`), so a member's own dangling length variable would index
+        // out of bounds in the diagnostic renderer.
+        PolyType::Generic { args, len_args, .. } => {
+            len_args.iter().all(|l| !matches!(l, Len::Var(_)))
+                && args.iter().all(member_shape_is_supported)
+        }
     }
 }
 
@@ -438,6 +458,85 @@ fn member_quotation_row_mentions_app(t: &PolyType) -> bool {
             args.iter().any(member_quotation_row_mentions_app)
         }
     }
+}
+
+/// P7b.S8 (REQ-1's panic-fence note, reference form per review finding 5):
+/// whether a ctor-headed application (`PolyType::Generic`, REQ-1's
+/// newly-admitted member shape) is reachable anywhere in `t`, returning the
+/// offending node itself rather than a bare bool -- so the concrete-target
+/// fence can name the actual ctor application (`Option['T]`) instead of the
+/// trait's header variable, which is all `MemberGrounding::head_name` ever
+/// carried. `ground_member_type` (`src/ast.rs:2168`) has no `Generic` arm at
+/// all -- unlike the App fence's `member_ty_mentions_app`
+/// (`src/ast.rs:2113`), which only needs to catch an App, a `Generic` is
+/// unreachable in `ground_member_type` regardless of what its own arguments
+/// contain, so this predicate treats *any* `Generic` as a hit rather than
+/// recursing past it looking for something else.
+fn member_first_ctor_application(t: &PolyType) -> Option<&PolyType> {
+    match t {
+        PolyType::Generic { .. } => Some(t),
+        PolyType::Concrete(_) | PolyType::Var(_) | PolyType::QuotLit => None,
+        PolyType::Array(elem, _) => member_first_ctor_application(elem),
+        PolyType::Ref(referent, _) => member_first_ctor_application(referent),
+        PolyType::OwnedCell(inner) => member_first_ctor_application(inner),
+        PolyType::Quotation(ins, outs, ..) => ins
+            .iter()
+            .chain(outs)
+            .find_map(member_first_ctor_application),
+        PolyType::App { args, .. } | PolyType::GenericVariant { args, .. } => {
+            args.iter().find_map(member_first_ctor_application)
+        }
+    }
+}
+
+/// P7b.S8 (REQ-1's panic-fence note; reworded review finding 5): the
+/// concrete-target twin of `member_app_concrete_target_error`
+/// (`src/ast.rs:2095`), for a ctor-headed application rather than a
+/// trait-var-headed one. Names the offending application itself
+/// (`Option['T]`, rendered over the member signature's own variable
+/// tables via `render_target_pt`) rather than `dg.head_name` -- the trait
+/// header variable, which for a ctor-headed slot is not the constructor
+/// the message is about.
+fn member_ctor_application_concrete_target_error(
+    dg: &MemberGrounding,
+    offending: &PolyType,
+    ty_var_names: &[String],
+    len_var_names: &[String],
+) -> String {
+    let ctor_display = render_target_pt(offending, ty_var_names, len_var_names);
+    format!(
+        "error: trait member `{}` of `{}` (line {}, col {}) declares the ctor-headed application `{}`, but the impl target `{}` is concrete\n  a ctor-headed member row has no monomorphic representation here (`ground_member_type` grounds concrete/array/reference/quotation shapes only); implement the trait for a constructor target with a type variable instead",
+        dg.member, dg.trait_name, dg.member_span.line, dg.member_span.col, ctor_display, dg.target_display
+    )
+}
+
+/// P7b.S8 (REQ-1's panic-fence note): the concrete-path ctor-application
+/// fence, the twin of `fence_member_app_against_concrete_target`
+/// (`src/ast.rs:2137`). A ctor-headed member row (`Option['T]`, admitted by
+/// REQ-1's lift to `member_shape_is_supported`) grounded against a concrete
+/// target has no mono representation -- `ground_member_type` has no
+/// `Generic` arm -- so the desugar rejects the shape here, located, before
+/// `ground_member_type` could ever reach its `unreachable!` fallthrough.
+fn fence_member_ctor_application_against_concrete_target(
+    inputs: &[PolyType],
+    outputs: &[PolyType],
+    dg: &MemberGrounding,
+    ty_var_names: &[String],
+    len_var_names: &[String],
+) -> Result<(), String> {
+    if let Some(offending) = inputs
+        .iter()
+        .chain(outputs)
+        .find_map(member_first_ctor_application)
+    {
+        return Err(member_ctor_application_concrete_target_error(
+            dg,
+            offending,
+            ty_var_names,
+            len_var_names,
+        ));
+    }
+    Ok(())
 }
 
 /// P7.S3e (R4/R8): a trait member signature mentions an unsupported shape
@@ -4332,6 +4431,20 @@ impl<'t> Parser<'t> {
             // `ground_member_type`'s own App arm being the unreachable
             // backstop the fence guards.
             fence_member_app_against_concrete_target(&sig.inputs, &sig.outputs, &dg)?;
+            // P7b.S8 (REQ-1's panic-fence note): the concrete-target twin
+            // of the App fence, for a ctor-headed application
+            // (`PolyType::Generic`, REQ-1's newly-admitted member shape).
+            // `ground_member_type` (`src/ast.rs:2168`) has no `Generic` arm
+            // -- its fallthrough is an `unreachable!` -- so this must be
+            // fenced here, located, before grounding ever runs, exactly as
+            // the App fence already is.
+            fence_member_ctor_application_against_concrete_target(
+                &sig.inputs,
+                &sig.outputs,
+                &dg,
+                &sig.ty_var_names,
+                &sig.len_var_names,
+            )?;
             let target_ty = target.concrete_ty().expect("checked is_concrete");
             let ground =
                 |slots: &[PolyType], arrays: &mut Vec<ArrayDecl>, refs: &mut Vec<RefDecl>| {
@@ -12058,6 +12171,195 @@ mod tests {
         // by head.
         assert!(member_quotation_row_mentions_app(&app_in_row));
         assert!(!member_quotation_row_mentions_app(&app_free));
+    }
+
+    #[test]
+    fn member_shape_is_supported_generic_arm_admits_ctor_headed_app_expected() {
+        // P7b.S8 (REQ-1): a ctor-headed application is supported once every
+        // type argument is itself a supported shape -- here a bare trait var,
+        // mirroring `Option['T]`.
+        let option_shaped = PolyType::Generic {
+            is_enum: true,
+            idx: 0,
+            module: 0,
+            args: vec![PolyType::Var(0)],
+            len_args: vec![],
+            name: "Option",
+        };
+        assert!(member_shape_is_supported(&option_shaped));
+    }
+
+    #[test]
+    fn member_shape_is_supported_generic_arm_recurses_into_nested_ctor_args() {
+        // P7b.S8 (REQ-1): the recursion reaches arbitrarily deep ctor
+        // nesting -- `Step['T 'It['T]]`, a ctor application whose second
+        // argument is itself a ctor-headed application.
+        let step_shaped = PolyType::Generic {
+            is_enum: true,
+            idx: 1,
+            module: 0,
+            args: vec![
+                PolyType::Var(0),
+                PolyType::Generic {
+                    is_enum: false,
+                    idx: 2,
+                    module: 0,
+                    args: vec![PolyType::Var(0)],
+                    len_args: vec![],
+                    name: "It",
+                },
+            ],
+            len_args: vec![],
+            name: "Step",
+        };
+        assert!(member_shape_is_supported(&step_shaped));
+    }
+
+    #[test]
+    fn member_shape_is_supported_generic_arm_rejects_len_var_argument() {
+        // P7b.S8 (REQ-1): type arguments only -- a `Len::Var` among the
+        // ctor application's own length arguments stays rejected even
+        // though every type argument is supported (mirrors the Array arm's
+        // `Len::Var` refusal; the grounded `PolySig` takes its
+        // `len_var_names` from the target, so a member's own dangling
+        // length variable would index out of bounds at diagnostic render
+        // time).
+        let buf_shaped = PolyType::Generic {
+            is_enum: false,
+            idx: 0,
+            module: 0,
+            args: vec![PolyType::Var(0)],
+            len_args: vec![Len::Var(0)],
+            name: "Buf",
+        };
+        assert!(!member_shape_is_supported(&buf_shaped));
+    }
+
+    #[test]
+    fn member_shape_is_supported_generic_arm_rejects_unsupported_nested_arg() {
+        // P7b.S8 (REQ-1/REQ-2): a ctor-headed row containing a
+        // member-local-headed App argument (`Step['G['T] 'F['T]]`-shaped)
+        // stays rejected -- the lifted arm's own recursion into args keeps
+        // this fenced post-lift.
+        let unsupported_nested_arg = PolyType::Generic {
+            is_enum: true,
+            idx: 0,
+            module: 0,
+            args: vec![
+                PolyType::App {
+                    head: 1,
+                    args: vec![PolyType::Var(2)],
+                },
+                PolyType::Var(0),
+            ],
+            len_args: vec![],
+            name: "Step",
+        };
+        assert!(!member_shape_is_supported(&unsupported_nested_arg));
+    }
+
+    #[test]
+    fn member_first_ctor_application_generic_expected() {
+        // P7b.S8 (REQ-1's panic-fence note): a bare ctor-headed application
+        // is a hit regardless of what its own arguments contain --
+        // `ground_member_type` has no `Generic` arm at all, unlike the App
+        // fence's predicate, which only needs to catch a *nested* App.
+        let option_shaped = PolyType::Generic {
+            is_enum: true,
+            idx: 0,
+            module: 0,
+            args: vec![PolyType::Var(0)],
+            len_args: vec![],
+            name: "Option",
+        };
+        assert!(member_first_ctor_application(&option_shaped).is_some());
+        assert!(member_first_ctor_application(&PolyType::Var(0)).is_none());
+        assert!(member_first_ctor_application(&PolyType::Concrete(Type::I64)).is_none());
+    }
+
+    #[test]
+    fn member_first_ctor_application_finds_generic_nested_under_array_and_ref() {
+        // The predicate recurses through the same wrapper shapes the App
+        // twin does, so a ctor application buried under an array element or
+        // a reference is still caught.
+        let option_shaped = PolyType::Generic {
+            is_enum: true,
+            idx: 0,
+            module: 0,
+            args: vec![PolyType::Var(0)],
+            len_args: vec![],
+            name: "Option",
+        };
+        let under_array = PolyType::Array(Box::new(option_shaped.clone()), Len::Concrete(2));
+        let under_ref = PolyType::Ref(Box::new(option_shaped), false);
+        assert!(member_first_ctor_application(&under_array).is_some());
+        assert!(member_first_ctor_application(&under_ref).is_some());
+    }
+
+    #[test]
+    fn fence_member_ctor_application_against_concrete_target_ctor_headed_member_is_error() {
+        // P7b.S8 (REQ-1's panic-fence note): the unit beside the changed
+        // code -- a ctor-headed member row fenced located, before
+        // `ground_member_type` could reach its `unreachable!` fallthrough.
+        let dg = MemberGrounding {
+            trait_name: "Wrapper",
+            member: "wrap",
+            member_span: Span {
+                line: 3,
+                col: 5,
+                ..Span::default()
+            },
+            head_name: "'T",
+            target_display: "i64",
+            target_var: None,
+        };
+        let option_shaped = PolyType::Generic {
+            is_enum: true,
+            idx: 0,
+            module: 0,
+            args: vec![PolyType::Var(0)],
+            len_args: vec![],
+            name: "Option",
+        };
+        let err = fence_member_ctor_application_against_concrete_target(
+            &[],
+            &[option_shaped],
+            &dg,
+            &["'T".to_string()],
+            &[],
+        )
+        .unwrap_err();
+        assert!(err.contains("ctor-headed application"), "{err}");
+        assert!(err.contains("`Option['T]`"), "{err}");
+        assert!(err.contains("line 3, col 5"), "{err}");
+        assert!(err.contains("target `i64` is concrete"), "{err}");
+    }
+
+    #[test]
+    fn fence_member_ctor_application_against_concrete_target_app_headed_member_is_admitted() {
+        // The ctor-application fence is scoped to `Generic`; a trait-var-
+        // headed `App` (S2-3's dispatchable shape, unaffected by REQ-1)
+        // stays the other fence's problem, not this one's.
+        let dg = MemberGrounding {
+            trait_name: "Functor",
+            member: "map",
+            member_span: Span::default(),
+            head_name: "'F",
+            target_display: "i64",
+            target_var: None,
+        };
+        let app_headed = PolyType::App {
+            head: 0,
+            args: vec![PolyType::Var(1)],
+        };
+        assert!(fence_member_ctor_application_against_concrete_target(
+            &[],
+            &[app_headed],
+            &dg,
+            &["'F".to_string()],
+            &[],
+        )
+        .is_ok());
     }
 
     #[test]

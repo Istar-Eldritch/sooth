@@ -245,14 +245,22 @@ member-local-headed nested applications, `src/ast.rs:2338-2343`). The lift is
 admission-only, so its safety must be swept: every newly-admitted shape either grounds
 through the existing generic path or fails with a located error, never a panic (pin one
 non-Iterator admitted shape, e.g. the probe's Interlude-B `Box2['T]` member row; a
-`Buf['T 'N]` var-length ctor arg; and the panic below). One panic **is** reachable
-post-lift: a ctor-headed member row against a **concrete** impl target passes the S2-6
-fence (`member_ty_mentions_app`, `src/ast.rs:2113`, is false for an App-free
-`Generic`) and reaches `ground_member_type`, whose `Generic` case is missing
-(`_ => unreachable!`, `src/ast.rs:2209-2211`). The assigned fence is parser-side, in
-`parse_impl_member_body`'s concrete branch (`src/parser.rs:4325`) — a located,
-measured-then-pinned error — so `src/ast.rs` stays untouched and phase 1's file scope
-stands.
+`Buf['T 'N]` var-length ctor arg; and the panics below). Two panics **are** reachable
+post-lift, both from `ground_member_type`'s missing `Generic` case (`_ =>
+unreachable!`, `src/ast.rs:2209-2211`): (1) a ctor-headed member row against a
+**concrete** impl target passes the S2-6 fence (`member_ty_mentions_app`,
+`src/ast.rs:2113`, is false for an App-free `Generic`) and reaches it via
+`parse_impl_member_body`'s concrete branch — fenced parser-side (`src/parser.rs:4325`),
+a located, measured-then-pinned error; (2) `unsatisfied_user_bound_error`
+(`src/check/poly.rs:9047`) renders member signatures through
+`try_ground_member_type`, whose fallthrough (`src/ast.rs:2245`) hands a `Generic` to
+the same `unreachable!` — live the moment a bound over a trait with a ctor-headed
+member row is instantiated at a type with no impl (found in phase-1 review; it fires
+on the shipped `core::iterator` itself, and it is exactly phase 2's
+bound-instantiated-at-unsupported-type case). Fence (2) is a defensive
+`PolyType::Generic { .. } => None` arm in `try_ground_member_type` (mirroring the App
+arm's fallback at `src/ast.rs:2239`) — the one deliberate `src/ast.rs` change phase 1
+makes, so the caller's existing missing-impl diagnostic fires instead of a panic.
 
 **The protocol (R1).** One new core module carries the whole protocol: the two-param
 `Step` enum, the single-type-variable `Iterator` trait (multi-var headers are fenced
@@ -362,7 +370,8 @@ All anchors re-verified on base `54414cb`, 2026-09-06.
 | `src/ast.rs:2072` | `member_app_abstract_target_error()` | The abstract-target twin (unaffected) |
 | `src/ast.rs:2051` | `member_app_arity_error()` | Arity gate on the App dissolve — reused by the lift |
 | `src/ast.rs:2283` | `ground_member_poly()` | App arm `:2337-2400` dissolves `'It['T]` against a `Generic` target — the dissolve Delta B reuses; `head != 0` nested-App support `:2338-2343` is why `'F['G['T]]` rows are legal |
-| `src/ast.rs:2168` | `ground_member_type()` | Concrete-branch re-grounding; App arm + fallthrough both `unreachable!` (`:2206-2211`) — the post-lift panic site; fenced parser-side in phase 1 |
+| `src/ast.rs:2168` | `ground_member_type()` | Concrete-branch re-grounding; App arm + fallthrough both `unreachable!` (`:2206-2211`) — post-lift panic site (1); fenced parser-side in phase 1 |
+| `src/ast.rs:2233` | `try_ground_member_type()` | Member-sig rendering helper (`unsatisfied_user_bound_error` path, `poly.rs:9047`); fallthrough `:2245` was panic site (2); phase 1 adds the `Generic => None` fallback (mirrors the App arm `:2239`) |
 | `src/ast.rs:2483` | `ImplTarget::is_concrete()` | `matches!(pattern, PolyType::Concrete(_))` — the test the lifted targets stop satisfying (no change needed) |
 | `src/check/poly.rs:5998` | `poly_bind_construction_arg()` | **Do not touch** (S8b): catch-all `:6116-6117` is the S6 wall |
 | `src/check/poly.rs:6235` | `poly_construct_generic()` | Poly construction path — plain-field ctors construct fine in member bodies (P8-2a) |
@@ -432,8 +441,13 @@ Load-bearing constraints:
   declares its **own trait+impl pair** (the S4-5 precedent, `tests/phase7b_slice4.rs` —
   zero lib churn); or the impls move into `list.sth`; or the fixture declares a twin
   target type.
-- [ ] The exact `import:` surface a consumer module needs for the member name
-  (`next`) to resolve through the bound — trivial, measured at phase 2.
+- [x] ~~The exact `import:` surface a consumer module needs for the member name
+  (`next`) to resolve through the bound~~ — **answered in phase-1 review (260906,
+  measured):** `import: core::iterator | Step Done More Iterator | ;` — import the
+  trait (type + ctors + trait name), do NOT name the member; bare `next` then
+  resolves at the dispatch site (verified end-to-end: selective-import drain of
+  `List[i64]` builds and runs). Naming `next` in the import list errors; omitting
+  the import errors `unknown word next`.
 
 ## Risks & Mitigations
 
@@ -442,7 +456,7 @@ Load-bearing constraints:
 | Member dispatch through the bound is fenced by `poly_cross_call_unsupported_error` (Step-row compound return is unmeasured) | Low–Med | REQ-6 makes it the first measurement after Delta A; the `q map` precedent (S4-5) predicts success; if fenced: stop, escalate with verbatim repro + evidence (named site `src/check/poly.rs:4371`) — no silent reshape of `next`, no unsanctioned gate lift |
 | The `is_concrete()`-keyed dispatch continuations reject the mono member word (`resolve_mono_member_call`'s else-branch `debug_assert!` `:2545-2549`; `impl_mono_seed`'s `poly: Some` requirement `:7939`) → `Range[i64]` impl undebuggable-at-dispatch | Med | Phase 3 leads with the direct mono call-site golden; the lifted-target arm + mono-word seeding are the scoped fix, fenced to fully-applied targets (REQ-8 pins keep everything else byte-exact); the recorded option-B fallback (generic-path routing, `poly: Some` var-free `PolySig`) is the escape hatch |
 | Delta B's fold interception leaks beyond impl targets and breaks ordinary-signature mint-sharing suite-wide | Low (high impact) | Interception lives only in `parse_impl_target` (`src/parser.rs:4085`); REQ-NFR2 + a regression pin (`Range[i64]` in an ordinary signature still folds/shares the mint) |
-| The gate lift admits shapes whose grounding was never exercised (e.g. `Box2['T]` member rows now declare) and something downstream panics | Med | Lift is admission-only; phase 1 runs an admission-safety sweep — every newly-admitted shape grounds or fails located, never panics; pin one non-Iterator shape (`Box2['T]`), a var-length ctor arg (`Buf['T 'N]`, REQ-1), and the ctor-row-over-concrete-target shape (the `ground_member_type` `unreachable!`, fenced parser-side per REQ-1's panic-fence note) |
+| The gate lift admits shapes whose grounding was never exercised (e.g. `Box2['T]` member rows now declare) and something downstream panics | Med | Lift is admission-only; phase 1 runs an admission-safety sweep — every newly-admitted shape grounds or fails located, never panics; pin one non-Iterator shape (`Box2['T]`), a var-length ctor arg (`Buf['T 'N]`, REQ-1), and the ctor-row-over-concrete-target shape (the `ground_member_type` `unreachable!`, fenced parser-side per REQ-1's panic-fence note) and the bound-over-unsupported-trait shape (the `try_ground_member_type` path, fenced by the `Generic => None` fallback) |
 | Diagnostic drift: pins written against the probe log's superseded `ae6fdd7`-era message text | Low | This spec pins against the current S7-reworded text (`src/parser.rs:446`); measure-then-pin from the live binary (REQ-NFR1) |
 | Sequential-phase merge friction in `member_shape_is_supported` (S7 + S8 edits accumulate in one function) | Low | Phases are strictly sequential (no parallel work declared); growth-structure re-check at phase 4 exit per CLAUDE.md |
 | IR evidence over-read as a fusion claim | Low | REQ-11 records facts only (loop = one frame; `next` = real frame; chain = two frames); the roadmap wording stays "evidence recorded, ruling deferred" |
@@ -466,8 +480,9 @@ Load-bearing constraints:
     (REQ-3), `trait: Iterator['It: * -> *] : next ( 'It['T] -- Step['T 'It['T]] ) ;`,
     and `impl: Iterator for List` (REQ-4: Cons arm destructures + packs `More`; Nil
     arm consumes and returns only `Done` — no remainder construction). Export the
-    type, its ctors, the trait, and the member name; explicit imports only (no
-    prelude change).
+    type, its ctors, and the trait; member names resolve through trait dispatch, not
+    module exports (`export: ... next` names nothing — verified; `cmp.sth`
+    precedent). Explicit imports only (no prelude change).
   - Create `tests/phase7b_slice8.rs` (`build_run_keep` is the per-file helper pattern,
     `tests/phase7b_slice4.rs:70`; golden style per the same file): (a) trait-declares
     - List `next` at a mono call site runs (the P8-4a3 shape through the trait
@@ -479,17 +494,21 @@ Load-bearing constraints:
     (c) admission-safety sweep: one newly-admitted non-Iterator shape (a `Box2['T]`
     member row over a dispatchable `'F['T]` input, per probe Interlude B) grounds or
     fails located — never panics; a `Buf['T 'N]` var-length ctor arg is rejected
-    located (REQ-1); and a ctor-headed member row over a **concrete** impl target
+    located (REQ-1); a ctor-headed member row over a **concrete** impl target
     (e.g. an `Option['T]` row against `for i64`) is fenced located in
-    `parse_impl_member_body`'s concrete branch (`src/parser.rs:4325`) — the
-    `ground_member_type` `unreachable!` (`src/ast.rs:2209-2211`) must stay
-    unreachable; (d) the cross-module-impl placement check
+    `parse_impl_member_body`'s concrete branch (`src/parser.rs:4325`); and a bound
+    over a trait with a ctor-headed member row, instantiated at a type with no
+    impl, fails located via the `try_ground_member_type` `Generic` fallback
+    (`src/ast.rs:2233` region) — not the `ground_member_type` `unreachable!`
+    (`src/ast.rs:2209-2211`), which both fences keep unreachable;
+    (d) the cross-module-impl placement check
     (`impl: Iterator for List` in the protocol module) passes.
   - Unit tests beside the changed parser function for the new gate arm (happy +
     rejected shapes; naming per CLAUDE.md `thing_condition_expected`).
   - Explicitly out of scope for this phase: Range, Delta B, `for_each`/`fold`, any
-    `src/check/` or `src/ir/` change, and `src/ast.rs` changes (the assigned fences
-    are parser-side, so `src/ast.rs` stays untouched).
+    `src/check/` or `src/ir/` change, and all `src/ast.rs` changes except the one
+    defensive arm above (`try_ground_member_type`'s `Generic` fallback — the
+    review-discovered second panic path).
 - **Entry Conditions**: Worktree green on `54414cb`; slice8-brief and slice8-probes
   read; R1–R4 treated as settled.
 - **Exit Criteria / Verifiable Artifacts**:

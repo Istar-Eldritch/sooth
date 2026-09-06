@@ -9034,11 +9034,13 @@ fn unsatisfied_user_bound_error(
 ) -> String {
     let callee = crate::resolve::demangle_call(callee);
     // P7b.S2 (S2-15.f): the error builder grounds member sigs at a ty that
-    // can be a `CtorImage` (the dispatch just failed on one) or face an
+    // can be a `CtorImage` (the dispatch just failed on one), or face an
     // App-headed member slot (an HKT trait's declared signature, which has
-    // no mono representation at all -- S2-6). Both are the non-raising
-    // twin's `None`; the builder falls back to the declared `PolyType`'s own
-    // rendering rather than raising from inside the error it is building.
+    // no mono representation at all -- S2-6), or a ctor-headed one
+    // (`Step['T 'It['T]]`, admitted by P7b.S8's Generic gate lift, equally
+    // unrepresentable). All three are the non-raising twin's `None`; the
+    // builder falls back to the declared `PolyType`'s own rendering rather
+    // than raising from inside the error it is building.
     let sigs: Vec<String> = trait_decl
         .members
         .iter()

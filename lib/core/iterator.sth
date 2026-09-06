@@ -1,0 +1,47 @@
+\ core::iterator -- the linear iteration protocol (HKT as the associated-type
+\ substitute; P7b.S8 R1). `Iterator['It: * -> *]` makes the iterator itself
+\ the type constructor rather than naming an associated element type: `next`
+\ consumes the iterator and yields the element plus the advanced iterator
+\ packed together in one `Step` value. `Done` carries nothing, so the
+\ exhausted case's final drop lives inside `next`'s own `Done` arm -- the one
+\ canonical site, never a remainder construction (this is why the S6
+\ construction wall, `src/check/poly.rs:6116-6117`, is never reached by any
+\ shape in this module). The Option-shaped alternative
+\ (`next ( 'It['T] -- Option['T] 'It['T] )`) was considered and rejected: arm
+\ parity would force the dead iterator out to every caller and the final drop
+\ to every `None` path instead of living in one place.
+import: intrinsics | drop | ;
+import: self::list | List Nil Cons | ;
+
+\ `next` is deliberately absent from this list: a trait member's own
+\ synthesized word is named `member;Trait;module;Type` (never the bare
+\ member name, `src/parser.rs`'s `synth_member_word_name`), so `export:`
+\ has no bare `next` to promise -- `exportable_names` only ever sees the
+\ mangled spelling. A consumer imports the trait and its ctors
+\ (`import: core::iterator | Step Done More Iterator | ;`) and does *not*
+\ name `next`; bare `next` then resolves through trait dispatch at the
+\ call site.
+export: Step Done More Iterator ;
+
+type: Step['T 'Rest]
+| Done
+| More 'T 'Rest
+;
+
+trait: Iterator['It: * -> *]
+  : next ( 'It['T] -- Step['T 'It['T]] ) ;
+;
+
+\ The `Cons` arm destructures the matched list (`Cons>` disposes of the
+\ matched cell and hands back its fields, element deepest, the still-cell-
+\ wrapped remainder on top) and packs `More` with the element deepest and
+\ the (unwrapped) remainder on top -- the same field order `Cons` itself
+\ constructs with. The exhausted `Nil` arm consumes the matched (empty) list
+\ via `drop` and returns only the `Done` shell: no remainder to construct, so
+\ the S6 wall is never in play here.
+impl: Iterator for List
+  : next
+    ~[ ( Nil ) drop Done ]
+    ~[ ( Cons ) Cons> | v rest | v rest ^> More ]
+    List? ;
+;
