@@ -5,9 +5,9 @@ Touches `src/check/poly.rs` (one call site + one error function), and possibly
 nothing else. No shared files with the testing/hosted-layer work (S7) or the
 higher-kinded-type work (P7b).
 
-**Motivation.** `&>`/`&!>` on `array['T 'N]` inside a **non-inline** poly body is
-unconditionally rejected (`poly_generic_length_index_error`,
-`src/check/poly.rs:11388`, call site `:6296`) because the checker's single
+**Motivation.** `&>`/`&!>` on `array['T 'N]` inside a **non-inline** poly body was,
+at the time of writing, unconditionally rejected (`poly_generic_length_index_error`,
+then at `src/check/poly.rs:11388`, call site `:6296`) because the checker's single
 generic walk over a poly body's declaration cannot statically prove `index <
 'N` for every possible instantiation — `'N` is not yet concrete at that walk.
 The documented workaround is `inline`: an inline word's body re-splices and
@@ -76,7 +76,7 @@ existing accepted case** (`Len::Concrete`); only the checker layer is closed.
 
 Only the checker-side rejection, and only at one call site:
 
-- **`src/check/poly.rs:6296-6304`**, the `Len::Var(v) => Err(poly_generic_length_index_error(...))`
+- **`src/check/poly.rs:6296-6304`** (pre-diff), the `Len::Var(v) => Err(poly_generic_length_index_error(...))`
   arm inside the `count` match that feeds `check_poly_array_index`
   (`:6306`). This is the single generic diagnostic pass over the poly body's
   *declaration* — it runs once, independent of any call site, which is why it
@@ -130,12 +130,17 @@ fall through to `size_conversion_needed_error` or an equivalent "cannot verify
 statically, defer" outcome when `count` is `None`, rather than indexing
 `i64::from(count)`.
 
-**Also resolved by reading**: `poly_generic_length_index_error`
-(`src/check/poly.rs:11388`) has exactly one call site in the whole tree
-(`:6305`) and zero test assertions on its message anywhere in `src/` or
-`tests/` (confirmed by grep). Safe to delete outright alongside its call site
-once the guard is relaxed; no other consumer to preserve, no test pinning its
-wording to migrate.
+**Correction (post-spec-write): this brief's own grep claim below was wrong.**
+`poly_generic_length_index_error` (`src/check/poly.rs:11388`, pre-diff) has
+exactly one call site in the whole tree (`:6305`, pre-diff) — that part holds
+— but it does **not** have zero test assertions on its message: at base commit
+`a9eca84`, `src/check/poly.rs:18164` asserted its exact message verbatim via
+`assert_eq!`. "Safe to delete outright... no test pinning its wording to
+migrate" was false when written. The spec (and the shipped design) instead
+**narrows** the diagnostic to the one residual case a `usize`-typed index
+can't cover — a literal index against an unknown length — and **migrates**
+the existing test (not deletes it) to pin the narrowed wording. See
+`docs/roadmap/P7/slice6c-spec.md` for the design actually shipped.
 
 ## What changes
 
@@ -149,12 +154,17 @@ wording to migrate.
 2. No `TermKind`, `PolyType`, `Subst`, or IR change — the grounding and the
    runtime guard both already exist and already fire for the parallel
    `Len::Concrete` case.
-3. `poly_generic_length_index_error` (`src/check/poly.rs:11388`) likely becomes
-   dead and gets deleted along with its now-unreachable call site, rather than
-   kept as an unused diagnostic — confirm via the mutation-test-the-guards
-   convention before deleting (a diagnostic that never fires is worth deleting,
-   not preserving as false safety, but only after grepping for any other
-   caller and any test asserting its message).
+3. `poly_generic_length_index_error` (`src/check/poly.rs:11388`, pre-diff) is
+   **not** dead and does **not** get deleted: an existing test
+   (`src/check/poly.rs:18164`, pre-diff) already asserts its exact message via
+   `assert_eq!`, which this brief's own grep-based claim above missed. Its
+   call site stays reachable for the one residual case a `usize`-typed index
+   can't cover — a literal index against an unknown length still can't be
+   range-checked — so the fix **narrows** (rewrites) the diagnostic's text to
+   that one case and **migrates** the existing test to pin the new wording,
+   rather than deleting either. (Shipped as
+   `poly_array_index_literal_unknown_length_requires_usize_conversion` in
+   `src/check/poly.rs`, at HEAD.)
 4. A non-inline integration golden that actually indexes a generic-length
    array, using S6b's explicit-length syntax to call it at a known length —
    e.g. `: sum['T 'N: Len] ( array['T 'N] -- 'T ) …` written with `&>` over a
@@ -176,10 +186,17 @@ wording to migrate.
 ## Exit criteria (draft, confirm against spec-write)
 
 A non-inline word declaring `array['T 'N]` in its signature can index it with
-`&>`/`&!>` using a runtime (non-literal) index; a call site can bind `'N`
-explicitly (S6b) or by inference; an out-of-range access at runtime traps via
-`sooth_oob_trap` rather than corrupting memory. `cargo fmt --check && cargo
-clippy -- -D warnings && cargo test` is green.
+`&>`/`&!>` using a runtime (non-literal, `usize`-typed) index; a call site can
+bind `'N` explicitly (S6b) or by inference; an out-of-range access at runtime
+traps via `sooth_oob_trap` rather than corrupting memory. A **literal** index
+against a generic (unknown) length is still rejected at check time — there is
+no count to range-check it against, and no runtime-defer path for a value that
+is already a compile-time constant — via the narrowed
+`poly_generic_length_index_error`, not by deleting the diagnostic. `cargo fmt
+--check && cargo clippy -- -D warnings && cargo test` is green.
+
+**(Resolved at spec-write / shipped, see `docs/roadmap/P7/slice6c-spec.md` for
+the as-shipped exit criteria and commits.)**
 
 ## Open questions
 
