@@ -6096,10 +6096,32 @@ fn poly_construction_fallback(
     })
 }
 
+/// P7b.S8b (Phase 2 review, P1): a `Generic` construction field naming a
+/// non-empty `len_args` -- e.g. a self-referential `Ring['T 'N: Len]`
+/// field -- has no slot to bind its length variable into;
+/// `poly_construct_generic` infers no lengths at all. Deliberately not
+/// `poly_rendered_type_mismatch_error`: this fence runs BEFORE the operand is
+/// even destructured or identity-checked, and `poly_type_str` renders name +
+/// args but not the module id -- so both a same-header operand and a
+/// module-only identity mismatch would print identical text on both sides
+/// (`` `Ring` expected `Ring['T 'N]`, found `Ring['T 'N]` ``) --
+/// indistinguishable from a real bug in the renderer. This names the header
+/// and says what is actually unbindable instead.
+fn poly_generic_field_len_unbound_error(ctx: &Ctx, span: Span, op: &str, header: &str) -> String {
+    let op = crate::resolve::demangle_call(op);
+    let where_ = ctx.rendered_word();
+    format!(
+        "error: `{op}` in {where_} (line {}) cannot bind `{header}`'s length variable\n  the field names `{header}` with a length parameter, but constructing a value here infers no lengths; only the field's element type variables can be bound this way",
+        span.line
+    )
+}
+
 /// P7 slice 3a (R3): bind one constructor payload field's declared `PolyType`
 /// against the operand `PolyType` on the stack, recording the header
-/// variable it determines. `substitute_generic_field`'s own doc: a generic
-/// `type:` field is always exactly one of these two shapes.
+/// variable it determines. Five field shapes reach this match today:
+/// `Var`, `Concrete`, `App`, `OwnedCell` (P7b.S6), and `Generic`
+/// (P7b.S8b Phase 2, the generic field arm) -- the catch-all still
+/// rejects everything else (an array-shaped field, per `substitute_generic_field`).
 fn poly_bind_construction_arg(
     field_pty: &PolyType,
     operand: &PolyType,
@@ -6218,6 +6240,84 @@ fn poly_bind_construction_arg(
                 return Err(mismatch());
             };
             poly_bind_construction_arg(payload, op_payload, args, sig, ctx, span, name)
+        }
+        // P7b.S8b (PB-1): the self-reference field's own payload shape --
+        // `^List['T]` unwraps one level up (the `OwnedCell` arm) and this is
+        // what remains: a *named* header reference (`List`, not an abstract
+        // `'F`). The `App` arm's twin with the header already concrete: the
+        // operand must be a `Generic` naming the same header (identity is
+        // `(is_enum, idx, module)`), else a located mismatch, mirroring the
+        // `App` arm's treatment of non-`Generic` operands -- never a panic,
+        // never a silent bind. With identity matched, the bind recurses
+        // positionally over the field's arguments against the operand's own
+        // (the header itself is already fixed, so only the arguments bind);
+        // grounding to the concrete instantiation stays `apply_subst`'s job,
+        // as for every sibling arm.
+        PolyType::Generic {
+            is_enum,
+            idx,
+            module,
+            args: field_args,
+            len_args: field_len_args,
+            name: field_header_name,
+        } => {
+            let mismatch = || {
+                poly_rendered_type_mismatch_error(
+                    ctx,
+                    span,
+                    name,
+                    &poly_type_str(field_pty, sig),
+                    &poly_type_str(operand, sig),
+                )
+            };
+            // P7b.S8b (Phase 2 review, P1): a length variable in a
+            // construction field has no slot to bind into --
+            // `poly_construct_generic` infers no lengths (its symbolic
+            // result carries a permanent empty `len_args`), so a field
+            // carrying one is rejected here, located. This is NOT a
+            // `poly_rendered_type_mismatch_error` (both sides would render
+            // identically: the fence runs before the operand is destructured
+            // and identity-checked, and `poly_type_str` renders name + args
+            // but not the module id, so even a module-only identity mismatch
+            // would print identical sides) -- a dedicated message instead,
+            // naming the field's header and saying what is actually
+            // unbindable. The stored `^List['T]` field is
+            // `len_args: []` today; a length-carrying field (e.g.
+            // `Ring['T 'N: Len]`'s self-reference) hits this fence.
+            if !field_len_args.is_empty() {
+                return Err(poly_generic_field_len_unbound_error(
+                    ctx,
+                    span,
+                    name,
+                    field_header_name,
+                ));
+            }
+            let PolyType::Generic {
+                is_enum: op_is_enum,
+                idx: op_idx,
+                module: op_module,
+                args: op_args,
+                ..
+            } = operand
+            else {
+                return Err(mismatch());
+            };
+            if *is_enum != *op_is_enum || *idx != *op_idx || *module != *op_module {
+                return Err(mismatch());
+            }
+            // Phase 2 review (P2): defense-only past this point -- the
+            // identity check above (`is_enum`/`idx`/`module`) already pins
+            // one declared header, whose own arity is fixed at
+            // registration, so `field_args.len()` and `op_args.len()` can
+            // only disagree if the *other* side (the operand) is somehow
+            // malformed; a live checker never constructs one.
+            if op_args.len() != field_args.len() {
+                return Err(mismatch());
+            }
+            for (fa, oa) in field_args.iter().zip(op_args.iter()) {
+                poly_bind_construction_arg(fa, oa, args, sig, ctx, span, name)?;
+            }
+            Ok(())
         }
         other => unreachable!("a generic `type:` field is never {other:?}"),
     }
@@ -6494,12 +6594,14 @@ fn poly_construct_generic(
             refs,
         };
         let mut g = cell.borrow_mut();
-        // P7.S6a (R5): `poly_bind_construction_arg`'s own catch-all already
-        // restricts every field this construction path can bind to
-        // `Var`/`Concrete` (an array-shaped field panics there today,
-        // pre-existing and unrelated to this slice), so this call never has
-        // a length to infer -- a permanent empty list, not a phase-scoped
-        // placeholder.
+        // P7.S6a (R5) / P7b.S8b Phase 2 (P3): a length can only ever come
+        // from a `Generic` field naming a length variable -- `Var`/`Concrete`/
+        // `App`/`OwnedCell` fields carry none by construction, and the
+        // `Generic` field arm's own `len_args` fence
+        // (`poly_bind_construction_arg`, `poly_generic_field_len_unbound_error`)
+        // rejects the one shape that could, located, before reaching here.
+        // So this call never has a length to infer -- a permanent empty
+        // list, not a phase-scoped placeholder.
         let ty = if is_enum {
             g.instantiate_enum(idx, &concrete_args, &[], module, regs)
         } else {
@@ -14857,6 +14959,203 @@ mod tests {
         let sig = ref_sig();
         let field_pty = PolyType::OwnedCell(Box::new(PolyType::Var(0)));
         let operand = PolyType::Concrete(Type::I64);
+        let mut args: Vec<Option<PolyType>> = vec![None];
+        let err = poly_bind_construction_arg(
+            &field_pty,
+            &operand,
+            &mut args,
+            &sig,
+            &ctx,
+            Span::default(),
+            "Cons",
+        )
+        .unwrap_err();
+        assert!(err.contains("type mismatch"), "{err}");
+    }
+
+    /// P7b.S8b (PB-1): the new `Generic` field arm -- `^List['T]`'s own
+    /// shape once the `OwnedCell` arm has already unwrapped one level.
+    /// Same-identity operand binds the header's own argument positionally.
+    #[test]
+    fn poly_bind_construction_arg_generic_same_identity_binds_arg() {
+        let word = probe_word();
+        let ctx = probe_ctx(&word);
+        let sig = bare_sig();
+        let field_pty = PolyType::Generic {
+            is_enum: true,
+            idx: 0,
+            module: 0,
+            args: vec![PolyType::Var(0)],
+            len_args: Vec::new(),
+            name: "List",
+        };
+        let operand = PolyType::Generic {
+            is_enum: true,
+            idx: 0,
+            module: 0,
+            args: vec![PolyType::Concrete(Type::I64)],
+            len_args: Vec::new(),
+            name: "List",
+        };
+        let mut args: Vec<Option<PolyType>> = vec![None];
+        poly_bind_construction_arg(
+            &field_pty,
+            &operand,
+            &mut args,
+            &sig,
+            &ctx,
+            Span::default(),
+            "Cons",
+        )
+        .expect("same-identity Generic operand binds the element var");
+        assert_eq!(args[0], Some(PolyType::Concrete(Type::I64)));
+    }
+
+    /// A differently-headed `Generic` operand (a distinct `idx`) is a
+    /// located mismatch, not a bind -- the rendered mismatch names both
+    /// sides.
+    #[test]
+    fn poly_bind_construction_arg_generic_different_header_is_error() {
+        let word = probe_word();
+        let ctx = probe_ctx(&word);
+        let sig = ref_sig();
+        let field_pty = PolyType::Generic {
+            is_enum: true,
+            idx: 0,
+            module: 0,
+            args: vec![PolyType::Var(0)],
+            len_args: Vec::new(),
+            name: "List",
+        };
+        let operand = PolyType::Generic {
+            is_enum: true,
+            idx: 1,
+            module: 0,
+            args: vec![PolyType::Concrete(Type::I64)],
+            len_args: Vec::new(),
+            name: "Other",
+        };
+        let mut args: Vec<Option<PolyType>> = vec![None];
+        let err = poly_bind_construction_arg(
+            &field_pty,
+            &operand,
+            &mut args,
+            &sig,
+            &ctx,
+            Span::default(),
+            "Cons",
+        )
+        .unwrap_err();
+        assert!(err.contains("type mismatch"), "{err}");
+    }
+
+    /// PB-3: a `Concrete` operand reaching the `Generic` field arm (not
+    /// observed live today, but the arm's own rejection contract) is the
+    /// same located mismatch, mirroring the `App` arm's treatment of
+    /// non-`Generic` operands -- never a panic, never a silent bind.
+    #[test]
+    fn poly_bind_construction_arg_generic_concrete_operand_is_error() {
+        let word = probe_word();
+        let ctx = probe_ctx(&word);
+        let sig = ref_sig();
+        let field_pty = PolyType::Generic {
+            is_enum: true,
+            idx: 0,
+            module: 0,
+            args: vec![PolyType::Var(0)],
+            len_args: Vec::new(),
+            name: "List",
+        };
+        let operand = PolyType::Concrete(Type::I64);
+        let mut args: Vec<Option<PolyType>> = vec![None];
+        let err = poly_bind_construction_arg(
+            &field_pty,
+            &operand,
+            &mut args,
+            &sig,
+            &ctx,
+            Span::default(),
+            "Cons",
+        )
+        .unwrap_err();
+        assert!(err.contains("type mismatch"), "{err}");
+    }
+
+    /// PB-2 / Phase 2 review (P1): a `Generic` field carrying a non-empty
+    /// `len_args` has no slot to bind a length into, so it is rejected --
+    /// via the dedicated `poly_generic_field_len_unbound_error`, not
+    /// `poly_rendered_type_mismatch_error` (both sides would render
+    /// identically for this exact case, since the header already matches
+    /// before the length is even considered). The shape is spellable
+    /// (`Ring['T 'N: Len] head 'T rest Ring['T 'N]`, `tests/phase7b_slice8b.rs`'s
+    /// `generic_field_with_a_length_variable_is_a_located_error`), not future
+    /// work.
+    #[test]
+    fn poly_bind_construction_arg_generic_nonempty_len_args_is_error() {
+        let word = probe_word();
+        let ctx = probe_ctx(&word);
+        let sig = ref_sig();
+        let field_pty = PolyType::Generic {
+            is_enum: true,
+            idx: 0,
+            module: 0,
+            args: vec![PolyType::Var(0)],
+            len_args: vec![Len::Var(0)],
+            name: "List",
+        };
+        let operand = PolyType::Generic {
+            is_enum: true,
+            idx: 0,
+            module: 0,
+            args: vec![PolyType::Concrete(Type::I64)],
+            len_args: Vec::new(),
+            name: "List",
+        };
+        let mut args: Vec<Option<PolyType>> = vec![None];
+        let err = poly_bind_construction_arg(
+            &field_pty,
+            &operand,
+            &mut args,
+            &sig,
+            &ctx,
+            Span::default(),
+            "Cons",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("cannot bind") && err.contains("length variable"),
+            "{err}"
+        );
+    }
+
+    /// Phase 2 review (P2): the arm's identity check is `(is_enum, idx,
+    /// module)`, not `(is_enum, idx)` -- an operand naming the same header
+    /// index but a *different* declaring module (a same-named generic
+    /// header can exist in two modules) is still a located mismatch, not a
+    /// silent bind. Deleting `*module != *op_module` from the identity
+    /// check survives every other test in this file, since none of them
+    /// vary only this component.
+    #[test]
+    fn poly_bind_construction_arg_generic_different_module_is_error() {
+        let word = probe_word();
+        let ctx = probe_ctx(&word);
+        let sig = ref_sig();
+        let field_pty = PolyType::Generic {
+            is_enum: true,
+            idx: 0,
+            module: 0,
+            args: vec![PolyType::Var(0)],
+            len_args: Vec::new(),
+            name: "List",
+        };
+        let operand = PolyType::Generic {
+            is_enum: true,
+            idx: 0,
+            module: 1,
+            args: vec![PolyType::Concrete(Type::I64)],
+            len_args: Vec::new(),
+            name: "List",
+        };
         let mut args: Vec<Option<PolyType>> = vec![None];
         let err = poly_bind_construction_arg(
             &field_pty,

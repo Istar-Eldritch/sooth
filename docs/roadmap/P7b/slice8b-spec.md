@@ -50,10 +50,13 @@ fix (required, not optional), and the traitful `List` surface (`map`, `append`) 
   same identity — including a `Concrete` operand (PB-3: only `Generic` operands are
   observed reaching the arm today; everything else mirrors the `App` arm's rejection) —
   never a panic, never a silent bind.
-- **R3.** The system must reject, as a located mismatch (recorded fence, PB-2), a
+- **R3.** The system must reject, as a located error (recorded fence, PB-2), a
   `Generic` field carrying a non-empty `len_args` — the stored `^List['T]` field is
-  `len_args: []` today and the arm's contract must say what a future length-carrying
-  field gets.
+  `len_args: []` today, but the shape is spellable now (a self-referential field with a
+  `Len` variable, e.g. `Ring['T 'N: Len] head 'T rest Ring['T 'N]`); the rejection is a
+  dedicated message (not `poly_rendered_type_mismatch_error`, which would render
+  identical text on both sides for this exact case), naming the field's header and
+  saying its length variable cannot be bound by this construction.
 - **R4.** A nullary trait member called with an explicit type argument over a **generic,
   single-type-variable** impl target must instantiate the member through the impl-target
   equation — `empty[List[i64]]` over `impl: Monoid for List` seeds the member's element
@@ -158,10 +161,10 @@ fix (required, not optional), and the traitful `List` surface (`map`, `append`) 
 - [ ] A ctor-mismatch operand (constructing `Cons` against a differently-headed operand)
       produces the byte-exact located mismatch error, and a `Concrete` operand at the new
       arm is likewise a located error, not a panic — R2.
-- [ ] A `Generic` field with non-empty `len_args` is a located error (unit test, not a
-      golden — a length-carrying `Generic` field is unspellable in source today, so
-      CLAUDE.md's golden-per-exit-criterion convention is satisfied by the unit test
-      instead) — R3.
+- [ ] A `Generic` field with non-empty `len_args` is a located error, both a unit test
+      and a golden — the shape is spellable (`Ring['T 'N: Len] head 'T rest Ring['T
+      'N]`), so CLAUDE.md's golden-per-exit-criterion convention is satisfied by the
+      golden itself, not waived — R3.
 - [ ] `tests/phase7b_slice6.rs`'s wall witness passes as a positive golden (build + run
       exit 0) — R7.
 - [ ] `map` through a `Functor` bound maps a real `List[i64]` (e.g. `1 2 3` → `2 3 4`
@@ -354,7 +357,10 @@ S6-pinned behavior).
 - [x] ~~PB-1 — does the arm fix both P8 shapes without regressing mono/plain-field
       constructions?~~ Resolved by probe: yes; suite green 3293/0 with the patch.
 - [x] ~~PB-2 — `len_args` handling in the new arm?~~ Resolved: recorded fence — a
-      length-carrying `Generic` field is a located mismatch (R3).
+      length-carrying `Generic` field is spellable (a self-referential field with a `Len`
+      variable, e.g. `Ring`) and is rejected by a dedicated located diagnostic naming the
+      unbindable length (R3, corrected during implementation; the probe round's original
+      capture rendered tautologically).
 - [x] ~~PB-3 — which operand shapes reach the arm?~~ Resolved: only `Generic` observed;
       everything else takes the located mismatch (R2), mirroring the `App` arm.
 - [x] ~~PB-5 — `append`'s host trait, and how much of S6's wall closes?~~ Resolved by
@@ -570,8 +576,13 @@ S6-pinned behavior).
   variant word is minted for the bare name to resolve to — unrelated to the arm, and
   distinct from the recorded nullary-variant fence (which is about a mis-grounded
   candidate, not a missing one) — so the golden must use the helper spelling);
-  ctor-mismatch and `Concrete`-operand errors byte-exact; `len_args` fence unit-tested;
-  `mklist`, `Range`'s `next`, and S8's 24 tests byte-unchanged; full gate green.
+  the ctor-mismatch diagnostic byte-exact (integration pin, `badcons`); the
+  `Concrete`-operand diagnostic asserted as a located type-mismatch at unit level
+  (`.contains("type mismatch")`, matching the unit-level pattern at `:14724`), with its
+  full rendering frozen byte-exact separately by the integration pin (no `Concrete`
+  operand is reached live today, so only the ctor-mismatch pin is a real-program
+  golden); the `len_args` fence unit-tested AND golden (R3, `mkring`); `mklist`,
+  `Range`'s `next`, and S8's 24 tests byte-unchanged; full gate green.
 - **Parallelism**: PARALLEL with Phase 1 (same reason and landing rule); SEQUENTIAL
   before Phase 3.
 - **Relative Effort**: S — the measured patch exists and was suite-verified; the work is

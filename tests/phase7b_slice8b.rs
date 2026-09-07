@@ -375,3 +375,82 @@ impl: Monoid for List
 ";
     assert_eq!(build_and_run("single-inst-nullary", src), "0\n0\n");
 }
+
+/// P7b.S8b Phase 2 (R1): the P8-2d2 shape -- a plain generic word (not a
+/// trait member) constructing `Cons` through the new `Generic` field arm.
+/// Verbatim from the probe round's `p8b-2d2-plain-generic-cons-helper.sth`
+/// (`docs/roadmap/P7b/slice8b-probes.md`, Part 1a). The sibling bare-`Nil`
+/// main spelling (`p8b-2d2-plain-generic-cons.sth`) is deliberately not a
+/// golden here: it fails with `` error: unknown word `Nil` in `main` (line 4) ``
+/// because the program never grounds a `List[i64]` instantiation (only
+/// `cons2['T]`'s generic signature exists), so no `Nil` variant word is
+/// minted for the bare name to resolve to -- unrelated to the arm, and
+/// distinct from the recorded nullary-variant fence above (a mis-grounded
+/// candidate, not a missing one).
+#[test]
+fn plain_generic_cons_helper_builds_and_runs_clean() {
+    let src = "\
+ import: core::list * ;\n\
+ : cons2['T] ( 'T List['T] -- List['T] ) ^ Cons ;\n\
+ : mknil ( -- List[i64] ) Nil ;\n\
+ : main ( -- ) 5 mknil cons2 drop ;\n";
+    assert_eq!(build_and_run("2d2-plain-generic-cons-helper", src), "");
+}
+
+/// P7b.S8b Phase 2 (R2): the ctor-mismatch shape the new `Generic` field arm
+/// must reject -- a differently-headed operand (`Option['T]` where `Cons`'s
+/// self-reference field declares `List['T]`) is a located type mismatch,
+/// never a panic. `badcons` mirrors the P8-2d2 helper's `cons2['T]` but
+/// swaps the tail parameter's header -- the same shape class as the probe
+/// round's `p8b-cons-tail-mismatch-clean.sth`
+/// (`docs/roadmap/P7b/slice8b-probes.md`, Part 1), adapted to this harness
+/// (boxed tail operand, different word/field names), not a byte-for-byte copy.
+///
+/// (Phase 2 review, P2-4-equivalent risk row) The pinned `note: declared
+/// ( -- )` is pre-existing `effect_str` rendering (`poly_rendered_type_mismatch_error`)
+/// -- it never renders the word's declared signature (here, `'T Option['T]
+/// -- List['T]`), only a placeholder -- but this is the first phase to
+/// freeze it byte-exact. Pinned as-is; expected to change when effect
+/// rendering is fixed.
+#[test]
+fn plain_generic_cons_differently_headed_tail_is_a_located_mismatch() {
+    let stderr = build_error_located(
+        "2d2-ctor-mismatch",
+        "\
+ import: core::list * ;\n\
+ import: core::option * ;\n\
+ : badcons['T] ( 'T Option['T] -- List['T] ) ^ Cons ;\n\
+ : main ( -- ) 1 None badcons drop ;\n",
+    );
+    assert_eq!(
+        stderr.trim_end(),
+        "error: type mismatch in `badcons` (line 5)\n  `Cons` expected `List['T]`, found `Option['T]`\n  note: declared ( -- )"
+    );
+}
+
+/// P7b.S8b Phase 2 (R3, review round P1): the length-carrying self-reference
+/// field the spec's own R3/exit-criteria text called "unspellable in source
+/// today" -- false, the review round spelled it. `Ring['T 'N: Len]`'s
+/// self-reference field (`next ^Ring['T 'N]`) reaches the new `Generic` field
+/// arm's `len_args` fence, verbatim from the probe round's
+/// `p8b-lenvar-selfref-fence.sth` (`docs/roadmap/P7b/slice8b-probes.md:67-70`)
+/// plus the harness's `: main` entry point (the probe fixture had none).
+/// The rejection is right; only the *message* changed -- the probe round's
+/// captured text was `` `Ring` expected `Ring['T 'N]`, found `Ring['T 'N]` ``,
+/// tautological (this fixture's sides render identically, and a module-only
+/// identity mismatch would too, since `poly_type_str` omits the module id).
+/// This pins the dedicated fence message instead.
+#[test]
+fn generic_field_with_a_length_variable_is_a_located_error() {
+    let stderr = build_error_located(
+        "ring-lenvar-fence",
+        "\
+ type: Ring['T 'N: Len] head 'T next ^Ring['T 'N] ;\n\
+ : mkring['T 'N: Len] ( 'T ^ Ring['T 'N] -- Ring['T 'N] ) Ring ;\n\
+ : main ( -- ) ;\n",
+    );
+    assert_eq!(
+        stderr.trim_end(),
+        "error: `Ring` in `mkring` (line 4) cannot bind `Ring`'s length variable\n  the field names `Ring` with a length parameter, but constructing a value here infers no lengths; only the field's element type variables can be bound this way"
+    );
+}
