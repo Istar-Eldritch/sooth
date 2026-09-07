@@ -405,6 +405,34 @@ no `src/ir/` change, unit tests beside the changed checker code, goldens for bot
 dispatch routes (mono call site and bound dispatch), and the S8-review repro twins
 panicked→located. Size: `S`.
 
+**P7b.S11 — Per-call-site grounding for bare generic constructors.**
+Carved out of the P7b semantics walkthrough (260907) after probe round dp_a–dp_h
+traced how bare generic-ctor calls actually ground: there is **no per-call-site
+mechanism** — concrete type applications anywhere in a module mint monomorphs into a
+whole-module registry at parse time (`parser.rs:7294`), and a bare ctor call scans that
+registry (`mint_fallback_candidates`, `terms.rs:2010`): zero mints → a generic
+`unknown word` error (`terms.rs:923`); one mint, even an unrelated one → taken
+unconditionally (`terms.rs:951`); two or more → silent first-declared-wins
+(`builtins.rs:164-183`), so two programs differing only in unrelated declaration order
+can construct different runtime types from the same call (dp_g2/dp_g3 — a correctness
+gap, not a diagnostics gap). Explicit type args on a bare ctor are category-illegal
+today (`poly_call_takes_type_args`, `terms.rs:1300`). The slice builds per-call-site
+grounding: literal-driven partial inference, consumer-driven re-grounding in S2-9's
+obligation style, an explicit-type-args category for bare ctor/destructure names (full
+arity), and a deterministic tie-break — explicit args > single compatible candidate >
+located ambiguity error, first-wins retired. Checker-stage only; S5's declared-overload
+tier policy, S2-9's member dispatch, and S10's foreign grounding + exemptions stay
+byte-unchanged (baseline `probes/dp_baseline.md`). Maintainer ruling: ground at the
+call site ("B"), 260907. See [slice11-brief](./P7b/slice11-brief.md) and
+[slice11-probes](./P7b/slice11-probes.md).
+**Exit:** `1 Ok drop` is a located unbound-parameter error naming the parameter (not
+`unknown word`); a wrong sole mint is a located grounding error, never a far-away
+operand mismatch; tied candidates are a located ambiguity error byte-identical across
+declaration orders; `1 Ok[i64 i64] drop` is legal and grounds; the
+`1 Ok [ 1 sub ] map[i64 i64 i64] drop` shape grounds through the consumer's
+constraints; genuinely undefined names keep `unknown word`; S10's diagnostics and the
+dp_a/dp_b/dp_f behaviors are byte-identical to baseline.
+
 **Dogfood:** S6 — a program that `map`s and folds over `Option`, `Result`, and `List` through
 shared bounds, with the impls declared against the real lib types and output matching
 hand-written inline equivalents. S7 — `bind` dispatching per constructor over `Option`/`Result`
@@ -419,4 +447,6 @@ grounding for return-type-polymorphic words. A general `Default` trait for const
 out (S6's `Monoid.empty` is scoped to merge identities, not defaults). Drop-forwarding for
 user-declared generic containers (a `Drop` trait) rides with P9's alloc layer where the need
 first becomes real; whether drop_graph already covers payload drops for minted generic
-instantiations is an S6 probe note.
+instantiations is an S6 probe note (partially answered by the dp probe round, 260907:
+grounded non-linear instantiations drop flat and nested — `probes/dp_findings.md`
+dp_a/dp_d; resource-owning payloads remain P9.S2's question).

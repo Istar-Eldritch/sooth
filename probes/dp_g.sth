@@ -1,0 +1,8 @@
+\ dp_g -- TWO different, unused monomorphs coexist (Res[i64 i64] and
+\ Res[i64 cstr]) via uncalled sibling words. True ambiguity test: does bare
+\ Ok now report an actual ambiguity, or something else?
+import: intrinsics * ;
+type: Res['T 'E] | Ok 'T | Err 'E ;
+: unused_a ( Res[i64 i64] -- ) drop ;
+: unused_b ( Res[i64 cstr] -- ) drop ;
+: main ( -- ) 1 Ok drop ;

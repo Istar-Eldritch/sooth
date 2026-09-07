@@ -1,0 +1,7 @@
+\ dp_e2 -- no-consumer variant: explicit type args on the bare ctor, in
+\ statement position, nothing consumes the result at all (no drop, word
+\ declares no outputs). Tests whether the CONSTRUCTION itself grounds
+\ independent of any consumer, or whether the path still needs one.
+import: intrinsics * ;
+type: Res['T 'E] | Ok 'T | Err 'E ;
+: main ( -- ) 1 Ok[i64 i64] ;

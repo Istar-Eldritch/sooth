@@ -1,0 +1,6 @@
+\ dp_c -- minimal repro: bare Ok consumed by polymorphic drop. The literal
+\ pins 'T = i64; nothing pins 'E. Expected: rejected (ambiguity), but with a
+\ misleading "unknown word" diagnostic rather than one naming the real cause.
+import: intrinsics * ;
+type: Res['T 'E] | Ok 'T | Err 'E ;
+: main ( -- ) 1 Ok drop ;

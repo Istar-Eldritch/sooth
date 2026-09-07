@@ -1,0 +1,6 @@
+\ dp_e -- explicit type-args spelling on the bare ctor call, no other
+\ declaration in the file mentions Res[i64 i64] at all. Tests whether
+\ explicit annotation independently grounds the instantiation.
+import: intrinsics * ;
+type: Res['T 'E] | Ok 'T | Err 'E ;
+: main ( -- ) 1 Ok[i64 i64] drop ;

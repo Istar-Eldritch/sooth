@@ -1,0 +1,10 @@
+\ dp_g3 -- same as dp_g2 but with declaration order swapped (cstr-shape
+\ sibling declared first, i64-shape second). Isolates whether the pick
+\ tracks declaration order or something else (e.g. struct/enum registry
+\ insertion order, which may not equal source order).
+import: intrinsics * ;
+type: Res['T 'E] | Ok 'T | Err 'E ;
+: unused_b ( Res[i64 cstr] -- ) drop ;
+: unused_a ( Res[i64 i64] -- ) drop ;
+: only_takes_cstr_err ( Res[i64 cstr] -- ) drop ;
+: main ( -- ) 1 Ok only_takes_cstr_err ;

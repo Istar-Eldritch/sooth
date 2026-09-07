@@ -1,0 +1,8 @@
+\ dp_f -- same body as dp_c, plus an UNUSED, UNCALLED sibling word whose
+\ declared signature happens to mention Res[i64 i64]. Tests whether the
+\ parser's eager type-application minting (not per-call inference) is what
+\ actually grounds a bare Ok elsewhere in the same module.
+import: intrinsics * ;
+type: Res['T 'E] | Ok 'T | Err 'E ;
+: unused ( Res[i64 i64] -- ) drop ;
+: main ( -- ) 1 Ok drop ;

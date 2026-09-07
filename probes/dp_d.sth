@@ -1,0 +1,8 @@
+\ dp_d -- nested case: a nested Res instantiation as the outer Ok's payload,
+\ same ambiguity (outer 'E unpinned), consumed by drop. Expected: rejected,
+\ same diagnostic class as dp_c -- checks the fall-through doesn't behave
+\ differently once the inner type is itself a generic instantiation.
+import: intrinsics * ;
+type: Res['T 'E] | Ok 'T | Err 'E ;
+: mkok ( i64 -- Res[i64 i64] ) Ok ;
+: main ( -- ) 1 mkok Ok drop ;

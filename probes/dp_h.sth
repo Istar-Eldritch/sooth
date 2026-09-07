@@ -1,0 +1,8 @@
+\ dp_h -- dp_f with declaration order flipped: main (the bare-Ok caller)
+\ comes BEFORE the unused sibling that mentions Res[i64 i64]. Tests
+\ whether minting is truly whole-module/parse-time (order-independent)
+\ rather than "only sees what's textually earlier."
+import: intrinsics * ;
+type: Res['T 'E] | Ok 'T | Err 'E ;
+: main ( -- ) 1 Ok drop ;
+: unused ( Res[i64 i64] -- ) drop ;

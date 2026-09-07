@@ -1,0 +1,10 @@
+\ dp_g2 -- dp_g's ambiguity, but the pick is made observable: consume the
+\ bare Ok's result with a word that only accepts the (i64 cstr) shape.
+\ Declares unused_a (i64 i64) FIRST, unused_b (i64 cstr) SECOND -- if the
+\ pick is declaration-order-first, this should type-mismatch.
+import: intrinsics * ;
+type: Res['T 'E] | Ok 'T | Err 'E ;
+: unused_a ( Res[i64 i64] -- ) drop ;
+: unused_b ( Res[i64 cstr] -- ) drop ;
+: only_takes_cstr_err ( Res[i64 cstr] -- ) drop ;
+: main ( -- ) 1 Ok only_takes_cstr_err ;

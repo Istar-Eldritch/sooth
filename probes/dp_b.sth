@@ -1,0 +1,7 @@
+\ dp_b -- working control: a consumer with a fully concrete declared input
+\ signature (Res[i64 i64]) grounds the instantiation by unification against
+\ that declaration, no helper indirection needed. Expected: accepted.
+import: intrinsics * ;
+type: Res['T 'E] | Ok 'T | Err 'E ;
+: showres ( Res[i64 i64] -- ) drop ;
+: main ( -- ) 1 Ok showres ;

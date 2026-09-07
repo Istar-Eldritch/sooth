@@ -1,0 +1,7 @@
+\ dp_a -- working control: expectation flows in from a concretely-typed
+\ helper's declared output effect, so the enum's type variables ground
+\ before Ok is ever looked up. Expected: accepted, drop consumes cleanly.
+import: intrinsics * ;
+type: Res['T 'E] | Ok 'T | Err 'E ;
+: mkok ( i64 -- Res[i64 i64] ) Ok ;
+: main ( -- ) 1 mkok drop ;
