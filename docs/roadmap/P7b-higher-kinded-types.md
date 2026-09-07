@@ -383,31 +383,31 @@ existing 2-candidate error and every single-header, hub, and selective-import sh
 byte-identical; S9's G4 golden retired (GA/GB are its inverted replacements); 12
 units beside the changed `terms.rs` code.
 
-**P7b.S6d — Arrays as trait-impl constructors (the third `GenericId` case).**
-The slice the S6 carve-out pointed at (mislabelled "S6b" until 260906 — that name and
-"S6c" were consumed by P7's length-arguments and array-indexing slices; see the pointer
-fix in S6's entry). A trait impl cannot target an array: `impl: Foldable for
-array['T 'N]` has nothing to dissolve into, because `array` is a built-in `Type::Array`,
-never wrapped in `Type::CtorImage`, and `GenericId`'s `(is_enum, idx, module)` triple is
-a binary switch into the two header-indexed registries (`GenericStructDecl` /
-`GenericEnumDecl`, walked by `instantiate_struct`/`instantiate_enum`) while `array`'s
-own registry (`ArrayDecl`) is content-addressed by `(element, count)` with no header to
-index. Landed scope, from the measured inventory in
-[slice6-spec](./P7b/slice6-spec.md)'s Phase 6: a third `GenericId` case with its own
-registry and instantiation pair bridging the two shapes, and impl-target parsing that
-stops discarding per-variable kinds (an array target carries a *length* variable, so
-this shares the impl-target parser neighborhood with P7b.S8c's territory — sequence
-after S8c, or coordinate). Design-bearing: which traits make sense over arrays (map/fold
-shape, the length in the target vs the row), and whether the S8 Iterator row composes
-(`next` over a fixed-size array can be index-free or must carry a cursor — an
-interview-level ruling). What exists vs what's missing (260907): generic-length array
-words are already **per-length monomorphized** (S6c: `Len::Var` grounds to a concrete
-count per instantiation via `subst.len_of`; computed indices defer to the runtime
-`bounds_check` guard) — so a `slice['T]` fat-pointer view (runtime length, O(1)
-sub-view, pointer-bump iteration) would additionally erase the per-N instantiation tax
-on embedded flash, and its remainder shape dissolves the S6d iterator problem. The
-seed machinery is S6c's runtime guard + `subst.len_of`; the missing pieces are the
-value type, poly-body borrow rules (parked P7.S3w), and the impl/iteration story. Size: `M`.
+**P7b.S6d — Slices as Iterator targets (the built-in-view lift).**
+Corrected 260907 after a live probe (two earlier sketches in this entry's history were
+wrong: the S6 carve-out's "third `GenericId` case" framing, and an interim "the value
+type is missing" reading — `Slice['T]`/`!Slice['T]` have existed since P7.S3c as
+runtime-length views, `Type::Slice` interned per `(element, mutable)` with no count
+("the length is a runtime component of the value"), `slice`/`subslice`/`len` words, and
+one-instantiation-over-all-lengths semantics — no per-N monomorphs).
+
+Today (probe-verified): `impl: Iterator for Slice[i64]` and `!Slice[i64]` parse as
+impl targets but the App-headed member row hits the S2-6 fence
+(`member_app_concrete_target_error`) — the P7b.S8 lift admits only fully-applied
+ctor-application targets (`Range[i64]`), and a built-in slice has no ctor header for
+`is_mono_ctor_app` to recognize. The generic spelling `Slice['T]` fails earlier
+("unknown type `'T`": no ctor header to bind the target variable).
+
+Landed scope: admit element-concrete slice targets (`Slice[i64]`, `!Slice[i64]`) to the
+P7b.S8 lifted-mono route — the member grounds mono exactly like Range's — then
+`impl: Iterator for Slice[i64]` is a library impl over existing words (`len`, `&!>`
+element read, O(1) `subslice` remainder, Step construction over plain fields — the S6
+wall is not in play). Whether the generic-element spelling (`Slice['T]`) is also worth
+admitting is a discovery measurement; the mono route may suffice for the stdlib's
+per-element impls. Discovery questions: shared vs exclusive iteration (`Slice` is
+multi-use, `!Slice` linear — which takes the impl, or both), the remainder's
+mutability, and the linear-discipline story for a view that owns nothing. Size: `S-M`
+(checker/target-grammar only; no `src/ir/` change; lib impl + goldens).
 
 **P7b.S8c — Located fence for member signatures with unbindable free type variables.**
 Found by the P7b.S8 integrated review (260906); pre-existing, not introduced by S8 — the
