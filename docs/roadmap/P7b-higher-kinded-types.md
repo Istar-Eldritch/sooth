@@ -400,7 +400,14 @@ this shares the impl-target parser neighborhood with P7b.S8c's territory — seq
 after S8c, or coordinate). Design-bearing: which traits make sense over arrays (map/fold
 shape, the length in the target vs the row), and whether the S8 Iterator row composes
 (`next` over a fixed-size array can be index-free or must carry a cursor — an
-interview-level ruling). Size: `M`.
+interview-level ruling). What exists vs what's missing (260907): generic-length array
+words are already **per-length monomorphized** (S6c: `Len::Var` grounds to a concrete
+count per instantiation via `subst.len_of`; computed indices defer to the runtime
+`bounds_check` guard) — so a `slice['T]` fat-pointer view (runtime length, O(1)
+sub-view, pointer-bump iteration) would additionally erase the per-N instantiation tax
+on embedded flash, and its remainder shape dissolves the S6d iterator problem. The
+seed machinery is S6c's runtime guard + `subst.len_of`; the missing pieces are the
+value type, poly-body borrow rules (parked P7.S3w), and the impl/iteration story. Size: `M`.
 
 **P7b.S8c — Located fence for member signatures with unbindable free type variables.**
 Found by the P7b.S8 integrated review (260906); pre-existing, not introduced by S8 — the
