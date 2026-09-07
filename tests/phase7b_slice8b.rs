@@ -885,3 +885,160 @@ impl: Functor for List
         "error: `mapadd` in `main` (line 19) has output variable `'U` that no input binds\n  note: supply it explicitly: `mapadd[SomeType SomeType SomeType]`"
     );
 }
+
+/// P7b.S8b (round-1 review, P2): the `Generic` field arm's length fence used
+/// to fire on *any* non-empty `len_args`, so a field naming a **concrete**
+/// length was rejected with "cannot bind `Ring`'s length variable" -- naming a
+/// variable the field does not have. `Ring['T 3]` has nothing to bind and
+/// nothing to infer, so it grounds. The self-reference `next ^Ring['T 'N]`
+/// keeps the header honest (this is the same `Ring` the fence golden above
+/// uses); the *constructed* field is `Holder`'s `r`, which is where the
+/// concrete-length `Generic` operand reaches the arm.
+///
+/// `mkholder` is never called: a generic word's body is walked by the poly
+/// pre-pass without instantiation (the fence golden above rejects from an
+/// empty `main` the same way), so building at all is the witness -- there is
+/// no way to *construct* a `Ring` to call it with, since its `next` field
+/// makes the type infinitely sized.
+#[test]
+fn generic_field_with_a_concrete_length_grounds() {
+    let src = "\
+ type: Ring['T 'N: Len] head 'T next ^Ring['T 'N] ;\n\
+ type: Holder['T] r Ring['T 3] ;\n\
+ : mkholder['T] ( Ring['T 3] -- Holder['T] ) Holder ;\n\
+ : main ( -- ) ;\n";
+    assert_eq!(build_and_run("ring-concrete-len", src), "");
+}
+
+/// P7b.S8b (round-1 review, P2): a **two-variable** bare impl target is the
+/// hole `nullary_member_with_surplus_type_arguments_is_a_located_arity_error`
+/// above leaves open. That golden's `empty[Opt[i64] i64]` is caught because
+/// `Opt` declares one variable and the list carries two; `Pair` declares two,
+/// so the same list *passes* the arity gate, reaches the impl-target seed --
+/// which grounds both variables from the dispatch type alone -- and the
+/// second written argument was read by nothing. `empty[Pair[i64 i64] str]`
+/// and `empty[Pair[i64 i64] i64]` both minted
+/// `sooth_mono_empty_Monoid_0_Pair__T0__T1___m0__t0_i64_t1_i64`: one
+/// monomorph from two spellings, the `str` silently dropped. It is now a
+/// located conflict, in the spirit of
+/// `mono_concrete_member_call_with_explicit_type_args_is_error`
+/// (`src/check/poly.rs`), which likewise rejects a meaningless list rather
+/// than dropping it.
+///
+/// The asserted string bakes in the same internal spellings P2-9 records
+/// above (`empty;Monoid;0;Pair['T0 'T1]`, `'ctor1`): a regression pin on the
+/// current rendering, not a ratification of it.
+#[test]
+fn nullary_member_type_argument_disagreeing_with_its_impl_target_is_an_error() {
+    let stderr = build_error_located(
+        "seed-conflict",
+        "\
+type: Pair['A 'B] | Nought | Node 'A 'B ;
+trait: Monoid['T] :
+  empty ( -- 'T ) ;
+  : combine ( 'T 'T -- 'T ) ;
+;
+impl: Monoid for Pair
+  : empty Nought ;
+  : combine drop ;
+;
+: main ( -- )
+  empty[Pair[i64 i64] str] drop ;
+",
+    );
+    assert_eq!(
+        stderr.trim_end(),
+        "error: `empty;Monoid;0;Pair['T0 'T1]` in `main` (line 13) was written with `'ctor1` = `str`, but its impl target determines `'ctor1` = `i64`"
+    );
+}
+
+/// P7b.S8b (round-1 review, P2): the accept half of the fix above -- a written
+/// argument that *agrees* with what the impl target determines still grounds,
+/// so closing the silent drop costs no working spelling. Same program as the
+/// conflict golden, `str` replaced by the `i64` the dispatch type implies.
+#[test]
+fn nullary_member_type_argument_agreeing_with_its_impl_target_grounds() {
+    let src = "
+type: Pair['A 'B] | Nought | Node 'A 'B ;
+trait: Monoid['T] :
+  empty ( -- 'T ) ;
+  : combine ( 'T 'T -- 'T ) ;
+;
+impl: Monoid for Pair
+  : empty Nought ;
+  : combine drop ;
+;
+: main ( -- )
+  empty[Pair[i64 i64] i64] drop ;
+";
+    assert_eq!(build_and_run("seed-agreeing", src), "");
+}
+
+/// P7b.S8b (round-3 review, P0): the three ICE regression pins.
+///
+/// Letting a *concrete* length mismatch fall through to `mismatch()` (the
+/// round-1 amendment above) sent shapes to `poly_type_str` that the old
+/// all-lengths fence had pre-empted -- and the renderer indexed
+/// `sig.ty_var_names` raw. A construction field carries **its own header's**
+/// variable ids, so `Holder['T] r Ring['T 3]` hands `Var(0)` to a caller that
+/// declares no type variables at all: index out of bounds, a panic on the
+/// error path. This exact program was a clean located error before the
+/// amendment and an ICE after it, which is what the review caught.
+///
+/// The fix is a total renderer (`foreign_var_str`), so the assertion is the
+/// full byte-exact diagnostic: it pins both that the build is *located* (the
+/// panic is gone) and that the placeholder keeps the two sides readable --
+/// `Ring['?0 3]` against `Ring[array[i64 'N] 5]` still shows which lengths
+/// disagree.
+#[test]
+fn concrete_length_mismatch_renders_a_foreign_field_var_as_a_placeholder() {
+    let src = "\
+ type: Ring['T 'N: Len] head 'T next ^Ring['T 'N] ;\n\
+ type: Holder['T] r Ring['T 3] ;\n\
+ : mk['N: Len] ( Ring[array[i64 'N] 5] -- Holder[array[i64 'N]] ) Holder ;\n\
+ : main ( -- ) ;\n";
+    assert_eq!(
+        build_error_located("foreign-var-len-mismatch", src),
+        "error: type mismatch in `mk` (line 5)\n  `Holder` expected `Ring['?0 3]`, found `Ring[array[i64 'N] 5]`\n  note: declared ( -- )\n"
+    );
+}
+
+/// P7b.S8b (round-3 review, P0): the same panic class reached by a
+/// *differently-headed* operand rather than a length disagreement -- `H`'s
+/// field is `L['T]`, the operand is a `Box[...]`, so the identity check
+/// rejects and renders. Unlike the golden above this shape ICEd **before**
+/// this slice too (the old fence only covered lengths, and there is no length
+/// here to fence), so it pins a pre-existing hole the total renderer closes,
+/// not a regression of ours.
+#[test]
+fn header_mismatch_renders_a_foreign_field_var_as_a_placeholder() {
+    let src = "\
+ type: L['T] | Nil2 | Cons2 'T ;\n\
+ type: Box['T] v 'T ;\n\
+ type: H['T] r L['T] ;\n\
+ : mk2['N: Len] ( Box[array[i64 'N]] -- H[array[i64 'N]] ) H ;\n\
+ : main ( -- ) ;\n";
+    assert_eq!(
+        build_error_located("foreign-var-header-mismatch", src),
+        "error: type mismatch in `mk2` (line 6)\n  `H` expected `L['?0]`, found `Box[array[i64 'N]]`\n  note: declared ( -- )\n"
+    );
+}
+
+/// P7b.S8b (round-3 review, P0): the *partly* foreign case, which is why the
+/// placeholder carries the raw id instead of one anonymous marker. `HH['A 'B]`
+/// stores `P2[Var(0) Var(1)]`; the caller `mkhh['X]` declares one variable, so
+/// `Var(0)` resolves to `'X` and only `Var(1)` falls off the end. A single
+/// side can be half nameable, and `P2['X '?1]` says exactly which half.
+#[test]
+fn header_mismatch_renders_a_partly_foreign_field_var_as_a_placeholder() {
+    let src = "\
+ type: P2['A 'B] | N2 | C2 'A 'B ;\n\
+ type: Box['T] v 'T ;\n\
+ type: HH['A 'B] r P2['A 'B] ;\n\
+ : mkhh['X] ( Box['X] -- HH['X 'X] ) HH ;\n\
+ : main ( -- ) ;\n";
+    assert_eq!(
+        build_error_located("foreign-var-partial", src),
+        "error: type mismatch in `mkhh` (line 6)\n  `HH` expected `P2['X '?1]`, found `Box['X]`\n  note: declared ( -- )\n"
+    );
+}

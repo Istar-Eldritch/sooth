@@ -312,12 +312,24 @@ panicking on a bare `PolyType::Generic` self-reference field, e.g. `^List['T]`) 
 one new arm (`src/check/poly.rs:6256`, inserted before the catch-all): bind the field
 positionally against a same-identity `Generic` operand, recursing over field args vs
 operand args; a differently-headed or non-`Generic` operand is a located
-`poly_rendered_type_mismatch_error`, never a panic. A `Generic` field carrying a
-non-empty `len_args` (a self-referential length-carrying header is spellable, e.g.
+`poly_rendered_type_mismatch_error`, never a panic. A `Generic` field carrying a length
+**variable** (a self-referential length-carrying header is spellable, e.g.
 `Ring['T 'N: Len] head 'T next ^Ring['T 'N]`) is a separate, dedicated located error
 (`poly_generic_field_len_unbound_error`, `src/check/poly.rs:6110`) naming the header
-and its unbindable length variable — not the mismatch renderer, which would print
-identical text on both sides for this exact case. Lifting the wall exposed a
+and its unbindable length variable — a sharper message than a rendered mismatch, whose
+expected side can only show a placeholder for it: a field's length-variable id lives in
+its own header's space, which the caller's tables cannot name. A **concrete** length is
+not fenced (the round-1 review found the original any-non-empty fence rejected
+`Ring['T 3]` while naming a variable it does not have): it grounds when both sides
+agree, and is an ordinary rendered mismatch when they do not. Routing that case to the
+renderer exposed a **pre-existing panic class** the old fence had been hiding
+(round-3 review, P0): `poly_type_str` indexed the caller's variable tables raw, so any
+id from another declaration space was an index-out-of-bounds ICE *on the error path* —
+reachable before this slice via a length-variable-carrying operand against a
+differently-headed field, and newly reachable for `Holder['T] r Ring['T 3]`, a clean
+located error one commit earlier. The renderer is now total: an unnameable id prints
+`'?0` / `'?len0` / `'?row0`, in-range spellings byte-identical, so a diagnostic can no
+longer be the thing that crashes the build. Lifting the wall exposed a
 pre-existing, S6-era two-defect bug the probe round root-caused independently of the
 arm (both reproduce at base `c406149` with no self-reference field at all, `type:
 Opt['T]` / `impl: Monoid for Opt`): (a) a nullary trait member called with an explicit
@@ -325,7 +337,14 @@ type argument over a generic, single-type-variable impl target (`empty[List[i64]
 over `impl: Monoid for List`) seeded its θ positionally instead of through the
 impl-target equation, minting `List[List[i64]]` instead of `List[i64]` — fixed by
 seeding through `match_impl_target` on a channel separate from call-site `type_args`
-(`src/check/poly.rs:2371-2391`, the nullary rescue branch); (b) the wrong mint's
+(`src/check/poly.rs:2371-2391`, the nullary rescue branch) — the round-1 review then
+closed that channel's own silent drop: for a **multi-variable** target the arity gate
+catches only the short spelling (`empty[Pair[i64 str]]`), while the full-length
+`empty[Pair[i64 i64] str]` passed it, reached a seed that grounds both variables from
+the dispatch type alone, and minted the same monomorph as `empty[Pair[i64 i64] i64]`
+with its second argument read by nothing; past position 0 (the dispatch type on this
+path) a written argument must now agree with what the target determined, or is a
+located conflict; (b) the wrong mint's
 variant words then clobbered the lowering-side bare-name last-write-wins variant map
 (`src/ir/layout.rs:597-640`), so *every* `Cons`/`Nil` construction program-wide lowered
 with wrong field shapes — a silent 40-byte layout corruption, SIGSEGV on any program

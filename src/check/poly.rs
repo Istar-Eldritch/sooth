@@ -6270,21 +6270,53 @@ fn poly_bind_construction_arg(
                     &poly_type_str(operand, sig),
                 )
             };
-            // P7b.S8b (Phase 2 review, P1): a length variable in a
-            // construction field has no slot to bind into --
-            // `poly_construct_generic` infers no lengths (its symbolic
-            // result carries a permanent empty `len_args`), so a field
-            // carrying one is rejected here, located. This is NOT a
-            // `poly_rendered_type_mismatch_error` (both sides would render
-            // identically: the fence runs before the operand is destructured
-            // and identity-checked, and `poly_type_str` renders name + args
-            // but not the module id, so even a module-only identity mismatch
-            // would print identical sides) -- a dedicated message instead,
-            // naming the field's header and saying what is actually
-            // unbindable. The stored `^List['T]` field is
-            // `len_args: []` today; a length-carrying field (e.g.
-            // `Ring['T 'N: Len]`'s self-reference) hits this fence.
-            if !field_len_args.is_empty() {
+            // P7b.S8b (Phase 2 review, P1; amended by the round-1 review):
+            // a length *variable* in a construction field has no slot to
+            // bind into -- `poly_construct_generic` infers no lengths (its
+            // symbolic result carries a permanent empty `len_args`) -- so a
+            // field carrying one is rejected here, located, by a dedicated
+            // message that names the header and says what is unbindable.
+            //
+            // The fence runs *before* any `mismatch()` render. That ordering
+            // was originally justified as ICE-safety -- a field's
+            // length-variable id lives in its own header's declaration space,
+            // not in the caller's `sig`, so reaching the renderer indexed out
+            // of bounds. It no longer is: the round-3 review found the same
+            // panic arriving through a *type* variable, which this fence
+            // cannot cover (binding field type variables is the arm's whole
+            // job), so the renderer itself was made total
+            // (`foreign_var_str`). What the ordering buys now is message
+            // quality: a dedicated "cannot bind ...'s length variable" beats
+            // a mismatch whose expected side reads `Ring['T '?len0]`. The
+            // operand's lengths are read here, ahead of the destructure, for
+            // the same reason (`mismatch()` renders both sides).
+            // That second half costs one wording imprecision: the message's
+            // "the field names ..." clause attributes the length parameter
+            // to the field, so an all-concrete field meeting a
+            // variable-length *operand* is described slightly wrong. It is
+            // still the accurate lead ("cannot bind ...'s length variable":
+            // there is one, and it cannot be bound), and one covering fence
+            // is worth more than a precise noun split across two.
+            //
+            // A *concrete* length is a different case and is deliberately
+            // not fenced: it names no variable, so there is nothing to bind
+            // and nothing to infer. Equal concrete lengths simply ground
+            // (the positional argument bind below), and unequal ones are an
+            // ordinary located mismatch -- `poly_type_str` *does* render
+            // length arguments (`Ring[i64 3]` vs `Ring[i64 5]`, see
+            // `poly_type_str_renders_a_generic_application_with_len_args`),
+            // so the two sides print distinguishably and the standard
+            // renderer is honest for that case where it would not be for a
+            // variable.
+            let operand_len_args: &[Len] = match operand {
+                PolyType::Generic { len_args, .. } => len_args,
+                _ => &[],
+            };
+            if field_len_args
+                .iter()
+                .chain(operand_len_args)
+                .any(|l| matches!(l, Len::Var(_)))
+            {
                 return Err(poly_generic_field_len_unbound_error(
                     ctx,
                     span,
@@ -6303,6 +6335,11 @@ fn poly_bind_construction_arg(
                 return Err(mismatch());
             };
             if *is_enum != *op_is_enum || *idx != *op_idx || *module != *op_module {
+                return Err(mismatch());
+            }
+            // Both sides are all-concrete past the fence above, so this is a
+            // plain value comparison and `mismatch()` can render it.
+            if field_len_args.as_slice() != operand_len_args {
                 return Err(mismatch());
             }
             // Phase 2 review (P2): defense-only past this point -- the
@@ -7558,6 +7595,49 @@ pub(super) fn check_poly_call(
             for (v, ty) in &seed.ty {
                 subst.ty.push((*v, *ty));
                 seeded.push(*v);
+            }
+            // P7b.S8b (round-1 review, P2): the seed replaces the positional
+            // binding, so without this every written argument past the first
+            // was dropped in silence. The arity gate above forces the caller
+            // to write one argument per declared variable, and for a bare
+            // multi-variable target (`impl: Monoid for Pair`, whose member
+            // sig is padded to the target's variables by
+            // `build_member_var_union`) the seed grounds *all* of them from
+            // the dispatch type -- so `empty[Pair[i64 i64] str]` and
+            // `empty[Pair[i64 i64] i64]` both minted
+            // `..._t0_i64_t1_i64`, one monomorph from two spellings, the
+            // second argument never read.
+            //
+            // Position 0 is exempt and cannot be checked here: on this path
+            // it is the *dispatch type* (`type_args.first()` is what
+            // `find_bound_impl` matched the target pattern against), not
+            // variable #0's value -- that is the whole point of the seed
+            // channel, and `empty[List[i64]]` binds `'T := i64` from an
+            // argument that reads `List[i64]`. Every later position keeps
+            // the ordinary positional contract (position `i` is variable
+            // `i`), which is the only reading the arity gate leaves
+            // available: a seed-bound variable must agree with what was
+            // written, and a variable the seed does not reach (a member's
+            // own local, appended after the target's) binds from it.
+            for (pos, written) in type_args.iter().enumerate().skip(1) {
+                let v = pos as u32;
+                match seed.ty_of(v) {
+                    Some(determined) if determined != *written => {
+                        return Err(impl_target_seed_conflict_error(
+                            ctx,
+                            span,
+                            name,
+                            &sig.ty_var_names[pos],
+                            determined,
+                            *written,
+                        ));
+                    }
+                    Some(_) => {}
+                    None => {
+                        subst.ty.push((v, *written));
+                        seeded.push(v);
+                    }
+                }
             }
         }
     }
@@ -12092,6 +12172,32 @@ pub(super) fn explicit_instantiation_conflict_error(
         )
 }
 
+/// P7b.S8b (round-1 review, P2): an explicit type argument that disagrees
+/// with what the impl target already determined for that variable
+/// (`empty[Pair[i64 i64] str]`: the dispatch type fixes `'B` = `i64`, the
+/// list writes `str`). Neither
+/// `explicit_instantiation_conflict_error` nor `poly_var_conflict_error`
+/// fits: both name an *operand* as one end, and here both ends are the
+/// caller's own `[...]` list -- one entry written directly, the other fixed
+/// by the dispatch type the list's first entry names -- so "but its operand
+/// is" would name a thing the caller never wrote. Says which end is which,
+/// since the remedy differs by what the caller meant.
+pub(super) fn impl_target_seed_conflict_error(
+    ctx: &Ctx,
+    span: Span,
+    callee: &str,
+    var: &str,
+    determined: Type,
+    written: Type,
+) -> String {
+    let callee = crate::resolve::demangle_call(callee);
+    let line = span.line;
+    format!(
+        "error: `{callee}` in {name} (line {line}) was written with `{var}` = `{written}`, but its impl target determines `{var}` = `{determined}`",
+        name = ctx.rendered_word()
+    )
+}
+
 /// P7.S6b (R5): `explicit_instantiation_conflict_error`'s length-typed
 /// sibling -- a length conflict compares two `u32`s, not two `Type`s, and
 /// `u32`'s `Display` renders identically, so a thin sibling is simpler than
@@ -12242,19 +12348,41 @@ pub(super) fn poly_unbound_output_ty_error(
     )
 }
 
+/// A variable id `sig` cannot name, rendered rather than indexed.
+///
+/// P7b.S8b (round-3 review, P0): a `PolyType` reaching a diagnostic does not
+/// always belong to the signature it is rendered against. A construction
+/// field's variables live in *its own header's* declaration space (`Holder['T]
+/// r Ring['T 3]` stores `Var(0)` for `Holder`'s `'T`), and the caller whose
+/// `sig` renders the mismatch may declare fewer variables -- or none. Indexing
+/// panicked there, which made a *diagnostic* the thing that crashed the
+/// compiler: an error path is exactly where the checker must stay total.
+///
+/// The placeholder is `'?` (a variable this signature cannot name) plus the
+/// domain and the raw id, so the two sides of a mismatch stay distinguishable
+/// and a reader can tell a type variable from a length one. In-range ids are
+/// unaffected: they render by their declared spelling, byte for byte.
+fn foreign_var_str(table: &[String], id: u32, domain: &str) -> String {
+    match table.get(id as usize) {
+        Some(name) => name.clone(),
+        None => format!("'?{domain}{id}"),
+    }
+}
+
 /// Render a `PolyType` for a diagnostic: a variable by its declared spelling,
-/// a concrete type by its name, an array structurally.
+/// a concrete type by its name, an array structurally. Total on variable ids
+/// (`foreign_var_str`): a rendering is never the reason a build panics.
 pub(crate) fn poly_type_str(pt: &PolyType, sig: &PolySig) -> String {
     match pt {
         PolyType::Concrete(t) => t.name().to_string(),
-        PolyType::Var(v) => sig.ty_var_names[*v as usize].clone(),
+        PolyType::Var(v) => foreign_var_str(&sig.ty_var_names, *v, ""),
         // P7 slice 3b (R2): no effect to render (that is the point of the
         // marker), so it renders as what it is.
         PolyType::QuotLit => "a quotation literal".to_string(),
         PolyType::Array(elem, len) => {
             let l = match len {
                 Len::Concrete(n) => n.to_string(),
-                Len::Var(id) => sig.len_var_names[*id as usize].clone(),
+                Len::Var(id) => foreign_var_str(&sig.len_var_names, *id, "len"),
             };
             format!("array[{} {}]", poly_type_str(elem, sig), l)
         }
@@ -12265,7 +12393,7 @@ pub(crate) fn poly_type_str(pt: &PolyType, sig: &PolySig) -> String {
             let row = |r: &[PolyType], row_var: Option<u32>| {
                 let mut parts: Vec<String> = Vec::new();
                 if let Some(v) = row_var {
-                    parts.push(sig.row_var_names[v as usize].clone());
+                    parts.push(foreign_var_str(&sig.row_var_names, v, "row"));
                 }
                 parts.extend(r.iter().map(|p| poly_type_str(p, sig)));
                 parts.join(" ")
@@ -12301,7 +12429,7 @@ pub(crate) fn poly_type_str(pt: &PolyType, sig: &PolySig) -> String {
             let mut parts: Vec<String> = args.iter().map(|a| poly_type_str(a, sig)).collect();
             parts.extend(len_args.iter().map(|l| match l {
                 Len::Concrete(n) => n.to_string(),
-                Len::Var(id) => sig.len_var_names[*id as usize].clone(),
+                Len::Var(id) => foreign_var_str(&sig.len_var_names, *id, "len"),
             }));
             format!("{name}[{}]", parts.join(" "))
         }
@@ -12313,7 +12441,11 @@ pub(crate) fn poly_type_str(pt: &PolyType, sig: &PolySig) -> String {
         // spelling, then its arguments.
         PolyType::App { head, args } => {
             let parts: Vec<String> = args.iter().map(|a| poly_type_str(a, sig)).collect();
-            format!("{}[{}]", sig.ty_var_names[*head as usize], parts.join(" "))
+            format!(
+                "{}[{}]",
+                foreign_var_str(&sig.ty_var_names, *head, ""),
+                parts.join(" ")
+            )
         }
     }
 }
@@ -15085,15 +15217,21 @@ mod tests {
         assert!(err.contains("type mismatch"), "{err}");
     }
 
-    /// PB-2 / Phase 2 review (P1): a `Generic` field carrying a non-empty
-    /// `len_args` has no slot to bind a length into, so it is rejected --
-    /// via the dedicated `poly_generic_field_len_unbound_error`, not
-    /// `poly_rendered_type_mismatch_error` (both sides would render
-    /// identically for this exact case, since the header already matches
-    /// before the length is even considered). The shape is spellable
+    /// PB-2 / Phase 2 review (P1), amended by the round-1 review: a
+    /// `Generic` field carrying a length *variable* has no slot to bind a
+    /// length into, so it is rejected -- via the dedicated
+    /// `poly_generic_field_len_unbound_error`, not
+    /// `poly_rendered_type_mismatch_error`, because a field's length-variable
+    /// id lives in its own header's space, which the caller's
+    /// `len_var_names` cannot name -- a rendered mismatch would show
+    /// `'?len0` where a dedicated message can say what is actually
+    /// unbindable. (Rendering it is merely unhelpful, not fatal: the round-3
+    /// review made `poly_type_str` total.) The shape is spellable
     /// (`Ring['T 'N: Len] head 'T next ^Ring['T 'N]`, `tests/phase7b_slice8b.rs`'s
     /// `generic_field_with_a_length_variable_is_a_located_error`), not future
-    /// work.
+    /// work. Its all-concrete siblings are the two tests below: a *concrete*
+    /// length names no variable, so it grounds when it agrees and is an
+    /// ordinary rendered mismatch when it does not.
     #[test]
     fn poly_bind_construction_arg_generic_nonempty_len_args_is_error() {
         let word = probe_word();
@@ -15129,6 +15267,91 @@ mod tests {
         assert!(
             err.contains("cannot bind") && err.contains("length variable"),
             "{err}"
+        );
+    }
+
+    /// P7b.S8b (round-1 review, P2): a *concrete* length carries no variable
+    /// and needs no binding, so a field naming one grounds against an operand
+    /// naming the same length -- the pre-amendment fence rejected this shape
+    /// with "cannot bind `Ring`'s length variable", naming a variable that is
+    /// not there. `args` records the element binding, proving the arm reached
+    /// its positional bind rather than returning early.
+    #[test]
+    fn poly_bind_construction_arg_generic_matching_concrete_len_binds_arg() {
+        let word = probe_word();
+        let ctx = probe_ctx(&word);
+        let sig = ref_sig();
+        let field_pty = PolyType::Generic {
+            is_enum: true,
+            idx: 0,
+            module: 0,
+            args: vec![PolyType::Var(0)],
+            len_args: vec![Len::Concrete(3)],
+            name: "Ring",
+        };
+        let operand = PolyType::Generic {
+            is_enum: true,
+            idx: 0,
+            module: 0,
+            args: vec![PolyType::Concrete(Type::I64)],
+            len_args: vec![Len::Concrete(3)],
+            name: "Ring",
+        };
+        let mut args: Vec<Option<PolyType>> = vec![None];
+        poly_bind_construction_arg(
+            &field_pty,
+            &operand,
+            &mut args,
+            &sig,
+            &ctx,
+            Span::default(),
+            "Node",
+        )
+        .expect("a matching concrete length grounds");
+        assert_eq!(args[0], Some(PolyType::Concrete(Type::I64)));
+    }
+
+    /// P7b.S8b (round-1 review, P2): concrete lengths that *disagree* are a
+    /// real type mismatch, and the standard rendered error is honest for it
+    /// -- `poly_type_str` renders length arguments, so the two sides print
+    /// distinguishably (`Ring['T 3]` against `Ring[i64 5]`) where a length
+    /// variable could not be rendered at all.
+    #[test]
+    fn poly_bind_construction_arg_generic_differing_concrete_len_is_error() {
+        let word = probe_word();
+        let ctx = probe_ctx(&word);
+        let sig = ref_sig();
+        let field_pty = PolyType::Generic {
+            is_enum: true,
+            idx: 0,
+            module: 0,
+            args: vec![PolyType::Var(0)],
+            len_args: vec![Len::Concrete(3)],
+            name: "Ring",
+        };
+        let operand = PolyType::Generic {
+            is_enum: true,
+            idx: 0,
+            module: 0,
+            args: vec![PolyType::Concrete(Type::I64)],
+            len_args: vec![Len::Concrete(5)],
+            name: "Ring",
+        };
+        let mut args: Vec<Option<PolyType>> = vec![None];
+        let err = poly_bind_construction_arg(
+            &field_pty,
+            &operand,
+            &mut args,
+            &sig,
+            &ctx,
+            Span::default(),
+            "Node",
+        )
+        .unwrap_err();
+        assert!(err.contains("type mismatch"), "{err}");
+        assert!(
+            err.contains("3") && err.contains("5"),
+            "both lengths: {err}"
         );
     }
 
@@ -18241,6 +18464,52 @@ mod tests {
         // resolves cleanly.
         assert_eq!(poly_type_str(&PolyType::Var(1), &member_sig), "'U");
         assert_eq!(poly_type_str(&PolyType::Var(0), &caller_sig), "'F");
+    }
+
+    #[test]
+    fn poly_type_str_renders_a_var_past_the_sig_tables_as_a_placeholder() {
+        // P7b.S8b (round-3 review, P0): the twin of the test above. That one
+        // fixes the *caller*, rendering each side against the sig that owns
+        // it; this one covers the case where no such sig is in hand -- a
+        // construction field carries its own header's variable ids, and the
+        // only sig at the mismatch is the caller's. Rendering must degrade to
+        // a placeholder, never index out of bounds: `k.sth`'s
+        // `Holder['T] r Ring['T 3]` against a caller declaring no type
+        // variables at all is a real program, and it used to ICE here.
+        let sig = PolySig {
+            row_in: None,
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            row_out: None,
+            bounds: Vec::new(),
+            ty_var_names: Vec::new(),
+            ty_var_spans: Vec::new(),
+            ty_kinds: Vec::new(),
+            len_var_names: Vec::new(),
+            len_var_spans: Vec::new(),
+            row_var_names: Vec::new(),
+        };
+        assert_eq!(poly_type_str(&PolyType::Var(0), &sig), "'?0");
+        assert_eq!(
+            poly_type_str(
+                &PolyType::Array(Box::new(PolyType::Concrete(Type::I64)), Len::Var(2)),
+                &sig
+            ),
+            "array[i64 '?len2]"
+        );
+        // The whole point of the placeholder: the two sides of a mismatch
+        // stay distinguishable, and a length variable never reads as a type
+        // one.
+        assert_eq!(
+            poly_type_str(
+                &PolyType::App {
+                    head: 1,
+                    args: vec![PolyType::Var(0)],
+                },
+                &sig
+            ),
+            "'?1['?0]"
+        );
     }
 
     #[test]

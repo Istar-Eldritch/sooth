@@ -55,24 +55,59 @@ two-defect fix (required, not optional), and the traitful `List` surface as gold
   `Concrete`-operand case is asserted at unit level only
   (`.contains("type mismatch")`, `src/check/poly.rs:15085`) — no live program reaches a
   `Concrete` operand today, so only the ctor-mismatch pin is a real-program golden.
-- **R3.** Reject, as a located error (dedicated `poly_generic_field_len_unbound_error`, not
-  `poly_rendered_type_mismatch_error` which would render identical text on both sides), a
-  `Generic` field carrying a non-empty `len_args`. The stored `^List['T]` is `len_args: []`
-  today, but the shape is spellable now (`Ring['T 'N: Len] head 'T next ^Ring['T 'N]`); the
-  message names the field header and its unbindable length variable.
+- **R3.** Reject, as a located error (dedicated `poly_generic_field_len_unbound_error`), a
+  `Generic` field carrying a length **variable**: construction infers no lengths, so there
+  is no slot to bind one into. The dedicated message earns its keep on quality -- a field's
+  length-variable id lives in its own header's declaration space, which the caller's
+  `len_var_names` cannot name, so a rendered mismatch would print a placeholder where a
+  dedicated message says what is unbindable. The stored `^List['T]` is `len_args: []` today,
+  but the shape is spellable now (`Ring['T 'N: Len] head 'T next ^Ring['T 'N]`).
+  - **Amended (round-1 review):** the fence originally fired on any non-empty `len_args`,
+    which rejected a **concrete**-length field (`Ring['T 3]`) with a message naming a
+    length variable it does not have. A concrete length names no variable and needs no
+    binding, so it now grounds when both sides agree and is an ordinary
+    `poly_rendered_type_mismatch_error` when they do not -- honest there, because
+    `poly_type_str` does render length arguments (`Ring[i64 3]` against `Ring[i64 5]`).
+    Witnessed by `generic_field_with_a_concrete_length_grounds` and the two
+    `poly_bind_construction_arg_generic_*_concrete_len_*` unit tests.
+  - **Amended again (round-3 review, P0):** routing the concrete-unequal case to
+    `poly_rendered_type_mismatch_error` sent shapes to `poly_type_str` that the old
+    all-lengths fence had pre-empted, exposing a **pre-existing panic class**: the renderer
+    indexed the caller's variable tables raw, so any variable id from another declaration
+    space (a construction field carries *its own header's*) was an index-out-of-bounds ICE
+    on the error path. It was reachable before this slice through a length-variable-carrying
+    operand meeting a differently-headed field, and the amendment additionally made
+    `Holder['T] r Ring['T 3]` -- a clean located error at `5d20aac` -- ICE, which is how the
+    review found it. Fixed at the root by making `poly_type_str` total (`foreign_var_str`):
+    an id its signature cannot name renders as `'?0` / `'?len0` / `'?row0` instead of
+    panicking, and in-range rendering is byte-identical. The fence ordering is unchanged;
+    it is now justified by message quality rather than ICE-safety, since the type-variable
+    route into the same panic was never something this fence could cover. Witnessed by
+    three goldens (`*_renders_a_foreign_field_var_as_a_placeholder`) and
+    `poly_type_str_renders_a_var_past_the_sig_tables_as_a_placeholder`.
 - **R4.** A nullary trait member called with an explicit type argument over a **generic,
   single-type-variable** impl target instantiates through the impl-target equation:
   `empty[List[i64]]` over `impl: Monoid for List` seeds the element var by matching the
   target `List['E]` against the call-site type (`'E := i64`), minting a monomorph returning
   `List[i64]` (24-byte Nil), never `List[List[i64]]`. The concrete-target nullary path
   (S6's `empty[i64]`) stays byte-unchanged.
-  - **Fence (recorded, not fixed):** a **multi-variable** impl target (`Monoid for
-    Pair['A 'B]`) is pre-existing out of scope — `check_poly_call`'s arity gate compares
-    the call site's `type_args.len()` against the member sig's *full* variable count
-    (`build_member_var_union`), so `empty[Pair[i64 str]]` hits `instantiation_arity_error`
-    before the seed channel runs. The seed channel carries types only (`Subst.len` is not
-    threaded), so a length-carrying generic target cannot ground a nullary member this way
-    either (same family as R3).
+  - **Fence (amended by the round-1 review):** for a **multi-variable** impl target
+    (`Monoid for Pair['A 'B]`) the arity gate catches only the *short* spelling:
+    `check_poly_call` compares the call site's `type_args.len()` against the member sig's
+    *full* variable count (`build_member_var_union`), so one-argument `empty[Pair[i64 str]]`
+    hits `instantiation_arity_error` before the seed channel runs. The **full-length**
+    spelling does not: `empty[Pair[i64 i64] str]` carries two arguments for two declared
+    variables, passes the gate, and reaches a seed that grounds *both* variables from the
+    dispatch type alone — so the second written argument was read by nothing.
+    `empty[Pair[i64 i64] str]` and `empty[Pair[i64 i64] i64]` minted the identical
+    monomorph (`..._t0_i64_t1_i64`, confirmed by `nm`). Now a located conflict: past
+    position 0 (which on this path names the *dispatch type*, not variable #0's value) a
+    written argument must agree with what the target determined, and a variable the seed
+    does not reach binds from it. Witnessed by
+    `nullary_member_type_argument_disagreeing_with_its_impl_target_is_an_error` and its
+    agreeing twin. The seed channel still carries types only (`Subst.len` is not threaded),
+    so a length-carrying generic target cannot ground a nullary member this way (same
+    family as R3).
   - **Asymmetry:** on the nullary seed-channel path a written type argument means "the
     dispatch type" (matched against the impl-target pattern); on the operand-dispatched
     generic-call path (S3t) the same written type argument still means "variable #0".
