@@ -194,8 +194,13 @@ pub(super) struct FuncBuilder<'a> {
     /// overload of a builtin-named word, span -> resolved callee name.
     /// Consulted before the name-directed builtin dispatch in `lower_call`, so
     /// a recorded `Vec2 add` site emits an `Instr::Call` to the user word
-    /// instead of `Bin(Add)`. Empty on every corpus/test path (the
-    /// checker records nothing there), so their lowering is byte-for-byte.
+    /// instead of `Bin(Add)`. P7b.S8b Phase 1 (R5) widened this map's
+    /// occupants: a single-candidate site naming a *generic* enum
+    /// instantiation's variant word also records here, keyed to its resolved
+    /// mangled symbol (which differs from the bare surface name), so the map
+    /// is no longer necessarily empty; a non-generic enum's variant word is
+    /// skipped — its symbol is already the bare name the map always carried
+    /// (`src/check/terms.rs`'s single-candidate arm).
     pub(super) builtin_overloads: &'a HashMap<Span, String>,
     /// P7.S3e (R8/R9): this instantiation's own trait-member-call resolutions
     /// (`CallInst::trait_calls`), span -> the implementing word's lowering
