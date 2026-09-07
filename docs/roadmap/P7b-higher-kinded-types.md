@@ -195,7 +195,9 @@ construction inside a trait member reproduces it identically. Arrays do not beco
 Functor/Foldable instances in this slice: `impl: ... for array['T 'N]` has no constructor
 representation to dissolve the application into (`array` is a built-in `Type::Array`, never
 wrapped in `Type::CtorImage`), and the impl-target parser discards per-variable kinds
-regardless — a widening carved out to its own follow-on slice, **S6b**. The carve-out is
+regardless — a widening carved out to its own follow-on slice, **P7b.S6d** (the entry
+below; the originally-pointed name S6b was consumed by P7's explicit-length-arguments
+slice, and S6c by generic-length array indexing). The carve-out is
 measured, not assumed: `GenericId`'s `(is_enum, idx, module)` triple is a binary switch
 into two header-indexed registries (`GenericStructDecl`/`GenericEnumDecl`, walked by
 `instantiate_struct`/`instantiate_enum`), while `array`'s own registry (`ArrayDecl`) is
@@ -362,6 +364,25 @@ errors byte-exact and deterministic across import order and minter placement; th
 existing 2-candidate error and every single-header, hub, and selective-import shape
 byte-identical; S9's G4 golden retired (GA/GB are its inverted replacements); 12
 units beside the changed `terms.rs` code.
+
+**P7b.S6d — Arrays as trait-impl constructors (the third `GenericId` case).**
+The slice the S6 carve-out pointed at (mislabelled "S6b" until 260906 — that name and
+"S6c" were consumed by P7's length-arguments and array-indexing slices; see the pointer
+fix in S6's entry). A trait impl cannot target an array: `impl: Foldable for
+array['T 'N]` has nothing to dissolve into, because `array` is a built-in `Type::Array`,
+never wrapped in `Type::CtorImage`, and `GenericId`'s `(is_enum, idx, module)` triple is
+a binary switch into the two header-indexed registries (`GenericStructDecl` /
+`GenericEnumDecl`, walked by `instantiate_struct`/`instantiate_enum`) while `array`'s
+own registry (`ArrayDecl`) is content-addressed by `(element, count)` with no header to
+index. Landed scope, from the measured inventory in
+[slice6-spec](./P7b/slice6-spec.md)'s Phase 6: a third `GenericId` case with its own
+registry and instantiation pair bridging the two shapes, and impl-target parsing that
+stops discarding per-variable kinds (an array target carries a *length* variable, so
+this shares the impl-target parser neighborhood with P7b.S8c's territory — sequence
+after S8c, or coordinate). Design-bearing: which traits make sense over arrays (map/fold
+shape, the length in the target vs the row), and whether the S8 Iterator row composes
+(`next` over a fixed-size array can be index-free or must carry a cursor — an
+interview-level ruling). Size: `M`.
 
 **P7b.S8c — Located fence for member signatures with unbindable free type variables.**
 Found by the P7b.S8 integrated review (260906); pre-existing, not introduced by S8 — the
