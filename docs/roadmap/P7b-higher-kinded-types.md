@@ -556,7 +556,7 @@ behaviour, the IR `expect` remains as a backstop) or a binding rule that grounds
 member variables at the impl target/call site like `'B` above. Scope: `src/check/` only,
 no `src/ir/` change, unit tests beside the changed checker code, goldens for both
 dispatch routes (mono call site and bound dispatch), and the S8-review repro twins
-panicked→located. Size: `S`.
+panicked→located. Size: `S`. The 260907 recon round (probes + paper tests, [slice8c-brief](./P7b/slice8c-brief.md) with [slice8c-probes](./P7b/slice8c-probes.md) and [slice8c-paper-tests](./P7b/slice8c-paper-tests.md)) measured the surface as a five-route dispatch taxonomy: the panic is a build-time lowering panic (the check succeeds; `sooth build` exits 101, no binary — the entry's "the build succeeds and the PANIC fires at run/IR time" wording is a corrigendum), the mint arm's match-only substitution is the mechanism (`resolve_user_bound`'s non-CtorImage generic-winner arm records the member instantiation without the member row's own variables in θ, while the CtorImage arm grounds them per site), and the concrete-target arm carries an adjacent *silent* no-site-check hole (`ground_member_type` collapses every member local to the target; a `List[i64]` flowed through an i64-typed member slot unchecked) — fold-in-or-carve-out is the spec's D2.
 
 **P7b.S11 — Per-call-site grounding for bare generic constructors.**
 Carved out of the P7b semantics walkthrough (260907) after probe round dp_a–dp_h
