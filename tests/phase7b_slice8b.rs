@@ -87,8 +87,8 @@ fn build_and_run(tag: &str, src: &str) -> String {
     String::from_utf8(run.stdout).expect("stdout should be utf8")
 }
 
-/// Build `src`, assert it fails *located* (non-zero exit with an `error:`
-/// stderr and no panic), and return that stderr.
+/// Build `src`, assert it fails with a non-zero exit and no panic, and
+/// return that stderr -- callers assert the exact `error:` text themselves.
 fn build_error_located(tag: &str, src: &str) -> String {
     let (_t, entry) = single_file_hosted(tag, src);
     let build = Command::new(env!("CARGO_BIN_EXE_sooth"))
@@ -259,7 +259,8 @@ impl: Monoid for i64
 /// (`terms.rs:962-985`) can land the construction span in `builtin_overloads`
 /// via that standalone walk, the same channel a splice's redirect writes to.
 /// This pins the current dispatch outcome for that case rather than fixing
-/// it (spec Risks table): `mkopt` constructs a variant and is never spliced
+/// it ("New-in-slice caveat", `docs/roadmap/P7b/slice8b-spec.md`): `mkopt`
+/// constructs a variant and is never spliced
 /// (`main` calls it as an ordinary word, not inline-expanded at a call site
 /// shaped like a combinator), so the build+run must still succeed.
 #[test]
@@ -428,6 +429,34 @@ fn plain_generic_cons_differently_headed_tail_is_a_located_mismatch() {
     );
 }
 
+/// P7b.S8b Phase 2 (R1, review round P1): every fixture above exercises a
+/// *single*-type-variable generic header (`List['T]`), where the new arm's
+/// positional `field_args.iter().zip(op_args.iter())` is order-blind --
+/// reversing the zip is a no-op on one element. A two-variable
+/// self-referential header (`Pair['A 'B]`, field `rest ^Pair['A 'B]`) is the
+/// minimal case that can tell binding order apart: `pcons` grounds `'A :=
+/// i64`, `'B := f64` from its own explicit operands before the `rest` field
+/// is bound against `mknought`'s already-concrete `Pair[i64 f64]` cell, so a
+/// reversed zip would try to re-bind the already-`i64`-bound `'A` to `f64`
+/// and take the mismatch branch instead of grounding clean. The output pin
+/// (destructuring the built `Node` back out) additionally witnesses the two
+/// fields keep their own types and values in declared order, not swapped.
+#[test]
+fn plain_generic_cons_two_parameter_header_binds_args_in_order() {
+    let src = "
+ type: Pair['A 'B] | Nought | Node 'A 'B rest ^Pair['A 'B] ;
+ : pcons['A 'B] ( 'A 'B ^ Pair['A 'B] -- Pair['A 'B] ) Node ;
+ : mknought ( -- Pair[i64 f64] ) Nought ;
+ : showpair ( Pair[i64 f64] -- )
+   ~[ ( Nought ) drop ]
+   ~[ ( Node ) Node> | a b r | a . b . r ^> drop ]
+   Pair? ;
+ : main ( -- )
+   1 2.5 mknought ^ pcons showpair ;
+";
+    assert_eq!(build_and_run("2param-generic-order", src), "1\n2.5\n");
+}
+
 /// P7b.S8b Phase 2 (R3, review round P1): the length-carrying self-reference
 /// field the spec's own R3/exit-criteria text called "unspellable in source
 /// today" -- false, the review round spelled it. `Ring['T 'N: Len]`'s
@@ -488,6 +517,69 @@ impl: Functor for List
   showlist ;
 ";
     assert_eq!(build_and_run("map-list-e2e", src), "2\n3\n4\n");
+}
+
+/// (R8, review round P2) The frame-shape pin the golden above can't give:
+/// `impl: Functor for List`'s `map` recurses over its own `Cons` arm
+/// (`rot map ^ Cons`), so the only way to tell "one non-inline real frame"
+/// from a duplicated-per-instantiation lowering is to look at the emitted
+/// symbol itself. Same `emit_ssa_with_manifest` route as
+/// `nullary_member_over_a_generic_impl_target_mints_the_one_level_monomorph`
+/// above, source byte-identical to the golden this pin covers modulo a
+/// uniform one-space indent.
+#[test]
+fn functor_for_list_map_lowers_as_one_non_inline_frame() {
+    let src = "
+ import: core::list * ;
+ trait: Functor['F: * -> *] :
+   map ( 'F['T] [ 'T -- 'U ] -- 'F['U] ) ;
+ ;
+ impl: Functor for List
+   : map
+     swap
+     ~[ ( Nil ) drop drop Nil ]
+     ~[ ( Cons ) Cons> | v rest | dup v swap call rest ^> rot map ^ Cons ]
+     List? ;
+ ;
+ : mkempty ( -- List[i64] ) Nil ;
+ : showlist ( List[i64] -- )
+   ~[ ( Nil ) drop ]
+   ~[ ( Cons ) Cons> | v rest | v . rest ^> showlist ]
+   List? ;
+ : main ( -- )
+   3 mkempty ^ Cons
+   2 swap ^ Cons
+   1 swap ^ Cons
+   [ 1 add ] map[i64 i64]
+   showlist ;
+";
+    let path =
+        std::env::temp_dir().join(format!("sooth-p7bs8b-map-ssa-{}.sth", std::process::id()));
+    common::write_fixture(&path, src).expect("writing the fixture should succeed");
+    let ssa = sooth::driver::emit_ssa_with_manifest(&path, common::manifest_for(&path).as_deref())
+        .unwrap_or_else(|e| panic!("emitting the fixture should succeed: {e}"));
+    std::fs::remove_file(&path).ok();
+
+    let sites: Vec<&str> = ssa
+        .lines()
+        .filter(|l| l.contains("sooth_mono_map_Functor"))
+        .collect();
+    assert_eq!(
+        sites.len(),
+        3,
+        "one definition, the top-level call, and the recursive self-call: {sites:?}"
+    );
+    let defs = sites.iter().filter(|l| l.contains("function")).count();
+    assert_eq!(
+        defs, 1,
+        "exactly one non-inline frame, not one per call site: {sites:?}"
+    );
+    let calls = sites.iter().filter(|l| l.contains("call")).count();
+    assert_eq!(
+        calls, 2,
+        "both the outer dispatch and the recursive descent go through a real call, \
+         never unrolled: {sites:?}"
+    );
 }
 
 /// P7b.S8b Phase 3 (R8): the shared-bound variant of the map golden --
@@ -603,7 +695,7 @@ impl: Monoid for List
 /// two-defect fix (theta seeding + per-instantiation variant words) is what
 /// this golden regresses against.
 #[test]
-fn list_shaped_two_defect_repro_grounds_after_phases_1_and_2() {
+fn list_shaped_two_defect_repro_grounds() {
     let src = "
 import: core::list * ;
 trait: Monoid['T] :

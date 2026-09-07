@@ -210,7 +210,7 @@ construction wall above); `combine`/`empty`/`mconcat` goldens for `i64` and
 `Option`/`List`; core gains `List['T]` with a constant-stack destructor that drops linear
 payloads per instantiation; the array-as-constructor widening and the `List`
 construction wall are recorded rulings, not landed capabilities (the wall itself is
-landed later by P7b.S8b).
+fixed by P7b.S8b, below).
 
 **P7b.S7 — Quotation effects over type constructors (the `call` extension).**
 `Monad.bind ( 'F['T] [ 'T -- 'F['U] ] -- 'F['U] )` declares and dispatches over
@@ -314,7 +314,7 @@ positionally against a same-identity `Generic` operand, recursing over field arg
 operand args; a differently-headed or non-`Generic` operand is a located
 `poly_rendered_type_mismatch_error`, never a panic. A `Generic` field carrying a
 non-empty `len_args` (a self-referential length-carrying header is spellable, e.g.
-`Ring['T 'N: Len] head 'T rest Ring['T 'N]`) is a separate, dedicated located error
+`Ring['T 'N: Len] head 'T next ^Ring['T 'N]`) is a separate, dedicated located error
 (`poly_generic_field_len_unbound_error`, `src/check/poly.rs:6110`) naming the header
 and its unbindable length variable — not the mismatch renderer, which would print
 identical text on both sides for this exact case. Lifting the wall exposed a
@@ -371,7 +371,12 @@ of the expected output — a second-instantiation nullary construction cannot be
 spelled, caught only as a located signature mismatch (adjacent to S6 R4's future
 consuming-context-grounding slice); and the struct-word twin of the bare-key
 last-write-wins class, plus cross-module same-named variant names in the flat
-`enums.words` map, has no known miscompile repro but is left for a future slice.
+`enums.words` map, has no known miscompile repro but is left for a future slice. One
+caveat is new in this slice, not pre-existing: a mono `inline` (combinator) word's
+body is checked as an ordinary mono word, which can record a construction span into
+`builtin_overloads` even when the word is never spliced anywhere in the program,
+benign at one θ per mono body, pinned by
+`mono_inline_combinator_variant_construction_builds_and_runs`.
 **Exit:** the Opt repro builds and runs exit 0; both P8 shapes (impl-member-body and
 plain-generic-word `Cons` construction) build and run; the ctor-mismatch and
 `len_args` errors are located, byte-exact, golden-pinned; the S6 wall witness passes

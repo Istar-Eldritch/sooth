@@ -7530,16 +7530,20 @@ pub(super) fn check_poly_call(
         // binding, because on that path the written type argument is the
         // dispatch operand, not variable #0's value.
         //
-        // P7b.S8b Phase 1 review (P2-5): a *concrete*-ctor impl target whose
-        // member still carries free locals (e.g. `impl: T for Point`, member
-        // `f['U]`) matches `match_impl_target` against zero free variables,
-        // so `find_bound_impl` hands back an *empty* subst -- `Some(empty)`,
-        // not `None`. Replacing the positional binding with nothing would
-        // silently drop the caller's explicit type argument. Fall back to
-        // the original positional contract whenever the seed carries no
-        // bindings; a genuinely generic target's seed is non-empty by
-        // construction (it always grounds at least the target's own
-        // variable), so that path is unaffected.
+        // P7b.S8b Phase 1 review (P2-5): a *concrete*-ctor target (`imp.target.is_concrete()`)
+        // never reaches `check_poly_call` at all -- its member is handled entirely by the
+        // mono branch above (`resolve_mono_member_call`), which does not consult this seed.
+        // This fallback fires for a target whose *pattern* is fully applied to concrete
+        // arguments (a lifted target, e.g. `impl: X for Range[i64]`) yet whose member still
+        // carries its own free local (`bar['U]`), so the member word stays polymorphic and
+        // does reach here (`lifted_mono` is false: the desugar only grounds a member with no
+        // free locals of its own). `Range[i64]`'s pattern has no free variables to bind, so
+        // `match_impl_target` hands back an *empty* subst -- `Some(empty)`, not `None`.
+        // Replacing the positional binding with nothing would silently drop the caller's
+        // explicit type argument (meant for `'U`, not for the target). Fall back to the
+        // original positional contract whenever the seed carries no bindings; a genuinely
+        // generic target's seed is non-empty by construction (it always grounds at least the
+        // target's own variable), so that path is unaffected.
         if impl_target_seed
             .as_ref()
             .is_none_or(|seed| seed.ty.is_empty())
@@ -15087,7 +15091,7 @@ mod tests {
     /// `poly_rendered_type_mismatch_error` (both sides would render
     /// identically for this exact case, since the header already matches
     /// before the length is even considered). The shape is spellable
-    /// (`Ring['T 'N: Len] head 'T rest Ring['T 'N]`, `tests/phase7b_slice8b.rs`'s
+    /// (`Ring['T 'N: Len] head 'T next ^Ring['T 'N]`, `tests/phase7b_slice8b.rs`'s
     /// `generic_field_with_a_length_variable_is_a_located_error`), not future
     /// work.
     #[test]

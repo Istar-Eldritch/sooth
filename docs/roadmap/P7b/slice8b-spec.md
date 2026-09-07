@@ -1,6 +1,10 @@
 # Spec: P7b.S8b — the construction-wall fix, the pre-existing two-defect pair it exposes, and traitful `List` members (`map`, `append`)
 
 **Status:** Landed (Phases 1-4).
+**Merge note:** `docs/roadmap/ROADMAP.md`'s P7b row conflicts with `main` at merge time
+(main's row reads S1–S10 landed, pending S8b/S8c, after the S6d retitle commits
+`e11f088`/`2683505`/`df9d55f`); resolve as "S1–S10, S8b landed; pending: S8c; S6d —
+slices as Iterator targets".
 **Discovery:** [slice8b-brief](./slice8b-brief.md), [slice8b-probes](./slice8b-probes.md)
 (P8b probe battery, segfault root-cause, spellings log, ledger — landed `b667916`).
 **Roadmap entry:** [P7b-higher-kinded-types.md](../P7b-higher-kinded-types.md), "P7b.S8b".
@@ -44,13 +48,17 @@ two-defect fix (required, not optional), and the traitful `List` surface as gold
   positionally against a `Generic` operand of the same ctor identity (`is_enum`, `idx`,
   `module`), recursing over field args vs operand args — both P8 shapes ground: an impl
   member body constructing `Cons`, and a plain generic word constructing `Cons`.
-- **R2.** Reject, with a located `poly_rendered_type_mismatch_error` (byte-exact), any
-  operand reaching the new arm that is not a `Generic` of the same identity (including a
+- **R2.** Reject, with a located `poly_rendered_type_mismatch_error`, any operand
+  reaching the new arm that is not a `Generic` of the same identity (including a
   `Concrete` operand) — never a panic, never a silent bind. Mirrors the `App` arm.
+  Byte-exact for the ctor-mismatch case (`badcons`, an integration pin); the
+  `Concrete`-operand case is asserted at unit level only
+  (`.contains("type mismatch")`, `src/check/poly.rs:15085`) — no live program reaches a
+  `Concrete` operand today, so only the ctor-mismatch pin is a real-program golden.
 - **R3.** Reject, as a located error (dedicated `poly_generic_field_len_unbound_error`, not
   `poly_rendered_type_mismatch_error` which would render identical text on both sides), a
   `Generic` field carrying a non-empty `len_args`. The stored `^List['T]` is `len_args: []`
-  today, but the shape is spellable now (`Ring['T 'N: Len] head 'T rest Ring['T 'N]`); the
+  today, but the shape is spellable now (`Ring['T 'N: Len] head 'T next ^Ring['T 'N]`); the
   message names the field header and its unbindable length variable.
 - **R4.** A nullary trait member called with an explicit type argument over a **generic,
   single-type-variable** impl target instantiates through the impl-target equation:
@@ -83,7 +91,8 @@ two-defect fix (required, not optional), and the traitful `List` surface as gold
   no self-reference field, a prior `Some` construction, then `empty[Opt[i64]]`) builds and
   runs exit 0 — it SIGSEGVs at the base — pinned as a golden independent of the List wall.
 - **R7.** The S6 recorded-wall witness flips from `..._construction_wall_is_recorded` to a
-  positive golden `monoid_for_list_append_construction_builds_and_runs_clean` (build, run, drop clean); the pre-S8b panic text is preserved in the doc comment.
+  positive golden `monoid_for_list_append_construction_builds_and_runs_clean` (build, run,
+  drop clean); the pre-S8b panic text is preserved in the doc comment.
 - **R8.** `impl: Functor for List` with the S6 signature (`map ( 'F['T] [ 'T -- 'U ] --
   'F['U] )`) grounds end-to-end: a consumer dispatching through a shared `Functor` bound
   with the `'U := 'T` specialization maps a real `List[i64]`, the member lowers as one
@@ -149,11 +158,15 @@ two-defect fix (required, not optional), and the traitful `List` surface as gold
   generic *struct* sharing a bare ctor name in unrecorded mono sites (same last-write-wins
   class); cross-module same-named variant names in the flat `enums.words` map. No known
   miscompile repro; future slice.
-- **Ordinary-word-walk double-record:** a mono `inline` (combinator) word's body checked as
-  an ordinary mono word records the construction span in `builtin_overloads`, which
-  `calls.rs`'s read wins over any splice-keyed one. Benign at one θ per mono body (the flat
-  map is not `span.module`-keyed, so cross-module same-named variants fall to the
-  pre-existing bare-key hazard). Deliberate scope stop; pinned by
+
+## New-in-slice caveat (recorded, pinned)
+
+- **Ordinary-word-walk double-record:** created by Phase 1's recording arm, not
+  pre-existing -- a mono `inline` (combinator) word's body checked as an ordinary mono
+  word records the construction span in `builtin_overloads`, which `calls.rs`'s read wins
+  over any splice-keyed one. Benign at one θ per mono body (the flat map is not
+  `span.module`-keyed, so cross-module same-named variants fall to the pre-existing
+  bare-key hazard). Deliberate scope stop; pinned by
   `mono_inline_combinator_variant_construction_builds_and_runs`.
 
 Also out of scope (brief + probes): iterator adaptors (`zip`/`take`/`rev`), lazy/streaming
