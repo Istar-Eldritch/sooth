@@ -454,3 +454,342 @@ fn generic_field_with_a_length_variable_is_a_located_error() {
         "error: `Ring` in `mkring` (line 4) cannot bind `Ring`'s length variable\n  the field names `Ring` with a length parameter, but constructing a value here infers no lengths; only the field's element type variables can be bound this way"
     );
 }
+
+/// P7b.S8b Phase 3 (R8): `Functor for List` -- the S6-dropped `map`
+/// golden, now that Phase 2 closes the construction wall `map`'s `Cons`
+/// recursion needs. Verbatim from the probe round's
+/// `p8b-map-list-end-to-end.sth` (`docs/roadmap/P7b/slice8b-probes.md`, Part
+/// 1a), minus the `import: intrinsics *`/`hosted::show` lines
+/// `single_file_hosted` already supplies.
+#[test]
+fn functor_for_list_map_grounds_end_to_end() {
+    let src = "
+import: core::list * ;
+trait: Functor['F: * -> *] :
+  map ( 'F['T] [ 'T -- 'U ] -- 'F['U] ) ;
+;
+impl: Functor for List
+  : map
+    swap
+    ~[ ( Nil ) drop drop Nil ]
+    ~[ ( Cons ) Cons> | v rest | dup v swap call rest ^> rot map ^ Cons ]
+    List? ;
+;
+: mkempty ( -- List[i64] ) Nil ;
+: showlist ( List[i64] -- )
+  ~[ ( Nil ) drop ]
+  ~[ ( Cons ) Cons> | v rest | v . rest ^> showlist ]
+  List? ;
+: main ( -- )
+  3 mkempty ^ Cons
+  2 swap ^ Cons
+  1 swap ^ Cons
+  [ 1 add ] map[i64 i64]
+  showlist ;
+";
+    assert_eq!(build_and_run("map-list-e2e", src), "2\n3\n4\n");
+}
+
+/// P7b.S8b Phase 3 (R8): the shared-bound variant of the map golden --
+/// `map` dispatched twice through a *shared* `Functor` bound (`'U := 'T`
+/// specialization, the spellings probe's verified substitute). Verbatim from
+/// `p8b-map-shared-bound-twice.sth` (`docs/roadmap/P7b/slice8b-probes.md`,
+/// Part 1a), same import elision as above.
+#[test]
+fn functor_for_list_map_through_a_shared_bound_grounds() {
+    let src = "
+import: core::list * ;
+trait: Functor['F: * -> *] :
+  map ( 'F['T] [ 'T -- 'U ] -- 'F['U] ) ;
+;
+impl: Functor for List
+  : map
+    swap
+    ~[ ( Nil ) drop drop Nil ]
+    ~[ ( Cons ) Cons> | v rest | dup v swap call rest ^> rot map ^ Cons ]
+    List? ;
+;
+: mkempty ( -- List[i64] ) Nil ;
+: twice['F: Functor 'T] ( 'F['T] [ 'T -- 'T ] -- 'F['T] )
+  | q |
+  q map
+  q map ;
+: showlist ( List[i64] -- )
+  ~[ ( Nil ) drop ]
+  ~[ ( Cons ) Cons> | v rest | v . rest ^> showlist ]
+  List? ;
+: main ( -- )
+  3 mkempty ^ Cons
+  2 swap ^ Cons
+  1 swap ^ Cons
+  [ 1 add ] twice
+  showlist ;
+";
+    assert_eq!(build_and_run("map-shared-bound-twice", src), "3\n4\n5\n");
+}
+
+/// P7b.S8b Phase 3 (R9): `combine` through a `Monoid` bound over two
+/// `List[i64]` spines, via a poly middleman (`merge['T: Monoid]`) rather than
+/// the direct `impl:` body S6's `monoid_for_list_append_construction_builds_and_runs_clean`
+/// already pins. Verbatim from `p8b-sp-4-combine-through-bound.sth`
+/// (`docs/roadmap/P7b/slice8b-probes.md`, Part 1a / Part 3 item 4). The probe's
+/// "green twice" verdict ran the SAME produced binary twice; this golden
+/// reproduces that: one build, two runs, identical pinned stdout (the
+/// determinism check, not just the output).
+#[test]
+fn monoid_for_list_combine_through_bound_grounds_and_is_stable() {
+    let src = "
+import: core::list * ;
+trait: Monoid['T] :
+  empty ( -- 'T ) ;
+  : combine ( 'T 'T -- 'T ) ;
+;
+impl: Monoid for List
+  : empty Nil ;
+  : combine
+    swap
+    ~[ ( Nil ) drop ]
+    ~[ ( Cons ) Cons> | v rest | rest ^> swap combine v swap ^ Cons ]
+    List? ;
+;
+: mkempty ( -- List[i64] ) Nil ;
+: merge['T: Monoid] ( 'T 'T -- 'T ) combine ;
+: showlist ( List[i64] -- )
+  ~[ ( Nil ) drop ]
+  ~[ ( Cons ) Cons> | v rest | v . rest ^> showlist ]
+  List? ;
+: main ( -- )
+  3 mkempty ^ Cons
+  2 swap ^ Cons
+  1 swap ^ Cons
+  3 mkempty ^ Cons
+  5 swap ^ Cons
+  merge
+  showlist ;
+";
+    let (_t, entry) = single_file_hosted("combine-through-bound", src);
+    let build = Command::new(env!("CARGO_BIN_EXE_sooth"))
+        .arg("build")
+        .arg(&entry)
+        .output()
+        .expect("sooth build should spawn");
+    assert!(
+        build.status.success(),
+        "build should have succeeded, stderr: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let binary = entry.with_extension("");
+    for run_idx in 1..=2 {
+        let run = Command::new(&binary).output().expect("binary should run");
+        assert_eq!(
+            run.status.code(),
+            Some(0),
+            "run {run_idx}: the built binary should exit 0 (a SIGSEGV is code None/139), stderr: {}",
+            String::from_utf8_lossy(&run.stderr)
+        );
+        assert_eq!(
+            String::from_utf8(run.stdout).expect("stdout should be utf8"),
+            "1\n2\n3\n5\n3\n",
+            "run {run_idx}: same binary, same output"
+        );
+    }
+}
+
+/// P7b.S8b Phase 3 (R4+R5, regression): the segfault round's minimal repro
+/// (`p8b-bisect-v1-drop-then-empty.sth`, `docs/roadmap/P7b/slice8b-probes.md`,
+/// Part 1a / Part 2 Step 1) -- a prior `Cons` construction, dropped, then
+/// `empty[List[i64]]`. Pre-Phase-1 this SIGSEGVs the direct binary
+/// (exit 139) though `sooth run` merely exits 1 silently; Phase 1's
+/// two-defect fix (theta seeding + per-instantiation variant words) is what
+/// this golden regresses against.
+#[test]
+fn list_shaped_two_defect_repro_grounds_after_phases_1_and_2() {
+    let src = "
+import: core::list * ;
+trait: Monoid['T] :
+  empty ( -- 'T ) ;
+  : combine ( 'T 'T -- 'T ) ;
+;
+impl: Monoid for List
+  : empty Nil ;
+  : combine
+    swap
+    ~[ ( Nil ) drop ]
+    ~[ ( Cons ) Cons> | v rest | rest ^> swap combine v swap ^ Cons ]
+    List? ;
+;
+: mkempty ( -- List[i64] ) Nil ;
+: showlist ( List[i64] -- )
+  ~[ ( Nil ) drop ]
+  ~[ ( Cons ) Cons> | v rest | v . rest ^> showlist ]
+  List? ;
+: main ( -- )
+  1 mkempty ^ Cons drop
+  empty[List[i64]] drop \"ok\" . ;
+";
+    assert_eq!(build_and_run("bisect-v1-drop-then-empty", src), "ok");
+}
+
+/// P7b.S8b Phase 3 (R9, spelling constraint): the explicit-route-only
+/// `empty[List[i64]]` mono-main golden -- no prior `List` construction in the
+/// program, so it is unaffected by (and does not regress-test) the Phase 1
+/// two-defect pair. Note (R9): the S6 golden `mconcat_over_list_dispatches`
+/// dispatches `Monoid for i64`'s `empty`, not `List`'s -- bound-directed
+/// `empty` resolving at the `List` impl itself remains unverified per R9 and
+/// is not claimed here (this golden pins the explicit route only).
+/// Shape verified at the probe round's
+/// `p8b-side-empty-instantiation-only.sth` (`docs/roadmap/P7b/slice8b-probes.md`,
+/// Part 1 battery: build OK, run exit 0, stdout `ok`); this fixture is a
+/// minimal from-scratch equivalent (that source is not inlined verbatim in
+/// Part 1a).
+#[test]
+fn explicit_empty_list_i64_mono_main_grounds() {
+    let src = "
+import: core::list * ;
+trait: Monoid['T] :
+  empty ( -- 'T ) ;
+  : combine ( 'T 'T -- 'T ) ;
+;
+impl: Monoid for List
+  : empty Nil ;
+  : combine drop ;
+;
+: main ( -- ) empty[List[i64]] drop \"ok\" . ;
+";
+    assert_eq!(build_and_run("empty-list-i64-only", src), "ok");
+}
+
+/// P7b.S8b Phase 3 (R10, linearity pin): an undropped `map` result is a
+/// located build error, never a silent drop or a panic -- the same
+/// `linear value left on the stack` diagnostic S8's own goldens exercise for
+/// other types. Byte-exact, measured from the live binary (this fixture's own
+/// line numbers, not a probe fixture's).
+#[test]
+fn undropped_map_result_is_a_located_linear_error() {
+    let stderr = build_error_located(
+        "undropped-map-result",
+        "
+import: core::list * ;
+trait: Functor['F: * -> *] :
+  map ( 'F['T] [ 'T -- 'U ] -- 'F['U] ) ;
+;
+impl: Functor for List
+  : map
+    swap
+    ~[ ( Nil ) drop drop Nil ]
+    ~[ ( Cons ) Cons> | v rest | dup v swap call rest ^> rot map ^ Cons ]
+    List? ;
+;
+: mkempty ( -- List[i64] ) Nil ;
+: main ( -- )
+  3 mkempty ^ Cons
+  2 swap ^ Cons
+  1 swap ^ Cons
+  [ 1 add ] map[i64 i64] ;
+",
+    );
+    assert_eq!(
+        stderr.trim_end(),
+        "error: linear value left on the stack in `main` (line 20)\n  body leaves a `List[i64]` beyond the 0 declared output(s): a linear value must be consumed exactly once, so `drop` it or return it\n  note: declared ( -- )"
+    );
+}
+
+/// P7b.S8b Phase 3 (R10, linearity pin): the `append`/`combine` twin of the
+/// pin above -- an undropped `combine` result over `List[i64]` is the same
+/// located error, never a silent drop or a panic. Byte-exact.
+#[test]
+fn undropped_append_result_is_a_located_linear_error() {
+    let stderr = build_error_located(
+        "undropped-append-result",
+        "
+import: core::list * ;
+trait: Monoid['T] :
+  empty ( -- 'T ) ;
+  : combine ( 'T 'T -- 'T ) ;
+;
+impl: Monoid for List
+  : empty Nil ;
+  : combine
+    swap
+    ~[ ( Nil ) drop ]
+    ~[ ( Cons ) Cons> | v rest | rest ^> swap combine v swap ^ Cons ]
+    List? ;
+;
+: mkempty ( -- List[i64] ) Nil ;
+: main ( -- )
+  3 mkempty ^ Cons
+  2 swap ^ Cons
+  1 swap ^ Cons
+  3 mkempty ^ Cons
+  5 swap ^ Cons
+  combine ;
+",
+    );
+    assert_eq!(
+        stderr.trim_end(),
+        "error: linear value left on the stack in `main` (line 24)\n  body leaves a `List[i64]` beyond the 0 declared output(s): a linear value must be consumed exactly once, so `drop` it or return it\n  note: declared ( -- )"
+    );
+}
+
+/// P7b.S8b Phase 3 (R11, linearity pin): `dup` of a `List['T]` operand in a
+/// poly body is the pre-existing `poly_copy_generic_error` fence (S8's
+/// carve-out; unrelated to the construction wall) -- byte-exact, the same
+/// shape class as the probe round's `p8b-dup-list-operand-fenced.sth`
+/// (`docs/roadmap/P7b/slice8b-probes.md`, Part 1), reproduced from scratch
+/// (that source is not inlined verbatim in Part 1a) since only the message,
+/// not the fixture bytes, is what this pins.
+#[test]
+fn dup_of_generic_list_operand_is_a_located_copy_error() {
+    let stderr = build_error_located(
+        "dup-list-operand",
+        "
+import: core::list * ;
+: duplist['T] ( List['T] -- List['T] List['T] ) dup ;
+: main ( -- ) ;
+",
+    );
+    assert_eq!(
+        stderr.trim_end(),
+        "error: cannot `dup` a generic type applied to a variable in `duplist` (line 5)\n  `List['T]` is conservatively linear: it may carry a linear argument at some instantiation, so it cannot be duplicated"
+    );
+}
+
+/// P7b.S8b Phase 3 (R12, distinct-`'U` fence): a plain poly word
+/// (`mapadd['F: Functor 'T 'U]`) that widens `Functor.map`'s bound to a
+/// second, output-only type variable is a located error -- inference does
+/// not bind an output-only variable through a shared bound (the spellings
+/// round's mechanical finding: a quotation literal only unifies against
+/// already-bound row variables). Byte-exact, reproduced from scratch to the
+/// same shape class as `p8b-map-distinct-u-unbound.sth`
+/// (`docs/roadmap/P7b/slice8b-probes.md`, Part 1); the working substitute
+/// this fence's Open-Questions note points to (`'U := 'T` specialization) is
+/// already exercised by `functor_for_list_map_grounds_end_to_end` above.
+#[test]
+fn map_output_variable_unbound_through_a_shared_functor_bound_is_located_error() {
+    let stderr = build_error_located(
+        "distinct-u-unbound",
+        "
+import: core::list * ;
+trait: Functor['F: * -> *] :
+  map ( 'F['T] [ 'T -- 'U ] -- 'F['U] ) ;
+;
+impl: Functor for List
+  : map
+    swap
+    ~[ ( Nil ) drop drop Nil ]
+    ~[ ( Cons ) Cons> | v rest | dup v swap call rest ^> rot map ^ Cons ]
+    List? ;
+;
+: mkempty ( -- List[i64] ) Nil ;
+: mapadd['F: Functor 'T 'U] ( 'F['T] [ 'T -- 'U ] -- 'F['U] ) map ;
+: main ( -- )
+  3 mkempty ^ Cons
+  [ drop \"x\" ] mapadd
+  drop ;
+",
+    );
+    assert_eq!(
+        stderr.trim_end(),
+        "error: `mapadd` in `main` (line 19) has output variable `'U` that no input binds\n  note: supply it explicitly: `mapadd[SomeType SomeType SomeType]`"
+    );
+}
