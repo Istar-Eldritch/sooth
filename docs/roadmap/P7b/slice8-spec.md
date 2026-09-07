@@ -168,11 +168,13 @@ alias import, or a rename).
 - Associated types / GATs — the slice exists to show they are not needed.
 - Borrow-based iteration (`&!`, lifetimes, exclusivity) — linearity replaces it.
 - No adaptor library (`zip`/`take`/`rev`/...), no lazy/streaming iteration;
-  `Iterator for array` is S6b territory; `Option`'s shape and surface consumed as-is.
-- Fusion is **evidence, not a ruling**: the roadmap records the facts (the loop is one frame;
+  `Iterator for array` is P7b.S6d territory; `Option`'s shape and surface consumed as-is.
+- Fusion is **evidence, then a measured ruling (260907)**: the roadmap records the facts (the loop is one frame;
   `next` is a real called frame; a two-consumer chain is two dedicated frames — "one frame" is
-  true of the loop, not of loop-plus-`next`), and the residual per-`next`-call frame question
-  is left open.
+  true of the loop, not of loop-plus-`next`) and the P8-F probe numbers: call-fusion would recover
+  ~16% of the protocol's per-element cost (the dominant ~62% is the Step-value protocol); on
+  embedded it trades flash size for a small cycle win. Ruled: deferred, reopen on measured need
+  (the high-leverage lever is streaming fusion, not call fusion).
 - The D5 borrow gate untouched; no numeric trait; no phantom parameters; `src/ir/`
   diff-empty; the QBE backend untouched.
 

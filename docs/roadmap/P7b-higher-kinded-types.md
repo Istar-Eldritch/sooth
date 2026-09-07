@@ -248,7 +248,7 @@ final drop lives inside `next`'s own `Done` arm, and `Done` carries nothing. One
 impl each for List (generic target) and a count-up `Range[i64]` (the S2-6
 concrete-impl-target lift, Delta B); `for_each`/`fold` over the Iterator bound, written
 once against neither impl; whether chained splices actually fuse in the IR is recorded
-as evidence, not a ruling.
+as evidence, and ruled deferred 260907 (the fusion ruling below).
 **Exit:** `for_each`/`fold` through the Iterator bound over List and Range goldens (no
 per-impl copy of either consumer); `next` over `Range[i64]` dispatches at a plain mono
 call site; the exhausted-case ruling and the fusion evidence below are written down.
@@ -267,7 +267,8 @@ traitful `List` members (`map`, `append`) over the Iterator protocol. A second
 follow-up, **P7b.S8c** (260906): the located-fence fix for member signatures with
 unbindable free type variables — the `src/ir/driver.rs:579` unification-expect ICE
 surfaced by the integrated review (pre-existing; reproducible at the S8 base).
-Fusion evidence (REQ-11, recorded facts only — no fusion verdict): a consuming loop's
+Fusion evidence (REQ-11, recorded facts only — the automated pin asserts no verdict;
+the measured ruling follows): a consuming loop's
 monomorphized `for_each` over `Range[i64]` lowers to **one emitted function** whose
 self-call in the `More` arm is a backward `jmp` to its own loop header (the P7.S3g
 self-tail transform, `src/ir/driver.rs:1093`, unchanged by this slice); `next` over
@@ -276,8 +277,20 @@ spliced) from inside that loop — and per element the loop body also calls the
 consumer's own quotation, its own frame; the one-frame claim excludes the caller's
 quotation. "One frame" is true of the loop, not of loop-plus-`next`
 together; a two-consumer chain (e.g. two dispatches through the bound in sequence) is
-two dedicated frames, not one fused one. Whether that residual per-`next`-call frame is
-worth eliminating is left open for a future slice — this one only measures it.
+two dedicated frames, not one fused one. **Ruled 260907 (P8-F fusion probe, measured on
+the amd64_sysv QBE emission, 10M-iteration min-of-3): fusion is deferred.** The direct
+`next` call fusion would remove costs ~1.3ns/element — a zero-call back-edge loop runs
+0.8ns/element, +one direct call 2.1, the protocol `for_each` drain 8.2 vs a hand-rolled
+drain 1.2 — i.e. ~16% of the protocol's per-element cost. The dominant ~62% is the
+Step-value protocol itself (pack/destructure/drop per element), which call-level fusion
+does not touch. On embedded the trade runs backwards regardless: splicing duplicates
+`next`'s ~150-byte body into every consuming loop (flash size) for a small cycle win,
+and the direct call is the WCET-friendly element (static target) — unlike the indirect
+quotation call, which fusion cannot remove. The high-leverage future lever is
+**streaming fusion** (eliding Step values in consuming loops — recovers most of the
+7ns abstraction tax), a design-bearing slice to reopen only on measured need. Hot-loop
+escape hatch, documented: hand-roll the loop (the P8-F f2c shape, 6.8× faster than the
+protocol drain).
 (`tests/phase7b_slice8.rs`'s
 `consuming_loop_over_range_is_one_frame_with_a_back_edge_and_next_is_a_real_frame` is
 the automated pin, captured via `driver::emit_ssa_with_manifest` rather than any
