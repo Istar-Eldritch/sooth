@@ -54,13 +54,33 @@ fix (required, not optional), and the traitful `List` surface (`map`, `append`) 
   `Generic` field carrying a non-empty `len_args` — the stored `^List['T]` field is
   `len_args: []` today and the arm's contract must say what a future length-carrying
   field gets.
-- **R4.** A nullary trait member called with an explicit type argument over a **generic**
-  impl target must instantiate the member through the impl-target equation —
-  `empty[List[i64]]` over `impl: Monoid for List` seeds the member's element variable from
-  matching the impl target `List['E]` against the call-site type (`'E := i64`), minting a
-  monomorph declared and returning `List[i64]` (a 24-byte Nil, SSA-verifiable) — never
-  `List[List[i64]]`. The concrete-target nullary path (S6's `empty[i64]` golden) stays
-  byte-unchanged.
+- **R4.** A nullary trait member called with an explicit type argument over a **generic,
+  single-type-variable** impl target must instantiate the member through the impl-target
+  equation — `empty[List[i64]]` over `impl: Monoid for List` seeds the member's element
+  variable from matching the impl target `List['E]` against the call-site type (`'E :=
+  i64`), minting a monomorph declared and returning `List[i64]` (a 24-byte Nil,
+  SSA-verifiable) — never `List[List[i64]]`. The concrete-target nullary path (S6's
+  `empty[i64]` golden) stays byte-unchanged. Qualification (review round, P1-4/P2-6): a
+  **multi-variable** impl target (e.g. `impl: Monoid for Pair['A 'B]`) is a pre-existing
+  fence, not covered by this requirement — `check_poly_call`'s arity gate
+  (`poly.rs:7421-7423`) compares the call site's `type_args.len()` against the member
+  sig's *full* variable count (target vars + member locals, `build_member_var_union`,
+  `src/parser.rs:768`), so `empty[Pair[i64 str]]` hits `instantiation_arity_error` before
+  the seed channel ever runs; the seed cannot be reached with an arity-matching call at
+  more than one target variable. Separately, the seed channel itself carries types only —
+  `Subst.len` is not threaded through it (`poly.rs:7439-7443`) — so a length-carrying
+  generic target (a `'N`-style variable) cannot ground a nullary member through this
+  route either; this is the same fence family as R3's unspellability note (which covers
+  the length-argument *spelling* side, not this seeding side). Asymmetry note: on the
+  nullary seed-channel path a written type argument means "the dispatch type" (matched
+  against the impl target pattern); on the operand-dispatched generic-call path (S3t) the
+  same written type argument still means "variable #0" (bound positionally). Both
+  fences are recorded here, not fixed — a future slice that lifts either is a distinct
+  unit of work from Phase 1's. Related defensive note: the seed's `Some(empty)` fallback
+  arm (`poly.rs:7441-7448`, positional restore when the impl-target equation binds
+  nothing) has no spelled fixture today — an all-concrete target pattern is the only shape
+  that reaches it, and no test spells one; mutating its discriminator to `is_none()`
+  survives the suite. Accepted as defensive coverage, recorded rather than fixture-built.
 - **R5.** A checker-resolved enum construction or destructure site must lower with its own
   resolved instantiation's field shapes even when another instantiation of the same header
   is minted later in the program — per-instantiation resolution applies wherever the
@@ -406,6 +426,7 @@ S6-pinned behavior).
 | Parallel edits to `src/check/poly.rs` (Phases 1 ∥ 2) conflict at merge | Med | Disjoint functions (dispatch ~2274-2640 vs construction-bind 6074-6193); landing rule: whoever lands second rebases and re-runs the full gate before proceeding |
 | Fixture sources cited by golden descriptions live only under `/tmp/p8b-probes/` (the probe logs themselves are already committed — `b667916` landed the full `slice8b-probes.md`, 741 lines, Parts 1-4) | Low | the five golden-model fixture sources are inlined verbatim in Probes Part 1a (durable, byte-checked against `/tmp/p8b-probes/`); no phase depends on `/tmp` surviving |
 | Wrong-θ intermediate state (arm landed, Phase 1 not) is suite-green but crash-prone for `empty[…]` programs | Med | Sequencing rule: Phase 3 (which writes `empty[List[i64]]` goldens) starts only after both Phase 1 and Phase 2 land; no in-repo test exercises the intermediate state |
+| The new per-instantiation record (R5) also fires when a mono `inline` (combinator) word's body is checked as an *ordinary mono word* with the real maps (`check.rs:1036-1053`), not only inside a splice — so a construction span can land in both `builtin_overloads` (from that ordinary-word walk) and `splice_enum_words` (from the spliced walk), and `calls.rs:480`'s `builtin_overloads` read wins over the splice-keyed one | Low | Deliberate scope stop, not fixed in Phase 1: threading an `is_combinator` flag through `Ctx` to suppress the ordinary-word-walk record is out of this phase's lane. Benign at one θ per mono body (the flat `builtin_overloads` map is not `span.module`-keyed, so a cross-module same-named variant would resolve through the same pre-existing bare-key hazard this map already carries — R5's own doc comment). Pinned by a golden: a mono `inline` word constructing a variant, called from `main`, builds and runs — see `mono_inline_combinator_variant_construction_builds_and_runs` (`tests/phase7b_slice8b.rs`) |
 
 ## Delivery Plan
 

@@ -2053,6 +2053,7 @@ pub(super) fn resolve_splice_member_call(
                 span,
                 &[],
                 &[],
+                None,
                 stack,
                 ctx,
                 env,
@@ -2367,6 +2368,18 @@ pub(super) fn resolve_mono_member_call(
     // call site supplies an explicit type argument, that argument is the only
     // way to ground the trait's own type variable; ground it directly and run
     // the same `find_bound_impl` the operand path uses.
+    //
+    // P7b.S8b Phase 1 (R4): the impl-target equation `find_bound_impl`
+    // already computed (`match_impl_target` of the target pattern against
+    // the call-site type: `Opt['ctor0]` vs `Opt[i64]` gives `'ctor0 := i64`)
+    // is kept, not discarded. For a *generic* target it is the only correct
+    // seed for the member word's θ -- the member word's variables are the
+    // impl target's own, member locals appended after (`build_member_var_union`,
+    // `src/parser.rs:768`), so the call-site type belongs one level below
+    // variable #0, not in it. Seeding it positionally minted
+    // `Opt[Opt[i64]]`, whose variant words then clobbered lowering's
+    // bare-name map and re-typed every `Some`/`Cons` in the program.
+    let mut impl_target_seed: Option<Subst> = None;
     if viable.is_empty() {
         if let (Some(&ty), [(zero_tid, zero_m)]) = (
             type_args.first(),
@@ -2378,7 +2391,7 @@ pub(super) fn resolve_mono_member_call(
                 .as_slice(),
         ) {
             let mut visited: Vec<(TraitId, Type)> = Vec::new();
-            if let Some((imp_idx, _)) = find_bound_impl(
+            if let Some((imp_idx, subst)) = find_bound_impl(
                 *zero_tid,
                 ty,
                 None,
@@ -2391,6 +2404,7 @@ pub(super) fn resolve_mono_member_call(
                 &mut visited,
             )? {
                 viable.push((*zero_tid, *zero_m, imp_idx));
+                impl_target_seed = Some(subst);
             }
         }
     }
@@ -2623,8 +2637,23 @@ pub(super) fn resolve_mono_member_call(
             "a dispatched impl's member word is always in the whole-program poly_env"
         );
         let next = check_poly_call(
-            &word_sym, span, type_args, len_args, stack, ctx, env, scope, arrays, cells, refs,
-            slices, prov, live, at, poly,
+            &word_sym,
+            span,
+            type_args,
+            len_args,
+            impl_target_seed.as_ref(),
+            stack,
+            ctx,
+            env,
+            scope,
+            arrays,
+            cells,
+            refs,
+            slices,
+            prov,
+            live,
+            at,
+            poly,
         )?;
         Ok(Some(next))
     }
@@ -7331,6 +7360,14 @@ pub(super) fn check_poly_call(
     span: Span,
     type_args: &[Type],
     len_args: &[Len],
+    // P7b.S8b Phase 1 (R4): the impl-target equation for a nullary trait
+    // member dispatched over a *generic* impl target, on its own channel.
+    // A member word is polymorphic over both its impl target's variables and
+    // its own locals, so this seed is partial by nature and cannot ride the
+    // `type_args` channel, whose positional contract (P7.S3t, below) binds
+    // variable `i` from argument `i`. `None` at every other caller, which
+    // keeps that contract exactly as it was.
+    impl_target_seed: Option<&Subst>,
     stack: &mut Vec<Slot>,
     ctx: &Ctx,
     env: &HashMap<String, Vec<Overload>>,
@@ -7385,9 +7422,37 @@ pub(super) fn check_poly_call(
         if type_args.len() != sig.ty_var_names.len() {
             return Err(instantiation_arity_error(span, name, &sig, type_args.len()));
         }
-        for (v, ty) in type_args.iter().enumerate() {
-            subst.ty.push((v as u32, *ty));
-            seeded.push(v as u32);
+        // P7b.S8b Phase 1 (R4): the arity gate above still reads the
+        // explicit list -- a wrong-arity `empty[A B]` is the same located
+        // error it was -- but an impl-target seed *replaces* the positional
+        // binding, because on that path the written type argument is the
+        // dispatch operand, not variable #0's value.
+        //
+        // P7b.S8b Phase 1 review (P2-5): a *concrete*-ctor impl target whose
+        // member still carries free locals (e.g. `impl: T for Point`, member
+        // `f['U]`) matches `match_impl_target` against zero free variables,
+        // so `find_bound_impl` hands back an *empty* subst -- `Some(empty)`,
+        // not `None`. Replacing the positional binding with nothing would
+        // silently drop the caller's explicit type argument. Fall back to
+        // the original positional contract whenever the seed carries no
+        // bindings; a genuinely generic target's seed is non-empty by
+        // construction (it always grounds at least the target's own
+        // variable), so that path is unaffected.
+        if impl_target_seed
+            .as_ref()
+            .is_none_or(|seed| seed.ty.is_empty())
+        {
+            for (v, ty) in type_args.iter().enumerate() {
+                subst.ty.push((v as u32, *ty));
+                seeded.push(v as u32);
+            }
+        } else if let Some(seed) = &impl_target_seed {
+            // `match_impl_target` keeps `Subst::ty` in variable-id order,
+            // which is the ascending-id push order this block owes `Subst`.
+            for (v, ty) in &seed.ty {
+                subst.ty.push((*v, *ty));
+                seeded.push(*v);
+            }
         }
     }
     // P7.S6b (R3): the length twin of the type-argument seeding above. R2b:
@@ -12582,6 +12647,71 @@ mod tests {
              : main ( -- ) 7 empty[i64] combine drop ;\n",
         )
         .expect("empty[i64] grounds Monoid's 'T from the explicit type argument");
+    }
+
+    /// The generic-target twin of the fixture above, whose `impl:` target is
+    /// `Opt['ctor0]` rather than a concrete `i64`.
+    fn nullary_member_generic_target_src() -> &'static str {
+        "type: Opt['T] | None | Some 'T ;\n\
+         trait: Monoid['T] :\n\
+         empty ( -- 'T ) ;\n\
+         : combine ( 'T 'T -- 'T ) ;\n\
+         ;\n\
+         impl: Monoid for Opt\n\
+           : empty None ;\n\
+           : combine drop ;\n\
+         ;\n\
+         : mkopt ( i64 -- Opt[i64] ) Some ;\n\
+         : main ( -- ) 1 mkopt drop empty[Opt[i64]] drop ;\n"
+    }
+
+    /// P7b.S8b Phase 1 (R4): over a *generic* impl target the call-site type
+    /// argument is the dispatch operand, not variable #0's value -- the
+    /// member word's variables are the impl target's own (`build_member_var_union`,
+    /// `src/parser.rs:768`), so the written `Opt[i64]` belongs one level below
+    /// `'ctor0`. Seeding it positionally (P7.S3t's contract, right for every
+    /// other caller) minted the monomorph at `Opt[Opt[i64]]`; the impl-target
+    /// equation `find_bound_impl` already computed says `'ctor0 := i64`.
+    /// Asserted on the minted enum registry, the one place the wrong
+    /// instantiation is visible without lowering.
+    #[test]
+    fn nullary_member_over_a_generic_target_mints_the_one_level_instantiation() {
+        let (module, _) = checked_like_a_build(nullary_member_generic_target_src())
+            .expect("the generic-target nullary fixture checks");
+        let names: Vec<&str> = module.enums.iter().map(|e| e.name.as_str()).collect();
+        assert!(
+            names.contains(&"Opt[i64]"),
+            "the member's own instantiation is minted: {names:?}"
+        );
+        assert!(
+            !names.contains(&"Opt[Opt[i64]]"),
+            "the positionally-seeded one-level-too-deep mint is gone: {names:?}"
+        );
+    }
+
+    /// P7b.S8b Phase 1 (R4): the seed replaces the explicit list's *binding*,
+    /// not the list's own arity check. `check_poly_call`'s
+    /// `instantiation_arity_error` still reads `type_args`, so a surplus
+    /// argument stays the located error it was before the channel existed.
+    #[test]
+    fn nullary_member_with_surplus_type_args_is_still_an_arity_error() {
+        let err = check_src(
+            "type: Opt['T] | None | Some 'T ;\n\
+             trait: Monoid['T] :\n\
+             empty ( -- 'T ) ;\n\
+             : combine ( 'T 'T -- 'T ) ;\n\
+             ;\n\
+             impl: Monoid for Opt\n\
+               : empty None ;\n\
+               : combine drop ;\n\
+             ;\n\
+             : main ( -- ) empty[Opt[i64] i64] drop ;\n",
+        )
+        .expect_err("two type arguments for one declared variable");
+        assert!(
+            err.contains("declares 1 type variable") && err.contains("given 2 type arguments"),
+            "the untouched arity gate still fires: {err}"
+        );
     }
 
     /// P7b.S6 Phase 4 (R5): Q1 rules out consuming-context inference for this
