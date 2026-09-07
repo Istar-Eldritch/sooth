@@ -288,9 +288,14 @@ does not touch. On embedded the trade runs backwards regardless: splicing duplic
 and the direct call is the WCET-friendly element (static target) — unlike the indirect
 quotation call, which fusion cannot remove. The high-leverage future lever is
 **streaming fusion** (eliding Step values in consuming loops — recovers most of the
-7ns abstraction tax), a design-bearing slice to reopen only on measured need. Hot-loop
+7ns abstraction tax), a design-bearing slice to reopen only on measured need. For
+calibration: the same fold over the same half-open range in Rust (100M elements, rustc
+-O, min-of-3) measures ~0.6ns/element in BOTH the iterator form and the hand-written
+loop — LLVM collapses the former into the latter, so Rust's protocol tax is ~1× and
+Sooth's is ~13× today. That gap is the streaming-fusion-plus-inlining lever, not the
+call lever. Hot-loop
 escape hatch, documented: hand-roll the loop (the P8-F f2c shape, 6.8× faster than the
-protocol drain).
+protocol drain, within ~2× of Rust's hand-written loop).
 (`tests/phase7b_slice8.rs`'s
 `consuming_loop_over_range_is_one_frame_with_a_back_edge_and_next_is_a_real_frame` is
 the automated pin, captured via `driver::emit_ssa_with_manifest` rather than any
