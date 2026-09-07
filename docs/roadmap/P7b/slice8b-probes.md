@@ -4,7 +4,8 @@ Consolidated verbatim evidence for the S8b spec. Three rounds, all on base
 `c406149` (+ `/tmp/p8b-arm.patch`, the measured wall arm, where noted):
 
 1. **Round P8b** (the brief's PB-1..PB-6 battery) — fixtures under
-   `/tmp/p8b-probes/`, full 26-fixture rerun captured below (Part 1).
+   `/tmp/p8b-probes/`, full 26-fixture rerun captured below (Part 1); Part 1a inlines
+   the golden-model fixture sources these goldens cite, verbatim, for durability.
 2. **Segfault root-cause** (worker run d9e51aa6) — why `empty[List[i64]]`
    crashed after any prior List construction: a pre-existing S6-era two-defect
    pair (θ seeding + variant-map clobber). Verbatim log (Part 2).
@@ -144,6 +145,164 @@ error: linear value left on the stack in `main` (line 14)
   body leaves a `List[i64]` beyond the 0 declared output(s): a linear value must be consumed exactly once, so `drop` it or return it
   note: declared ( -- )
 ```
+
+# Part 1a — golden-model fixture sources, inlined 260907 for durability
+
+Phase 3's map/append goldens and Phase 2's P8-2d2 exit criterion name `/tmp`-resident
+fixtures by filename. Inlined here verbatim (byte-identical to `/tmp/p8b-probes/<name>`
+at probe time) so the spec's golden-model descriptions do not depend on a volatile path.
+Each source is followed by a one-line restatement of its Part 1 (or, where noted, Part 2/3)
+verdict.
+
+### `p8b-2d2-plain-generic-cons-helper.sth`
+
+```sth
+import: intrinsics * ;
+import: core::list * ;
+: cons2['T] ( 'T List['T] -- List['T] ) ^ Cons ;
+: mknil ( -- List[i64] ) Nil ;
+: main ( -- ) 5 mknil cons2 drop ;
+```
+
+Verdict (Part 1): build OK, run exit 0 — the P8-2d2 shape (a plain generic word
+constructing `Cons`) grounds via the helper-function spelling.
+
+### `p8b-map-list-end-to-end.sth`
+
+```sth
+import: intrinsics * ;
+import: core::list * ;
+import: hosted::show | . | ;
+trait: Functor['F: * -> *] :
+  map ( 'F['T] [ 'T -- 'U ] -- 'F['U] ) ;
+;
+impl: Functor for List
+  : map
+    swap
+    ~[ ( Nil ) drop drop Nil ]
+    ~[ ( Cons ) Cons> | v rest | dup v swap call rest ^> rot map ^ Cons ]
+    List? ;
+;
+: mkempty ( -- List[i64] ) Nil ;
+: showlist ( List[i64] -- )
+  ~[ ( Nil ) drop ]
+  ~[ ( Cons ) Cons> | v rest | v . rest ^> showlist ]
+  List? ;
+: main ( -- )
+  3 mkempty ^ Cons
+  2 swap ^ Cons
+  1 swap ^ Cons
+  [ 1 add ] map[i64 i64]
+  showlist ;
+```
+
+Verdict (Part 1): build OK, run exit 0, stdout `2\n3\n4` — `map` through the `Functor`
+bound over a real `List[i64]` grounds end-to-end.
+
+### `p8b-map-shared-bound-twice.sth`
+
+```sth
+import: intrinsics * ;
+import: core::list * ;
+import: hosted::show | . | ;
+trait: Functor['F: * -> *] :
+  map ( 'F['T] [ 'T -- 'U ] -- 'F['U] ) ;
+;
+impl: Functor for List
+  : map
+    swap
+    ~[ ( Nil ) drop drop Nil ]
+    ~[ ( Cons ) Cons> | v rest | dup v swap call rest ^> rot map ^ Cons ]
+    List? ;
+;
+: mkempty ( -- List[i64] ) Nil ;
+: twice['F: Functor 'T] ( 'F['T] [ 'T -- 'T ] -- 'F['T] )
+  | q |
+  q map
+  q map ;
+: showlist ( List[i64] -- )
+  ~[ ( Nil ) drop ]
+  ~[ ( Cons ) Cons> | v rest | v . rest ^> showlist ]
+  List? ;
+: main ( -- )
+  3 mkempty ^ Cons
+  2 swap ^ Cons
+  1 swap ^ Cons
+  [ 1 add ] twice
+  showlist ;
+```
+
+Verdict (Part 1): build OK, run exit 0, stdout `3\n4\n5` — `map` dispatched twice through
+a *shared* `Functor` bound (the `'U := 'T` specialization) grounds.
+
+### `p8b-sp-4-combine-through-bound.sth`
+
+```sth
+import: intrinsics * ;
+import: core::list * ;
+import: hosted::show | . | ;
+trait: Monoid['T] :
+  empty ( -- 'T ) ;
+  : combine ( 'T 'T -- 'T ) ;
+;
+impl: Monoid for List
+  : empty Nil ;
+  : combine
+    swap
+    ~[ ( Nil ) drop ]
+    ~[ ( Cons ) Cons> | v rest | rest ^> swap combine v swap ^ Cons ]
+    List? ;
+;
+: mkempty ( -- List[i64] ) Nil ;
+: merge['T: Monoid] ( 'T 'T -- 'T ) combine ;
+: showlist ( List[i64] -- )
+  ~[ ( Nil ) drop ]
+  ~[ ( Cons ) Cons> | v rest | v . rest ^> showlist ]
+  List? ;
+: main ( -- )
+  3 mkempty ^ Cons
+  2 swap ^ Cons
+  1 swap ^ Cons
+  3 mkempty ^ Cons
+  5 swap ^ Cons
+  merge
+  showlist ;
+```
+
+Verdict (Part 3, item 4): build OK, run exit 0, stdout `1 2 3 5 3` (green twice) —
+`combine` through a shared `Monoid` bound appends two `List[i64]` spines correctly.
+
+### `p8b-bisect-v1-drop-then-empty.sth`
+
+```sth
+import: intrinsics * ;
+import: core::list * ;
+import: hosted::show | . | ;
+trait: Monoid['T] :
+  empty ( -- 'T ) ;
+  : combine ( 'T 'T -- 'T ) ;
+;
+impl: Monoid for List
+  : empty Nil ;
+  : combine
+    swap
+    ~[ ( Nil ) drop ]
+    ~[ ( Cons ) Cons> | v rest | rest ^> swap combine v swap ^ Cons ]
+    List? ;
+;
+: mkempty ( -- List[i64] ) Nil ;
+: showlist ( List[i64] -- )
+  ~[ ( Nil ) drop ]
+  ~[ ( Cons ) Cons> | v rest | v . rest ^> showlist ]
+  List? ;
+: main ( -- )
+  1 mkempty ^ Cons drop
+  empty[List[i64]] drop "ok" . ;
+```
+
+Verdict (Part 2): build OK; `sooth run` exits 1 with no output; the direct binary
+SIGSEGVs (exit 139), reproducibly, twice — this is the segfault-round's minimal repro
+for the pre-existing θ-seeding + variant-word-clobber pair (Part 2, Step 1/2).
 
 # Part 2 — Segfault root-cause log (worker d9e51aa6, verbatim)
 

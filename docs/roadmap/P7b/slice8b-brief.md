@@ -131,6 +131,8 @@ Design questions the probe round must answer:
   the named members. Note the roadmap's "over the Iterator protocol" phrase is
   loose; the S6 recorded-wall shapes are the concrete reading this brief
   probes.
+  Outcome (260907, user ruling): Monoid for List; whole wall closes — both goldens land
+  in S8b. See slice8b-spec.md.
 - **PB-6 — linearity teeth on the new constructions.** An undropped mapped or
   appended list is a compile error (`drop` is the explicit destructor; nothing
   auto-drops); `dup` of a `List['T]` operand stays fenced (conservative
