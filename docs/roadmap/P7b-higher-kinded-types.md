@@ -267,8 +267,8 @@ date): the S6 construction-wall fix (`poly_bind_construction_arg`'s bare-`Generi
 `^Self['T]` self-reference-field arm, refined by the P8 round) plus per-impl
 traitful `List` members (`map`, `append`) over the `Functor`/`Monoid` protocols S6
 left as a recorded wall (see below). A second
-follow-up, **P7b.S8c** (260906): the located-fence fix for member signatures with
-unbindable free type variables — the `src/ir/driver.rs:579` unification-expect ICE
+follow-up, **P7b.S8c** (260906): the per-site binding fix for member signatures with
+free input type variables — the `src/ir/driver.rs:579` unification-expect ICE
 surfaced by the integrated review (pre-existing; reproducible at the S8 base).
 Fusion evidence (REQ-11, recorded facts only — the automated pin asserts no verdict;
 the measured ruling follows): a consuming loop's
@@ -537,26 +537,68 @@ multi-use, `!Slice` linear — which takes the impl, or both), the remainder's
 mutability, and the linear-discipline story for a view that owns nothing. Size: `S-M`
 (checker/target-grammar only; no `src/ir/` change; lib impl + goldens).
 
-**P7b.S8c — Located fence for member signatures with unbindable free type variables.**
-Found by the P7b.S8 integrated review (260906); pre-existing, not introduced by S8 — the
-repro reproduces at the S8 base `86ca5eb`. A trait member whose signature carries a free
-INPUT type variable — not the trait's header variable, not bound by any bound bracket —
-passes checking and panics at IR instantiation: the unification `expect` in
-`subst_polytype` (`src/ir/driver.rs:579`, "checked: unification bound every input type
-variable"). Shape (verified 260906, panics at `src/ir/driver.rs:579:14` on tip and at the
-S8 base `86ca5eb` alike): a struct type with a `mkbox`-style constructor word (ctor names
-resolve under a declared-type expectation), a trait member carrying a free input variable
-(`trait: Odd['T] : odd ( 'U &'T -- ) ;` — `'U` is bound by nothing), an impl, and a
-bound-dispatched consumer (`: consume ['T: Odd] ( 'U &'T -- ) odd ;` called as
-`mkbox | b | 7 &b consume`); the build succeeds and the PANIC fires at run/IR time. Fix
-direction, to be settled by the slice's own discovery:
-either a check-stage located fence (a member type variable that neither the header nor
-its bounds binds is rejected where it is declared — measure-then-pin, diagnostics are
-behaviour, the IR `expect` remains as a backstop) or a binding rule that grounds free
-member variables at the impl target/call site like `'B` above. Scope: `src/check/` only,
-no `src/ir/` change, unit tests beside the changed checker code, goldens for both
-dispatch routes (mono call site and bound dispatch), and the S8-review repro twins
-panicked→located. Size: `S`. The 260907 recon round (probes + paper tests, [slice8c-brief](./P7b/slice8c-brief.md) with [slice8c-probes](./P7b/slice8c-probes.md) and [slice8c-paper-tests](./P7b/slice8c-paper-tests.md)) measured the surface as a five-route dispatch taxonomy: the panic is a build-time lowering panic (the check succeeds; `sooth build` exits 101, no binary — the entry's "the build succeeds and the PANIC fires at run/IR time" wording is a corrigendum), the mint arm's match-only substitution is the mechanism (`resolve_user_bound`'s non-CtorImage generic-winner arm records the member instantiation without the member row's own variables in θ, while the CtorImage arm grounds them per site), and the concrete-target arm carries an adjacent *silent* no-site-check hole (`ground_member_type` collapses every member local to the target; a `List[i64]` flowed through an i64-typed member slot unchecked) — fold-in-or-carve-out is the spec's D2. Round 2 (five `prober` workers at the S8b base, same day) re-verified every measurement byte-identical, added the array-element and bare-var-target panic cells, **exploit-confirmed** the concrete hole (unambiguous wrong output), and **refuted** the declaration-fence option's blast-radius claim (a plain-slot fence breaks ≥7 green tests including S6's `Foldable::fold` exit golden) — the D1 evidence now leans to the per-site binding rule.
+**P7b.S8c — Per-site binding for member signatures with free input type variables.**
+Closes the lowering panic the P7b.S8 integrated review found (260906; pre-existing, not
+introduced by S8 — the repro reproduces at the S8 base `86ca5eb`): a trait member whose
+signature carries a free INPUT type variable — not the trait's header variable, not bound
+by any bound bracket — passed checking and panicked at lowering, reaching
+`subst_polytype`'s unification `expect` (`src/ir/driver.rs:579`, "checked: unification
+bound every input type variable") from lowering's R9 instantiation loop; the panic was a
+**build-time lowering panic**, not a run/IR-time one — the check succeeded, `sooth build`
+exited 101, and produced no binary. Shape: a struct type with a `mkbox`-style constructor
+word (ctor names resolve under a declared-type expectation), a trait member carrying a
+free input variable (`trait: Odd['T] : odd ( 'U &'T -- ) ;` — `'U` is bound by nothing),
+an impl, and a bound-dispatched consumer (`: consume ['T: Odd] ( 'U &'T -- ) odd ;`
+called as `mkbox | b | 7 &b consume`).
+
+The surface was a dispatch taxonomy keyed in `resolve_user_bound` (`src/check/poly.rs:8981`)
+on the obligation's `ty`: the healthy CtorImage route (a CtorImage-headed operand grounds
+every member variable per site); the ICE route (the non-CtorImage generic-winner mint arm,
+recording the member instantiation without the member row's own variables in θ — the
+operand cells that hit it were the plain slot, the `&'T` ref, the quotation-row, and the
+array-element shapes); the concrete-winner hole (the non-CtorImage concrete-winner arm was
+a *silent* no-site-check hole — `ground_member_type`'s `Var` arm, `src/ast.rs:2241`,
+collapses every free member local to the target type, so an operand of any type flowed
+through unchecked); and the QuotLit cell (its own dedicated fence, untouched by this
+slice). The direct mono member call and the lifted mono ctor-app target are the untouched
+healthy routes outside this taxonomy (the `is_concrete()` gate on D2 exists to protect the
+latter). On the impl-target side, two spellings hit the ICE route the same way: the
+bare-var-target spelling (`for 'T`), and a bare-CTOR-target spelling (`impl: Odd for Box`,
+no type argument) — `for Box` desugars to `for Box['ctor0]` (`src/parser.rs:677-678`),
+structurally the same one-variable generic-pattern shape as the bare-var-target cell, so it
+panicked at the slice's baseline too and is grounded by this fix as well, though it carries
+no dedicated golden of its own (unwitnessed end-to-end).
+
+Shipped: direction B — per-site binding in the mint arm (`resolve_user_bound`'s
+non-CtorImage generic-winner arm, `src/check/poly.rs:9315-9364`; `compose_member_theta`,
+`poly.rs:9415-9471`) composes `theta` as `subst.clone()` (the impl-target match
+substitution) extended per call site with that site's own re-grounded operands, unified
+against the member word's signature (`unify_poly_input`, `poly.rs:10747`), and fails
+closed on any signature variable still unbound before minting (`poly.rs:9462`) — the
+fence that keeps `driver.rs:579` unreached, never touching it directly (REQ-3). D2's
+concrete-arm site-slot check folds in alongside it (`check_concrete_member_site_slots`,
+`poly.rs:9506`, gated on `imp.target.is_concrete()`): a plain `Type` equality comparison
+between each re-grounded operand and the member word's already-grounded declared input —
+stricter than the direct mono call's `match_slot` (`src/check.rs:381`), which admits
+exactly one coercion (an `i64` literal to a size type); bound-dispatch slots carry no
+literal coercion at all, by design.
+
+The repro twins panicked→**grounded** (they build and run): only three shapes stay
+**located** rather than grounded — the mint arm's residual-unbound-variable fail-closed
+tail (a shape neither the impl-target match nor the site's own operands determine), the
+QuotLit cell, and D2's concrete-arm mismatch. Scope: `src/check/` only, no `src/ir/`
+change (`driver.rs:579` unchanged; G2/G4 double as the proof it never fires on the
+already-healthy routes). Size: `M`/`S`/`M`/`S` across the slice's four phases (mint-arm
+fix / concrete-arm fix / goldens / roadmap-and-gate). See [slice8c-spec](./P7b/slice8c-spec.md)
+with its frozen [slice8c-brief](./P7b/slice8c-brief.md), [slice8c-probes](./P7b/slice8c-probes.md),
+and [slice8c-paper-tests](./P7b/slice8c-paper-tests.md).
+Growth-structure re-check (CLAUDE.md, at this phase's exit) over the files this slice
+touched — `src/check/poly.rs` and `tests/phase7b_slice8.rs`: no new signals from
+this slice's diff; `poly.rs`'s standing count (still 3/5) is unchanged (the two new
+functions, `compose_member_theta` and `check_concrete_member_site_slots`, sit beside
+`resolve_user_bound`'s existing arms as more binding/check functions of the same kind
+already there), so the split stays deferred. `tests/phase7b_slice8.rs` is an existing
+file gaining goldens in place, not a new module.
 
 **P7b.S11 — Per-call-site grounding for bare generic constructors.**
 Carved out of the P7b semantics walkthrough (260907) after probe round dp_a–dp_h
