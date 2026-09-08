@@ -9369,6 +9369,33 @@ fn resolve_user_bound(
             // minting an instantiation of it would name a body that no
             // monomorphization pass will ever emit (`impl_mono_seed`
             // requires `poly: Some`).
+            //
+            // P7b.S8c (D2/REQ-2): a concrete target's member word carries an
+            // already-grounded `StackEffect` in which `ground_member_type`'s
+            // `Var` arm (`src/ast.rs:2241`) pinned every free member local to
+            // the target type. This arm minted the bare symbol without ever
+            // comparing the site's operands against that effect, so an
+            // operand of *any* type flowed through such a local slot and the
+            // member body computed on its raw slot word -- silent wrong
+            // typing, not a panic. Check it, gated on `is_concrete` so the
+            // arm's other tenant (a lifted mono ctor-app target, Route E) is
+            // untouched: its compatibility is already checked as plain type
+            // equality in the CtorImage arm above.
+            if imp.target.is_concrete() {
+                check_concrete_member_site_slots(
+                    &tr.words[*idx],
+                    &trait_decl.name,
+                    ob,
+                    sig,
+                    caller_subst,
+                    name,
+                    span,
+                    ctx,
+                    arrays,
+                    cells,
+                    refs,
+                )?;
+            }
             word_sym.clone()
         };
         trait_calls.insert(ob.span, symbol);
@@ -9400,15 +9427,7 @@ fn compose_member_theta(
     refs: &mut Vec<RefDecl>,
     base: Subst,
 ) -> Result<Subst, String> {
-    // Before any re-grounding: a written quotation literal can reach a plain
-    // member slot (`unify_member_operand`'s `(Var(v), found)` bind arm
-    // accepts it), and `apply_subst`'s `QuotLit` arm is `unreachable!`. Fence
-    // it located here.
-    if let Some(slot) = ob.slots.iter().position(|s| *s == PolyType::QuotLit) {
-        return Err(member_slot_quotation_literal_error(
-            ctx, ob.span, &ob.member, trait_name, slot,
-        ));
-    }
+    fence_quotation_literal_slot(ctx, ob, trait_name)?;
     let site_slots: Vec<Type> = ob
         .slots
         .iter()
@@ -9450,6 +9469,95 @@ fn compose_member_theta(
     theta.ty.sort_by_key(|(v, _)| *v);
     theta.len.sort_by_key(|(v, _)| *v);
     Ok(theta)
+}
+
+/// P7b.S8c (REQ-1/REQ-2): the fence both re-grounding arms of
+/// `resolve_user_bound` run *before* touching a slot. A written quotation
+/// literal can reach a plain member slot (`unify_member_operand`'s
+/// `(Var(v), found)` bind arm accepts it, unlike a declared `Quotation`
+/// slot), and `apply_subst`'s `QuotLit` arm is `unreachable!` -- so the
+/// marker has to be rejected located at the dispatch site instead.
+fn fence_quotation_literal_slot(
+    ctx: &Ctx,
+    ob: &TraitObligation,
+    trait_name: &str,
+) -> Result<(), String> {
+    match ob.slots.iter().position(|s| *s == PolyType::QuotLit) {
+        Some(slot) => Err(member_slot_quotation_literal_error(
+            ctx, ob.span, &ob.member, trait_name, slot,
+        )),
+        None => Ok(()),
+    }
+}
+
+/// P7b.S8c (D2/REQ-2, P2-1): the concrete-winner arm's site-slot
+/// compatibility check. `word` is the member word a concrete `impl:` target's
+/// desugar registered -- `poly: None`, its `StackEffect` already grounded at
+/// the target (`src/parser.rs:4589-4608`), so there is no `PolySig` here and
+/// nothing to unify: after re-grounding the obligation's slots through the
+/// caller's θ this is plain `Type` equality, the same test the lifted-mono
+/// tenant of the same arm makes against its own grounded effect.
+///
+/// The ruling this enforces: a free member local at a concrete target *stays
+/// pinned* to the target type, because that is what `ground_member_type`'s
+/// `Var` arm did to it at registration. An operand disagreeing with that pin
+/// is rejected; the arm does not become polymorphic and no inference is added.
+#[allow(clippy::too_many_arguments)]
+fn check_concrete_member_site_slots(
+    word: &WordDef,
+    trait_name: &str,
+    ob: &TraitObligation,
+    sig: &PolySig,
+    caller_subst: &Subst,
+    name: &str,
+    span: Span,
+    ctx: &Ctx,
+    arrays: &mut Vec<ArrayDecl>,
+    cells: &mut Vec<OwnedCellDecl>,
+    refs: &mut Vec<RefDecl>,
+) -> Result<(), String> {
+    fence_quotation_literal_slot(ctx, ob, trait_name)?;
+    // The obligation carries exactly one slot per declared member input, and
+    // the word's effect is a 1:1 ground_member_type map over the same member
+    // row (src/parser.rs:4589-4608; a restated signature is rejected), so the
+    // lengths agree by construction. Unlike the mint arm there is no residual
+    // tail here to fail closed, so the invariant is asserted in debug builds.
+    debug_assert_eq!(
+        word.effect.inputs.len(),
+        ob.slots.len(),
+        "member word effect and obligation slots must be 1:1"
+    );
+    for (slot, (declared, recorded)) in word.effect.inputs.iter().zip(&ob.slots).enumerate() {
+        let found = apply_subst(
+            sig,
+            recorded,
+            caller_subst,
+            name,
+            span,
+            ctx,
+            arrays,
+            cells,
+            refs,
+        )?;
+        if found != declared.ty {
+            // Both ends are already concrete, so the two `PolySig`s
+            // `trait_member_operand_error` renders against are unread (a
+            // `PolyType::Concrete` renders as its own type name) -- the same
+            // no-op split the mono branch notes at its own call.
+            return Err(trait_member_operand_error(
+                ctx,
+                ob.span,
+                &ob.member,
+                trait_name,
+                &PolyType::Concrete(declared.ty),
+                sig,
+                &PolyType::Concrete(found),
+                sig,
+                slot,
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// P7b.S2 (S2-8): a `Generic` impl-target pattern's pin count -- how many of
@@ -23184,5 +23292,86 @@ mod tests {
             ),
             "error: `odd` of `Odd` in `probe` (line 5, col 46) leaves type variable `'U` unbound\n  the impl target's match and this site's operands together determine no type for `'U`, so the member has no instantiation here -- give it an operand position that fixes `'U`"
         );
+    }
+
+    /// P7b.S8c (D2/REQ-2): the concrete-winner arm's fixtures. `impl: Odd for
+    /// i64` is a genuinely concrete target, so `ground_member_type` pinned the
+    /// member row's *own* free variable (`'U`) to `i64` at registration and
+    /// the member word is registered `poly: None` at that grounded effect --
+    /// there is nothing to instantiate and no `PolySig` to unify, only the
+    /// site's operands to compare. `operand` is `main`'s body; the `List`
+    /// declaration is inlined because the unit harness resolves no `import:`.
+    fn odd_i64_src(operand: &str) -> String {
+        format!(
+            "type: List['T] | Nil | Cons 'T rest ^List['T] ;\n\
+             trait: Odd['T] : odd ( 'T 'U -- ) ; ;\n\
+             impl: Odd for i64 : odd drop drop ; ;\n\
+             : consume ['T: Odd] ( 'T 'U -- ) odd ;\n\
+             : push ( List[i64] i64 -- List[i64] ) swap ^ Cons ;\n\
+             : main ( -- ) {operand} ;\n"
+        )
+    }
+
+    /// P7b.S8c (D2/REQ-2), the hole: a `List[i64]` reaching an `i64`-pinned
+    /// member local through a bound dispatch. This arm minted the bare symbol
+    /// with no site check at all, so the operand flowed into the local slot
+    /// unexamined and the member body computed on its raw slot word (measured
+    /// in recon: a `List[i64]`'s head printed verbatim). Located now, naming
+    /// the member and the offending slot, in `trait_member_operand_error`'s
+    /// wording -- the same message the direct mono member call already
+    /// produced for this shape.
+    #[test]
+    fn concrete_target_member_dispatch_with_a_mismatched_slot_is_an_error() {
+        let err = checked_like_a_build_mangled(&odd_i64_src("Nil 3 push | l | 7 l consume"))
+            .expect_err("`List[i64]` disagrees with the `i64` the member local is pinned to");
+        assert_eq!(
+            err,
+            "error: `odd` of `Odd` in `main` (line 4, col 34) expects `i64`, found `List[i64]` in operand slot 1"
+        );
+    }
+
+    /// P7b.S8c (D2/REQ-2), the accept side of the same fixture: operands that
+    /// agree with the pinned local still dispatch. The ruling is "a free
+    /// member local at a concrete target stays pinned to the target type" --
+    /// the check rejects disagreement, it does not make the arm polymorphic,
+    /// so the `'U` slot admits an `i64` and nothing else.
+    #[test]
+    fn concrete_target_member_dispatch_with_matching_slots_checks() {
+        checked_like_a_build_mangled(&odd_i64_src("7 5 consume"))
+            .expect("matching slots pass the concrete site check");
+    }
+
+    /// P7b.S8c (REQ-2), the QuotLit fence on *this* arm. REQ-2's re-grounding
+    /// step drives the same `apply_subst` the mint arm's does, so it inherits
+    /// the same hazard: a written quotation literal in a plain member slot
+    /// would reach `apply_subst`'s `unreachable!`. Both arms call one shared
+    /// fence, so this pins the same bytes at the concrete-winner dispatch.
+    #[test]
+    fn concrete_target_member_dispatch_with_a_quotation_literal_slot_is_a_located_error() {
+        let err = checked_like_a_build_mangled(
+            "trait: Odd['T] : odd ( 'U 'T -- ) ; ;\n\
+             impl: Odd for i64 : odd drop drop ; ;\n\
+             : consume ['T: Odd] ( 'T -- ) [ drop ] swap odd ;\n\
+             : main ( -- ) 7 consume ;\n",
+        )
+        .expect_err("a written quotation literal is not the `i64` the local is pinned to");
+        assert_eq!(
+            err,
+            "error: `odd` of `Odd` in `main` (line 3, col 45) found a quotation literal in operand slot 0\n  a bound-dispatched member instantiates its signature at this site's operand types, and a written quotation literal has no type to instantiate at -- declare the slot as a quotation parameter, or pass the literal through one"
+        );
+    }
+
+    /// P7b.S8c (REQ-2), the accept-side blast-radius pin. `core::cmp`'s `Ord`
+    /// (12 concrete impls) is the shipped surface this arm actually gates, and
+    /// a bound-dispatched `cmp` reaches the new check for real: stubbing the
+    /// check to reject unconditionally turns this test red, which is what
+    /// stops it from being a placebo that would pass with the arm untouched.
+    #[test]
+    fn ord_dispatch_through_a_bound_passes_the_concrete_site_check() {
+        checked_like_a_build_mangled(
+            ": go ['T: Ord] ( 'T 'T -- Ordering ) cmp ;\n\
+             : main ( -- ) 1 2 go drop ;\n",
+        )
+        .expect("Ord's concrete-target bound dispatch passes the site check");
     }
 }
