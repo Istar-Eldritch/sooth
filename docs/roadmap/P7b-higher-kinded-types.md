@@ -559,15 +559,30 @@ operand cells that hit it were the plain slot, the `&'T` ref, the quotation-row,
 array-element shapes); the concrete-winner hole (the non-CtorImage concrete-winner arm was
 a *silent* no-site-check hole — `ground_member_type`'s `Var` arm, `src/ast.rs:2241`,
 collapses every free member local to the target type, so an operand of any type flowed
-through unchecked); and the QuotLit cell (its own dedicated fence, untouched by this
-slice). The direct mono member call and the lifted mono ctor-app target are the untouched
-healthy routes outside this taxonomy (the `is_concrete()` gate on D2 exists to protect the
-latter). On the impl-target side, two spellings hit the ICE route the same way: the
-bare-var-target spelling (`for 'T`), and a bare-CTOR-target spelling (`impl: Odd for Box`,
-no type argument) — `for Box` desugars to `for Box['ctor0]` (`src/parser.rs:677-678`),
-structurally the same one-variable generic-pattern shape as the bare-var-target cell, so it
-panicked at the slice's baseline too and is grounded by this fix as well, though it carries
-no dedicated golden of its own (unwitnessed end-to-end).
+through unchecked); and the QuotLit cell, shipped fenced by this slice —
+`fence_quotation_literal_slot` (`poly.rs:9480`, formatter
+`member_slot_quotation_literal_error`, `poly.rs:9612`) fires in both the mint
+and concrete arms, closing a post-fix hazard the re-grounding step would
+otherwise newly expose. The direct mono member call (Route D) resolves
+outside this taxonomy entirely, through `match_slot` (`src/check.rs:381`),
+untouched; the lifted mono ctor-app target (Route E) sits inside the
+taxonomy, with two tenancies in `resolve_user_bound`: the CtorImage arm's
+`lifted_mono` branch (`src/check/poly.rs:9203-9219`) and the bare-symbol
+arm's other tenant (`src/check/poly.rs:9365-9399`) — both untouched and
+healthy; D2's `is_concrete()` gate (`poly.rs:9384`, in that second arm)
+is what keeps the Route E tenancy out of the site check. On the
+impl-target side, three
+spellings hit the ICE route the same way: the bare-var-target spelling
+(`for 'T`); a bare-CTOR-target spelling (`impl: Odd for Box`, no type
+argument) — `for Box` desugars to `for Box['ctor0]` (`src/parser.rs:677-678`),
+structurally the same one-variable generic-pattern shape as the bare-var-target
+cell; and a mono ctor-app spelling (`impl: Odd for Box[str]`), which rides
+this route whenever the member row keeps a free local (its grounded
+signature is not var-free at `src/parser.rs:4519`, so it takes the generic
+path). All three panicked at the slice's baseline and are grounded by this
+fix the same way (the third measured: minted symbol
+`sooth_mono_odd_Odd_0_Box_str___m0__t0_i64`); only the bare-var-target cell
+carries a dedicated golden, the other two are unwitnessed end-to-end.
 
 Shipped: direction B — per-site binding in the mint arm (`resolve_user_bound`'s
 non-CtorImage generic-winner arm, `src/check/poly.rs:9315-9364`; `compose_member_theta`,

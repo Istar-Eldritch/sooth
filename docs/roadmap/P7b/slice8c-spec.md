@@ -14,12 +14,15 @@ input type variable" `expect` (`src/ir/driver.rs`), reached through
 the panic was a **build-time lowering** panic, so `sooth build` exited 101 and
 produced **no binary**.
 
-Dispatch in `resolve_user_bound` (`src/check/poly.rs`) is keyed on the
-obligation's `ty` into five routes. Two were broken:
+Bound dispatch keys on the obligation's `ty` into five routes; four of them
+(A, B, C, E) are dispatched inside `resolve_user_bound` (`src/check/poly.rs`).
+Route D (the direct mono member call) resolves outside `resolve_user_bound`
+entirely, through `match_slot`. Two were broken:
 
 - **Route B — non-CtorImage generic winner** (bound variable in a non-App
-  position: plain slot, `&'T`, quotation row, array element, bare-var impl
-  target). The P7.S4 mint arm recorded `(member_word, subst)` where `subst` was
+  position: plain slot, `&'T`, quotation row, array element; impl targets
+  `for 'T`, `for Box`, and `for Box[str]` when the member row keeps a free
+  local). The P7.S4 mint arm recorded `(member_word, subst)` where `subst` was
   `find_bound_impl`'s impl-target match substitution **alone** — the member
   row's own variables never entered θ, so lowering hit the unbound `expect`.
   **This was the ICE.**
@@ -103,18 +106,22 @@ trait/impl surface, no `lib/` change.
   The symmetric `i64`/`i64` twins (G1r/G1p, array-element, bare-var-target) are
   grounding-*existence* pins only — they prove the panic→grounded flip but
   cannot discriminate binding provenance.
-- **Bare-ctor impl-target cell** grounds under this fix (for `Box` it desugars
-  to a one-variable generic pattern) but is **unwitnessed by a dedicated
-  golden** — recorded at its measured truth in the roadmap entry.
+- **Impl-target spellings without a dedicated golden**: the bare-ctor cell
+  (`for Box` desugars to a one-variable generic pattern) and the mono
+  ctor-app spelling (`for Box[str]`, riding Route B whenever the member row
+  keeps a free local) both ground under this fix but are **unwitnessed by a
+  dedicated golden** — recorded at their measured truth in the roadmap
+  entry.
 
 ## Implementation
 
 | Area | Commit | Key symbols / files |
 | --- | --- | --- |
-| D1 — per-site binding in the Route B mint arm | `8bddbd5` | `compose_member_theta`, `fence_quotation_literal_slot`, fail-closed tail in `resolve_user_bound` (`src/check/poly.rs`); 10 unit tests |
-| D2 — concrete-arm site-slot compatibility check | `969cb15` | `check_concrete_member_site_slots` (`src/check/poly.rs`), reuses Phase 1's QuotLit fence; 4 unit tests |
+| D1 — per-site binding in the Route B mint arm | `8bddbd5` | `compose_member_theta`, fail-closed tail in `resolve_user_bound` (`src/check/poly.rs`); 9 unit tests |
+| D2 — concrete-arm site-slot compatibility check | `969cb15` | `check_concrete_member_site_slots`, extracts the shared `fence_quotation_literal_slot` (`src/check/poly.rs`); 4 unit tests |
 | End-to-end goldens (both routes, cells, witnesses) | `32c2dac` | 10 goldens in `tests/phase7b_slice8.rs` (G1r/G1a/G1p/G2/G3b/G4/G6, QuotLit rejection, array-element + bare-var twins) |
 | Roadmap corrigenda + green gate | `11f8747` | `docs/roadmap/P7b-higher-kinded-types.md` (six corrigenda); growth re-check (poly.rs split deferred, 3/5 signals) |
+| Review-round fix — the fail-closed-tail golden | this commit | `bound_dispatch_fails_closed_when_a_member_output_variable_stays_unbound` (11th golden, `tests/phase7b_slice8.rs`); record corrections in `ROADMAP.md` and the S8c entry |
 
 Base for the slice's review history: `5d7087e` (spec). Recon-docs base:
 `62a928d`; S8b merge: `8985d6c`. Recon inputs (retained):
@@ -122,4 +129,4 @@ Base for the slice's review history: `5d7087e` (spec). Recon-docs base:
 [slice8c-paper-tests](./slice8c-paper-tests.md).
 
 Final gate at HEAD: `cargo fmt --check && cargo clippy -- -D warnings && cargo
-test` green (3357 passed / 0 failed).
+test` green (3358 passed / 0 failed).

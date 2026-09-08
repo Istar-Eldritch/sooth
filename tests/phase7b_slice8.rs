@@ -1174,3 +1174,27 @@ impl: Odd for 'T : odd drop drop ; ;
 ";
     build_run_keep("bare-var-target-twin", src);
 }
+
+/// The fail-closed tail itself (`member_unbound_variable_error`,
+/// `src/check/poly.rs:9632`), reached end to end: `odd`'s declared output
+/// `'U` is a signature variable that occurs in neither its input (`&'T`) nor
+/// the impl target's match, so neither determines it before minting. Located
+/// (not `driver.rs:579`'s panic), reported against the caller `main` at the
+/// call site inside `consume`'s inlined body (`consume` is itself generic,
+/// so its body is checked in the caller's context, not standalone).
+#[test]
+fn bound_dispatch_fails_closed_when_a_member_output_variable_stays_unbound() {
+    let stderr = build_error_located(
+        "unbound-output-var",
+        "type: Box['T] v 'T ;\n\
+         : mkbox ( i64 -- Box[i64] ) Box ;\n\
+         trait: Odd['T] : odd ( &'T -- 'U ) ; ;\n\
+         impl: Odd for Box['T] : odd odd ; ;\n\
+         : consume ['T: Odd] ( &'T -- 'T ) odd ;\n\
+         : main ( -- ) 7 mkbox | b | &b consume drop ;\n",
+    );
+    assert_eq!(
+        stderr,
+        "error: `odd` of `Odd` in `main` (line 7, col 35) leaves type variable `'U` unbound\n  the impl target's match and this site's operands together determine no type for `'U`, so the member has no instantiation here -- give it an operand position that fixes `'U`\n"
+    );
+}
