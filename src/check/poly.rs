@@ -9317,9 +9317,50 @@ fn resolve_user_bound(
                 && tr.words.get(*idx).is_some_and(|w| w.poly.is_none()))
         {
             // P7.S4 (R6): mint the dispatched symbol as the instantiation of
-            // the member word at the matched substitution.
-            let s = instantiation_symbol(word_sym, &subst);
-            impl_monos.push((word_sym.clone(), subst.clone()));
+            // the member word at the matched substitution -- P7b.S8c (D1/
+            // REQ-1) *extended*, per site, with what this call site's own
+            // operands bind. `find_bound_impl`'s match subst covers only the
+            // impl target's variables, so a member row's own free variable
+            // (`odd ( 'U &'T -- )`'s `'U`) stayed unbound and lowering's
+            // `subst_polytype` expect fired on it (`src/ir/driver.rs:579`).
+            // Extending, never replacing, is load-bearing: a nullary member
+            // (`empty ( -- 'T )`) has zero obligation slots, so per-site
+            // unification contributes nothing and the header variable's
+            // binding lives in the match subst alone.
+            //
+            // P7b.S8c (P2-1): fail closed, mirroring the CtorImage arm above
+            // -- a poly:None member word reaching this arm has no `PolySig`
+            // to per-site-extend, and minting at the match-only subst would
+            // reproduce the pre-slice ICE shape this whole arm exists to
+            // fence against.
+            let Some(word_sig) = tr.word_sig_of(word_sym) else {
+                return Err(unresolved_trait_obligation_error(
+                    ctx,
+                    span,
+                    name,
+                    &trait_decl.name,
+                    &ob.member,
+                    ty,
+                    ob.span,
+                ));
+            };
+            let theta = compose_member_theta(
+                word_sig,
+                word_sym,
+                &trait_decl.name,
+                ob,
+                sig,
+                caller_subst,
+                name,
+                span,
+                ctx,
+                arrays,
+                cells,
+                refs,
+                subst.clone(),
+            )?;
+            let s = instantiation_symbol(word_sym, &theta);
+            impl_monos.push((word_sym.clone(), theta));
             s
         } else {
             // A concrete winner keeps the bare symbol path (P7.S4) -- and so
@@ -9328,9 +9369,193 @@ fn resolve_user_bound(
             // minting an instantiation of it would name a body that no
             // monomorphization pass will ever emit (`impl_mono_seed`
             // requires `poly: Some`).
+            //
+            // P7b.S8c (D2/REQ-2): a concrete target's member word carries an
+            // already-grounded `StackEffect` in which `ground_member_type`'s
+            // `Var` arm (`src/ast.rs:2241`) pinned every free member local to
+            // the target type. This arm minted the bare symbol without ever
+            // comparing the site's operands against that effect, so an
+            // operand of *any* type flowed through such a local slot and the
+            // member body computed on its raw slot word -- silent wrong
+            // typing, not a panic. Check it, gated on `is_concrete` so the
+            // arm's other tenant (a lifted mono ctor-app target, Route E) is
+            // untouched: its compatibility is already checked as plain type
+            // equality in the CtorImage arm above.
+            if imp.target.is_concrete() {
+                check_concrete_member_site_slots(
+                    &tr.words[*idx],
+                    &trait_decl.name,
+                    ob,
+                    sig,
+                    caller_subst,
+                    name,
+                    span,
+                    ctx,
+                    arrays,
+                    cells,
+                    refs,
+                )?;
+            }
             word_sym.clone()
         };
         trait_calls.insert(ob.span, symbol);
+    }
+    Ok(())
+}
+
+/// P7b.S8c (D1/REQ-1, P1-1): the per-site theta composition the generic-mint
+/// arm above extends the impl-target match subst with -- fence the written
+/// quotation literal, re-ground the obligation's slots through the caller's
+/// concrete subst, unify each against the member word's declared inputs, then
+/// fail closed if any signature variable is still unbound before minting.
+/// Extracted so the wiring between `unify_poly_input`'s per-slot errors,
+/// `first_unbound_sig_var`'s fail-closed tail and the sort invariant below it
+/// is exercised directly rather than only through its two pure halves.
+#[allow(clippy::too_many_arguments)]
+fn compose_member_theta(
+    word_sig: &PolySig,
+    word_sym: &str,
+    trait_name: &str,
+    ob: &TraitObligation,
+    sig: &PolySig,
+    caller_subst: &Subst,
+    name: &str,
+    span: Span,
+    ctx: &Ctx,
+    arrays: &mut Vec<ArrayDecl>,
+    cells: &mut Vec<OwnedCellDecl>,
+    refs: &mut Vec<RefDecl>,
+    base: Subst,
+) -> Result<Subst, String> {
+    fence_quotation_literal_slot(ctx, ob, trait_name)?;
+    let site_slots: Vec<Type> = ob
+        .slots
+        .iter()
+        .map(|s| apply_subst(sig, s, caller_subst, name, span, ctx, arrays, cells, refs))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut theta = base;
+    for (input, slot) in word_sig.inputs.iter().zip(&site_slots) {
+        // Empty seed lists: `seeded`/`seeded_len` only select which wording
+        // renders a conflict, and the prior binding here comes from the
+        // impl-target *match*, not a written `[...]` instantiation -- so the
+        // unseeded `poly_var_conflict_error` is the honest provenance. The
+        // bindings themselves ride in `theta`.
+        unify_poly_input(
+            word_sig,
+            input,
+            *slot,
+            word_sym,
+            ob.span,
+            ctx,
+            arrays,
+            cells,
+            refs,
+            &mut theta,
+            &[],
+            &[],
+        )?;
+    }
+    // Fail-closed: `concrete_effect` substitutes outputs through the same
+    // closure as inputs, so the whole variable space has to be bound. REQ-3
+    // keeps `driver.rs:579` untouched, which makes this the only fence
+    // against that panic on this route.
+    if let Some(unbound) = first_unbound_sig_var(word_sig, &theta) {
+        return Err(member_unbound_variable_error(
+            ctx, ob.span, &ob.member, trait_name, &unbound,
+        ));
+    }
+    // The P7.S3t sort invariant: canonical order at construction, or two
+    // sites mint two symbols for one (word, θ).
+    theta.ty.sort_by_key(|(v, _)| *v);
+    theta.len.sort_by_key(|(v, _)| *v);
+    Ok(theta)
+}
+
+/// P7b.S8c (REQ-1/REQ-2): the fence both re-grounding arms of
+/// `resolve_user_bound` run *before* touching a slot. A written quotation
+/// literal can reach a plain member slot (`unify_member_operand`'s
+/// `(Var(v), found)` bind arm accepts it, unlike a declared `Quotation`
+/// slot), and `apply_subst`'s `QuotLit` arm is `unreachable!` -- so the
+/// marker has to be rejected located at the dispatch site instead.
+fn fence_quotation_literal_slot(
+    ctx: &Ctx,
+    ob: &TraitObligation,
+    trait_name: &str,
+) -> Result<(), String> {
+    match ob.slots.iter().position(|s| *s == PolyType::QuotLit) {
+        Some(slot) => Err(member_slot_quotation_literal_error(
+            ctx, ob.span, &ob.member, trait_name, slot,
+        )),
+        None => Ok(()),
+    }
+}
+
+/// P7b.S8c (D2/REQ-2, P2-1): the concrete-winner arm's site-slot
+/// compatibility check. `word` is the member word a concrete `impl:` target's
+/// desugar registered -- `poly: None`, its `StackEffect` already grounded at
+/// the target (`src/parser.rs:4589-4608`), so there is no `PolySig` here and
+/// nothing to unify: after re-grounding the obligation's slots through the
+/// caller's θ this is plain `Type` equality, the same test the lifted-mono
+/// tenant of the same arm makes against its own grounded effect.
+///
+/// The ruling this enforces: a free member local at a concrete target *stays
+/// pinned* to the target type, because that is what `ground_member_type`'s
+/// `Var` arm did to it at registration. An operand disagreeing with that pin
+/// is rejected; the arm does not become polymorphic and no inference is added.
+#[allow(clippy::too_many_arguments)]
+fn check_concrete_member_site_slots(
+    word: &WordDef,
+    trait_name: &str,
+    ob: &TraitObligation,
+    sig: &PolySig,
+    caller_subst: &Subst,
+    name: &str,
+    span: Span,
+    ctx: &Ctx,
+    arrays: &mut Vec<ArrayDecl>,
+    cells: &mut Vec<OwnedCellDecl>,
+    refs: &mut Vec<RefDecl>,
+) -> Result<(), String> {
+    fence_quotation_literal_slot(ctx, ob, trait_name)?;
+    // The obligation carries exactly one slot per declared member input, and
+    // the word's effect is a 1:1 ground_member_type map over the same member
+    // row (src/parser.rs:4589-4608; a restated signature is rejected), so the
+    // lengths agree by construction. Unlike the mint arm there is no residual
+    // tail here to fail closed, so the invariant is asserted in debug builds.
+    debug_assert_eq!(
+        word.effect.inputs.len(),
+        ob.slots.len(),
+        "member word effect and obligation slots must be 1:1"
+    );
+    for (slot, (declared, recorded)) in word.effect.inputs.iter().zip(&ob.slots).enumerate() {
+        let found = apply_subst(
+            sig,
+            recorded,
+            caller_subst,
+            name,
+            span,
+            ctx,
+            arrays,
+            cells,
+            refs,
+        )?;
+        if found != declared.ty {
+            // Both ends are already concrete, so the two `PolySig`s
+            // `trait_member_operand_error` renders against are unread (a
+            // `PolyType::Concrete` renders as its own type name) -- the same
+            // no-op split the mono branch notes at its own call.
+            return Err(trait_member_operand_error(
+                ctx,
+                ob.span,
+                &ob.member,
+                trait_name,
+                &PolyType::Concrete(declared.ty),
+                sig,
+                &PolyType::Concrete(found),
+                sig,
+                slot,
+            ));
+        }
     }
     Ok(())
 }
@@ -9376,6 +9601,97 @@ fn bare_var_impl_target_capture_error(
         trait = trait_decl.name,
         ctor = ty.name(),
     )
+}
+
+/// P7b.S8c (REQ-1): a written quotation literal occupies a member operand
+/// slot that the member declared as an ordinary (non-quotation) input.
+/// `unify_member_operand`'s bind arm admits it, so the obligation carries a
+/// `PolyType::QuotLit` slot -- which per-site re-grounding would drive into
+/// `apply_subst`'s `unreachable!`. Located at the dispatch site, naming the
+/// member and the slot, in `trait_member_operand_error`'s wording family.
+fn member_slot_quotation_literal_error(
+    ctx: &Ctx,
+    span: Span,
+    member: &str,
+    trait_name: &str,
+    slot: usize,
+) -> String {
+    format!(
+        "error: `{member}` of `{trait_name}` in {name} (line {}, col {}) found a quotation literal in operand slot {slot}\n  a bound-dispatched member instantiates its signature at this site's operand types, and a written quotation literal has no type to instantiate at -- declare the slot as a quotation parameter, or pass the literal through one",
+        span.line,
+        span.col,
+        name = ctx.rendered_word(),
+    )
+}
+
+/// P7b.S8c (REQ-1), the fail-closed tail: neither the impl-target match nor
+/// this site's operands determined some variable of the member word's
+/// signature, so no instantiation of it exists to dispatch to. Located here
+/// rather than left to lowering, where the same shape is
+/// `subst_polytype`'s `expect` (`src/ir/driver.rs:579`) -- a raw panic.
+fn member_unbound_variable_error(
+    ctx: &Ctx,
+    span: Span,
+    member: &str,
+    trait_name: &str,
+    var: &str,
+) -> String {
+    format!(
+        "error: `{member}` of `{trait_name}` in {name} (line {}, col {}) leaves type variable `{var}` unbound\n  the impl target's match and this site's operands together determine no type for `{var}`, so the member has no instantiation here -- give it an operand position that fixes `{var}`",
+        span.line,
+        span.col,
+        name = ctx.rendered_word(),
+    )
+}
+
+/// P7b.S8c (REQ-1): the first variable of `sig` -- across **inputs and
+/// outputs** alike, since `concrete_effect` substitutes both through the same
+/// closure -- that `theta` does not bind, rendered as its declared name. The
+/// walk enumerates `PolyType`'s variants rather than the slot lists alone:
+/// `Len::Var` hides inside an `Array`/`Generic`, and an `App`'s head is a
+/// variable in its own right. Rows are excluded deliberately: a row is a
+/// caller-side pass-through that `concrete_effect` never materializes.
+fn first_unbound_sig_var(sig: &PolySig, theta: &Subst) -> Option<String> {
+    fn walk(pty: &PolyType, sig: &PolySig, theta: &Subst) -> Option<String> {
+        let ty_var = |v: u32| {
+            theta.ty_of(v).is_none().then(|| {
+                sig.ty_var_names
+                    .get(v as usize)
+                    .cloned()
+                    .unwrap_or_else(|| format!("'{v}"))
+            })
+        };
+        let len_var = |l: &Len| match l {
+            Len::Concrete(_) => None,
+            Len::Var(ln) => theta.len_of(*ln).is_none().then(|| {
+                sig.len_var_names
+                    .get(*ln as usize)
+                    .cloned()
+                    .unwrap_or_else(|| format!("'{ln}"))
+            }),
+        };
+        match pty {
+            PolyType::Concrete(_) | PolyType::QuotLit => None,
+            PolyType::Var(v) => ty_var(*v),
+            PolyType::Array(elem, len) => walk(elem, sig, theta).or_else(|| len_var(len)),
+            PolyType::Ref(inner, _) | PolyType::OwnedCell(inner) => walk(inner, sig, theta),
+            PolyType::Quotation(ins, outs, ..) => {
+                ins.iter().chain(outs).find_map(|p| walk(p, sig, theta))
+            }
+            PolyType::App { head, args } => {
+                ty_var(*head).or_else(|| args.iter().find_map(|p| walk(p, sig, theta)))
+            }
+            PolyType::Generic { args, len_args, .. }
+            | PolyType::GenericVariant { args, len_args, .. } => args
+                .iter()
+                .find_map(|p| walk(p, sig, theta))
+                .or_else(|| len_args.iter().find_map(len_var)),
+        }
+    }
+    sig.inputs
+        .iter()
+        .chain(&sig.outputs)
+        .find_map(|p| walk(p, sig, theta))
 }
 
 /// P7b.S2 (S2-8/S2-9): every identity-matched candidate's member word refused
@@ -12503,10 +12819,20 @@ mod tests {
     /// `check_impl_decls` resolves each binding by the name the parser's
     /// desugar synthesized, which only agrees with `WordDef::name` pre-mangle.
     fn check_src_mangled(src: &str) -> Result<(), String> {
+        checked_like_a_build_mangled(src).map(|_| ())
+    }
+
+    /// `check_src_mangled` keeping the checked `Module`, for a pin on what
+    /// checking *recorded* (a minted dispatch symbol) rather than merely that
+    /// it succeeded. Mangled rather than `checked_like_a_build` because an
+    /// instantiation symbol carries the member word's per-module suffix
+    /// (`odd;Odd;0;Box['T0]__m0`), which only a mangled run produces.
+    fn checked_like_a_build_mangled(src: &str) -> Result<Module, String> {
         let tokens = lex(src).unwrap();
         let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
         crate::resolve::resolve_modules(&mut module, true).unwrap();
-        super::super::check_module(&mut module).map(|_| ())
+        super::super::check_module(&mut module)?;
+        Ok(module)
     }
 
     /// The cross-call records a checked source produced, keyed by the
@@ -22577,5 +22903,475 @@ mod tests {
             "the pre-pass recorded `{}` so its grounded sig is findable",
             member.name
         );
+    }
+
+    /// P7b.S8c (D1/REQ-1): the per-site mint arm's fixtures. A generic impl
+    /// target (`Box['T]`) whose member row carries a free type variable of
+    /// its own (`'U`) -- the shape whose match-only mint reached lowering
+    /// with `'U` unbound and panicked at `subst_polytype`'s `expect`
+    /// (`src/ir/driver.rs:579`). `slot` is the member's first (free-local)
+    /// operand position as declared, `boxed` the payload `mkbox` builds.
+    fn odd_box_src(slot: &str, boxed: &str, operand: &str) -> String {
+        format!(
+            "type: Box['T] v 'T ;\n\
+             : mkbox ( {boxed} -- Box[{boxed}] ) Box ;\n\
+             trait: Odd['T] : odd ( 'U {slot} -- ) ; ;\n\
+             impl: Odd for Box['T] : odd drop drop ; ;\n\
+             : consume ['T: Odd] ( 'U {slot} -- ) odd ;\n\
+             : main ( -- ) {operand} ;\n"
+        )
+    }
+
+    /// P7b.S8c (REQ-1/REQ-6): the symbols the mint arm recorded for a
+    /// checked source's bound dispatches, filtered to `members` -- most are
+    /// `instantiation_symbol` applied to the recorded `(member word, theta)`
+    /// pair, so the string *is* theta rendered, which is what makes a byte
+    /// pin here a pin on the composed substitution and not merely on a name;
+    /// but `trait_calls` also carries bare symbols from the concrete/lifted-
+    /// mono arm, and comparing the module's entire sorted symbol list would
+    /// make every fixture hostage to any future prelude dispatch recorded
+    /// alongside it.
+    fn minted_dispatch_symbols(src: &str, members: &[&str]) -> Vec<String> {
+        let module = checked_like_a_build_mangled(src).expect("the fixture checks");
+        let mut symbols: Vec<String> = module
+            .instantiations
+            .values()
+            .flat_map(|i| i.trait_calls.values().cloned())
+            .filter(|s| {
+                members
+                    .iter()
+                    .any(|m| s.starts_with(&format!("sooth_mono_{m}_")))
+            })
+            .collect();
+        symbols.sort();
+        symbols
+    }
+
+    /// P7b.S8c (REQ-1): the plain-slot cell -- the shape `Foldable::fold`
+    /// rides in production. Two variables enter theta by two different
+    /// routes: `t0` from `find_bound_impl`'s impl-target match against
+    /// `Box[i64]`, and `t1` (the member row's own `'U`) from unifying the
+    /// member word's sig against this site's re-grounded operand slot. The
+    /// mint arm recorded only the former before this slice, so `t1` reached
+    /// lowering unbound.
+    #[test]
+    fn bound_dispatch_binds_a_plain_member_slot_from_the_call_site() {
+        assert_eq!(
+            minted_dispatch_symbols(&odd_box_src("'T", "i64", "7 7 mkbox consume"), &["odd"]),
+            vec!["sooth_mono_odd_Odd_0_Box__T0___m0__t0_i64_t1_i64"]
+        );
+    }
+
+    /// P7b.S8c (REQ-1): the `&'T` cell (`plainslot.sth`, the S8-review
+    /// repro). The trait-var operand arrives behind a reference, so the
+    /// member word's sig unifies through `unify_poly_input`'s `Ref` arm
+    /// rather than its `Generic` arm -- the other of the two binding routes
+    /// into theta.
+    #[test]
+    fn bound_dispatch_binds_a_ref_member_slot_from_the_call_site() {
+        assert_eq!(
+            minted_dispatch_symbols(
+                &odd_box_src("&'T", "i64", "7 mkbox | b | 7 &b consume"),
+                &["odd"]
+            ),
+            vec!["sooth_mono_odd_Odd_0_Box__T0___m0__t0_i64_t1_i64"]
+        );
+    }
+
+    /// P7b.S8c (REQ-6), the grounding-*correctness* witness. The two cells
+    /// above bind `t0` and `t1` to the same `i64`, so their symbol would
+    /// render identically even if per-site unification had wrongly sourced
+    /// the member local's binding from the impl-target match. Here the box
+    /// holds a `str` and the free local operand is an `i64`: only a theta
+    /// whose `t1` came from *this site's slot* renders `t0_str_t1_i64`.
+    #[test]
+    fn bound_dispatch_at_an_asymmetric_site_binds_the_local_from_the_slot() {
+        assert_eq!(
+            minted_dispatch_symbols(
+                &odd_box_src("&'T", "str", "\"x\" mkbox | b | 7 &b consume"),
+                &["odd"]
+            ),
+            vec!["sooth_mono_odd_Odd_0_Box__T0___m0__t0_str_t1_i64"]
+        );
+    }
+
+    /// P7b.S8c (REQ-1): slice8b's shipped `Monoid`-over-`List` dispatch
+    /// surface, the one committed shape that rides this arm
+    /// (`tests/phase7b_slice8b.rs`'s
+    /// `monoid_for_list_combine_through_bound_grounds_and_is_stable`), with
+    /// `core::list`'s header inlined since the unit harness resolves no
+    /// `import:`.
+    fn monoid_list_src() -> &'static str {
+        "type: List['T] | Nil | Cons 'T rest ^List['T] ;\n\
+         trait: Monoid['T] :\n\
+           empty ( -- 'T ) ;\n\
+           : combine ( 'T 'T -- 'T ) ;\n\
+         ;\n\
+         impl: Monoid for List\n\
+           : empty Nil ;\n\
+           : combine\n\
+             swap\n\
+             ~[ ( Nil ) drop ]\n\
+             ~[ ( Cons ) Cons> | v rest | rest ^> swap combine v swap ^ Cons ]\n\
+             List? ;\n\
+         ;\n\
+         : mkempty ( -- List[i64] ) Nil ;\n\
+         : merge['T: Monoid] ( 'T 'T -- 'T ) combine ;\n\
+         : mkempty2['T: Monoid] ( -- 'T ) empty ;\n\
+         : main ( -- )\n\
+           3 mkempty ^ Cons 3 mkempty ^ Cons merge drop\n\
+           mkempty2[List[i64]] drop ;\n"
+    }
+
+    /// P7b.S8c (REQ-1), the no-churn pins, both halves of `Monoid`:
+    ///
+    /// * `combine ( 'T 'T -- 'T )` is **trait-var-only** -- its row carries no
+    ///   variable beyond the dissolved trait header var, so per-site
+    ///   unification rebinds `t0` to the type the impl-target match already
+    ///   gave it and contributes nothing new. `theta == subst`.
+    /// * `empty ( -- 'T )` is **nullary**: `TraitObligation::slots` holds one
+    ///   entry per declared member *input*, so there are zero slots and the
+    ///   per-site loop does not run at all. Its header binding lives in the
+    ///   match subst alone, which is why theta must start as a clone of it
+    ///   and only ever be extended -- a fresh theta would render no `t0` and
+    ///   lowering would fire the `expect` on the member's *output*.
+    ///
+    /// Both symbols carry exactly one entry (`t0_i64`), and `subst` for
+    /// `match(List['T0], List[i64])` is exactly that one entry, so
+    /// `theta ⊇ subst` plus a one-entry render is `theta == subst`. They are
+    /// byte-identical to what the match-only arm minted before this slice.
+    #[test]
+    fn bound_dispatch_of_the_monoid_members_mints_the_match_subst_unchanged() {
+        assert_eq!(
+            minted_dispatch_symbols(monoid_list_src(), &["combine", "empty"]),
+            vec![
+                "sooth_mono_combine_Monoid_0_List__T0___m0__t0_i64",
+                "sooth_mono_empty_Monoid_0_List__T0___m0__t0_i64",
+            ]
+        );
+    }
+
+    /// P7b.S8c (REQ-1), the QuotLit fence. `unify_member_operand`'s
+    /// `(Var(v), found) => bind` arm accepts a written quotation literal
+    /// against a *plain* declared member slot (unlike a declared `Quotation`
+    /// slot, which it rejects), so the obligation clones a
+    /// `PolyType::QuotLit` slot. Re-grounding that slot would drive straight
+    /// into `apply_subst`'s `unreachable!`, so the fence runs before any
+    /// re-grounding. Located at the dispatch site, non-panic.
+    #[test]
+    fn bound_dispatch_with_a_quotation_literal_member_slot_is_a_located_error() {
+        let err = checked_like_a_build_mangled(
+            "type: Box['T] v 'T ;\n\
+             : mkbox ( i64 -- Box[i64] ) Box ;\n\
+             trait: Odd['T] : odd ( 'U &'T -- ) ; ;\n\
+             impl: Odd for Box['T] : odd drop drop ; ;\n\
+             : consume ['T: Odd] ( &'T -- ) [ drop ] swap odd ;\n\
+             : main ( -- ) 7 mkbox | b | &b consume ;\n",
+        )
+        .expect_err("a written quotation literal has no type to instantiate the member at");
+        assert_eq!(
+            err,
+            "error: `odd` of `Odd` in `main` (line 5, col 46) found a quotation literal in operand slot 0\n  a bound-dispatched member instantiates its signature at this site's operand types, and a written quotation literal has no type to instantiate at -- declare the slot as a quotation parameter, or pass the literal through one"
+        );
+    }
+
+    /// P7b.S8c (P1-1): drives `compose_member_theta` directly -- the private
+    /// helper the generic-mint arm extracted its body into, so this pins the
+    /// tail's *wiring* (per-slot unification into a conflict error, and the
+    /// fail-closed check after it) rather than only the two pure halves
+    /// (`unify_poly_input`, `first_unbound_sig_var`) each already has their
+    /// own unit test. Nothing that ships would fail if the arm called
+    /// `unify_poly_input` in a loop and skipped `first_unbound_sig_var`
+    /// entirely -- this is the test that would.
+    ///
+    /// The conflict-provenance ruling also folds in here (the review's
+    /// duplicate pin, P2-2): the mint arm unifies with `seeded`/`seeded_len`
+    /// **empty**, since those lists are wording selectors, not the channel
+    /// prior bindings ride (those ride theta, cloned from the impl-target
+    /// match). An empty list never contains the conflicting variable, so a
+    /// disagreement against a theta-bound variable renders the *unseeded*
+    /// symmetric wording -- the same unseeded wording the precedent
+    /// `unify_poly_input_finding_a_seeded_variable_names_the_instantiation`
+    /// already pins at the `unify_poly_input` level, here shown surviving
+    /// unchanged through the helper the mint arm actually calls.
+    #[test]
+    fn compose_member_theta_propagates_the_match_subst_conflict_unseeded() {
+        let word_sig = PolySig {
+            inputs: vec![PolyType::Var(0)],
+            ty_var_names: vec!["'T0".to_string()],
+            ..bare_sig()
+        };
+        let ob = TraitObligation {
+            span: Span::default(),
+            var: 0,
+            trait_id: TraitId(0),
+            member: "odd".to_string(),
+            slots: vec![PolyType::Concrete(Type::I64)],
+        };
+        let probe = probe_word();
+        let ctx = probe_ctx(&probe);
+        let caller_sig = bare_sig();
+        let caller_subst = Subst::default();
+        let (mut arrays, mut cells, mut refs) = (Vec::new(), Vec::new(), Vec::new());
+        // `base` as the mint arm builds it: cloned from the impl-target
+        // match, which already bound the target variable to `str`.
+        let mut base = Subst::default();
+        base.ty.push((0, Type::Str));
+        let err = compose_member_theta(
+            &word_sig,
+            "odd;Odd;0;Box['T0]__m0",
+            "Odd",
+            &ob,
+            &caller_sig,
+            &caller_subst,
+            "probe",
+            Span::default(),
+            &ctx,
+            &mut arrays,
+            &mut cells,
+            &mut refs,
+            base,
+        )
+        .expect_err("the site slot disagrees with what the impl-target match bound");
+        assert_eq!(
+            err,
+            "error: `odd;Odd;0;Box['T0]` in `probe` (line 0) resolved `'T0` to both `str` and `i64`"
+        );
+        assert!(
+            !err.contains("was instantiated at"),
+            "the impl-target match is not a written instantiation: {err}"
+        );
+    }
+
+    /// P7b.S8c (P1-1), the tail-wiring's other end: a signature variable that
+    /// appears only in the member's *output* (`empty ( -- 'T )`'s `'T`, the
+    /// nullary-member shape) and that neither the impl-target match (`base`)
+    /// nor this site's own input slots bind. `compose_member_theta` has to
+    /// reach `first_unbound_sig_var` and turn its `Some` into the located
+    /// error -- the fence REQ-3 relies on to keep `driver.rs:579` untouched.
+    #[test]
+    fn compose_member_theta_fails_closed_on_a_residual_unbound_variable() {
+        let word_sig = PolySig {
+            inputs: vec![PolyType::Var(0)],
+            outputs: vec![PolyType::Var(1)],
+            ty_var_names: vec!["'T".to_string(), "'U".to_string()],
+            ..bare_sig()
+        };
+        let ob = TraitObligation {
+            span: Span {
+                line: 5,
+                col: 46,
+                ..Span::default()
+            },
+            var: 0,
+            trait_id: TraitId(0),
+            member: "odd".to_string(),
+            slots: vec![PolyType::Concrete(Type::I64)],
+        };
+        let probe = probe_word();
+        let ctx = probe_ctx(&probe);
+        let caller_sig = bare_sig();
+        let caller_subst = Subst::default();
+        let (mut arrays, mut cells, mut refs) = (Vec::new(), Vec::new(), Vec::new());
+        let err = compose_member_theta(
+            &word_sig,
+            "odd;Odd;0;Box['T0]__m0",
+            "Odd",
+            &ob,
+            &caller_sig,
+            &caller_subst,
+            "probe",
+            Span::default(),
+            &ctx,
+            &mut arrays,
+            &mut cells,
+            &mut refs,
+            Subst::default(),
+        )
+        .expect_err("'U appears only in the output, and neither side binds it");
+        assert_eq!(
+            err,
+            "error: `odd` of `Odd` in `probe` (line 5, col 46) leaves type variable `'U` unbound\n  the impl target's match and this site's operands together determine no type for `'U`, so the member has no instantiation here -- give it an operand position that fixes `'U`"
+        );
+    }
+
+    /// P7b.S8c (REQ-1), the fail-closed tail's decision function. It walks
+    /// the member sig's `inputs` *and* `outputs` -- `concrete_effect`
+    /// substitutes both through the same closure -- and enumerates
+    /// `PolyType`'s variants rather than the slot lists alone, since a
+    /// `Len::Var` hides inside an `Array`/`Generic` and an `App`'s head is a
+    /// variable in its own right.
+    #[test]
+    fn first_unbound_sig_var_reaches_outputs_and_nested_positions() {
+        let sig = |inputs: Vec<PolyType>, outputs: Vec<PolyType>| PolySig {
+            inputs,
+            outputs,
+            ty_var_names: vec!["'T".to_string(), "'U".to_string()],
+            len_var_names: vec!["'N".to_string()],
+            ..bare_sig()
+        };
+        let mut theta = Subst::default();
+        theta.ty.push((0, Type::I64));
+        // Bound input, unbound output: the widened quantifier (an output-only
+        // variable is what `driver.rs:579` fires on for a nullary member).
+        assert_eq!(
+            first_unbound_sig_var(&sig(vec![PolyType::Var(0)], vec![PolyType::Var(1)]), &theta),
+            Some("'U".to_string())
+        );
+        // Behind a reference, inside a quotation row.
+        assert_eq!(
+            first_unbound_sig_var(
+                &sig(
+                    vec![PolyType::Ref(
+                        Box::new(PolyType::Quotation(
+                            vec![PolyType::Var(1)],
+                            Vec::new(),
+                            false,
+                            None,
+                            None,
+                        )),
+                        false,
+                    )],
+                    Vec::new(),
+                ),
+                &theta
+            ),
+            Some("'U".to_string())
+        );
+        // A length variable inside an array element shape.
+        assert_eq!(
+            first_unbound_sig_var(
+                &sig(
+                    vec![PolyType::Array(Box::new(PolyType::Var(0)), Len::Var(0))],
+                    Vec::new()
+                ),
+                &theta
+            ),
+            Some("'N".to_string())
+        );
+        // An application's head is itself a variable.
+        assert_eq!(
+            first_unbound_sig_var(
+                &sig(
+                    vec![PolyType::App {
+                        head: 1,
+                        args: vec![PolyType::Var(0)],
+                    }],
+                    Vec::new()
+                ),
+                &theta
+            ),
+            Some("'U".to_string())
+        );
+        // Fully determined: nothing to report, and the arm mints.
+        assert_eq!(
+            first_unbound_sig_var(
+                &sig(vec![PolyType::Var(0)], vec![PolyType::Concrete(Type::F64)]),
+                &theta
+            ),
+            None
+        );
+    }
+
+    /// P7b.S8c (REQ-1): the fail-closed tail's message. REQ-3 forbids
+    /// touching `subst_polytype`'s `expect`, so this located error is the
+    /// only fence standing between a member variable neither the impl-target
+    /// match nor this site's operands determine and a raw panic at
+    /// `src/ir/driver.rs:579`.
+    #[test]
+    fn member_unbound_variable_error_names_the_member_the_variable_and_the_site() {
+        let probe = probe_word();
+        let ctx = probe_ctx(&probe);
+        assert_eq!(
+            member_unbound_variable_error(
+                &ctx,
+                Span { line: 5, col: 46, ..Span::default() },
+                "odd",
+                "Odd",
+                "'U",
+            ),
+            "error: `odd` of `Odd` in `probe` (line 5, col 46) leaves type variable `'U` unbound\n  the impl target's match and this site's operands together determine no type for `'U`, so the member has no instantiation here -- give it an operand position that fixes `'U`"
+        );
+    }
+
+    /// P7b.S8c (D2/REQ-2): the concrete-winner arm's fixtures. `impl: Odd for
+    /// i64` is a genuinely concrete target, so `ground_member_type` pinned the
+    /// member row's *own* free variable (`'U`) to `i64` at registration and
+    /// the member word is registered `poly: None` at that grounded effect --
+    /// there is nothing to instantiate and no `PolySig` to unify, only the
+    /// site's operands to compare. `operand` is `main`'s body; the `List`
+    /// declaration is inlined because the unit harness resolves no `import:`.
+    fn odd_i64_src(operand: &str) -> String {
+        format!(
+            "type: List['T] | Nil | Cons 'T rest ^List['T] ;\n\
+             trait: Odd['T] : odd ( 'T 'U -- ) ; ;\n\
+             impl: Odd for i64 : odd drop drop ; ;\n\
+             : consume ['T: Odd] ( 'T 'U -- ) odd ;\n\
+             : push ( List[i64] i64 -- List[i64] ) swap ^ Cons ;\n\
+             : main ( -- ) {operand} ;\n"
+        )
+    }
+
+    /// P7b.S8c (D2/REQ-2), the hole: a `List[i64]` reaching an `i64`-pinned
+    /// member local through a bound dispatch. This arm minted the bare symbol
+    /// with no site check at all, so the operand flowed into the local slot
+    /// unexamined and the member body computed on its raw slot word (measured
+    /// in recon: a `List[i64]`'s head printed verbatim). Located now, naming
+    /// the member and the offending slot, in `trait_member_operand_error`'s
+    /// wording -- the same message the direct mono member call already
+    /// produced for this shape.
+    #[test]
+    fn concrete_target_member_dispatch_with_a_mismatched_slot_is_an_error() {
+        let err = checked_like_a_build_mangled(&odd_i64_src("Nil 3 push | l | 7 l consume"))
+            .expect_err("`List[i64]` disagrees with the `i64` the member local is pinned to");
+        assert_eq!(
+            err,
+            "error: `odd` of `Odd` in `main` (line 4, col 34) expects `i64`, found `List[i64]` in operand slot 1"
+        );
+    }
+
+    /// P7b.S8c (D2/REQ-2), the accept side of the same fixture: operands that
+    /// agree with the pinned local still dispatch. The ruling is "a free
+    /// member local at a concrete target stays pinned to the target type" --
+    /// the check rejects disagreement, it does not make the arm polymorphic,
+    /// so the `'U` slot admits an `i64` and nothing else.
+    #[test]
+    fn concrete_target_member_dispatch_with_matching_slots_checks() {
+        checked_like_a_build_mangled(&odd_i64_src("7 5 consume"))
+            .expect("matching slots pass the concrete site check");
+    }
+
+    /// P7b.S8c (REQ-2), the QuotLit fence on *this* arm. REQ-2's re-grounding
+    /// step drives the same `apply_subst` the mint arm's does, so it inherits
+    /// the same hazard: a written quotation literal in a plain member slot
+    /// would reach `apply_subst`'s `unreachable!`. Both arms call one shared
+    /// fence, so this pins the same bytes at the concrete-winner dispatch.
+    #[test]
+    fn concrete_target_member_dispatch_with_a_quotation_literal_slot_is_a_located_error() {
+        let err = checked_like_a_build_mangled(
+            "trait: Odd['T] : odd ( 'U 'T -- ) ; ;\n\
+             impl: Odd for i64 : odd drop drop ; ;\n\
+             : consume ['T: Odd] ( 'T -- ) [ drop ] swap odd ;\n\
+             : main ( -- ) 7 consume ;\n",
+        )
+        .expect_err("a written quotation literal is not the `i64` the local is pinned to");
+        assert_eq!(
+            err,
+            "error: `odd` of `Odd` in `main` (line 3, col 45) found a quotation literal in operand slot 0\n  a bound-dispatched member instantiates its signature at this site's operand types, and a written quotation literal has no type to instantiate at -- declare the slot as a quotation parameter, or pass the literal through one"
+        );
+    }
+
+    /// P7b.S8c (REQ-2), the accept-side blast-radius pin. `core::cmp`'s `Ord`
+    /// (12 concrete impls) is the shipped surface this arm actually gates, and
+    /// a bound-dispatched `cmp` reaches the new check for real: stubbing the
+    /// check to reject unconditionally turns this test red, which is what
+    /// stops it from being a placebo that would pass with the arm untouched.
+    #[test]
+    fn ord_dispatch_through_a_bound_passes_the_concrete_site_check() {
+        checked_like_a_build_mangled(
+            ": go ['T: Ord] ( 'T 'T -- Ordering ) cmp ;\n\
+             : main ( -- ) 1 2 go drop ;\n",
+        )
+        .expect("Ord's concrete-target bound dispatch passes the site check");
     }
 }

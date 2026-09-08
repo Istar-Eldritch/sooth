@@ -7,6 +7,12 @@
 //! its fences (REQ-8), with `Range` shipped in `core::range`.
 //! Phase 4: the REQ-11 IR pin (one-frame loop with a back-edge, `next` a real
 //! frame — facts only, no fusion verdict; REQ-10/REQ-12/REQ-13 verification).
+//! P7b.S8c (Phase 3): end-to-end goldens for per-site binding in the mint arm
+//! (D1/REQ-1) and the concrete-arm site-slot compatibility check (D2/REQ-2) —
+//! the Route B repro twins (plain slot, `&'T`, quotation row, array element,
+//! bare-var-target) grounding instead of panicking at `driver.rs:579`, the
+//! asymmetric monomorph-symbol witness (G1a), the QuotLit rejection, and D2's
+//! concrete-arm mismatch rejection (G6).
 //! Harness style from `tests/phase7b_slice4.rs`/`tests/phase7b_slice6.rs`.
 
 use std::path::PathBuf;
@@ -919,5 +925,276 @@ fn inline_declared_lifted_member_with_quotation_slot_builds_not_panics() {
            : ap | q | | b | b q call ;\n\
          ;\n\
          : main ( -- ) ;\n",
+    );
+}
+
+/// P7b.S8c (Phase 3, REQ-7): every emitted-IR line naming `needle` as a
+/// substring, via `driver::emit_ssa_with_manifest` -- the same capture route
+/// the file's own REQ-11 IR pin uses (`consuming_loop_over_range_is_one_
+/// frame_with_a_back_edge_and_next_is_a_real_frame`, above), narrowed to a
+/// `sooth_mono_*` substring filter the way `tests/phase7b_slice8b.rs:177/565`
+/// already do.
+fn mono_symbol_lines(tag: &str, src: &str, needle: &str) -> Vec<String> {
+    let path = std::env::temp_dir().join(format!("sooth-p7bs8c-{tag}-{}.sth", std::process::id()));
+    common::write_fixture(&path, src).expect("writing the fixture should succeed");
+    let ssa = sooth::driver::emit_ssa_with_manifest(&path, common::manifest_for(&path).as_deref())
+        .unwrap_or_else(|e| panic!("emitting the fixture should succeed: {e}"));
+    std::fs::remove_file(&path).ok();
+    ssa.lines()
+        .filter(|l| l.contains(needle))
+        .map(|l| l.to_string())
+        .collect()
+}
+
+/// G1r (P7b.S8c REQ-1/REQ-5/REQ-7/REQ-8): `plainslot.sth` (P1, the `&'T`
+/// cell, the S8-review repro) -- the Route B mint arm now grounds the free
+/// member local from the call site instead of panicking at `driver.rs:579`.
+/// A grounding-existence pin: target var and local are both `i64`
+/// (symmetric), so this proves the flip from panic to grounded, not
+/// correctness of *which* type the local bound to -- G1a is the
+/// discriminating witness for that.
+#[test]
+fn bound_dispatch_grounds_member_locals_from_the_call_site() {
+    let src = "\
+type: Box['T] v 'T ;
+: mkbox ( i64 -- Box[i64] ) Box ;
+trait: Odd['T] : odd ( 'U &'T -- ) ; ;
+impl: Odd for Box['T] : odd drop drop ; ;
+: consume ['T: Odd] ( 'U &'T -- ) odd ;
+: main ( -- ) 7 mkbox | b | 7 &b consume ;
+";
+    let (_t, _binary, _stdout) = build_run_keep("g1r-plainslot", src);
+
+    // Measured from the live binary (not copied from the spec's
+    // prediction): matches the spec's predicted
+    // `sooth_mono_odd_Odd_0_Box__T0___m0__t0_i64_t1_i64` byte-for-byte.
+    let mono = mono_symbol_lines("g1r-plainslot-ssa", src, "sooth_mono_odd_Odd_0_Box");
+    assert!(
+        mono.iter()
+            .any(|l| l.contains("sooth_mono_odd_Odd_0_Box__T0___m0__t0_i64_t1_i64")),
+        "expected the per-site-grounded monomorph symbol, found: {mono:?}"
+    );
+}
+
+/// G1p (P7b.S8c REQ-1/REQ-5/REQ-7/REQ-8): `noref.sth` (P9, the bare
+/// plain-slot cell -- the shape `Foldable::fold` rides in production) builds
+/// and runs instead of panicking. Grounding-existence pin (both `i64`,
+/// symmetric); no symbol capture needed per REQ-5.
+#[test]
+fn bound_dispatch_grounds_a_bare_plain_slot_member_local() {
+    let src = "\
+type: Box['T] v 'T ;
+: mkbox ( i64 -- Box[i64] ) Box ;
+trait: Odd['T] : odd ( 'U 'T -- ) ; ;
+impl: Odd for Box['T] : odd drop drop ; ;
+: consume ['T: Odd] ( 'U 'T -- ) odd ;
+: main ( -- ) 7 mkbox | b | 7 b consume ;
+";
+    build_run_keep("g1p-noref", src);
+}
+
+/// G1a (P7b.S8c REQ-1/REQ-6/REQ-7): the asymmetric twin of `plainslot.sth`
+/// -- `mkbox` takes `str` (the target var) while the free local operand
+/// stays `i64`. This is the end-to-end **grounding-correctness** witness:
+/// target and local are different types, so a per-site theta that wrongly
+/// sourced the local's binding from the impl-target match (rather than the
+/// site slot) would render a distinct, wrong symbol, not the one asserted
+/// below.
+#[test]
+fn bound_dispatch_discriminates_slot_sourced_from_target_sourced_binding() {
+    let src = "\
+type: Box['T] v 'T ;
+: mkbox ( str -- Box[str] ) Box ;
+trait: Odd['T] : odd ( 'U &'T -- ) ; ;
+impl: Odd for Box['T] : odd drop drop ; ;
+: consume ['T: Odd] ( 'U &'T -- ) odd ;
+: main ( -- ) \"x\" mkbox | b | 7 &b consume ;
+";
+    let (_t, _binary, _stdout) = build_run_keep("g1a-asymmetric", src);
+
+    // Measured from the live binary: matches the spec's predicted
+    // `sooth_mono_odd_Odd_0_Box__T0___m0__t0_str_t1_i64` byte-for-byte.
+    let mono = mono_symbol_lines("g1a-asymmetric-ssa", src, "sooth_mono_odd_Odd_0_Box");
+    assert!(
+        mono.iter()
+            .any(|l| l.contains("sooth_mono_odd_Odd_0_Box__T0___m0__t0_str_t1_i64")),
+        "expected the slot-sourced (not target-sourced) monomorph symbol, found: {mono:?}"
+    );
+}
+
+/// G2 (P7b.S8c REQ-4/REQ-7): `mono.sth` (P2, `plainslot.sth` minus the
+/// bound consumer -- a direct mono call to the member) stays a clean
+/// build+run. Route D's caller-side rule is pre-existing and untouched
+/// (REQ-4); this is the positive regression pin.
+#[test]
+fn mono_call_site_member_local_stays_working() {
+    let src = "\
+type: Box['T] v 'T ;
+: mkbox ( i64 -- Box[i64] ) Box ;
+trait: Odd['T] : odd ( 'U &'T -- ) ; ;
+impl: Odd for Box['T] : odd drop drop ; ;
+: main ( -- ) 7 mkbox | b | 7 &b odd ;
+";
+    build_run_keep("g2-mono", src);
+}
+
+/// G3b (P7b.S8c REQ-1/REQ-5/REQ-7/REQ-8): `qrow3.sth` (P5, the
+/// quotation-row member local, dispatched with the caller's explicit
+/// instantiation) grounds instead of panicking. The P4 caller-side rule
+/// (REQ-4) is a different fence entirely -- this golden exercises what lies
+/// past it.
+#[test]
+fn quotation_row_member_local_grounds_with_explicit_instantiation() {
+    let src = "\
+type: Box['T] v 'T ;
+: mkbox ( i64 -- Box[i64] ) Box ;
+trait: Odd['T] : odd ( &'T [ 'U -- ] -- ) ; ;
+impl: Odd for Box['T] : odd drop drop ; ;
+: consume ['T: Odd] ( &'T [ 'U -- ] -- ) odd ;
+: main ( -- ) 7 mkbox | b | b &b [ drop ] consume[Box[i64] i64] drop ;
+";
+    build_run_keep("g3b-qrow3", src);
+}
+
+/// G4 (P7b.S8c REQ-1/REQ-7/REQ-8): `mixed3.sth` (P8, an HKT member row
+/// whose header var heads an App with a plain-slot local alongside it) is
+/// the **Route A regression pin** -- the CtorImage arm this slice does not
+/// touch. Build+run exit 0 and the monomorph symbol byte-identical to
+/// today's measured value, proving Phase 1's per-site-binding edit causes
+/// no churn on the route it does not touch.
+#[test]
+fn app_headed_member_local_keeps_grounding_per_site() {
+    let src = "\
+import: core::bool | Bool True | ;
+type: Box['T] v 'T ;
+: mkbox ( i64 -- Box[i64] ) Box ;
+trait: W2['F: * -> *] : w2 ( 'F['U] 'V -- ) ; ;
+impl: W2 for Box : w2 drop drop ; ;
+: consume4 ['F: W2] ( 'F['U] 'V -- ) w2 ;
+: main ( -- ) 7 mkbox | b | b True consume4 ;
+";
+    let (_t, _binary, _stdout) = build_run_keep("g4-mixed3", src);
+
+    // Measured from the live binary: matches the spec's predicted
+    // `sooth_mono_w2_W2_0_Box__T0___m0__t0_i64_t1_e0_Bool` byte-for-byte --
+    // no churn on Route A.
+    let mono = mono_symbol_lines("g4-mixed3-ssa", src, "sooth_mono_w2_W2_0_Box");
+    assert!(
+        mono.iter()
+            .any(|l| l.contains("sooth_mono_w2_W2_0_Box__T0___m0__t0_i64_t1_e0_Bool")),
+        "expected the byte-identical, non-churned Route A monomorph symbol, found: {mono:?}"
+    );
+}
+
+/// G6 (P7b.S8c D2/REQ-2/REQ-7): `concrete4.sth` (P12, a concrete impl
+/// target with a member local, dispatched with a `List[i64]` flowed into
+/// the `i64`-typed local slot) is now rejected located instead of silently
+/// printing the operand's raw slot word. (Phase 2 review finding: the
+/// diagnostic names the instantiating caller (`main`) but the line/col
+/// points into the member call inside `consume` -- this is the existing
+/// diagnostic-family convention, not a bug introduced here.)
+#[test]
+fn concrete_target_member_dispatch_checks_site_slots() {
+    let stderr = build_error_located(
+        "g6-concrete4",
+        "import: core::list | List Nil Cons | ;\n\
+         trait: Odd['T] : odd ( 'T 'U -- ) ; ;\n\
+         impl: Odd for i64 : odd . . ;\n\
+         ;\n\
+         : consume ['T: Odd] ( 'T 'U -- ) odd ;\n\
+         : push ( List[i64] i64 -- List[i64] ) swap ^ Cons ;\n\
+         : main ( -- ) Nil 3 push 2 push 1 push | l | 7 l consume ;\n",
+    );
+    assert!(
+        stderr.contains(
+            "error: `odd` of `Odd` in `main` (line 7, col 34) expects `i64`, found `List[i64]` in operand slot 1"
+        ),
+        "{stderr}"
+    );
+}
+
+/// REQ-1's QuotLit fence: a written quotation literal reaching a plain
+/// member slot (the reviewer's repro) is rejected located, non-panic,
+/// naming the member and the site -- rather than reaching `apply_subst`'s
+/// `unreachable!` `QuotLit` arm.
+#[test]
+fn bound_dispatch_rejects_a_quotation_literal_in_a_plain_member_slot() {
+    let stderr = build_error_located(
+        "quotlit",
+        "type: Box['T] v 'T ;\n\
+         : mkbox ( i64 -- Box[i64] ) Box ;\n\
+         trait: Odd['T] : odd ( 'U &'T -- ) ; ;\n\
+         impl: Odd for Box['T] : odd drop drop ; ;\n\
+         : consume ['T: Odd] ( &'T -- ) [ drop ] swap odd ;\n\
+         : main ( -- ) 7 mkbox | b | &b consume ;\n",
+    );
+    assert!(
+        stderr.contains(
+            "error: `odd` of `Odd` in `main` (line 7, col 46) found a quotation literal in operand slot 0"
+        ),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains(
+            "a bound-dispatched member instantiates its signature at this site's operand types, and a written quotation literal has no type to instantiate at -- declare the slot as a quotation parameter, or pass the literal through one"
+        ),
+        "{stderr}"
+    );
+}
+
+/// REQ-5's array-element twin: `array['U 2]` (a `0 2 fill`-constructed
+/// array, since `array` is not itself a callable word) grounds the same
+/// way the other Route B cells do. Grounding-existence pin, symmetric
+/// `i64`/`i64`.
+#[test]
+fn bound_dispatch_grounds_an_array_element_member_local() {
+    let src = "\
+type: Box['T] v 'T ;
+: mkbox ( i64 -- Box[i64] ) Box ;
+trait: Odd['T] : odd ( array['U 2] &'T -- ) ; ;
+impl: Odd for Box['T] : odd drop drop ; ;
+: consume ['T: Odd] ( array['U 2] &'T -- ) odd ;
+: main ( -- ) 7 mkbox | b | 0 2 fill &b consume ;
+";
+    build_run_keep("array-element-twin", src);
+}
+
+/// REQ-5's bare-var-target twin: `impl: Odd for 'T` (the catch-all impl
+/// target) grounds the same way the other Route B cells do.
+/// Grounding-existence pin, symmetric `i64`/`i64`.
+#[test]
+fn bound_dispatch_grounds_a_member_local_under_a_bare_var_impl_target() {
+    let src = "\
+type: Box['T] v 'T ;
+: mkbox ( i64 -- Box[i64] ) Box ;
+trait: Odd['T] : odd ( 'T 'U -- ) ; ;
+impl: Odd for 'T : odd drop drop ; ;
+: consume ['T: Odd] ( 'T 'U -- ) odd ;
+: main ( -- ) 7 mkbox | b | b 7 consume ;
+";
+    build_run_keep("bare-var-target-twin", src);
+}
+
+/// The fail-closed tail itself (`member_unbound_variable_error`,
+/// `src/check/poly.rs:9632`), reached end to end: `odd`'s declared output
+/// `'U` is a signature variable that occurs in neither its input (`&'T`) nor
+/// the impl target's match, so neither determines it before minting. Located
+/// (not `driver.rs:579`'s panic), reported against the caller `main` at the
+/// call site inside `consume`'s inlined body (`consume` is itself generic,
+/// so its body is checked in the caller's context, not standalone).
+#[test]
+fn bound_dispatch_fails_closed_when_a_member_output_variable_stays_unbound() {
+    let stderr = build_error_located(
+        "unbound-output-var",
+        "type: Box['T] v 'T ;\n\
+         : mkbox ( i64 -- Box[i64] ) Box ;\n\
+         trait: Odd['T] : odd ( &'T -- 'U ) ; ;\n\
+         impl: Odd for Box['T] : odd odd ; ;\n\
+         : consume ['T: Odd] ( &'T -- 'T ) odd ;\n\
+         : main ( -- ) 7 mkbox | b | &b consume drop ;\n",
+    );
+    assert_eq!(
+        stderr,
+        "error: `odd` of `Odd` in `main` (line 7, col 35) leaves type variable `'U` unbound\n  the impl target's match and this site's operands together determine no type for `'U`, so the member has no instantiation here -- give it an operand position that fixes `'U`\n"
     );
 }
