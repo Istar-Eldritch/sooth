@@ -823,8 +823,8 @@ fn check_term(
             // has already established is where a non-empty one may arrive.
             if poly.env.contains_key(name) && !fall_through_to_env {
                 return check_poly_call(
-                    name, span, type_args, len_args, &mut stack, ctx, env, scope, arrays, cells,
-                    refs, slices, prov, live, at, poly,
+                    name, span, type_args, len_args, None, &mut stack, ctx, env, scope, arrays,
+                    cells, refs, slices, prov, live, at, poly,
                 );
             }
             // P7.S3o Phase 3: a bare trait member call (like `cmp` directly)
@@ -970,6 +970,20 @@ fn check_term(
                         // splices the library definition, so the checker and
                         // the backend would disagree about which `lt` a
                         // `Vec2 Vec2 lt` site means.
+                        poly.builtin_overloads.insert(span, only.symbol.clone());
+                    } else if is_generated_enum_word(name, only, ctx) {
+                        // P7b.S8b Phase 1 (R5): a generated enum word chosen
+                        // by bare name while only one instantiation of its
+                        // header existed. Lowering's own map keys every
+                        // variant under both the mangled and the bare
+                        // spelling, and the bare one is last-write-wins
+                        // across instantiations (`src/ir/layout.rs`), so a
+                        // *later* mint -- one the frozen `env` never saw,
+                        // grounded mid-check -- silently re-typed this site's
+                        // field shapes. Recording the resolved mangled symbol
+                        // pins the instantiation the checker actually chose,
+                        // the same span-keyed channel the multi-candidate arm
+                        // below already uses; lowering needs no change.
                         poly.builtin_overloads.insert(span, only.symbol.clone());
                     }
                     only
@@ -2043,6 +2057,35 @@ fn mint_fallback_candidates(name: &str, ctx: &Ctx) -> Vec<Overload> {
             }
         }
         out
+    })
+}
+
+/// P7b.S8b Phase 1 (R5): whether `chosen` is a generated enum word --
+/// `(name, symbol)` membership in `enum_generated_sigs` (constructors) or
+/// `variant_generated_sigs` (destructures) over the extended type slices.
+/// The non-splice twin of `splice_enum_site`'s own membership test, which
+/// needs the operative `EnumId` on top because a splice redirects per
+/// `(uid, span)`; outside a splice the resolved symbol is the whole record.
+/// An eliminator (`Opt?`) is deliberately absent: those sites are
+/// intercepted by `check_eliminator_call` and never reach this arm.
+fn is_generated_enum_word(name: &str, chosen: &Overload, ctx: &Ctx) -> bool {
+    // P7b.S8b Phase 1 review (P2-7): a non-generic instantiation's mangled
+    // symbol IS its bare surface name (`enum_generated_sigs` yields
+    // `variant.name`, R5's own doc comment), so `chosen.symbol == name` can
+    // only be that already-correctly-resolved bare-key case -- the dual-map
+    // scan below only ever matters for a generic instantiation, whose
+    // mangled symbol differs from the surface name. Skipping here is
+    // behavior-preserving (the bare-key path already resolves those sites)
+    // and shrinks the per-call `enum_generated_sigs`/`variant_generated_sigs`
+    // build to generic instantiations only.
+    if chosen.symbol == name {
+        return false;
+    }
+    ctx.with_extended_type_slices(|_, enums| {
+        enum_generated_sigs(enums)
+            .into_iter()
+            .chain(variant_generated_sigs(enums))
+            .any(|(n, symbol, _, _)| n == name && symbol == chosen.symbol)
     })
 }
 
@@ -3167,6 +3210,113 @@ mod tests {
             candidates.len(),
             2,
             "expected both same-surface-name pending mints, not a last-write truncation"
+        );
+    }
+
+    /// P7b.S8b Phase 1 (R5, happy path): a generated enum word is recognised
+    /// by `(name, symbol)` membership over the extended type slices, for the
+    /// constructor and for its destructure twin -- the two sources the
+    /// single-candidate arm's new record has to cover. The mint here is
+    /// deliberately *unflushed*, the same state `mint_fallback_candidates`
+    /// serves from, since that is the route the record's symbol can arrive
+    /// by.
+    #[test]
+    fn is_generated_enum_word_identifies_a_pending_variant_constructor_and_destructure() {
+        let structs: Vec<StructDecl> = Vec::new();
+        let enums: Vec<EnumDecl> = Vec::new();
+        let mut generics = GenericTypes::with_bases(structs.len(), enums.len());
+        generics.enums.push(generic_enum_decl("Result", "Ok"));
+        let mut scratch = ScratchRegs::default();
+        generics.instantiate_enum(0, &[Type::I64], &[], 0, scratch.regs());
+        let cell = RefCell::new(generics);
+        let word = crate::test_support::bare_word("main", 0);
+        let ctx = word_ctx(
+            &word,
+            &structs,
+            &enums,
+            &[],
+            None,
+            &CombinatorIndex::new(),
+            Some(&cell),
+        );
+        let ctors = mint_fallback_candidates("Ok", &ctx);
+        let [ctor] = ctors.as_slice() else {
+            panic!("expected exactly the one pending mint's constructor")
+        };
+        assert_eq!(ctor.symbol, "Ok[i64]", "the mangled registry spelling");
+        assert!(is_generated_enum_word("Ok", ctor, &ctx));
+        let destructures = mint_fallback_candidates("Ok>", &ctx);
+        let [destructure] = destructures.as_slice() else {
+            panic!("expected exactly the one pending mint's destructure")
+        };
+        assert!(is_generated_enum_word("Ok>", destructure, &ctx));
+    }
+
+    /// P7b.S8b Phase 1 (R5, negative): membership is on `(name, symbol)`, not
+    /// on the name alone -- a user word that happens to share a variant's
+    /// surface name is not a generated enum word, so it takes none of the
+    /// span-keyed record and keeps resolving by name at lowering.
+    #[test]
+    fn is_generated_enum_word_rejects_a_user_word_sharing_the_surface_name() {
+        let structs: Vec<StructDecl> = Vec::new();
+        let enums: Vec<EnumDecl> = Vec::new();
+        let mut generics = GenericTypes::with_bases(structs.len(), enums.len());
+        generics.enums.push(generic_enum_decl("Result", "Ok"));
+        let mut scratch = ScratchRegs::default();
+        generics.instantiate_enum(0, &[Type::I64], &[], 0, scratch.regs());
+        let cell = RefCell::new(generics);
+        let word = crate::test_support::bare_word("main", 0);
+        let ctx = word_ctx(
+            &word,
+            &structs,
+            &enums,
+            &[],
+            None,
+            &CombinatorIndex::new(),
+            Some(&cell),
+        );
+        let user_word = Overload {
+            sig: Sig {
+                inputs: vec![Type::I64],
+                outputs: vec![Type::I64],
+            },
+            symbol: "Ok__m0".to_string(),
+            module: 0,
+        };
+        assert!(!is_generated_enum_word("Ok", &user_word, &ctx));
+    }
+
+    /// P7b.S8b Phase 1 (R5, review round FIX 3): the single-candidate arm's
+    /// new record lands the resolved mangled symbol in `module.builtin_
+    /// overloads`, not merely a boolean predicate -- a full `check()` pass
+    /// over a mono body constructing a generated enum word, read back the
+    /// same way `checked_like_a_build` hands a `Module` to its callers
+    /// (`poly.rs:12248`).
+    #[test]
+    fn is_generated_enum_word_site_records_its_mangled_symbol_in_builtin_overloads() {
+        let mut module = crate::test_support::parse_with_core(
+            &crate::lexer::lex(
+                "type: Opt['T] | None | Some 'T ;\n\
+                 : mkopt ( i64 -- Opt[i64] ) Some ;\n\
+                 : main ( -- ) 1 mkopt drop ;\n",
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        crate::check::check(&mut module).expect("the mkopt fixture checks");
+        assert_eq!(
+            module.builtin_overloads.len(),
+            1,
+            "the record lands on exactly one span (key coverage): {:?}",
+            module.builtin_overloads
+        );
+        assert!(
+            module
+                .builtin_overloads
+                .values()
+                .any(|symbol| symbol == "Some[i64]"),
+            "the construction site records its resolved mangled symbol: {:?}",
+            module.builtin_overloads
         );
     }
 

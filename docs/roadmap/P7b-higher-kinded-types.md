@@ -186,7 +186,8 @@ consumes both operands, `empty ( -- 'T )` grounds only from an explicit instanti
 literal at a poly call site. `List['T]` is promoted into `core`, takes a non-inline trait
 impl, and its fused iterative destructor drops linear payloads per instantiation. `Monoid`
 for `i64` and `mconcat` over `Option`/`List` are measured and grounded; `Monoid for
-List['T]` (a real append) and `Functor for List` both hit a **recorded, unfixed wall**:
+List['T]` (a real append) and `Functor for List` both hit a **recorded, unfixed wall**
+(closed by P7b.S8b, below — both dropped goldens land there):
 any trait-member body over `List['T]` that *reconstructs* a `Cons` (as opposed to only
 destructuring one, which `Foldable.fold` does and works) panics in
 `poly_bind_construction_arg` on a bare `PolyType::Generic` field the existing `OwnedCell`
@@ -210,7 +211,8 @@ bounds with impls on the real lib types (`List` folds but does not map, per the
 construction wall above); `combine`/`empty`/`mconcat` goldens for `i64` and
 `Option`/`List`; core gains `List['T]` with a constant-stack destructor that drops linear
 payloads per instantiation; the array-as-constructor widening and the `List`
-construction wall are recorded rulings, not landed capabilities.
+construction wall are recorded rulings, not landed capabilities (the wall itself is
+fixed by P7b.S8b, below).
 
 **P7b.S7 — Quotation effects over type constructors (the `call` extension).**
 `Monad.bind ( 'F['T] [ 'T -- 'F['U] ] -- 'F['U] )` declares and dispatches over
@@ -263,7 +265,8 @@ are **`for_each`/`fold`** — `map` is not in S8 (a bound-generic body cannot pr
 `'It['U]` and cannot `dup` the abstract iterator). **P7b.S8b** (carved out, same
 date): the S6 construction-wall fix (`poly_bind_construction_arg`'s bare-`Generic`
 `^Self['T]` self-reference-field arm, refined by the P8 round) plus per-impl
-traitful `List` members (`map`, `append`) over the Iterator protocol. A second
+traitful `List` members (`map`, `append`) over the `Functor`/`Monoid` protocols S6
+left as a recorded wall (see below). A second
 follow-up, **P7b.S8c** (260906): the located-fence fix for member signatures with
 unbindable free type variables — the `src/ir/driver.rs:579` unification-expect ICE
 surfaced by the integrated review (pre-existing; reproducible at the S8 base).
@@ -322,6 +325,131 @@ overall (parser.rs and poly.rs are each one compiler-stage module, per CLAUDE.md
 "group by responsibility" convention), which is a standing size fact about the parse
 and check stages generally, not a signal this slice's own edits introduced — no split
 is warranted from this phase's diff alone.
+
+**P7b.S8b — The construction wall, a pre-existing two-defect fix, and the traitful
+`List` surface.** Closes S6's recorded construction wall (`poly_bind_construction_arg`
+panicking on a bare `PolyType::Generic` self-reference field, e.g. `^List['T]`) with
+one new arm (`src/check/poly.rs:6256`, inserted before the catch-all): bind the field
+positionally against a same-identity `Generic` operand, recursing over field args vs
+operand args; a differently-headed or non-`Generic` operand is a located
+`poly_rendered_type_mismatch_error`, never a panic. A `Generic` field carrying a length
+**variable** (a self-referential length-carrying header is spellable, e.g.
+`Ring['T 'N: Len] head 'T next ^Ring['T 'N]`) is a separate, dedicated located error
+(`poly_generic_field_len_unbound_error`, `src/check/poly.rs:6110`) naming the header
+and its unbindable length variable — a sharper message than a rendered mismatch, whose
+expected side can only show a placeholder for it: a field's length-variable id lives in
+its own header's space, which the caller's tables cannot name. A **concrete** length is
+not fenced (the round-1 review found the original any-non-empty fence rejected
+`Ring['T 3]` while naming a variable it does not have): it grounds when both sides
+agree, and is an ordinary rendered mismatch when they do not. Routing that case to the
+renderer exposed a **pre-existing panic class** the old fence had been hiding
+(round-3 review, P0): `poly_type_str` indexed the caller's variable tables raw, so any
+id from another declaration space was an index-out-of-bounds ICE *on the error path* —
+reachable before this slice via a length-variable-carrying operand against a
+differently-headed field, and newly reachable for `Holder['T] r Ring['T 3]`, a clean
+located error one commit earlier. The renderer is now total: an unnameable id prints
+`'?0` / `'?len0` / `'?row0`, in-range spellings byte-identical, so a diagnostic can no
+longer be the thing that crashes the build. Lifting the wall exposed a
+pre-existing, S6-era two-defect bug the probe round root-caused independently of the
+arm (both reproduce at base `c406149` with no self-reference field at all, `type:
+Opt['T]` / `impl: Monoid for Opt`): (a) a nullary trait member called with an explicit
+type argument over a generic, single-type-variable impl target (`empty[List[i64]]`
+over `impl: Monoid for List`) seeded its θ positionally instead of through the
+impl-target equation, minting `List[List[i64]]` instead of `List[i64]` — fixed by
+seeding through `match_impl_target` on a channel separate from call-site `type_args`
+(`src/check/poly.rs:2371-2391`, the nullary rescue branch) — the round-1 review then
+closed that channel's own silent drop: for a **multi-variable** target the arity gate
+catches only the short spelling (`empty[Pair[i64 str]]`), while the full-length
+`empty[Pair[i64 i64] str]` passed it, reached a seed that grounds both variables from
+the dispatch type alone, and minted the same monomorph as `empty[Pair[i64 i64] i64]`
+with its second argument read by nothing; past position 0 (the dispatch type on this
+path) a written argument must now agree with what the target determined, or is a
+located conflict; (b) the wrong mint's
+variant words then clobbered the lowering-side bare-name last-write-wins variant map
+(`src/ir/layout.rs:597-640`), so *every* `Cons`/`Nil` construction program-wide lowered
+with wrong field shapes — a silent 40-byte layout corruption, SIGSEGV on any program
+mixing a prior construction with an `empty[<inst>]` call — fixed by recording each
+checker-resolved enum-construction/destructure site's own resolved mangled symbol
+span-keyed into `builtin_overloads` (`is_generated_enum_word`, `src/check/terms.rs`),
+so a site lowers with its own instantiation's shape even when a later mint of the same
+header overwrites the bare-name map entry — with R5's carve-outs intact: non-generic
+enums' sites are deliberately not recorded (their symbol already is the bare name the
+bare-key path resolves) and mono-body eliminator routes are out of scope; shipping the
+arm without this pair would
+have traded a compile-time panic for a silent miscompile. The Opt-shaped repro (no
+self-reference field, prior `Some` construction, then `empty[Opt[i64]]`) is pinned as
+a golden independent of the List wall (`nullary_member_over_a_generic_impl_target_runs_after_a_prior_construction`,
+`tests/phase7b_slice8b.rs`); the concrete-target nullary path (S6's `empty[i64]`
+golden) and the S6 `mconcat_over_list_dispatches` golden stay byte-unchanged. Host
+trait ruling (PB-5, user-authorized 260907): `append` grounds through `Monoid for
+List` (`combine` = append, `empty` = `Nil`), and S8b closes S6's *whole* recorded
+wall — both dropped goldens (`Monoid for List`, `Functor for List`) land here as
+goldens, per S6's convention (trait declarations, impls, and consumers live in the
+golden programs; only the already-shipped `lib/core/list.sth` and the unchanged
+`lib/core/sooth.pkg` module list ship — no new lib modules). The S6 wall witness
+flips from a panic pin to a positive golden
+(`monoid_for_list_append_construction_builds_and_runs_clean`,
+`tests/phase7b_slice6.rs:407`, renamed from `..._wall_is_recorded`). `map` through a
+shared `Functor` bound grounds a real `List[i64]` end-to-end, including a
+shared-bound-dispatched-twice variant; `combine` through a `Monoid` bound (one poly
+middleman at a single impl) prints `1 2 3 5 3`; `empty[List[i64]]` grounds
+explicitly in a mono main. Residual (R9, recorded not measured): bound-directed
+`empty` resolving at the `List` impl itself remains unverified — the S6 golden
+exercises `Monoid for i64`'s `empty`, and no Phase 3 golden pins the `List` route.
+Linearity teeth hold on the new constructions: an
+undropped `map`/`append` result is a located compile error, and `dup` of a
+`List['T]` operand stays fenced byte-exact
+(`poly_copy_generic_error`). Recorded fence (R12, not fixed): a map producing a
+distinct `'U` through a shared bound remains unspellable (inference does not bind
+output-only vars; quotation types rejected against plain-var slots; poly→poly
+quotation passing fenced) — verified substitutes are `'U := 'T` specialization
+(the shipped `map` consumer), composition, and a mono middleman. Two further
+pre-existing fences recorded this round, neither fixed: a bare nullary variant ctor
+of a generic header in a mono body grounds at the single first candidate regardless
+of the expected output — a second-instantiation nullary construction cannot be
+spelled, caught only as a located signature mismatch (adjacent to S6 R4's future
+consuming-context-grounding slice); and the struct-word twin of the bare-key
+last-write-wins class, plus cross-module same-named variant names in the flat
+`enums.words` map, has no known miscompile repro but is left for a future slice. One
+caveat is new in this slice, not pre-existing: a mono `inline` (combinator) word's
+body is checked as an ordinary mono word, which can record a construction span into
+`builtin_overloads` even when the word is never spliced anywhere in the program,
+benign at one θ per mono body, pinned by
+`mono_inline_combinator_variant_construction_builds_and_runs`.
+**Exit:** the Opt repro builds and runs exit 0; both P8 shapes (impl-member-body and
+plain-generic-word `Cons` construction) build and run; the ctor-mismatch and
+`len_args` errors are located, byte-exact, golden-pinned; the S6 wall witness passes
+as a positive golden; `map`/`combine`/`empty[List[i64]]` goldens ground per above;
+undropped-result and `dup` errors byte-exact; `mconcat_over_list_dispatches` and
+every other S6/S8 pre-existing golden byte-unchanged; `git diff c406149..HEAD --
+src/ir/` empty modulo one comment-only correction to a doc comment at
+`src/ir/func_builder/mod.rs:195-199` (Phase 1's `builtin_overloads` record falsified
+its old "empty on every corpus/test path" claim); `lib/` and `lib/core/sooth.pkg`
+unchanged; full gate green. See [slice8b-spec](./P7b/slice8b-spec.md) with its
+[probes](./P7b/slice8b-probes.md) for the full mechanism verification, the segfault
+root-cause bisection, and the spellings log.
+Growth-structure re-check (CLAUDE.md, at this phase's exit) over every file this slice
+touched — `src/check/poly.rs`, `src/check/terms.rs`, `tests/phase7b_slice6.rs`,
+`tests/phase7b_slice8b.rs`: `src/check/poly.rs`'s new arm (with its one new dedicated
+error constructor, `poly_generic_field_len_unbound_error`, beside the pre-existing
+`poly_rendered_type_mismatch_error` it twin-styles) sits beside its existing neighbors
+as more binding-arm/error-rendering
+functions of the same kind already there (`poly_bind_construction_arg`'s own
+`Var`/`Concrete`/`App`/`OwnedCell` arms), and the θ-seeding change extends the existing
+nullary rescue branch
+in place rather than adding a parallel path; `src/check/terms.rs`'s new
+`is_generated_enum_word` sits beside its existing twin `splice_enum_site` (the
+doc comment says as much) and the single-candidate arm's new `else if` mirrors the
+multi-candidate arm's existing `builtin_overloads` insert in the same function — no
+import divergence, no function added that never calls its neighbors;
+`tests/phase7b_slice6.rs`'s diff is three doc-comment corrections plus one test rename/
+body-swap in place, no new functions. `tests/phase7b_slice8b.rs` is a new file, but
+it is the established one-file-per-slice pattern every prior S6/S7/S8/S10 golden
+suite already follows, not a new module needing a split. `poly.rs` and `terms.rs`
+remain large overall (each one compiler-stage module, per CLAUDE.md's "group by
+responsibility" convention), which is a standing size fact about the check stage
+generally, not a signal this slice's own edits introduced — no split is warranted
+from this slice's diffs.
 
 **P7b.S9 — Module-aware trait-impl matching.**
 Carved out of S5's review (260904): `find_bound_impl` (`poly.rs:8235`) matches a

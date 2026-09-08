@@ -353,8 +353,8 @@ fn mconcat_over_option_dispatches() {
 /// Phase 5 (R6a): `mconcat` over the real `core::list`, summing a 3-element
 /// `List[i64]` (`1 + 2 + 3 = 6`) through the same bound-parameter spelling.
 /// `fold`'s body only destructures and never reconstructs a `List`, so it
-/// does not hit the Phase 5 construction wall (see
-/// `monoid_for_list_append_construction_wall` below).
+/// does not hit the Phase 5 construction wall (closed by P7b.S8b; see
+/// `monoid_for_list_append_construction_builds_and_runs_clean` below).
 #[test]
 fn mconcat_over_list_dispatches() {
     let stdout = build_and_run(
@@ -390,24 +390,21 @@ fn mconcat_over_list_dispatches() {
     assert_eq!(stdout, "6\n");
 }
 
-/// Phase 5 (R6, recorded wall): `Monoid for List['T]` -- a real linear
+/// Phase 5 (R6) / P7b.S8b (PB-1): `Monoid for List['T]` -- a real linear
 /// merge over two spines, `combine` recursing through the self-reference
-/// and reconstructing a `Cons` on the way back out. Unlike Phase 3's
-/// `Foldable.fold` (which only *destructures* `List`, never reconstructs
-/// it), this hits a **new** panic distinct from M4's twinned arms: the
-/// declared field type arriving at `poly_bind_construction_arg`
-/// (`src/check/poly.rs:6072`) is a bare `PolyType::Generic` rather than the
-/// `OwnedCell(Generic)` Phase 3's arm handles, so the catch-all fires. A
-/// minimal reproduction (`monoid_for_list_construction_wall` unit-adjacent
-/// probe, see the manual verification below) shows the wall is not about
-/// recursion at all: *any* trait-member body over `List` that constructs a
-/// `Cons` panics identically, including a non-recursive one. Per R6's own
-/// ruling ("if it does not ground, the phase records the wall ... and drops
-/// the instance from the goldens"), `Monoid for List` is **not** landed as a
-/// golden; this test pins the located panic text so a future slice fixing
-/// the wall gets a regression witness that the wall existed.
+/// and reconstructing a `Cons` on the way back out. This was the S6
+/// *recorded wall*: the declared `^List['T]` self-reference field arrived
+/// at `poly_bind_construction_arg` as a bare `PolyType::Generic`, which no
+/// arm covered, and the catch-all panicked. S8b's `Generic` field arm
+/// (bind positionally against a same-identity `Generic` operand) removes
+/// the wall, so the fixture is now the positive golden it was always meant
+/// to be: the build grounds, the run appends the two spines, and `main`
+/// drops the result (empty stdout -- the element-carrying goldens pin
+/// visible output elsewhere). The pre-S8b panic text
+/// (`a generic \`type:\` field is never Generic`) is pinned verbatim in
+/// docs/roadmap/P7b/slice8-probes.md (P8-2b) and slice8b-probes.md.
 #[test]
-fn monoid_for_list_append_construction_wall_is_recorded() {
+fn monoid_for_list_append_construction_builds_and_runs_clean() {
     let (_t, entry) = single_file_hosted(
         "p5-monoid-list-wall",
         "\
@@ -435,19 +432,28 @@ fn monoid_for_list_append_construction_wall_is_recorded() {
         .arg(&entry)
         .output()
         .expect("sooth build should spawn");
-    let stderr = String::from_utf8_lossy(&build.stderr);
     assert!(
-        stderr.contains("a generic `type:` field is never Generic"),
-        "expected the recorded construction-wall panic, got: {stderr}"
+        build.status.success(),
+        "the S8b arm removed the construction wall; build should succeed, got: {}",
+        String::from_utf8_lossy(&build.stderr)
     );
+    let binary = entry.with_extension("");
+    let run = Command::new(&binary).output().expect("binary should run");
+    std::fs::remove_file(&binary).ok();
+    assert!(
+        run.status.success(),
+        "the appended list should drop cleanly (exit 0)"
+    );
+    assert_eq!(String::from_utf8_lossy(&run.stdout), "");
 }
 
 /// Phase 5 (R1 exit criterion): a single program that `map`s and `fold`s
 /// over `Option`, `Result`, and `List` through shared `Functor`/`Foldable`
 /// bounds, with impls on the real lib types. `Functor for List` is omitted
-/// -- it hits the same construction wall as `Monoid for List` above (any
-/// trait-member body over `List` that builds a `Cons`), so this program
-/// witnesses the non-array clauses that ground: `map` over `Option`,
+/// here -- S6 recorded it against the same construction wall as `Monoid for
+/// List` (any trait-member body over `List` that builds a `Cons`), a wall
+/// P7b.S8b closes; its dropped golden lands in S8b's own Phase 3. This
+/// program witnesses the non-array clauses that ground: `map` over `Option`,
 /// `fold` over all three.
 #[test]
 fn dogfood_maps_and_folds_over_option_result_and_list_through_shared_bounds() {
