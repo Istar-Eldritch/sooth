@@ -535,7 +535,73 @@ admitting is a discovery measurement; the mono route may suffice for the stdlib'
 per-element impls. Discovery questions: shared vs exclusive iteration (`Slice` is
 multi-use, `!Slice` linear — which takes the impl, or both), the remainder's
 mutability, and the linear-discipline story for a view that owns nothing. Size: `S-M`
-(checker/target-grammar only; no `src/ir/` change; lib impl + goldens).
+(checker/target-grammar only; no `src/ir/` change; lib impl + goldens). See
+[slice6d-brief](./P7b/slice6d-brief.md) with its [probes](./P7b/slice6d-probes.md):
+the blocker is confirmed exactly as above (`member_app_concrete_target_error`,
+identical for `Slice[i64]`/`!Slice[i64]`; `Slice['T]` is unreachable as a target
+spelling, not merely unadmitted) and the S8 Range lift's mechanism
+(`is_mono_ctor_app`/`GenericId`) does not transfer to a built-in `Type::Slice` target.
+A follow-up spike (round S6d-2, 260907) answered the fence-lift mechanism (a
+sentinel-substitution grounding path works, smaller than S8's own route) but surfaced
+a second, independent blocker: `Step`'s `Rest` field cannot hold a reference-shaped
+`Slice[i64]`/`!Slice[i64]` under `check_no_stored_references`. A third spike (round
+S6d-3, 260907) closed the carve-out option on this: unsound by the rule's own
+escape-safety rationale (no lifetime tracker exists to catch it any other way) and
+independently unbuildable (a deliberate, tested `layout.rs` refusal for slice-shaped
+enum payload fields). A fourth spike (round
+S6d-4, 260907) closed the alternate-shape route as well: an Option-row `next`
+(remainder as a bare stack value) dies at lowering on the same slice-field layout
+refusal, reached through the synthesized ≥2-output return-bundle struct — under any
+protocol whose `next` has two outputs, slices-as-Iterator is gated on one missing
+capability: slice-shaped fields in aggregates (IR layout) plus a storage-class/taint
+rule for reference-bearing aggregates. Ruling direction (maintainer consistency
+preference, 260907): no protocol fork, no carve-out — S6d is **deferred behind that
+prerequisite capability slice**; once it exists the Step-row protocol works for slices
+unchanged.
+
+**P7b.S6d-PREREQ — Reference-bearing aggregates (the capability S6d defers
+behind; prerequisite, not an S6d deliverable).** Recorded 260907 from probe
+rounds S6d-3/S6d-4 ([slice6d-probes](./P7b/slice6d-probes.md)); evidence-
+scoped, no spec written. Today two rules jointly make any reference-shaped
+type (`&T`/`&!T`, and `Type::Slice` by design, `builtins.rs:564`) unstorable
+and unreturnable: `check_no_stored_references`
+(`check/declarations.rs:1074`, the sole escape-safety mechanism — no
+lifetime tracker exists in Sooth) bans reference-shaped payloads from
+struct/enum fields, and `check_reference_free_signature` bans a non-inline
+word from declaring a reference-shaped output. Four walls close every
+shortcut past them: a `contains_reference` carve-out for `Type::Slice` is
+unsound by the rule's own rationale (a `Step[i64 Slice[i64]]` could
+outlive the buffer it views, with no tracker to catch it) *and* ICEs at
+`src/ir/layout.rs:271` (enum/struct payload layout has a deliberate, tested
+refusal — `scalar_size_align_refuses_a_slice` — for slice-shaped fields: a
+slice is two words `{ptr, len}`, not one); an Option-row protocol shape
+(remainder as a bare stack value) dodges the user-visible storage rule but
+not the IR — `intern_output_bundles` (R8/R10) synthesizes a return-bundle
+struct for every ≥2-output word, and that struct hits the identical layout
+refusal; a named local captured by a quotation builds a closure-env struct
+with a slice field (same storage class); and the poly-body stack checker
+loses an App-headed dispatch call's outputs (standing S8-era limitation,
+independent). The capability slice's content, when it is taken up: (1)
+slice-shaped fields in declared and synthesized aggregates — new enum/struct
+payload layout for a two-word slot (tag placement, projection, codegen;
+`scalar_size_align` gains a slice arm or slices resolve through a
+non-scalar slot path), touching `src/ir/layout.rs`, not just the checker;
+(2) the soundness story the layout work unblocks: a storage-class/taint
+rule extending the no-stored-reference discipline to *containing* values
+— e.g. an aggregate holding a slice is itself reference-bearing, cannot be
+returned from a non-inline word, cannot be captured, and cannot outlive
+the frame its borrowed storage lives in — which without real lifetime
+tracking must remain a conservative ban pattern, not an escape-permitting
+one; and (3) the standing poly-body App-dispatch output loss, if generic
+Iterator consumers over slices are to type-check. Landing (1) without (2)
+opens the exact escape the current rules exist to prevent; that is why
+this is a design-bearing slice and why S6d waits for it rather than
+shipping a checker relaxation. Size: `M-L` (layout + checker design;
+not driven by need until a slice-class target is actually wanted).
+See [slice6d-prereq-spec](./P7b/slice6d-prereq-spec.md).
+
+**P7b.S8c — Located fence for member signatures with unbindable free type
+variables.**
 
 **P7b.S8c — Per-site binding for member signatures with free input type variables.**
 Closes the lowering panic the P7b.S8 integrated review found (260906; pre-existing, not
