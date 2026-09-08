@@ -6,9 +6,15 @@ worktree had been cut before the S6/S6c/S7/S8/S8b merges and carried none of
 the S8 machinery the repro lives in), then adjudicated by a probe round
 (verbatim log, fixtures, and verdicts:
 [slice8c-probes](./slice8c-probes.md)) and a paper-test round (golden designs:
-[slice8c-paper-tests](./slice8c-paper-tests.md)). Repo untouched throughout.
-Baseline at HEAD: `cargo fmt --check && cargo clippy -- -D warnings && cargo
-test` **green — 88 binaries, 3293 passing, 0 failed**.
+[slice8c-paper-tests](./slice8c-paper-tests.md)). **Round 2** re-measured
+everything with five `prober` workers after the tree gained the S8b merge
+(base `8985d6c`, round-2 HEAD `62a928d`): every round-1 measurement
+re-verified byte-identical, two new panic cells measured, and two round-1
+claims **refuted** (D1 option A's blast radius; the concrete hole's
+observability) — the round-2 amendments are folded into F1-F5/D1/D2 below.
+Repo untouched throughout. Baseline at round-2 HEAD: `cargo fmt --check &&
+cargo clippy -- -D warnings && cargo test` **green — 89 binaries, 3334
+passing, 0 failed**.
 
 S8c is the P7b.S8 integrated review's pre-existing ICE: a bound-dispatched
 trait member whose signature carries a free INPUT type variable passes
@@ -40,17 +46,25 @@ route. Two wording corrigenda and one scope decision flow to the spec.
 
 ## What the recon round established (mechanism, probes verdict "Mechanism")
 
-- **F1 — the route decides.** `resolve_user_bound` (`src/check/poly.rs`)
+- **F1 — the route decides.** `resolve_user_bound` (`src/check/poly.rs:8981`
+  at the S8b base; byte-identical across the merge, only a +251-line offset)
   branches on the obligation's `ty`: the CtorImage arm (App-headed operand,
   S2-3) composes per site at instantiation — re-grounds `ob.slots` through
   `caller_subst`, unifies the member word's signature (`unify_poly_input`),
-  mints θ_call — so member locals ground (P3/P6/P7/P8). The P7.S4 mint arm
-  (`poly.rs:9065-9071`, generic winner, non-CtorImage) records
+  mints θ_call — so member locals ground (P3/P6/P7/P8). No shipped `lib/`
+  trait reaches the mint arm (w3r arm attribution: Show/Write/Ord → Route C,
+  Iterator/List → Route A, Iterator/Range[i64] → Route E; Functor/Foldable/
+  Monoid exist only as test-fixture traits). The P7.S4 mint arm
+  (now `poly.rs:9315-9323`, generic winner, non-CtorImage) records
   `(member_word, subst)` under `find_bound_impl`'s impl-target match
-  substitution **alone**; the member row's own variables never enter θ, and
+  substitution **alone** — the member row's own variables never enter θ, and
   lowering's `concrete_effect` (`src/ir/driver.rs:555`, called from the R9
   instantiation loop at `driver.rs:327`) hits the unbound `expect` at
-  `driver.rs:579` (P1/P5/P9/P10, backtrace P13).
+  `driver.rs:579` (P1/P5/P9/P10, backtrace P13, zero drift at the S8b base).
+  Round 2 widened the cell: the hole also swallows an **array-element**
+  member local (`array['U 2]`, admitted by the Array arm) and the
+  **bare-var catch-all** target (`impl: Odd for 'T`) — all three
+  generic-target spellings are one panic cell.
 - **F2 — the hole is admission-wide, position-wide.**
   `member_shape_is_supported`'s `PolyType::Var(_) => true` arm
   (`src/parser.rs:391`) admits member locals in any non-App position
@@ -63,15 +77,25 @@ route. Two wording corrigenda and one scope decision flow to the spec.
   ("body leaves `i64`, but the declared outputs are `'U`", probes P14). The
   slice's fence, whichever direction, only has input/ref/quotation positions
   to worry about.
-- **F4 — the concrete-target route is a silent hole, not a panic.**
-  `ground_member_type`'s `PolyType::Var(_) => target` (`src/ast.rs:2239`)
-  collapses every member local to the target type at registration, so the
-  member word emits as one mono function typed wholly at the target
-  (`nm`: `odd.::Odd.::0.::i64`), and the non-CtorImage concrete-winner arm
-  keeps the bare symbol **without any site-slot compatibility check** — a
-  `List[i64]` flows through the local's slot unchecked (probes P11/P12).
-  Same obligation loop, different failure class (silent wrong typing). D2
-  decides: fold the compatibility check into S8c or carve it out.
+- **F4 — the concrete-target route is a silent hole, not a panic — and it is
+  dispatch-specific and exploit-confirmed (round 2).**
+  `ground_member_type`'s `PolyType::Var(_) => target` (`src/ast.rs:2241`;
+  round 1 cited `2239`) collapses every member local to the target type at
+  registration (`parse_impl_member_body` → `ground_member_type` at
+  `parser.rs:4589`, mono `WordDef { poly: None }`), so the member word emits
+  as one mono function typed wholly at the target (`nm`:
+  `odd.::Odd.::0.::i64`), and the non-CtorImage concrete-winner arm keeps the
+  bare symbol **without any site-slot compatibility check**
+  (`poly.rs:9324-9331`; the only slot checks live in the CtorImage branch).
+  The direct mono call of the same member **is** checked (Route D's
+  `trait_member_operand_error`: "expects `i64`, found `Bool` in operand slot
+  1") — so the hole is bound-dispatch-specific. And it produces **unambiguous
+  wrong output**: a member body computing on the local slot prints a `Bool`'s
+  discriminant `+1` or a `List[i64]`'s head word `+1` — value varies with
+  what flows through the slot; no type-respecting execution explains it.
+  Same obligation loop as the ICE, different failure class (silent wrong
+  typing). D2 decides: fold the compatibility check into S8c or carve it
+  out; round 2 raises the urgency.
 - **F5 — the checker/IR contract mismatch, stated once.** The IR `expect`'s
   invariant ("checked: unification bound every input type variable") is true
   for every instantiation minted by call-site unification (Routes A and D)
@@ -88,10 +112,17 @@ route. Two wording corrigenda and one scope decision flow to the spec.
    at slice exit with the measured wording.
 2. The repro paragraph reads as if the shape is the whole surface → it is one
    cell of the route taxonomy (probes doc, summary table); the quotation-row
-   twin (P5) and the concrete-target hole (P12) are recorded alongside.
+   twin (P5), the array-element and bare-var-target cells (round 2), and the
+   concrete-target hole (P12, round 2: exploit-confirmed) are recorded
+   alongside.
 3. "pre-existing; reproducible at the S8 base `86ca5eb`" → carried forward as
    recorded (verified by the S8 integrated review; not re-verified this round
-   — the rebased base `445a74e` includes S8, and the panic reproduces there).
+   — the rebased base `445a74e` includes S8, and the panic reproduces there;
+   round 2 re-verified at the S8b base `62a928d`, byte-identical).
+4. Citation drift at the S8b base: the Route B mint arm is now
+   `src/check/poly.rs:9315-9323` (`resolve_user_bound` at `8981`);
+   `ground_member_type`'s Var arm is `src/ast.rs:2241` (round 1 said 2239);
+   `driver.rs:327/555/579` and `parser.rs:391` still exact.
 
 ## D1 — the fix direction (the spec's decision; the roadmap delegates it here)
 
@@ -100,13 +131,20 @@ Measured consequences, from the probes:
 - **Option A — declaration-time located fence** (reject a member type variable
   that neither the header nor any bound binds, where it is declared).
   Simplest diagnostic (the declaration is the site); makes G1/G3a red→green.
-  Cost: it outlaws **Route A's working shapes** — mixed3's plain-slot local
-  `'V` (P8) and any future HKT member that wants one — a capability
-  regression with zero shipped-lib victims today (no `lib/` trait member has
-  a plain-slot local; grepped) but a real narrowing of the surface S2-3
-  opened. The fence must live in the member-signature admission path
-  (`member_shape_is_supported`'s Var arm or its caller), and G4 is the
-  canary proving it did not overreach into App-arg positions.
+  **Round 2 refuted the round-1 cost claim**: the fence is not just a
+  capability regression with "zero victims" — the committed suite carries
+  positive green tests riding plain-slot member locals through **Route B
+  dispatches that work** (round 2's new measurement: `Functor::pick`
+  `tests/phase7b_slice2.rs:146`, `Take::take` `tests/phase7b_slice3.rs:426`,
+  `Foldable::fold` `tests/phase7b_slice6.rs:337/372/469` — the last being
+  **S6's exit-criterion dogfood golden**), so a declaration-time plain-slot
+  fence breaks **≥7 green test functions in 5 files** plus two src unit twins
+  (`declarations.rs:3860`, `poly.rs:22301`); only the two `pick` rows are
+  spareable, by placing the fence at check time ordered after S2-15.a's own
+  diagnostic. Rows 2-5 break under **any** fence placement. `lib/` itself
+  stays clean, but the suite is the spec's regression surface, not `lib/`.
+  The fence must also cover array-element positions (round 2's new cell),
+  not just top-level plain slots.
 - **Option B — the binding rule** (ground free member variables per site, like
   the doc's `'B` — Bifunctor's row locals — already ground through Route A's
   composition). Extends the CtorImage arm's per-site unification to the
@@ -114,34 +152,55 @@ Measured consequences, from the probes:
   member word's signature, mint that site's θ (sorted per the P7.S3t
   invariant). Makes G1r/G3b green; the repro *works* instead of being
   rejected. Costs: two sites can bind a local differently → two monomorphs
-  (existing dedup handles it); symbol-order churn risk for shipped traits
-  (expected nil — their locals are all target-pattern-determined — measured
-  by G5's checklist); and it leaves Route C's missing compatibility check
-  untouched unless D2 folds it in (the same unification is exactly that
-  check).
+  (existing dedup handles it). **Symbol churn: measured nil (w3r)** — no
+  shipped dispatch reaches the mint arm at all (Show/Write/Ord → Route C,
+  Iterator/List → Route A, Iterator/Range[i64] → Route E; the 49-symbol
+  inventory baseline contains no mint-arm dispatch), the len-pair
+  encounter-order hazard has zero victims (no `Len::Var` in the shipped
+  dispatch surface), and where both substitutions exist the binding sets
+  agree, so a per-site symbol is byte-identical to today's. The predicted
+  post-fix repro monomorph is
+  `sooth_mono_odd_Odd_0_Box__T0___m0__t0_i64_t1_i64` (member word registered
+  as `odd;Odd;0;Box['T0]__m0`; θ binds the target var and the local, both to
+  `i64`). One shape note: a consumer row that spells its slots in a different
+  order than the member row fails located at the pre-existing operand check
+  before any dispatch (w3r Q4a) — option B changes nothing about that fence.
+  It leaves Route C's missing compatibility check untouched unless D2 folds
+  it in (the same unification is exactly that check).
 - **Option C — the mint-site fence** (located error in the non-CtorImage
   mint arm when, after the match substitution, a member variable remains
   unbound — the IR `expect`'s predicate, checked instead of trusted, at the
   member call site). Narrowest behaviour change: only shapes that panic
-  today change (to located errors); Route A untouched by construction;
-  G1/G3a green with call-site (not declaration) wording. Cost: it fences a
-  shape Route A supports, but keyed on the *actual* failing condition
-  (route + unbound var) rather than the row's static shape — no working
-  program changes.
+  today change (to located errors); Route A untouched by construction —
+  which round 2 makes load-bearing, since Route A's plain-slot locals are
+  now known to be **pinned by green goldens** (S6's `fold` dogfood), not
+  merely permitted; G1/G3a green with call-site (not declaration) wording.
+  Cost: it fences a shape Route A supports, but keyed on the *actual*
+  failing condition (route + unbound var) rather than the row's static
+  shape — no working program changes.
 
-The probe evidence leans toward B (the hole is a missing half of machinery
-that exists one arm over, and B subsumes C's safety when D2 folds the
-concrete arm in) with C as the conservative fallback; the spec owns the call.
+The probe evidence after round 2 leans clearly toward **B** (the hole is a
+missing half of machinery that exists one arm over; B subsumes C's safety when
+D2 folds the concrete arm in; and A — the roadmap's first-named option — is
+now measured to break S6's own exit-criterion golden, which effectively
+disqualifies the parse-time placement and leaves check-time A as a narrower,
+ordering-fragile variant), with **C** as the conservative fallback; the spec
+owns the call.
 
 ## D2 — the concrete-target hole (fold in or carve out)
 
 `F4`'s silent no-site-check dispatch is adjacent (same obligation loop, the
 arm directly below the mint arm) but is a different bug class — silent wrong
-typing, no panic, no diagnostic. Folding it in costs one slot-compatibility
-unification in the concrete-winner arm and is exactly option B's machinery
-reused; carving it out keeps S8c a pure panicked→located slice (roadmap
-size `S`) and leaves the hole recorded for its own slice. The paper doc's G6
-is written to move either way.
+typing, no panic, no diagnostic. **Round 2 raised the urgency**: the hole is
+bound-dispatch-specific (the direct call is checked, the bound dispatch is
+not) and produces unambiguous wrong output (a `Bool`'s discriminant `+1` or a
+`List[i64]`'s head word `+1` printed through a member typed at the target).
+Folding it in costs one slot-compatibility unification in the concrete-winner
+arm and is exactly option B's machinery reused; Route D's
+`trait_member_operand_error` text is the ready diagnostic template (w2).
+Carving it out keeps S8c a pure panicked→located slice (roadmap size `S`)
+and leaves the hole recorded for its own slice. The paper doc's G6 is
+written to move either way.
 
 ## Non-goals (carried from the roadmap scope, unchanged by the recon)
 

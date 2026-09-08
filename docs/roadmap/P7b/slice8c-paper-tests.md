@@ -30,7 +30,14 @@ fence-at-call-site wording differ — see the brief's D1).
 - If the spec instead picks the binding-rule direction (D1's option 2), this
   fixture becomes a **positive** golden (G1r below) — the two directions are
   mutually exclusive and G1/G1r are written as alternatives, exactly one
-  surviving.
+  surviving. The post-fix monomorph to assert is
+  `sooth_mono_odd_Odd_0_Box__T0___m0__t0_i64_t1_i64` (w3r's measured-
+  ingredient prediction: member word registered as `odd;Odd;0;Box['T0]__m0`,
+  per-site θ binding the target var and the local, both to `i64`). One
+  spelling constraint the fixture must respect (w3r Q4a): the consumer's row
+  must spell its slots in the member row's order — a mismatched spelling
+  fails located at the consumer's own operand check before any dispatch, and
+  is a different (pre-existing, healthy) fence.
 
 ## G1r — `bound_dispatch_grounds_member_locals_from_the_call_site` (alternative to G1)
 
@@ -100,6 +107,43 @@ If the spec carves it out, this design moves to the carve-out slice's own
 paper doc verbatim. Not written as a positive pin of today's behaviour — the
 house rule (admission-safety sweep) forbids pinning a silent wrong-typing as
 a golden.
+
+## Round-2 validation (worker-measured at HEAD `62a928d`, post-S8b-merge)
+
+A five-worker `prober` round re-measured every fixture at the S8b base. All
+six "Today" claims above are **CONFIRMED byte-identical** (exit codes, panic
+bytes, error texts, monomorph symbols — w1/w5; no behavioural delta from the
+S8b merge, which left `src/ir/driver.rs`, `src/ast.rs`, `src/parser.rs`, and
+`lib/` diff-empty). Round-2 additions to the designs:
+
+- **G4 expected symbol** (exact assert target): the member monomorph
+  `sooth_mono_w2_W2_0_Box__T0___m0__t0_i64_t1_e0_Bool`; the caller twin,
+  optional, `sooth_mono_consume4__m0__t0_c0m0_Box_t1_i64_t2_e0_Bool`.
+- **G4 mechanism CONFIRMED**: `sooth::driver::emit_ssa_with_manifest`
+  (`src/driver.rs:897`, called by `sooth build` at `:891`) is the whole-closure
+  capture the REQ-11 pin uses (`tests/phase7b_slice8.rs:742`), and committed
+  tests already filter `sooth_mono_*` symbols from that capture
+  (`tests/phase7b_slice8b.rs:177`, `:565`) — the exact-symbol assert is
+  writable today.
+- **G5 named guards** (the checklist item's existing net):
+  `consuming_loop_over_range_is_one_frame_with_a_back_edge_and_next_is_a_real_frame`
+  (`tests/phase7b_slice8.rs:742`),
+  `functor_for_list_map_lowers_as_one_non_inline_frame`
+  (`tests/phase7b_slice8b.rs:531`), and the nullary-member mint pins
+  (`tests/phase7b_slice8b.rs:137/152/237`).
+- **G6 observability**: the wrongness is unambiguously observable today
+  (w2's exploit: a member body computing on the local slot prints a `Bool`'s
+  discriminant `+1` or a `List[i64]`'s head word `+1`) — the post-fix
+  `build_error_located` golden has a concrete wrong-behaviour it retires, and
+  Route D's `trait_member_operand_error` text is the ready diagnostic
+  template if D2 folds the check in.
+- **New-cells note for the implementing phase**: round 2 also measured an
+  **array-element** member local (`array['U 2]`) and the **bare-var catch-all**
+  target (`impl: Odd for 'T`) — both panic at `driver.rs:579` today. G1's
+  panicked→located pin should be written to cover the cheapest of these
+  twins, and the fence/binding code must handle both shapes whichever
+  direction D1 picks (they are the same unbound-union-var mechanism,
+  `build_member_var_union`, `parser.rs:768/817-827`).
 
 ## Cross-cutting invariants for the implementing phase
 

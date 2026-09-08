@@ -7,6 +7,63 @@ live under `/tmp/s8c-probe/` (`PROBE-LOG.txt`, `FIXTURES.txt`, one `.sth` per
 probe, `run-probes.sh`) — ephemeral; this doc preserves the log and every
 fixture verbatim.
 
+## Round 2 — worker adjudication (HEAD `62a928d`, post-S8b-merge)
+
+Round 1 was single-worker (inline). Round 2 re-measured everything with five
+`prober` workers after the tree gained the **P7b.S8b merge** (`main` `8985d6c`;
+round-2 HEAD `62a928d`, the recon docs rebased on top; baseline gate green —
+89 binaries, 3334 tests, 0 failed). Worker reports lived under
+`/tmp/p7bs8c-w2/{w1,w2,w4,w5}/report.md` (ephemeral; `w3` was cut off
+mid-analysis and re-run as `w3r`, see its section below). Summary of what
+round 2 changed in this doc's record:
+
+- **Every round-1 measurement re-verified byte-identical at the S8b base**
+  (w1: all 13 fixtures, exit codes, panic bytes, monomorph symbols — even the
+  `nm` addresses stable; w5: all six paper-test "Today" claims). The S8b
+  merge touched `poly.rs`/`terms.rs` heavily but changed zero fixture
+  behaviour and left `src/ir/driver.rs`, `src/ast.rs`, `src/parser.rs`,
+  `lib/` diff-empty; `resolve_user_bound` itself is byte-identical
+  (w2: only a +251-line offset).
+- **Two new panic cells** (w1): an **array-element** member local
+  (`array['U 2]` slot — admitted by `member_shape_is_supported`'s Array arm,
+  `parser.rs:392`) bound-dispatched from a mono caller panics at
+  `driver.rs:579:14`; the **bare-var catch-all** impl target (`impl: Odd for
+  'T`) with a member local panics identically (no capture error — that guard
+  is CtorImage-only). All three generic-target spellings (`Box['T]`, bare
+  `Box`, `'T`) are one panic cell, and the hole extends to array-element
+  positions — a top-level-slot-only fence would miss it. The member local
+  survives as a free union-space var through `build_member_var_union`
+  (`parser.rs:768`, `817-827`).
+- **The concrete-target hole is dispatch-specific and exploit-confirmed**
+  (w2, at HEAD): the direct mono call with `(i64, Bool)` is a **located
+  error** ("`odd` of `Odd` ... expects `i64`, found `Bool` in operand slot
+  1", Route D's `trait_member_operand_error`) while the bound-dispatch twin
+  with identical operands builds, runs, and prints **wrong, unambiguous
+  output** (member body computing on the local slot: a `Bool` yields its
+  discriminant `+1`, a `List[i64]` yields its head word `+1`) — the "every
+  observable ambiguous" escape does not hold. Citations at HEAD:
+  `resolve_user_bound` at `poly.rs:8981`, concrete-winner bare-symbol arm at
+  `poly.rs:9324-9331` (no `ob.slots` use), mint arm at `poly.rs:9315-9323`,
+  CtorImage slot machinery at `poly.rs:9161-9314`, `ground_member_type`'s
+  Var arm at `ast.rs:2241` (round 1 cited `2239` — amended), registration via
+  `parse_impl_member_body` → `ground_member_type` at `parser.rs:4589`, mono
+  `WordDef { poly: None }`, symbol `synth_member_word_name` (`parser.rs:1132`).
+- **The declaration-fence blast radius was refuted** (w4 — see the brief's
+  D1): the committed suite carries **46 local-bearing member rows**; 5 rows
+  put a local in a plain whole-slot position, 4 of them positive
+  stdout-pinned green tests — including **S6's exit-criterion golden**
+  (`Foldable::fold`'s `'A` plain slots, `tests/phase7b_slice6.rs:337/372/469`)
+  and S3's `Take::take` two-theta pin (`tests/phase7b_slice3.rs:426`). A
+  declaration-time plain-slot fence breaks **≥7 green test functions in 5
+  files** plus two src unit twins (`declarations.rs:3860`, `poly.rs:22301`).
+  `lib/` itself stays clean (zero plain-slot locals; S8b left `lib/`
+  diff-empty), and `tests/phase7b_slice8b.rs` has none either (its Monoid
+  rows put the *header* var in plain slots — out of fence scope).
+- **Citation drift at the S8b base** (w5): the Route B mint-arm citation is
+  now `src/check/poly.rs:9315-9323` (`resolve_user_bound` at `8981`; at base
+  `445a74e` it was `9065-9071`); everything else in round 1's record
+  (`driver.rs:327/555/579`, `parser.rs:391`) still exact.
+
 ## Baseline
 
 `cargo fmt --check && cargo clippy -- -D warnings && cargo test` at `445a74e`:
@@ -237,6 +294,52 @@ the worktree's `lib/core` and `lib/hosted`).
 
 ## Verdicts
 
+**w3r (D1 option B measurement, completed the cut-off w3 worker):**
+
+- **No churn — CONFIRMED.** Extending the P7.S4 mint arm to per-site
+  unification cannot change any shipped symbol, for three measured reasons:
+  (1) **no shipped dispatch reaches the mint arm at all** — w3r's arm
+  attribution: Show/Write/Ord ride Route C bare symbols (Ord's inline `cmp`
+  mints nothing), Iterator/List rides Route A (the Arrow-kind member row
+  forces an App-headed operand, so the dispatch is always CtorImage),
+  Iterator/Range[i64] rides Route E — the 49-symbol inventory union
+  (re-measured at HEAD, byte-identical to round 1 where they overlap:
+  `map_Functor`, `w2_W2`, `next_Iterator`) contains no mint-arm dispatch;
+  (2) the **len-pair ordering hazard has zero victims** — no `Len::Var`
+  anywhere in the shipped dispatch surface (`grep "array[" lib/` hits only
+  externs, four non-trait combinator words, and a struct field); and (3)
+  where both substitutions exist the **binding sets agree** — member-sig vars
+  are all target-pattern-determined (registration dissolves the header into
+  the whole target, `ground_member_poly` `None => Ok(target.clone())`,
+  `ast.rs:2366`; locals alias/append after target vars, `parser.rs:845`), so
+  the per-site θ binds the same values the match subst already carries
+  (mixed3's live `Box['T0]`-vs-`Box[i64]` arm shows both binding arms
+  working).
+- **Premise amended:** `lib/` ships **no** Functor/Foldable/Monoid/Monad —
+  the shipped trait surface is exactly `Ord['T]` (12 concrete impls),
+  `Iterator['It]` (`for List`, `for Range[i64]`), `Show['T]` (11 concrete),
+  `Write['S]` (`for Stdout`); the S6/S7 traits live only in test fixtures as
+  inline declarations (consistent with w4: `lib/` is fence-clean).
+- **The predicted post-fix repro symbol (measured ingredients):** the member
+  word's registered symbol at HEAD is `odd;Odd;0;Box['T0]__m0`
+  (`synth_member_word_name` renders only the target pattern,
+  `parser.rs:1132-1146`); its registered `PolySig` inputs are
+  `[Var(1), Box['T0]]` over the union id space (var 0 = the target's `'T`,
+  var 1 = the appended local `'U`; `parser.rs:4589-4640`, `ast.rs:2366`,
+  `parser.rs:845`). Per-site θ binds var 0 := `i64` (the dissolved
+  `Box['T0]` slot vs the ground `Box[i64]`) and var 1 := `i64` (the local
+  from the site slot) → predicted post-fix monomorph
+  **`sooth_mono_odd_Odd_0_Box__T0___m0__t0_i64_t1_i64`**.
+- **Q4 shape amendment:** the literal repro spelling with the member row
+  `( 'U 'T -- )` against a consumer row `( 'T 'U -- )` fails **earlier than
+  the panic** — a located depth error at the consumer's own member-operand
+  check ("expects `'T`, found `'U` in operand slot 1"); the depth-corrected
+  twin (consumer row spelling the slots in the row's order, main
+  `7 7 mkbox consume`) reaches the `driver.rs:579` panic exactly as recorded.
+  P1's shape (Ref over the header in slot 2, consistently spelled) is the
+  canonical panic fixture; slot-order mismatches are fenced by the
+  pre-existing operand check and are not part of this hole.
+
 **P1 (repro, restated):** the S8-review repro reproduces at the rebased base
 `445a74e` byte-identically to the roadmap's recorded shape: `panicked at
 src/ir/driver.rs:579:14` — "checked: unification bound every input type
@@ -359,7 +462,9 @@ variable, `*head == 0`).
 | `'F['U] --` (App-arg local) | `Box` | bound, mono caller | works (P6) |
 | `'F['U] 'V --` (two slots, two types) | `Box` | bound, mono caller | works, both bound (P7/P8) |
 | `'F['T] [ 'T -- 'U ] -- 'F['U]` (S6 `map`) | `Option` | bound, mono caller | works (P3) |
-| `'T 'U --` | `i64` concrete | bound, mono caller | builds+runs, **no site check** — silent type hole (P11/P12) |
+| `'T 'U --` | `i64` concrete | bound, mono caller | builds+runs, **no site check** — silent type hole (P11/P12); direct mono call of the same member **is** checked (round 2 w2: located `trait_member_operand_error`) |
+| `array['U 2]` element local | `Box['T]` | bound, mono caller | PANIC (round 2 w1: admitted, then `driver.rs:579`) |
+| `'T 'U --` | `'T` bare catch-all | bound, mono caller | PANIC (round 2 w1: no capture error, the member local is the unbound var) |
 | same traits, member called directly | — | mono direct | works (P2) |
 | `&'T -- 'U` (output-position local) | `Box['T]` | impl body check | located at the impl (P14) |
 
