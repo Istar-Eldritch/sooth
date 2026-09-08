@@ -561,11 +561,12 @@ unchanged.
 
 **P7b.S6d-PREREQ — Reference-bearing aggregates (the capability S6d defers
 behind; prerequisite, not an S6d deliverable).** Recorded 260907 from probe
-rounds S6d-3/S6d-4 ([slice6d-probes](./P7b/slice6d-probes.md)); evidence-
-scoped, no spec written. Today two rules jointly make any reference-shaped
-type (`&T`/`&!T`, and `Type::Slice` by design, `builtins.rs:564`) unstorable
+rounds S6d-3/S6d-4 ([slice6d-probes](./P7b/slice6d-probes.md)); spec written,
+see [slice6d-prereq-spec](./P7b/slice6d-prereq-spec.md). Today two rules
+jointly make any reference-shaped
+type (`&T`/`&!T`, and `Type::Slice` by design, `builtins.rs:578`) unstorable
 and unreturnable: `check_no_stored_references`
-(`check/declarations.rs:1074`, the sole escape-safety mechanism — no
+(`check/declarations.rs:1081`, the sole escape-safety mechanism — no
 lifetime tracker exists in Sooth) bans reference-shaped payloads from
 struct/enum fields, and `check_reference_free_signature` bans a non-inline
 word from declaring a reference-shaped output. Four walls close every
@@ -578,14 +579,16 @@ slice is two words `{ptr, len}`, not one); an Option-row protocol shape
 (remainder as a bare stack value) dodges the user-visible storage rule but
 not the IR — `intern_output_bundles` (R8/R10) synthesizes a return-bundle
 struct for every ≥2-output word, and that struct hits the identical layout
-refusal; a named local captured by a quotation builds a closure-env struct
-with a slice field (same storage class); and the poly-body stack checker
+refusal; a bare slice local captured by a quotation is checker-admitted
+today and ICEs at the backend instead (a capture-fence matter, not a layout
+one — see Ruling D below); and the poly-body stack checker
 loses an App-headed dispatch call's outputs (standing S8-era limitation,
 independent). The capability slice's content, when it is taken up: (1)
 slice-shaped fields in declared and synthesized aggregates — new enum/struct
-payload layout for a two-word slot (tag placement, projection, codegen;
-`scalar_size_align` gains a slice arm or slices resolve through a
-non-scalar slot path), touching `src/ir/layout.rs`, not just the checker;
+payload layout for a two-word slot (tag placement, projection, codegen) via
+**`LayoutBuilder::size_align`** (the ruled route; the bare-scalar sizer's
+refusal is retained unchanged as a backstop, never given a slice arm),
+touching `src/ir/layout.rs`, not just the checker;
 (2) the soundness story the layout work unblocks: a storage-class/taint
 rule extending the no-stored-reference discipline to *containing* values
 — e.g. an aggregate holding a slice is itself reference-bearing, cannot be
@@ -596,12 +599,21 @@ one; and (3) the standing poly-body App-dispatch output loss, if generic
 Iterator consumers over slices are to type-check. Landing (1) without (2)
 opens the exact escape the current rules exist to prevent; that is why
 this is a design-bearing slice and why S6d waits for it rather than
-shipping a checker relaxation. Size: `M-L` (layout + checker design;
-not driven by need until a slice-class target is actually wanted).
-See [slice6d-prereq-spec](./P7b/slice6d-prereq-spec.md).
-
-**P7b.S8c — Located fence for member signatures with unbindable free type
-variables.**
+shipping a checker relaxation. Maintainer rulings recorded in the spec:
+declared aggregates admit shared `Slice[T]` fields only, `!Slice[T]`
+stays hard-banned as a declared field (Ruling A); the input-position ban
+is preserved, the capability is body-local, produced only via inline words
+(Ruling B); aggregate construction and `@` projection propagate in-frame
+borrow provenance — `Deriv`-primary (the channel `live_derivs`/`live_borrow_of`
+read), plus alias for the alias-keyed sites — closing a soundness hole
+boundary bans alone cannot see (Ruling C); a bare or aggregate slice-bearing capture is rejected
+at every closure materialization boundary by a dedicated checker fence,
+rather than widening the closure-env encoding (Ruling D); the
+slice-element gate stays an unchanged hard reject, so a recursive
+slice-of-self shape stays undeclarable (Ruling E); and a construction whose
+slice-bearing operands view different arrays is rejected until `Deriv` can
+carry multiple roots (Ruling F). Size: `L` + `M` + `S`
+across three phases (layout/backend/bans; return-bundle ABI; evidence).
 
 **P7b.S8c — Per-site binding for member signatures with free input type variables.**
 Closes the lowering panic the P7b.S8 integrated review found (260906; pre-existing, not

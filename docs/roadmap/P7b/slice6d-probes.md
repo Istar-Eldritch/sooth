@@ -182,7 +182,7 @@ Even with candidate (a) fully working, the resulting monomorph
 `Step[i64 Slice[i64]]` — exactly the shape S6d's own `next` sketch needs
 (the remainder slice packed into the enum's `Rest` field) — is
 **independently rejected** by `check_no_stored_references`
-(`check/declarations.rs:1074`): `contains_reference`'s `Type::Slice(..) =>
+(`check/declarations.rs:1081`): `contains_reference`'s `Type::Slice(..) =>
 true` arm treats a slice as reference-shaped by design (same reasoning as
 `&T` — it borrows storage it doesn't own, doc comment at
 `declarations.rs:1146`, pre-existing since P7.S3c). This has nothing to do
@@ -323,6 +323,10 @@ brief:
 - The remainder must flow as an unnamed stack value: naming it in a local
   and referencing it from a quotation builds a captured-closure env struct
   with a slice field (the same storage class the rules ban).
+  [Superseded by Ruling D (260908): the env encoding is one word per capture,
+  the capture is checker-admitted, and it ICEs at `qbe.rs:526` — the
+  mechanism statement above is what the S6d-4 probe concluded from its
+  run, and the prereq spec's fence replaces it.]
 
 ### Result: fails at lowering — the same wall, reached through a different struct
 

@@ -102,7 +102,7 @@ Everything else needed to write `next`'s body already works (S6d-4/5/6):
   Full evidence: [slice6d-probes §Round S6d-2](./slice6d-probes.md#round-s6d-2-dq4-spike-run-260907).
 - **DQ5 — `Step`'s `Rest` field cannot hold a slice at all today,
   independently of DQ4.** **Spiked and closed on option (i), round S6d-3
-  (260907).** `check_no_stored_references` (`check/declarations.rs:1074`)
+  (260907).** `check_no_stored_references` (`check/declarations.rs:1081`)
   rejects `Step[i64 Slice[i64]]` because `Type::Slice` is reference-shaped
   by design (same rule as `&T`) — and this is not a technicality to route
   around: the rule's own rationale (`declarations.rs:1146`, "a reference
