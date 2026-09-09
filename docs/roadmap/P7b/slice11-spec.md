@@ -1,421 +1,205 @@
 # P7b.S11 — per-call-site grounding for bare generic constructors
 
-> Companion frozen docs: [slice11-brief](./slice11-brief.md) (problem, mechanism,
-> rulings R1–R7, proposed goldens), [slice11-probes](./slice11-probes.md) (verbatim
-> dp_a–dp_h round with Q1–Q3 analysis), byte-exact stderr baseline
-> `probes/dp_baseline.md`, fixtures `probes/dp_*.sth`. Sits beside
-> [slice10-spec](./slice10-spec.md) (the cross-module header-ambiguity sibling; this
-> slice is the same-module counterpart and is verified structurally separate from it).
-> Base `7404a71` (main; the dp round ran at this HEAD, suite green). Re-verified
-> at `486eda4` (merge p7b-s8c; main has since landed S8, S8b, S8c): the frozen
-> baseline `probes/dp_baseline.md` holds byte-for-byte at `486eda4` (all four
-> stderr shapes identical, all 11 exit codes match `probes/dp_findings.md`,
-> `cargo test --test phase7b_slice10` 17 passed / 0 failed), and every anchor
-> below is a fresh `486eda4` line. `parser.rs`, `ast.rs`, and `check.rs` are
-> byte-identical to `7404a71` — no parse-side or env-build drift exists — and
-> the only `src/ir` diff in `7404a71..486eda4` is a doc-comment rewrite.
-> Invocation `cargo run -q -- run probes/<name>.sth --manifest
-> tests/fixtures/sooth.pkg`.
+Condensed reference. Implemented on branch `soo-2` (base `486eda4`, phases 1–3 in
+`99c210a`, `bb8ad59`, `30b9fac`); the delivery plan and its phase scaffolding have
+been dropped in favour of the commit links below. Frozen round records — retained
+as history, not superseded by this file: [slice11-brief](./slice11-brief.md)
+(problem, mechanism, rulings R1–R7), [slice11-probes](./slice11-probes.md) (the
+dp round, plus a post-implementation appendix recording the implemented
+diagnostics verbatim), byte-exact stderr baseline `probes/dp_baseline.md`,
+fixtures `probes/dp_*.sth`. The cross-module sibling is
+[slice10-spec](./slice10-spec.md); this slice is the same-module counterpart and
+is verified structurally separate from it.
 
 ## Why
 
 Bare generic constructor/destructure calls (`Ok`, `Err`, and enum/struct
-generated words with a free type parameter) have **no per-call-site grounding**.
-The env is built once from parse-time eager mints only (`check.rs:579-603`, the
-`struct_generated_sigs` population loop at `:586`); a bare ctor call misses
-`env` and falls to `mint_fallback_candidates` (`terms.rs:2024`), which scans
-the whole-module monomorph registry for a name match with no call-site
-information. This produces four measured defects (probe round, verbatim in
-slice11-probes):
+generated words with a free type parameter) had **no per-call-site grounding**.
+The checker env was built once from parse-time eager mints; a bare ctor call
+missed `env` and fell to a whole-module monomorph registry scan
+(`mint_fallback_candidates`) that had no call-site information. Four measured
+defects (probe round, frozen in slice11-probes):
 
 1. **Zero-mint misdiagnostic (dp_c).** `1 Ok drop` with no concrete `Res[...]`
-   application anywhere in the module → the generic `unknown word` error
-   (`terms.rs:923`), indistinguishable from a genuinely undefined name and blaming
-   the wrong word rather than the unbound parameter `'E`.
-2. **Wrong-mint forcing (dp_d).** A sole existing mint is taken unconditionally
-   (the chosen `[only]` arm, `terms.rs:952-990`) regardless of fit. `1 mkok Ok
-   drop` forces the inner `Ok` onto the unrelated `Res[i64 i64]` mint from
-   `mkok`'s signature
-   and fails later with a far-away operand mismatch that never mentions grounding.
-   Rejection is correct; the mechanism reaching it is accidental.
-3. **Silent first-wins on ties (dp_g2/dp_g3).** With 2+ mints,
-   `select_overload_fallback_sourced` (`builtins.rs:164-183`) falls back to
-   `matching.first()` — declaration order — with no ambiguity check. Two programs
-   differing only in unrelated declaration order construct different runtime types
-   from the same bare call, silently. **A correctness gap, not a diagnostics gap.**
-4. **No explicit-args category (dp_e/dp_e2).** `Ok[i64 i64]` is rejected at
-   `poly_call_takes_type_args` (`terms.rs:1314-1356`): only user-declared poly
-   words and trait members admit type args. No escape-hatch spelling exists,
-   independent of grounding; the consumer is irrelevant (dp_e2 byte-identical).
+   anywhere in the module produced the generic `unknown word` error,
+   indistinguishable from a genuinely undefined name and blaming the wrong
+   word rather than the unbound parameter `'E`.
+2. **Wrong-mint forcing (dp_d).** A sole existing mint was taken unconditionally
+   regardless of fit, failing later with a far-away operand mismatch that never
+   mentioned grounding. The rejection was correct; the mechanism reaching it
+   was accidental.
+3. **Silent first-wins on ties (dp_g2/dp_g3).** With 2+ mints, the fallback
+   selector took the first declared candidate with no ambiguity check: two
+   programs differing only in unrelated declaration order constructed
+   different runtime types from the same bare call. **A correctness gap, not a
+   diagnostics gap.**
+4. **No explicit-args category (dp_e/dp_e2).** `Ok[i64 i64]` was rejected by
+   the type-args gate: only user-declared poly words and trait members admitted
+   type args. No escape-hatch spelling existed, independent of grounding.
 
-**Round-2 status at `486eda4`: S8b/S8c pre-empt none of this slice.** S8c's
-per-site binding (`compose_member_theta`, `poly.rs:9415`; site-slot
-compatibility check, `poly.rs:9506`) hooks bound dispatch only — none of S11's
-four capabilities (per-site θ for generated words, consumer-driven constraints
-landing at the resolve loop, compatibility filtering of mint candidates, the
-explicit-args category) is built on the ctor path, and
-`mint_fallback_candidates` is untouched by both landings. The one newcomer
-inside the restructuring target is S8b's span-keyed pin (`terms.rs:974-988`),
-which the plan below must preserve.
+This is the silent load-bearing dependence the roadmap exists to turn into
+sharp compile errors (CLAUDE.md). The slice is checker-stage only and has no
+forcing dependency on P9; landing it ahead of P9.S2 keeps the alloc-layer brief
+free of checker-grounding concerns.
 
-This is the silent load-bearing dependence the roadmap exists to turn into sharp
-compile errors (CLAUDE.md). Landing ahead of P9.S2 keeps the alloc-layer brief
-free of checker-grounding concerns; this slice is **checker-stage only** and has
-no forcing dependency on P9.
+## What shipped
 
-## Requirements
+### The grounding ladder
 
-Each requirement is independently verifiable against a golden or unit.
+`ground_bare_generic_ctor` (`src/check/terms.rs`) now intercepts bare ctor
+calls at both sites where the pre-existing resolution used to decide from
+mints alone: the zero-candidate `env.get`-miss arm and the chosen `[only]`
+candidate arm. It derives a substitution θ for the header's type parameters
+from three inputs, consumed in precedence order — the enduring semantic
+contract:
 
-- **R-1 (obligation-style re-grounding).** A bare generic ctor/destructure call
-  whose name has a known generic header but is unresolved at the `env.get`-miss
-  branch is re-grounded at the resolve loop from call-site inputs, not from the
-  incidental whole-module mint scan. Grounding derives a substitution θ for the
-  header's type parameters; the monomorph selected is the one θ names, whether or
-  not it was already minted.
+1. **Explicit type args** (full arity) pin every parameter outright and return.
+2. **Consumer constraints** — per ruling (A) (review round 1, 260909), a
+   *monomorphic* consumer's signature pins θ statically at the site
+   (dp_g2's `only_takes_cstr_err` pins both parameters), and a *poly*
+   consumer's declared input resolves through its own `check_poly_call` route:
+   the monomorph minted at the ctor site and the one the consumer resolves are
+   one monomorph under the existing instantiation keying (R-8). Tail position
+   reaches a third consumer, the enclosing word's declared output — the dp_a
+   channel, and the only pin a zero-field variant constructor (`None`) can
+   have.
+3. **Literal-driven partial inference** — operand types at the call site pin
+   the leading *bare* header variables they cover; variables nested inside
+   array/reference/cell shapes stay wildcards rather than risk a guessed
+   (miscompiling) grounding.
 
-- **R-2 (grounding inputs and outcome ladder, precedence order — R3 of brief;
-  ruling (A) at review round 1, 260909).** Inputs are consumed in this order:
-  1. **Explicit type args** (full arity, per R-6) — pin all parameters directly.
-  2. **Consumer constraints** — the consumer's known type pins the parameters
-     it determines. Two flavors, both landing at the resolve loop
-     (`check_poly_call`, `poly.rs:7497`; obligation re-grounding at `:7887-7892`;
-     cross-call fixpoint `discover_transitive_instantiations` at `:8029`):
-     a **monomorphic consumer's signature** pins θ statically at the site
-     (dp_g2's `only_takes_cstr_err` pins both parameters), and a **poly
-     consumer's obligation** defers to its `check_poly_call` (G5).
-  3. **Literal-driven partial inference** — operand types at the call site
-     (`1` → `i64`) pin the leading parameters they cover.
-  Outcome on the θ derived: **fully bound** → ground directly to θ
-  (lookup-or-mint under R-8's identity — a zero-mint site can still succeed).
-  **Partially bound** → wildcard-compatibility filter over existing mints
-  (R-3). **Error precedence when grounding fails:** ambiguity (2+ compatible,
-  R-4) > incompatible-grounding (mints exist, none compatible at the bound
-  positions, R-5 via dp_d) > **unbound type parameter** (no mints, parameters
-  undetermined; diagnostic content in R-5).
+Outcome on the θ derived:
 
-- **R-3 (mints are candidates, not verdicts — R4 of brief).** An existing mint
-  participates in compatibility selection like any other candidate; it is never
-  taken unconditionally. A mint is **compatible** iff it matches at every
-  θ-bound position; unbound positions are wildcards (dp_f's sole mint matches
-  at `'T` and wildcards at `'E` → accepted, binding `'E` from the mint; dp_d's
-  sole mint mismatches at the *bound* `'T` position → rejected). A sole
-  *incompatible* mint (dp_d) → located grounding error naming expected type vs
-  the mint's type, replacing the far-away operand mismatch. The worked-example
-  table at the end of this section verifies the ladder against the probe set
-  (the remaining probes are pinned by the G4/G6/G9 rows above).
+- **Fully bound** → ground directly, lookup-or-mint under the existing
+  instantiation keying — a zero-mint site can still succeed (G5, G9), and a
+  competing mint is never borrowed (the args' instantiation is minted fresh).
+- **Partially bound** → wildcard-compatibility filter over existing mints at
+  every θ-bound position (R-3: mints are candidates, not verdicts). Unbound
+  positions are wildcards; a sole compatible mint binds the remaining
+  parameters from itself (dp_f, unit-pinned).
+- **Failure**, by case (the spec's error precedence — ambiguity >
+  incompatible-grounding > unbound-parameter — maps onto disjoint mint-count
+  cases): 2+ same-tier compatible candidates the operands do not separate →
+  located **ambiguity error**, tied types listed sorted by rendered string so
+  the text is stable across declaration orders (dp_g, NFR-3); a sole mint
+  mismatching at a *bound* position → located **incompatible-grounding error**
+  naming expected vs mint (dp_d); zero mints with an undetermined parameter →
+  located **unbound-parameter error** naming the parameter, its header
+  position, and the remedy (dp_c). A genuinely undefined name keeps the
+  unchanged `unknown word` error (R-7) — the zero-mint/undefined split lives
+  in the zero-candidate arm, which only routes names with a known generic
+  header into the ladder.
+- **Decline** (`None`) leaves the pre-existing selection — the S8b span-keyed
+  pin and the S3 splice redirect included — byte-for-byte as it was, which is
+  also the disposition for a sole compatible candidate at a non-zero-candidate
+  site (it is the one the `[only]` arm would have taken anyway). The
+  take-the-sole-mint arm at zero-candidate sites is documented in-tree as
+  currently unreachable; dp_f's real flow is decline plus that pre-existing
+  take, outcome identical.
 
-- **R-4 (tie-break — R2 of brief).** Precedence: fully-bound θ (direct
-  grounding — no candidate selection) > single compatible candidate > located
-  ambiguity error. **First-wins is retired** in this path. When 2+ candidates
-  are compatible, emit a located ambiguity error listing the tied candidate
-  types **sorted by rendered type string**, so the text is stable across
-  declaration orders (S10 GA discipline). The ambiguity error applies to
-  same-tier ties; a mixed own-module/foreign tie keeps the existing S5 tier-1
-  own-module resolution (`builtins.rs:176-177`, unit-pinned at
-  `builtins.rs:293`) — the tier policy is byte-unchanged (NFR-2). The
-  zero-mints-with-an-unbound-parameter case emits the R-2 unbound-parameter
-  error, not `unknown word`.
-
-- **R-5 (located diagnostics).** Three new located, house-style messages:
-  - **unbound type parameter**: names the parameter (`'E`), its position in the
-    header, and the remedy (explicit type args or a concretely-typed consumer —
-    the latter works by design via R-2's consumer constraints; today it works
-    only via the parse-time-mint coincidence). dp_c.
-  - **incompatible sole mint**: names expected type vs the mint's type. dp_d.
-  - **ambiguous grounding**: lists tied candidate types sorted by rendered string.
-    dp_g (dp_g2/dp_g3 are no longer ties — their consumer grounds them; R-2).
-  Each is byte-exact (measure-then-pin).
-
-- **R-6 (explicit-args category — R7 of brief, dp_e/dp_e2).**
-  `poly_call_takes_type_args` (`terms.rs:1314-1356`) admits a new category: a bare
-  generic ctor/destructure name paired with a matching header. Explicit args
-  require **full arity** (`Ok[i64 i64]`); prefix pinning (`Ok[i64]` with `'E` from
-  context) is out of scope (open question). A wrong-arity explicit-args list is a
-  located error. The category is independent of whether a consumer exists (dp_e2:
-  the fully-concrete construction then reaches the ordinary forgetting check).
-
-- **R-7 (undefined-name distinguishability — G7).** A genuinely undefined ctor
-  name (no known generic header anywhere) still emits the unchanged `unknown word`
-  error. Zero-mints-of-a-known-header (R-2 unbound-parameter) must be
-  distinguishable from undefined-name.
-
-- **R-8 (monomorph identity/dedup preserved — R6 of brief, P7.S3t).** Re-grounding
-  mints or reuses under the same identity discipline: one symbol per `(word, θ)`,
-  canonical sorting per P7.S3t. No duplicate or divergent monomorph is introduced.
-
-**Grounding ladder — worked examples** (each row must reproduce its frozen
-probe; verified against `probes/dp_findings.md` and the goldens above):
-
-| Probe | θ at the site | Existing mints | Outcome under the ladder | Golden |
-| --- | --- | --- | --- | --- |
-| dp_c | `'T`=i64 (literal), `'E` unbound | none | unbound type parameter error | G1 |
-| dp_d | `'T`=Res[i64 i64] (operand), `'E` unbound | Res[i64 i64] — mismatches at the bound `'T` | incompatible-grounding error | G2 |
-| dp_f | `'T`=i64, `'E` unbound | Res[i64 i64] — `'T` matches, `'E` wildcards | accepted, `'E`:=i64 bound from the mint | G6 |
-| dp_g | `'T`=i64, `'E` unbound | Res[i64 i64], Res[i64 cstr] — both wildcard-compatible | ambiguity error (order-stable) | G3 |
-| dp_g2 | `'T`=i64, `'E`=cstr (monomorphic consumer pins statically) | both — irrelevant: fully-bound θ never selects | accepted, grounds to Res[i64 cstr] | G9 |
-
-## Non-functional requirements
-
-- **NFR-1 (checker-stage fence — R6 of brief, re-anchored to behavior).** No
-  *behavioral* IR/lowering/emit change relative to `486eda4`; all edits in
-  `src/check/`. The byte-level "zero IR diff" fence is retired — the only
-  `src/ir` diff in `7404a71..486eda4` is a doc-comment rewrite, so bytes were
-  never the operative guarantee. The `foreign_single_candidate_grounding`
-  contract (`terms.rs:1690`; the caller is in the single-candidate arm by
-  construction — doc `terms.rs:1670-1689`, verbatim at `:1685-1686`; untouched
-  by S8b/S8c) is preserved; the `env.get`-miss branch is
-  restructured around it, not through it.
-- **NFR-2 (behavioral fence — R5 of brief).** No correct program regresses.
-  dp_a/dp_b/dp_f behaviors byte-identical to baseline. S10's diagnostics
-  byte-unchanged (baseline diff). S5's declared-overload tier policy and S2-9's
-  member dispatch untouched.
-- **NFR-3 (determinism).** Ambiguity text is order-stable across declaration
-  orders (candidate types sorted by rendered string). No run-count/ratio
-  assertions; determinism pinned by byte-exact text across orderings.
-- **NFR-4 (no cross-module churn).** Cross-module header ambiguity remains S10's
-  territory; ties in this slice are same-module mints of one header (verified
-  structurally separate at `486eda4`: the fall-through `terms.rs:889-927` is
-  upstream of and distinct from `foreign_single_candidate_grounding`
-  (`terms.rs:1690`), which is reachable only via
-  `bare_generated_word_own_module_grounding` (`terms.rs:1483`) from the
-  single-candidate pre-guard).
-
-## Observable success criteria
-
-Goldens (`tests/phase7b_slice11.rs`), measure-then-pin, byte-exact on error text:
-
-| Golden | Shape | Behavior |
-| --- | --- | --- |
-| G1 | dp_c (`1 Ok drop`) | located unbound-parameter error naming `'E`, byte-exact; not `unknown word` |
-| G2 | dp_d (nested, sole wrong mint) | located grounding error naming expected vs mint, byte-exact |
-| G3 | dp_g (two mints, no consumer) | located ambiguity error, byte-identical across declaration orders (dp_g today exits 0 silently — an intended outcome change) |
-| G4 | dp_e (`1 Ok[i64 i64] drop`) | accepted, runs clean |
-| G9 | dp_g2 + dp_g3 (competing mints, determining consumer, both orders) | accepted — grounds to `Res[i64 cstr]` via the consumer's signature (R-2); behavior byte-identical across the two declaration orders |
-| G5 | `1 Ok [ 1 add ] apply2[i64 i64] .` with poly consumer `apply2 ( Res['T 'E] [ i64 -- i64 ] -- i64 )` | accepted via consumer-driven grounding (the consumer's explicit args pin both parameters), runs, output `42`. The originally-proposed `map[i64 i64 i64]` shape hits the pre-existing `poly_generic_not_yet_groundable_error` (`poly.rs:11138`) — a pre-S11 poly-word refusal, not a grounding gap; revisit when poly words ground explicit args. Shape as implemented at review round 1 (260910) |
-| G6 | dp_a / dp_b / dp_f | behavior byte-identical to baseline (non-regression) |
-| G7 | genuinely undefined ctor name | `unknown word` byte-unchanged |
-| G8 | S10 shapes (`probes/dp_baseline.md`) | stderr byte-identical; slice10 goldens stay green |
-
-Plus ~12 units beside each changed site (`terms.rs` gate + fall-through,
-`builtins.rs` fallback, plus a monomorph-dedup unit for mid-check minting —
-P7.S3t's discipline, R-8), named `thing_condition_expected`.
-
-Gate: `cargo fmt --check && cargo clippy -- -D warnings && cargo test`, green,
-with the S10 golden suite byte-unchanged.
-
-## Scope and boundaries
-
-**In scope:** per-call-site grounding for bare generic ctor/destructure calls in
-the same-module `env.get`-miss path; explicit-args category (full arity);
-first-wins retirement with located ambiguity; three new located diagnostics.
-
-**Out of scope:**
-
-- Prefix-pinned ctor type args (`Ok[i64]` meaning `Ok[i64 'E]`) — deferred with
-  R7 of brief; needs its own probe.
-- Cross-module header ambiguity — S10's territory (verified structurally
-  separate); this slice's ties are same-module mints of one header.
-- Any IR/lowering/emit change (NFR-1).
-- S5 declared-overload tier policy and S2-9 member dispatch (NFR-2).
-
-## Advisory solution approach
-
-Not binding; the implementation phase adjudicates.
-
-1. Restructure the `env.get`-miss branch (`terms.rs:889-927`) so that after
-   `mint_fallback_candidates` returns, candidates flow through a compatibility
-   filter conditioned on a call-site-derived θ (R-1/R-3) rather than the
-   unconditional `[only]` take (`terms.rs:952-990`). The zero-candidate arm
-   splits: no-header → unchanged `unknown_word_error` (`terms.rs:923`);
-   known-header → if θ is already fully bound, ground directly — lookup-or-mint,
-   a zero-mint site can still succeed (G5/G9); else defer only when a downstream
-   consumer obligation can still determine the remaining parameters (G5's
-   poly-obligation flavor), else R-5 unbound-parameter error
-   (dp_c). Note the `resolve_mono_member_call` call (`terms.rs:912`) lives inside
-   the branch being split and must keep dispatching (NFR-2). The S8b span-keyed pin
-   (`terms.rs:974-988`: `is_generated_enum_word` →
-   `poly.builtin_overloads.insert(span, only.symbol)`) sits inside this arm and
-   must survive the restructuring — kept in the compatibility-conditioned
-   selection path or relocated with it — or G6's non-regression breaks for bare
-   generated enum words at single-instantiation sites (lowering's bare-key map
-   is last-write-wins across instantiations, `src/ir/layout.rs`).
-2. Derive θ at the resolve loop from R-2's three inputs in precedence order.
-   The consumer step has two flavors (R-2): a monomorphic consumer's signature
-   pins statically; a poly consumer's obligation defers to its `check_poly_call`
-   (`poly.rs:7497`, re-grounding `:7887-7892`, fixpoint `:8029`) and retroactively
-   re-types an already-checked stack slot — a flow with no existing analog
-   (stated risk; mitigation is golden G5). The literal-driven step reads operand
-   `Type`s already at the call site and discarded today.
-3. Replace `select_overload_fallback_sourced`'s `matching.first()` fallback
-   (`builtins.rs:178-181`; the `None` arm already yields
-   `OverloadPick::Ambiguous`) — for this path only — with an ambiguity return
-   that lists the tied types sorted by rendered string. Keep the S5 tier-1
-   own-module check. Retiring first() inverts two load-bearing doc comments that
-   must be updated alongside the code: `mint_fallback_candidates`'s "this
-   fallback must not invent a stricter rule than a present `env` entry would
-   have had" (`terms.rs:2000-2003` — R-3's sole-incompatible-mint rejection is
-   precisely such a stricter rule, now deliberate) and
-   `select_overload_fallback_sourced`'s first-match rationale
-   (`builtins.rs:146-163`).
-4. Widen `poly_call_takes_type_args` (`terms.rs:1314-1356`) with a new admitted
-   category: a bare generic ctor/destructure name with a matching header, full
-   arity validated. S8c does not pre-build this — the gate still admits exactly
-   two categories at `486eda4` (round-2 verified).
-5. Preserve monomorph identity via the existing `(word, θ)` mint keying (P7.S3t).
-
-6. Treat S8c's machinery as a shape-template, not a shortcut:
-   `compose_member_theta` (`poly.rs:9415`, θ from a seeded substitution with a
-   fail-closed tail at `:9462`) and `check_concrete_member_site_slots`
-   (`poly.rs:9506`) are the closest existing analogs to R-1/R-2's θ derivation
-   and R-3's compatibility filtering, but they hook bound dispatch only — no
-   obligation record exists on the ctor path, nothing is reusable as-is, and
-   all four S11 capabilities remain to build.
-
-## Codebase map
-
-Every file touched, anchored path:line + symbol (fresh lines re-verified at
-`486eda4`; symbols located by grep, not trusted from the draft; `parser.rs`,
-`ast.rs`, and `check.rs` are byte-identical to the dp-round tree):
-
-- `src/check/terms.rs`
-  - `Call` arm `env.get`-miss branch, `terms.rs:889-927` (`None => match
-    env.get(name)` at `:889`, `mint_fallback_candidates` call at `:899`,
-    `from_fallback = true` at `:900`, `unknown_word_error` at `:923`) —
-    restructured for R-1/R-3/R-4/R-5/R-7.
-  - Chosen `[only]` arm, `terms.rs:952-990` (`let chosen = match candidates` at
-    `:952`) — no longer an unconditional take; compatibility-conditioned. The
-    S8b span-keyed pin, `terms.rs:974-988` (`is_generated_enum_word` →
-    `poly.builtin_overloads.insert(span, only.symbol)` at `:987`), sits inside
-    this arm and must survive or be relocated with it (G6 gate).
-  - S9 single-candidate pre-guard, `terms.rs:939-940`
-    (`bare_generated_word_own_module_grounding` call) — shares the outer `Call`
-    arm; collateral-change risk covered by G8.
-  - `fn poly_call_takes_type_args`, `terms.rs:1314-1356` — new admitted category
-    (R-6); gate caller at `terms.rs:199-204`.
-  - `fn bare_generated_word_own_module_grounding`, `terms.rs:1483` — same-module
-    grounding entry; extended/consulted for R-1.
-  - `fn foreign_single_candidate_grounding`, `terms.rs:1690` — **contract
-    untouched** (NFR-1; the caller is in the single-candidate arm by
-    construction — doc `terms.rs:1670-1689`, verbatim at `:1685-1686`;
-    untouched by S8b/S8c); restructuring routes
-    around it.
-  - `fn mint_fallback_candidates`, `terms.rs:2024` — candidate source; unchanged
-    behavior, consumed by the new compatibility filter. Its doc's first-wins
-    sentence ("this fallback must not invent a stricter rule…", `:2000-2003`)
-    is inverted by R-3/R-4 and updated alongside the code.
-- `src/check/builtins.rs`
-  - `fn select_overload_fallback_sourced`, `builtins.rs:164-183` — tier-1
-    own-module check at `:176`, `matching.first()` fallback at `:178-181` (the
-    `None` arm already yields `OverloadPick::Ambiguous`): gains the ambiguity
-    return for this path (R-4). Doc rationale `:146-163` updated alongside.
-    Sole caller: `terms.rs:1006`, guarded by `from_fallback`.
-- `src/check/poly.rs` — S8b/S8c machinery, read-only shape-template (no hook):
-  - `fn compose_member_theta`, `poly.rs:9415` (call site `:9347`) — closest
-    analog for R-1/R-2's θ derivation; fail-closed tail at `:9462`.
-  - `fn fence_quotation_literal_slot`, `poly.rs:9480`.
-  - `fn check_concrete_member_site_slots`, `poly.rs:9506` — closest analog for
-    R-3's compatibility filtering.
-  - `fn member_unbound_variable_error`, `poly.rs:9632`; `fn
-    first_unbound_sig_var`, `poly.rs:9654`.
-  - The resolve loop where consumer constraints land (R-2): `check_poly_call`,
-    `poly.rs:7497`; obligation re-grounding at `:7887-7892`; cross-call fixpoint
-    `discover_transitive_instantiations` at `:8029` — read-only references.
-- `src/check.rs`
-  - env build, `check.rs:579-603` (declaration at `:579`; three parallel
-    population loops — struct `:586`, enum `:593`, variant `:600`) — mechanism
-    reference for R-1; unchanged at `486eda4`.
-- `src/parser.rs`
-  - `fn resolve_type_or_apply`, `parser.rs:7294` (eager-mint site;
-    `find_struct` arm ~`:7326`, `find_enum` arm `:7348-7365` with
-    `instantiate_enum` at `:7364`) — read-only reference; R-6's explicit args
-    need no parse-side change (dp_e's frozen baseline shows `Ok[i64 i64]`
-    reaches the checker with full arity).
-- `src/ir/layout.rs` — read-only reference for the S8b pin's rationale (the
-  bare-key map note at `:556-557`); must not change (NFR-1).
-- New: `tests/phase7b_slice11.rs` — G1–G9 goldens + units.
-
-## Open questions and risks
-
-- **Prefix-pinned ctor type args** (`Ok[i64]` → `Ok[i64 'E]` with `'E` from
-  context) — deferred with R7 of brief; needs its own probe if ever wanted.
-- **dp_e2 no-consumer shape under R-6**: with explicit args the construction is
-  fully concrete and reaches the ordinary forgetting check. Record the observed
-  diagnostic in the probe appendix during implementation.
-- **Cross-module ambiguity boundary**: verified structurally separate from S10,
-  but the restructuring shares the outer `Call` arm; risk of collateral change to
-  the S10 fall-through. Mitigation: G8 diffs S10 stderr byte-for-byte (baseline).
-- **Consumer-driven re-grounding cost**: obligation-style re-grounding at the
-  resolve loop is unbuilt for this path; risk it interacts with the two-pass
-  split. Mitigation: G5 pins the map-driven case end to end.
-- **S8b pin survival**: the span-keyed pin (`terms.rs:974-988`) sits inside the
-  `[only]` arm this slice restructures; dropping it silently re-types
-  single-instantiation bare generated-enum-word sites at lowering (the bare-key
-  map is last-write-wins across instantiations). Mitigation: keep the pin in
-  the compatibility-conditioned path or relocate it with the selection logic;
-  G6's dp_a/dp_b/dp_f shapes exercise exactly this channel.
-- **Ruling record — review round 1 (260909).** R1–R7 confirmed; the
-  ties-with-determining-consumer adjudication resolved as (A): a monomorphic
-  consumer's signature grounds the call (dp_g2/dp_g3 accepted via R-2's static
-  pin), dp_g is the ambiguity golden (G3), and G5's consumer-driven mechanism
-  is uniform across mono and poly consumers.
-
-## Phased delivery plan
-
-**Phase 1 — checker grounding core.** Obligation-style re-grounding (R-1/R-2),
-compatibility-conditioned selection (R-3), first-wins retirement with located
-ambiguity (R-4), the three new located diagnostics (R-5), zero-mint/undefined
-split (R-7). Touches the `env.get`-miss branch (`terms.rs:889-927`), the chosen
-`[only]` arm (`terms.rs:952-990`), and `builtins.rs:164-183`. The S8b span-keyed
-pin (`terms.rs:974-988`) survives the restructuring — preserved in the
-compatibility-conditioned path or relocated with it (G6 gate). Retiring first()
-inverts two load-bearing docs — `mint_fallback_candidates`' stricter-rule
-sentence (`terms.rs:2000-2003`) and `select_overload_fallback_sourced`'s
-first-match rationale (`builtins.rs:146-163`) — both updated alongside the code.
-Goldens G1, G2, G3, G5, G7, G9 + core units. G5 and G9 are the end-to-end pins
-of the consumer-driven mechanism — G5 the poly-obligation flavor (fresh
-mid-check mint), G9 the mono-consumer static pin (mid-check lookup of an
-existing mint); per CLAUDE.md the phase is not done until its goldens pass.
-R-8 verified by the existing P7.S3t suite plus a new dedup unit for mid-check
-minting (G5 mints a fresh monomorph mid-check — P7.S3t's exact failure mode).
-
-**Phase 2 — explicit-args category.** Widen `poly_call_takes_type_args`
-(`terms.rs:1314-1356`) for the bare-ctor category with full-arity validation
-(R-6); the gate still admits exactly two categories at `486eda4` — S8c does not
-pre-build this. No parse-side change (dp_e's frozen baseline shows full-arity
-args reach the checker intact). Goldens G4 + units.
-
-**Phase 3 — non-regression sweep + docs.** Baseline diff against
-`probes/dp_baseline.md` (holds byte-for-byte at `486eda4`, round-2 re-run) and
-the S10 suite (G6, G8, NFR-2/NFR-4); NFR-1 judged behaviorally — no behavioral
-IR/lowering/emit change relative to `486eda4`. Clean up compiler-written ELF
-artifacts under `probes/` after probe rounds (not gitignored). Roadmap entry;
-record dp_e2's observed diagnostic in the probe appendix. Re-run growth signals
-(R6, CLAUDE.md) on every touched file.
-
-## Phases (JSON)
-
-```json
-{
-  "phases": [
-    {
-      "phase": 1,
-      "focus": "Checker grounding core",
-      "effort": "L",
-      "difficulty": "hard"
-    },
-    {
-      "phase": 2,
-      "focus": "Explicit-args category",
-      "effort": "M",
-      "difficulty": "standard"
-    },
-    {
-      "phase": 3,
-      "focus": "Non-regression sweep and docs",
-      "effort": "S",
-      "difficulty": "standard"
-    }
-  ]
-}
+```mermaid
+flowchart TD
+    A["bare ctor call: ground_bare_generic_ctor"] --> B{"header?"}
+    B -- "no header, bare call" --> X["decline: unchanged unknown-word fallthrough (R-7)"]
+    B -- "no header, explicit args" --> Y["arity check vs wide lookup, then no_type_arguments_error"]
+    B -- "own generic header" --> C{"explicit args?"}
+    C -- "wrong arity" --> E["explicit_ctor_arity_error"]
+    C -- "full arity" --> D["theta pins all parameters"]
+    C -- "bare call" --> F["derive theta: consumer first, then operand literals"]
+    D --> G{"theta fully bound?"}
+    F --> G
+    G -- "yes" --> H["lookup-or-mint under the existing instantiation key (R-8)"]
+    G -- "partial" --> I["wildcard filter over header mints at theta-bound positions"]
+    I --> J{"compatible candidates?"}
+    J -- "2+ same-tier, operands separate none" --> K["ambiguous_grounding_error, sorted by rendered string"]
+    J -- "none, zero mints" --> L["unbound_type_parameter_error"]
+    J -- "none, sole mint" --> M["incompatible_grounding_error"]
+    J -- "sole compatible / else" --> N["ground it, or decline: pre-existing selection runs unchanged (S8b pin intact)"]
 ```
+
+One settled deviation from the spec's advisory: the ambiguity tie-break was
+placed **upstream in `ground_bare_generic_ctor`**, not inside
+`select_overload_fallback_sourced` as the draft planned — the fence it needs
+(own-module instantiations of one own header, which S5's tier 1 must keep
+resolving in a *mixed* tie) is a fact about the call site's header, which an
+`Overload` alone cannot express. `builtins.rs` gained only a doc update; the
+selector's behavior is byte-identical (NFR-2).
+
+### Explicit-args category (R-6)
+
+`poly_call_takes_type_args` admits a third category: a bare generic
+ctor/destructure name paired with a matching own header (a purely additive
+disjunct; the two pre-existing categories are untouched). Full-arity validation
+lives in the ladder, the single choke point both arms flow through: a
+wrong-arity list is the located `explicit_ctor_arity_error` (count, plural,
+header spelling and parameter names interpolated); a list the ladder declines
+keeps the pre-S11 `no_type_arguments_error` — never a silent drop. Concrete
+headers are excluded ("generic"); no parse-side change was needed (dp_e's
+frozen baseline shows full-arity args reaching the checker intact). The
+dp_e2 open question resolved as the spec predicted: explicit args ground with
+no consumer at all, and a value the word then forgets reaches the ordinary
+forgetting check (probe appendix).
+
+### Fences
+
+- **Checker-stage only (NFR-1, verified at condensation):** the full branch
+  diff vs `486eda4` touches exactly `src/check/terms.rs` and
+  `src/check/builtins.rs` (the latter +13 doc lines) — no `src/ir`,
+  `src/parser.rs`, or `src/emit` change. The byte-level "zero IR diff" fence of
+  the draft was retired during recon; behavior is the operative guarantee.
+- **Non-regression (NFR-2/4):** S10's diagnostics byte-identical (S10 suite
+  17/0, G8); S5's declared-overload tier policy, S2-9 member dispatch, S9's
+  single-candidate pre-guard (which still runs ahead of the ladder), and
+  dp_a/dp_b/dp_f behaviors byte-identical to baseline (G6).
+
+## Goldens
+
+`tests/phase7b_slice11.rs` — 11 goldens, byte-exact on error text:
+G1 (dp_c unbound-parameter), G2 (dp_d expected-vs-mint), G3 (dp_g ambiguity,
+byte-identical across declaration orders), G4 (dp_e explicit args run clean),
+G5 (poly-consumer grounding), G9 (dp_g2/dp_g3 both orders, runtime-output
+proof), G7 (undefined name keeps `unknown word`), dp_h (mint declared after
+the caller grounds the call, both orders — added in phase 3), the dp_e2
+shapes, wrong-arity, and the accepting-shape sweep. Non-regression baseline:
+`probes/dp_baseline.md`.
+
+G5's implemented shape (corrected at review round 1, 260910; the spec row was
+patched in-commit by `99c210a` and the roadmap Exit line mirrored it in
+`30b9fac`): `1 Ok [ 1 add ] apply2[i64 i64] .` with poly consumer
+`apply2 ( Res['T 'E] [ i64 -- i64 ] -- i64 )` — accepted via consumer-driven
+grounding (the consumer's explicit args pin both parameters), runs, output
+`42`. The originally-proposed `map[i64 i64 i64]` shape is not declarable at
+this base: it hits the pre-existing `poly_generic_not_yet_groundable_error`
+(`poly.rs:11138`), a pre-S11 poly-word refusal, not a grounding gap.
+
+## Deferred (genuinely open)
+
+- **Prefix-pinned ctor type args** (`Ok[i64]` meaning `Ok[i64 'E]`) — out of
+  scope; needs its own probe if ever wanted.
+- **2+ mints, none compatible at the θ-bound positions** — the ladder declines
+  and the call keeps the pre-S11 `no_overload_matches_error`; no dedicated
+  incompatible-grounding diagnostic for this case (probe appendix P2 record).
+- **Length-parameterized headers** keep the baseline rejection wholesale —
+  `ctor_grounding_header` grounds length-free headers only.
+- **S9 pre-guard collision corner:** in the struct-ctor/foreign-mint corner the
+  pre-guard resolves the single-candidate site at the caller's own header
+  *before* the ladder's arity validation runs, so a wrong-arity explicit-args
+  list there surfaces the pre-guard's outcome rather than R-6's arity text.
+- **Poly words grounding explicit args** (the `map[i64 i64 i64]` shape) —
+  blocked by the pre-existing `poly_generic_not_yet_groundable_error`; revisit
+  when poly words ground explicit args.
+- **Proposed `src/check/ctor_grounding.rs` split** — recorded in `30b9fac`'s
+  growth-signal re-run (terms.rs at 1/5 signals, below the 2-signal bar); cut
+  the module when a second signal fires.
+
+## Implementation
+
+| Area | Commit | Key symbols / files |
+| --- | --- | --- |
+| Checker grounding core — ladder, θ derivation, three located diagnostics, unknown-word split | `99c210a` | `ground_bare_generic_ctor`, `derive_ctor_theta`, `consumer_expected_type`, `header_mint_candidates`, `mint_header_instantiation`, `ground_ctor_overload`, `unbound_type_parameter_error`, `incompatible_grounding_error`, `ambiguous_grounding_error` (`src/check/terms.rs`); `select_overload_fallback_sourced` doc update (`src/check/builtins.rs`); spec G5-row correction in-commit |
+| Explicit-args category | `bb8ad59` | third `poly_call_takes_type_args` category, `explicit_args_ctor_header`, `explicit_ctor_arity_error` (`src/check/terms.rs`) |
+| Non-regression sweep + docs | `30b9fac` | 11-probe baseline sweep; post-implementation appendix (`docs/roadmap/P7b/slice11-probes.md`); roadmap S11 entry marked landed, Exit line corrected to the `apply2` shape (`docs/roadmap/P7b-higher-kinded-types.md`); dp_h golden |
+| Goldens + units | `99c210a` + `bb8ad59` | 11 goldens in `tests/phase7b_slice11.rs`; 21 units beside the changed sites (`src/check/terms.rs`), including the mid-check-mint dedup unit (R-8) and the span-keyed-pin survivor units |
+
+Final gate verified at condensation time (HEAD `30b9fac`): `cargo fmt --check`
+green; full `cargo test` 3390 passed / 0 failed; slice11 suite 11/11.
