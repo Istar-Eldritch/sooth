@@ -1,0 +1,4 @@
+workspace = "ordfruma"
+team_id = "SOO"
+issue_sort = "manual"
+vcs = "git"
