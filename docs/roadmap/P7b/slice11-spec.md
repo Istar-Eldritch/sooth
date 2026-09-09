@@ -192,7 +192,7 @@ Goldens (`tests/phase7b_slice11.rs`), measure-then-pin, byte-exact on error text
 | G3 | dp_g (two mints, no consumer) | located ambiguity error, byte-identical across declaration orders (dp_g today exits 0 silently — an intended outcome change) |
 | G4 | dp_e (`1 Ok[i64 i64] drop`) | accepted, runs clean |
 | G9 | dp_g2 + dp_g3 (competing mints, determining consumer, both orders) | accepted — grounds to `Res[i64 cstr]` via the consumer's signature (R-2); behavior byte-identical across the two declaration orders |
-| G5 | `1 Ok [ 1 sub ] map[i64 i64 i64] drop` | accepted via consumer-driven grounding (map's args pin the channels), runs, expected output |
+| G5 | `1 Ok [ 1 add ] apply2[i64 i64] .` with poly consumer `apply2 ( Res['T 'E] [ i64 -- i64 ] -- i64 )` | accepted via consumer-driven grounding (the consumer's explicit args pin both parameters), runs, output `42`. The originally-proposed `map[i64 i64 i64]` shape hits the pre-existing `poly_generic_not_yet_groundable_error` (`poly.rs:11138`) — a pre-S11 poly-word refusal, not a grounding gap; revisit when poly words ground explicit args. Shape as implemented at review round 1 (260910) |
 | G6 | dp_a / dp_b / dp_f | behavior byte-identical to baseline (non-regression) |
 | G7 | genuinely undefined ctor name | `unknown word` byte-unchanged |
 | G8 | S10 shapes (`probes/dp_baseline.md`) | stderr byte-identical; slice10 goldens stay green |

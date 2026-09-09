@@ -161,6 +161,19 @@ pub(super) fn tier_pick<'a>(
 /// forbids. On a tier-1 miss, this falls back to the original
 /// first-input-match semantics (the first `matching` candidate, arbitrary
 /// among ties) rather than tiering further.
+///
+/// P7b.S11 Phase 1 (R-4) narrows what that arbitrary-among-ties tail can
+/// still reach. Its rationale above is unchanged and its behavior is
+/// byte-identical -- an unverified module id still buys no tier-2/3
+/// narrowing -- but the one shape whose ties were *observably* decided by
+/// declaration order, a bare generic constructor's competing monomorphs, no
+/// longer arrives here undecided: `ground_bare_generic_ctor`
+/// (`check/terms.rs`) either grounds that site from its own θ or reports the
+/// tie, upstream of both selectors. The tie-break is placed there rather
+/// than in here because the fence it needs -- own-module instantiations of
+/// one own header, which S5's tier 1 must keep resolving in a *mixed* tie
+/// (NFR-2) -- is a fact about the call site's header, which an `Overload`
+/// alone cannot express.
 pub(super) fn select_overload_fallback_sourced<'a>(
     candidates: &'a [Overload],
     operands: &[Type],
