@@ -620,6 +620,25 @@ slice-of-self shape stays undeclarable (Ruling E); and a construction or
 field store whose slice-bearing operands view different arrays is rejected
 until `Deriv` can carry multiple roots (Ruling F). Size: `L` + `M` + `S`
 across three phases (layout/backend/bans; return-bundle ABI; evidence).
+**Capability shipped (260909, Phases 1-3):** the two-word slice-slot layout
+(`LayoutBuilder::size_align`) and its field-position blit routing
+(`qbe.rs`'s member/load/store handling); the seven-site in-frame deriv+alias
+propagation (construction, `@` projection, `&`/`&!` of a provenance-carrying
+local, poly-call/member-dispatch output pushes, the `!`/`+!` field store, the
+anonymous-receiver projection arm, naming a reference-bearing aggregate into a
+local) with the exclusivity-scan place widening; Ruling F's distinct-root
+rejection at construction/field store; the closure-materialization capture
+fence, including the `Type::Variant` taint arm; `dup`'s alias retention for
+reference-bearing aggregates; and the REQ-5 admit-and-taint relaxation for
+shared `Slice[T]`-bearing fields only. The synthesized-aggregate return-bundle
+ABI (Phase 2) was evidenced as already complete over Phase 1's layout gate,
+not newly built. What remains before S6d itself resumes: the DQ4
+sentinel-substitution grounding route, and the deferred per-instantiation
+`audit_poly_reference_free_signature` fix — whoever closes that audit must
+leave an exempt path for synthesized multi-output bundles, since a genuine
+bundle pack/unpack carrying a slice reaches a `PolyType::Var` output and a
+blanket instantiation-time audit would otherwise strand REQ-3's ABI behind its
+own gate.
 
 **P7b.S8c — Per-site binding for member signatures with free input type variables.**
 Closes the lowering panic the P7b.S8 integrated review found (260906; pre-existing, not

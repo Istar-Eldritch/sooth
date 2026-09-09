@@ -1282,8 +1282,12 @@ them, then adds only the
 capability-shipped sentence and the growth re-check on every file this slice
 grew (`layout.rs`, `check.rs`,
 `check/declarations.rs`, `check/word_entry.rs`, `check/word_families.rs`,
-`check/captures.rs`, `check/audits.rs`, `check/terms.rs`, `ir/func_builder/`,
-`backend/qbe.rs`).
+`check/captures.rs`, `check/audits.rs`, `check/builtins.rs`, `check/engine.rs`,
+`check/poly.rs`, `check/terms.rs`, `ir/func_builder/`,
+`backend/qbe.rs`) — **corrected at Phase 3 exit**: `git diff 486eda4..HEAD
+--stat -- src/` shows three more grown files than this list names
+(`check/builtins.rs`, `check/engine.rs`, `check/poly.rs`); the list above is
+now the full 14-file grown set.
 Effort **S**, difficulty **standard**.
 
 ### Phases (JSON)
