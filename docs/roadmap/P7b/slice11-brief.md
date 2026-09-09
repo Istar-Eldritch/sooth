@@ -99,6 +99,11 @@ Four defects in the bare generic-ctor/destructure call path (evidence in slice11
 | G7 | genuinely undefined ctor name | `unknown word` byte-unchanged (zero-mints-of-a-known-header must be distinguishable from undefined-name) |
 | G8 | S10 shapes (`probes/dp_baseline.md`) | stderr byte-identical; slice10 goldens stay green |
 
+Review round 1 (260909) re-adjudicated ties with a determining consumer as
+ruling (A): G3's ambiguity expectation moves to dp_g (no consumer), and
+dp_g2/dp_g3 become accepted via the consumer's signature — see slice11-spec
+R-2 and goldens G3/G9.
+
 Plus units beside each changed site (`terms.rs` gate + fall-through, `builtins.rs`
 fallback, `parser.rs` if the args category needs parse support): target ~12, named
 `thing_condition_expected`.
@@ -137,13 +142,13 @@ byte-identical to `7404a71`, so no parse-side or env-build drift exists):**
 | --- | --- | --- |
 | env.get-miss branch | terms.rs:888-928 | terms.rs:889-927 (unknown_word_error :923) |
 | `[only]` chosen arm | terms.rs:951 | terms.rs:952-990 — take still unconditional, but see S8b pin |
-| poly_call_takes_type_args | terms.rs:1300 | terms.rs:1314-1348 — still two admitted categories |
+| poly_call_takes_type_args | terms.rs:1300 | terms.rs:1314-1356 — still two admitted categories |
 | bare_generated_word_own_module_grounding | terms.rs:1469 | terms.rs:1483 |
-| foreign_single_candidate_grounding | terms.rs:1676 | terms.rs:1690 — entry condition still "candidates already collapsed to [only]"; untouched |
+| foreign_single_candidate_grounding | terms.rs:1676 | terms.rs:1690 — caller is in the single-candidate arm by construction (doc 1670-1689); untouched |
 | mint_fallback_candidates | terms.rs:2010 | terms.rs:2024 (first-wins doc :1999-2011) |
 | env built once from eager mints | check.rs:586 | check.rs:579-603, exact |
 | select_overload_fallback_sourced | builtins.rs:164-183 | builtins.rs:164-183, first() at :178-181 (None arm already yields OverloadPick::Ambiguous) |
-| resolve_type_or_apply eager mint | parser.rs:7294 | parser.rs:7294 exact; find_enum arm :7348-7357 |
+| resolve_type_or_apply eager mint | parser.rs:7294 | parser.rs:7294 exact; find_enum arm :7348-7365 (`instantiate_enum` at :7364) |
 
 **Load-bearing addition since the draft — the S8b span-keyed pin.** S8b Phase 1
 inserted, inside the chosen `[only]` arm, `is_generated_enum_word(name, only, ctx)`
@@ -185,5 +190,7 @@ only Call-arm newcomer is the pin above.
 5. Record S8c's machinery as a shape-template, not a shortcut: no capability is
    pre-built for the ctor path and no interface conflict exists.
 
-Maintainer ruling to confirm at spec review round 1: ground at the call site ("B").
-The baseline note above is the only operational delta from round 1.
+Maintainer ruling confirmed at spec review round 1 (260909): ground at the call
+site ("B"), with the (A) reading — a monomorphic consumer's signature grounds
+the call (dp_g2/dp_g3 accepted); dp_g is the ambiguity golden. The baseline
+note above is the only operational delta from round 1.

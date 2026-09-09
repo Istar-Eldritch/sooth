@@ -620,25 +620,28 @@ Carved out of the P7b semantics walkthrough (260907) after probe round dp_a–dp
 traced how bare generic-ctor calls actually ground: there is **no per-call-site
 mechanism** — concrete type applications anywhere in a module mint monomorphs into a
 whole-module registry at parse time (`parser.rs:7294`), and a bare ctor call scans that
-registry (`mint_fallback_candidates`, `terms.rs:2010`): zero mints → a generic
+registry (`mint_fallback_candidates`, `terms.rs:2024`): zero mints → a generic
 `unknown word` error (`terms.rs:923`); one mint, even an unrelated one → taken
-unconditionally (`terms.rs:951`); two or more → silent first-declared-wins
+unconditionally (`terms.rs:952-990`); two or more → silent first-declared-wins
 (`builtins.rs:164-183`), so two programs differing only in unrelated declaration order
 can construct different runtime types from the same call (dp_g2/dp_g3 — a correctness
 gap, not a diagnostics gap). Explicit type args on a bare ctor are category-illegal
-today (`poly_call_takes_type_args`, `terms.rs:1300`). The slice builds per-call-site
+today (`poly_call_takes_type_args`, `terms.rs:1314-1356`). The slice builds per-call-site
 grounding: literal-driven partial inference, consumer-driven re-grounding in S2-9's
 obligation style, an explicit-type-args category for bare ctor/destructure names (full
 arity), and a deterministic tie-break — explicit args > single compatible candidate >
 located ambiguity error, first-wins retired. Checker-stage only; S5's declared-overload
 tier policy, S2-9's member dispatch, and S10's foreign grounding + exemptions stay
 byte-unchanged (baseline `probes/dp_baseline.md`). Maintainer ruling: ground at the
-call site ("B"), 260907. See [slice11-brief](./P7b/slice11-brief.md) and
-[slice11-probes](./P7b/slice11-probes.md).
+call site ("B"), 260907; consumer-pins reading (A) confirmed at spec review round 1,
+260909. See [slice11-brief](./P7b/slice11-brief.md),
+[slice11-probes](./P7b/slice11-probes.md), and
+[slice11-spec](./P7b/slice11-spec.md).
 **Exit:** `1 Ok drop` is a located unbound-parameter error naming the parameter (not
 `unknown word`); a wrong sole mint is a located grounding error, never a far-away
-operand mismatch; tied candidates are a located ambiguity error byte-identical across
-declaration orders; `1 Ok[i64 i64] drop` is legal and grounds; the
+operand mismatch; tied candidates with no determining consumer are a located
+ambiguity error byte-identical across declaration orders (a determining consumer
+grounds the call — ruling A, review round 1 260909); `1 Ok[i64 i64] drop` is legal and grounds; the
 `1 Ok [ 1 sub ] map[i64 i64 i64] drop` shape grounds through the consumer's
 constraints; genuinely undefined names keep `unknown word`; S10's diagnostics and the
 dp_a/dp_b/dp_f behaviors are byte-identical to baseline.
