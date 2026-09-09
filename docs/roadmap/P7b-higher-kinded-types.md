@@ -634,16 +634,23 @@ located ambiguity error, first-wins retired. Checker-stage only; S5's declared-o
 tier policy, S2-9's member dispatch, and S10's foreign grounding + exemptions stay
 byte-unchanged (baseline `probes/dp_baseline.md`). Maintainer ruling: ground at the
 call site ("B"), 260907; consumer-pins reading (A) confirmed at spec review round 1,
-260909. See [slice11-brief](./P7b/slice11-brief.md),
+260909. P7b.S11 has landed (per-call-site grounding plus the explicit-args
+category, phases 1–2, 260910), so the dp-traced defects above are closed. See
+[slice11-brief](./P7b/slice11-brief.md),
 [slice11-probes](./P7b/slice11-probes.md), and
 [slice11-spec](./P7b/slice11-spec.md).
 **Exit:** `1 Ok drop` is a located unbound-parameter error naming the parameter (not
 `unknown word`); a wrong sole mint is a located grounding error, never a far-away
 operand mismatch; tied candidates with no determining consumer are a located
 ambiguity error byte-identical across declaration orders (a determining consumer
-grounds the call — ruling A, review round 1 260909); `1 Ok[i64 i64] drop` is legal and grounds; the
-`1 Ok [ 1 sub ] map[i64 i64 i64] drop` shape grounds through the consumer's
-constraints; genuinely undefined names keep `unknown word`; S10's diagnostics and the
+grounds the call — ruling A, review round 1 260909); `1 Ok[i64 i64] drop` is legal and grounds; the implemented G5 shape
+`1 Ok [ 1 add ] apply2[i64 i64] .` with poly consumer
+`apply2 ( Res['T 'E] [ i64 -- i64 ] -- i64 )` grounds through the consumer's
+explicit type arguments (the originally-proposed `1 Ok [ 1 sub ]
+map[i64 i64 i64] drop` shape hits the pre-existing
+`poly_generic_not_yet_groundable_error`, `poly.rs:11138` — a pre-S11 poly-word
+refusal, not a grounding gap; revisit when poly words ground explicit args);
+genuinely undefined names keep `unknown word`; S10's diagnostics and the
 dp_a/dp_b/dp_f behaviors are byte-identical to baseline.
 
 **Dogfood:** S6 — a program that `map`s and folds over `Option`, `Result`, and `List` through

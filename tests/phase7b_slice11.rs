@@ -257,6 +257,35 @@ fn bare_ctor_with_a_determining_mono_consumer_grounds_identically_in_both_orders
 }
 
 // ---------------------------------------------------------------------------
+// dp_h: minting is whole-module, declaration-order-independent.
+// ---------------------------------------------------------------------------
+
+/// dp_f's twin with the sole mint declared *after* the caller (`main`
+/// first, `unused` second): the bare `Ok` still grounds, because grounding
+/// reads the whole module's registry rather than what is textually earlier
+/// (`probes/dp_findings.md`, dp_h). Both orders accept and behave
+/// identically -- the order dependence dp_g2/dp_g3 exposed lived only in
+/// the retired first-wins tie-break, never in minting.
+#[test]
+fn sole_mint_declared_after_the_caller_still_grounds_the_call() {
+    let show = "import: hosted::show | . | ;\n";
+    let caller_first = format!(
+        "{RES}{show}: main ( -- ) 1 Ok drop 3 . ;\n\
+         : unused ( Res[i64 i64] -- ) drop ;\n"
+    );
+    let caller_last = format!(
+        "{RES}{show}: unused ( Res[i64 i64] -- ) drop ;\n\
+         : main ( -- ) 1 Ok drop 3 . ;\n"
+    );
+    assert_eq!(build_and_run("dp-h-caller-first", &caller_first), "3\n");
+    assert_eq!(
+        build_and_run("dp-h-caller-last", &caller_last),
+        "3\n",
+        "minting is whole-module: both declaration orders ground identically"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // G4 (dp_e) + dp_e2 (R-6): the explicit-args category.
 // ---------------------------------------------------------------------------
 
