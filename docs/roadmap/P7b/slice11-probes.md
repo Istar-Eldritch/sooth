@@ -121,6 +121,8 @@ program runs clean; dp_g3's swapped declaration order is byte-identical (G9).
   overload of `Ok` … accepts these operands". Defensible per R-5's wording:
   the dedicated diagnostic speaks of "the only `Res` instantiation in scope",
   so the sole-mint arm (`mints.len() == 1`) is its whole territory.
+  *Superseded by the strict-grounding amendment (260910) below — an
+  undetermined parameter is the unbound-parameter error whatever the mints.*
 - **Length-parameterized headers keep the baseline rejection wholesale.**
   `ctor_grounding_header` grounds length-free headers only, and for a header
   with length parameters the explicit-args spelling skips even the arity
@@ -130,3 +132,51 @@ program runs clean; dp_g3's swapped declaration order is byte-identical (G9).
   site at the caller's own header *before* the ladder's R-6 arity validation
   runs, so a wrong-arity explicit-args list there surfaces the pre-guard's
   own outcome rather than R-6's arity text.
+
+## Strict-grounding amendment (260910)
+
+Maintainer ruling: a bare generic-ctor call (and bare generic destructure name)
+must be groundable from its **own** information alone — explicit type args, its
+consumer's declared signature, or its operand literals; determined by use →
+ground, not determined → the located unbound-parameter error, **regardless of
+what monomorphs exist in module scope**. The mint registry is never consulted
+to fill, disambiguate, or veto a bare ctor call's parameters; the wildcard
+filter, sole-compatible take, ambiguity error, and incompatible-sole-mint
+error are retired with the scope consultation.
+
+Re-probe outcomes at the amendment:
+
+| probe | before | after |
+| --- | --- | --- |
+| dp_a (helper's declared output) | accepted | **unchanged** (accepted) |
+| dp_b (concrete consumer) | accepted | **unchanged** (accepted) |
+| dp_c (zero mints) | unbound-parameter error | **unchanged** (same bytes) |
+| dp_d (sole mint, operand-pinned `'T`) | incompatible-grounding error | **unbound-parameter error naming `'E`** |
+| dp_e / dp_e2 (explicit args) | accepted / forgetting-check | **unchanged** |
+| dp_f (unused sibling's sole mint) | accepted | **unbound-parameter error** |
+| dp_g (two sibling mints) | ambiguity error | **unbound-parameter error** (scope never consulted) |
+| dp_g2/dp_g3 (determining consumer) | accepted | **unchanged** (accepted, both orders) |
+| dp_h (mint declared after the caller) | accepted | **unbound-parameter error, byte-identical in both declaration orders** |
+
+dp_g3 stays as observed: accepted in both orders (ruling A's consumer pin).
+The amendment is not purely negative — see the spec's *Blast radius* section:
+`consumer_expected_type` gained the spliced-poly-combinator-output fallback
+(keeps the P7 slice-11 `wrap … call Ok` family and the HKT member arms
+grounding), and five fixtures whose mechanism was the retired sole-compatible
+scope borrow (phase7_slice3a T1/T2, the `unify_poly_input` unit in poly.rs,
+phase6_slice3b's eliminator twin, P7 slice-11 golden 2) now name their
+instantiations with explicit type args, subjects unchanged.
+
+Verbatim stderr, dp_d:
+
+```text
+error: `Ok` in `main` (line 8) cannot be grounded here: `Res['T 'E]`'s type parameter `'E` (parameter 2 of 2) is determined by neither this call site's operands nor its consumer
+  note: pass the value to a consumer whose declared parameter names a concrete `Res[...]`, or name that instantiation in a signature so this call has one to ground at
+```
+
+Verbatim stderr, dp_g:
+
+```text
+error: `Ok` in `main` (line 8) cannot be grounded here: `Res['T 'E]`'s type parameter `'E` (parameter 2 of 2) is determined by neither this call site's operands nor its consumer
+  note: pass the value to a consumer whose declared parameter names a concrete `Res[...]`, or name that instantiation in a signature so this call has one to ground at
+```

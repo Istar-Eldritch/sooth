@@ -1,5 +1,4 @@
-//! P7b.S11 Phase 1 goldens: per-call-site grounding for bare generic
-//! constructors.
+//! P7b.S11 goldens: per-call-site grounding for bare generic constructors.
 //!
 //! A bare `Ok`/`Err` (or any generated word of a header with a free type
 //! parameter) had no per-call-site grounding at all: the outcome was a
@@ -7,11 +6,21 @@
 //! happened to mint at parse time, with a generic `unknown word` on zero
 //! mints, an unconditional take of a sole *wrong* mint, and a silent
 //! declaration-order-first pick on ties (`probes/dp_findings.md`). This suite
-//! pins the ladder that replaces it (spec R-2/R-3/R-4), the three new located
-//! diagnostics (R-5), and the undefined-name split (R-7).
+//! pins the ladder that replaced that (spec R-2, R-6, R-7), the located
+//! unbound-parameter diagnostic (R-5), and the undefined-name split (R-7),
+//! under the **strict-grounding amendment (maintainer ruling, 260910)**: a
+//! bare ctor call is groundable from its OWN information alone -- explicit
+//! type args, its consumer's declared signature, or its operand literals
+//! (R-2's order). Fully determined -> ground (R-8); any parameter left
+//! undetermined -> the located error, regardless of what monomorphs module
+//! scope happens to carry. The scope-consultation machinery of the original
+//! ladder (wildcard filter over mints, sole-compatible take, ambiguity
+//! error) is retired with its two diagnostics.
 //!
-//! Fixture texts are the frozen `probes/dp_*.sth` bodies; the error goldens
-//! pin the measured rendered bytes (measure-then-pin). Harness styled after
+//! Fixture texts are the frozen `probes/dp_*.sth` bodies. Full error bytes
+//! are pinned at G1/G2/G3 and the wrap/if-arm golden (measure-then-pin);
+//! dp_f and dp_h pin a located error prefix plus cross-order byte-equality,
+//! not the full trailing note text. Harness styled after
 //! `tests/phase7b_slice10.rs`.
 
 use std::path::PathBuf;
@@ -117,43 +126,46 @@ fn bare_ctor_with_no_mint_and_an_unbound_parameter_names_the_parameter() {
 }
 
 // ---------------------------------------------------------------------------
-// G2 (dp_d): a sole mint that disagrees at a bound position.
+// G2 (dp_d): an operand pins one parameter; nothing determines the other.
 // ---------------------------------------------------------------------------
 
 /// `mkok`'s signature mints the only `Res` monomorph in the program, and the
-/// old single-candidate arm took it unconditionally -- forcing the *nested*
-/// `Ok` (whose `'T` the operand pins to `Res[i64 i64]`) onto it and failing
-/// three checks later with an operand mismatch that never mentioned
-/// grounding. Rejection was already correct; the mechanism reaching it was
-/// not.
+/// retired ladder took it as the grounding (reporting an
+/// incompatible-grounding error when it disagreed at the pinned `'T`). Under
+/// the strict-grounding amendment (260910) that mint is never consulted: the
+/// operand pins `'T` to `Res[i64 i64]`, `'E` is determined by nothing at the
+/// call site, and the call is the unbound-parameter error naming `'E` -- the
+/// same bytes as G1, since scope is irrelevant to the outcome.
 #[test]
-fn bare_ctor_whose_sole_mint_disagrees_at_a_bound_position_is_a_grounding_error() {
+fn bare_ctor_whose_operand_pins_one_parameter_names_the_other() {
     let err = build_error(
         "g2",
         &format!("{RES}: mkok ( i64 -- Res[i64 i64] ) Ok ;\n: main ( -- ) 1 mkok Ok drop ;\n"),
     );
     assert_eq!(
         err,
-        "error: `Ok` in `main` (line 4) cannot be grounded here: this call site needs `Res['T 'E]`'s `'T` to be `Res[i64 i64]`, but the only `Res` instantiation in scope is `Res[i64 i64]`, whose `'T` is `i64`\n  note: name the instantiation this call means in a signature, so it is minted here rather than borrowing the one that happens to exist\n"
+        "error: `Ok` in `main` (line 4) cannot be grounded here: `Res['T 'E]`'s type parameter `'E` (parameter 2 of 2) is determined by neither this call site's operands nor its consumer\n  note: pass the value to a consumer whose declared parameter names a concrete `Res[...]`, or name that instantiation in a signature so this call has one to ground at\n"
     );
     assert!(
-        !err.contains("type mismatch"),
-        "the far-away operand mismatch is replaced, not merely preceded"
+        !err.contains("instantiation in scope"),
+        "strict grounding never consults scope, so no mint is named: {err}"
     );
 }
 
 // ---------------------------------------------------------------------------
-// G3 (dp_g): two compatible mints, no determining consumer.
+// G3 (dp_g): two in-scope mints, no determining input.
 // ---------------------------------------------------------------------------
 
-/// dp_g exits 0 today, silently constructing whichever `Res[i64 ?]` was
-/// declared first -- a correctness gap, not a diagnostics gap. First-wins is
-/// retired: the tie is a located error, and the tied types are listed sorted
-/// by rendered string, so the *bytes* are identical under a declaration-order
-/// swap (NFR-3) rather than merely the verdict.
+/// dp_g used to report the retired ambiguity error (candidate list, sorted by
+/// rendered string). Under the strict-grounding amendment (260910) scope is
+/// never consulted to fill or disambiguate a bare ctor call's parameters, so
+/// "2 instantiations fit" is no longer the failure mode -- "nothing
+/// determines it" is, and the call is the unbound-parameter error. Both
+/// declaration orders take the same call-site-only path, so the *bytes* are
+/// identical under the swap.
 #[test]
-fn bare_ctor_with_two_compatible_mints_is_an_order_stable_ambiguity_error() {
-    let expected = "error: `Ok` in `main` (line 5) is ambiguous: `Res['T 'E]`'s type parameter `'E` is determined by neither this call site's operands nor its consumer, and 2 instantiations in scope fit it\n  candidate: `Res[i64 cstr]`\n  candidate: `Res[i64 i64]`\n  note: pass the value to a consumer whose declared parameter names the concrete `Res[...]` this call means\n";
+fn bare_ctor_with_two_in_scope_mints_and_no_determining_input_is_an_unbound_parameter_error() {
+    let expected = "error: `Ok` in `main` (line 5) cannot be grounded here: `Res['T 'E]`'s type parameter `'E` (parameter 2 of 2) is determined by neither this call site's operands nor its consumer\n  note: pass the value to a consumer whose declared parameter names a concrete `Res[...]`, or name that instantiation in a signature so this call has one to ground at\n";
     let a_first = build_error(
         "g3-a-first",
         &format!(
@@ -257,31 +269,65 @@ fn bare_ctor_with_a_determining_mono_consumer_grounds_identically_in_both_orders
 }
 
 // ---------------------------------------------------------------------------
-// dp_h: minting is whole-module, declaration-order-independent.
+// dp_h: the strict rule is declaration-order-independent.
 // ---------------------------------------------------------------------------
 
-/// dp_f's twin with the sole mint declared *after* the caller (`main`
-/// first, `unused` second): the bare `Ok` still grounds, because grounding
-/// reads the whole module's registry rather than what is textually earlier
-/// (`probes/dp_findings.md`, dp_h). Both orders accept and behave
-/// identically -- the order dependence dp_g2/dp_g3 exposed lived only in
-/// the retired first-wins tie-break, never in minting.
+/// dp_f's twin with the sole mint declared *after* the caller. dp_h used to
+/// be accepted in both orders (whole-module minting); under the strict
+/// grounding amendment (260910) the sibling's mint is irrelevant in either
+/// order -- scope is never consulted -- so both declaration orders now
+/// produce the same located unbound-parameter error. Order-independence
+/// survives the retirement of what it originally stabilized: the error bytes
+/// are identical across the swap. The two declarations share one line so the
+/// located line number matches too.
 #[test]
-fn sole_mint_declared_after_the_caller_still_grounds_the_call() {
-    let show = "import: hosted::show | . | ;\n";
-    let caller_first = format!(
-        "{RES}{show}: main ( -- ) 1 Ok drop 3 . ;\n\
-         : unused ( Res[i64 i64] -- ) drop ;\n"
-    );
-    let caller_last = format!(
-        "{RES}{show}: unused ( Res[i64 i64] -- ) drop ;\n\
-         : main ( -- ) 1 Ok drop 3 . ;\n"
-    );
-    assert_eq!(build_and_run("dp-h-caller-first", &caller_first), "3\n");
+fn sole_mint_declared_after_the_caller_is_the_same_unbound_parameter_error_in_both_orders() {
+    let caller_first =
+        format!("{RES}: main ( -- ) 1 Ok drop 3 . ; : unused ( Res[i64 i64] -- ) drop ;\n");
+    let caller_last =
+        format!("{RES}: unused ( Res[i64 i64] -- ) drop ; : main ( -- ) 1 Ok drop 3 . ;\n");
+    let first = build_error("dp-h-caller-first", &caller_first);
+    let last = build_error("dp-h-caller-last", &caller_last);
     assert_eq!(
-        build_and_run("dp-h-caller-last", &caller_last),
-        "3\n",
-        "minting is whole-module: both declaration orders ground identically"
+        first, last,
+        "the strict rule reads only the call site: both orders error identically"
+    );
+    assert!(
+        first.contains(
+            "`Ok` in `main` (line 3) cannot be grounded here: `Res['T 'E]`'s type parameter `'E`"
+        ),
+        "unexpected message: {first}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// dp_f (strict amendment): an unused sibling's mint is not a parameter source.
+// ---------------------------------------------------------------------------
+
+/// dp_f used to be accepted: the sole in-scope mint (an unused, uncalled
+/// sibling's declared signature) bound the undetermined `'E`. The
+/// strict-grounding amendment (260910) removes that channel entirely -- the
+/// sibling's existence is irrelevant, and the call is the unbound-parameter
+/// error no matter what the module happens to mint elsewhere. (Formerly the
+/// dp_f leg of the accepting-shapes sweep below.)
+#[test]
+fn bare_ctor_with_an_unused_sibling_mint_and_no_determining_input_is_an_unbound_parameter_error() {
+    let err = build_error(
+        "dp-f-strict",
+        &format!(
+            "{RES}: unused ( Res[i64 i64] -- ) drop ;\n\
+             : main ( -- ) 1 Ok drop 3 . ;\n"
+        ),
+    );
+    assert!(
+        err.contains(
+            "`Ok` in `main` (line 4) cannot be grounded here: `Res['T 'E]`'s type parameter `'E` (parameter 2 of 2)"
+        ),
+        "unexpected message: {err}"
+    );
+    assert!(
+        !err.contains("instantiation in scope"),
+        "the sibling's mint is never named: {err}"
     );
 }
 
@@ -340,9 +386,14 @@ fn explicit_args_ctor_with_wrong_arity_is_a_located_error() {
 // G6 (NFR-2/4): the non-regression half, end to end.
 // ---------------------------------------------------------------------------
 
-/// dp_a / dp_b / dp_f still build and run: dp_a and dp_b on a fully bound θ (the word's
-/// declared output, resp. the consumer's declared input); dp_f's ladder declines (its
-/// sole-mint arm is unreachable at both call sites) and the pre-existing `[only]` take grounds it.
+/// dp_a / dp_b still build and run byte-identically to baseline: both on a
+/// fully bound θ via use-determination (the helper's declared output, resp.
+/// the consumer's declared input) -- exactly the shapes the strict rule
+/// keeps. dp_f moved out of this sweep by the strict-grounding amendment
+/// (260910): an unused sibling's mint no longer grounds anything, and its
+/// rejecting assertion lives in
+/// `bare_ctor_with_an_unused_sibling_mint_and_no_determining_input_is_an_unbound_parameter_error`
+/// above.
 #[test]
 fn the_accepting_probe_shapes_still_build_and_run() {
     let show = "import: hosted::show | . | ;\n";
@@ -369,16 +420,56 @@ fn the_accepting_probe_shapes_still_build_and_run() {
         ),
         "2\n"
     );
-    // dp_f: an unused, uncalled sibling's mere declaration is the sole
-    // compatible mint; `'E` binds from it.
-    assert_eq!(
-        build_and_run(
-            "g6-dp-f",
-            &format!(
-                "{RES}{show}: unused ( Res[i64 i64] -- ) drop ;\n\
-                 : main ( -- ) 1 Ok drop 3 . ;\n"
-            )
+}
+
+// ---------------------------------------------------------------------------
+// Strict amendment: a fully operand-pinned θ grounds with zero in-scope mints.
+// ---------------------------------------------------------------------------
+
+/// A 1-parameter generic ctor whose operand pins its only parameter grounds
+/// and runs with NO monomorph of its header anywhere in the module -- no
+/// sibling declarations at all. The fully bound θ goes straight to the R-8
+/// lookup-or-mint (`mint_header_instantiation`), minting `Opt[i64]`
+/// mid-check: determined by use -> ground, with nothing for scope to
+/// contribute.
+#[test]
+fn one_parameter_ctor_grounds_from_its_operand_with_zero_in_scope_mints() {
+    let out = build_and_run(
+        "zero-sibling",
+        "import: intrinsics * ;\ntype: Opt['T] | Some 'T | None ;\n\
+         import: hosted::show | . | ;\n\
+         : main ( -- ) 1 Some drop 7 . ;\n",
+    );
+    assert_eq!(out, "7\n");
+}
+
+// ---------------------------------------------------------------------------
+// Blast radius (260910): the if-arm boundary of the spliced-output channel.
+// ---------------------------------------------------------------------------
+
+/// The spec's *Blast radius* acceptance→rejection delta, end to end: a bare
+/// ctor at the tail of an if-ARM body nested inside a poly-combinator splice
+/// rejects. `f call` splices the caller's quotation into `wrap`'s body, but
+/// running off the *if-arm's* term list reaches only the row-based `if`'s
+/// output row -- `if` carries no poly sig, so the spliced-output channel is
+/// inert there and nothing determines `'E`. Before the amendment this exact
+/// program built and ran on the retired scope borrow (`mki`'s sole mint);
+/// strict grounding never consults scope, so the sibling mint is irrelevant
+/// and the call is the unbound-parameter error, byte-exact (measure-then-pin).
+#[test]
+fn bare_ctor_at_an_if_arm_tail_inside_a_poly_splice_is_an_unbound_parameter_error() {
+    let err = build_error(
+        "wrap-if-arm",
+        &format!(
+            "{RES}import: core::prelude * ;\n\
+             : mki ( i64 -- Res[i64 i64] ) Ok ;\n\
+             : wrap inline ( 'T ~[ 'T -- 'T ] -- Res['T i64] ) | f | f call \
+             True ~[ drop 1 Ok ] ~[ drop 2 Ok ] if ;\n\
+             : main ( -- ) 7 ~[ 1 add ] wrap drop ;\n"
         ),
-        "3\n"
+    );
+    assert_eq!(
+        err,
+        "error: `Ok` in `main` (line 5) cannot be grounded here: `Res['T 'E]`'s type parameter `'E` (parameter 2 of 2) is determined by neither this call site's operands nor its consumer\n  note: pass the value to a consumer whose declared parameter names a concrete `Res[...]`, or name that instantiation in a signature so this call has one to ground at\n"
     );
 }

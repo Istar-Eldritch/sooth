@@ -162,18 +162,21 @@ pub(super) fn tier_pick<'a>(
 /// first-input-match semantics (the first `matching` candidate, arbitrary
 /// among ties) rather than tiering further.
 ///
-/// P7b.S11 Phase 1 (R-4) narrows what that arbitrary-among-ties tail can
-/// still reach. Its rationale above is unchanged and its behavior is
-/// byte-identical -- an unverified module id still buys no tier-2/3
+/// P7b.S11 Phase 1 (R-4, retired 260910) once narrowed what that
+/// arbitrary-among-ties tail could still reach; the strict-grounding
+/// amendment (260910) removed that tail's reach into bare-ctor calls
+/// entirely. The rationale above is unchanged and this selector's behavior
+/// is byte-identical -- an unverified module id still buys no tier-2/3
 /// narrowing -- but the one shape whose ties were *observably* decided by
 /// declaration order, a bare generic constructor's competing monomorphs, no
 /// longer arrives here undecided: `ground_bare_generic_ctor`
-/// (`check/terms.rs`) either grounds that site from its own θ or reports the
-/// tie, upstream of both selectors. The tie-break is placed there rather
-/// than in here because the fence it needs -- own-module instantiations of
-/// one own header, which S5's tier 1 must keep resolving in a *mixed* tie
-/// (NFR-2) -- is a fact about the call site's header, which an `Overload`
-/// alone cannot express.
+/// (`check/terms.rs`) either grounds that site from its own θ or reports
+/// the located unbound-parameter error -- strict grounding never consults
+/// scope, so there is no tie to report -- upstream of both selectors. The
+/// ladder is placed there rather than in here because the fence it needs --
+/// own-module instantiations of one own header, which S5's tier 1 must keep
+/// resolving in a *mixed* tie (NFR-2) -- is a fact about the call site's
+/// header, which an `Overload` alone cannot express.
 pub(super) fn select_overload_fallback_sourced<'a>(
     candidates: &'a [Overload],
     operands: &[Type],

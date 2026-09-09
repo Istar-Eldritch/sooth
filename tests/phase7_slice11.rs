@@ -93,13 +93,19 @@ fn unbounded_combinator_constructing_its_generic_output_builds_and_runs() {
 /// own body (only `call`) -- `Ok`'s constructor resolves through the parse-
 /// time monomorph `mki` grounds, not through R4's word-scoped env, so this
 /// dies under "revert R1" and survives "stub R4".
+/// Strict-grounding amendment (260910): the argument quotation's bare `Ok`
+/// used to resolve through the retired scope borrow (`mki`'s parse-time
+/// mint was the sole compatible candidate); it now names its instantiation
+/// explicitly. The R1/R4 discrimination is untouched: `mki`'s parse-time
+/// mint is still what grounds the `Ok>`/`Err>` destructure and `Result?`
+/// sites in `main`, and relay's own body stays constructor-free.
 #[test]
 fn constructor_free_combinator_grounds_its_generic_output_and_runs() {
     let src = "type: Result['T 'E] | Ok 'T | Err 'E ;\n\
          : mki ( i64 -- Result[i64 i64] ) Ok ;\n\
          : relay inline ( 'T ~[ 'T -- Result['T i64] ] -- Result['T i64] ) call ;\n\
          : main ( -- )\n\
-           7 ~[ Ok ] relay\n\
+           7 ~[ Ok[i64 i64] ] relay\n\
            ~[ ( Ok ) Ok> . ]\n\
            ~[ ( Err ) Err> . ]\n\
            Result? ;\n";

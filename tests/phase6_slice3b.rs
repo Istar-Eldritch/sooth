@@ -206,6 +206,11 @@ fn forward_declared_generic_type_eliminates_after_the_matching_word() {
 /// normalize to the surface name `Ok`.
 #[test]
 fn two_asymmetric_instantiations_eliminate_independently_in_one_word() {
+    // Strict-grounding amendment (260910): the four bare ctor calls used to
+    // resolve through the retired sole-compatible scope borrow (elim-both's
+    // own signature mints both monomorphs); they now name their
+    // instantiations explicitly, leaving the R5 scrutinee routing and the
+    // arm normalization this test pins byte-identical.
     let (stdout, code) = build_and_run(
         "s3b-two-asymmetric-instantiations",
         "type: Result['T 'E] | Ok val 'T | Err val 'E ;\n\
@@ -219,8 +224,8 @@ fn two_asymmetric_instantiations_eliminate_independently_in_one_word() {
            Result?\n  \
            swap ;\n\
          : main ( -- )\n  \
-           42 Ok 7 Err elim-both . .\n  \
-           True Err True Ok elim-both . . ;\n",
+           42 Ok[i64 Bool] 7 Err[Bool i64] elim-both . .\n  \
+           True Err[i64 Bool] True Ok[Bool i64] elim-both . . ;\n",
     );
     assert_eq!(stdout, "7\n42\n10\n1\n");
     assert_eq!(code, 0);

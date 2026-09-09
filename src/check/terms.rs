@@ -915,16 +915,18 @@ fn check_term(
                             )? {
                                 return Ok(next);
                             }
-                            // P7b.S11 Phase 1 (R-2/R-4/R-7): the zero-candidate
-                            // arm splits. A name with no generic header of this
-                            // module's own declines below to the unchanged
-                            // unknown-word/intrinsic fallthrough, so every
-                            // existing golden holds; a bare constructor of one
-                            // grounds from the call site instead -- a θ the
-                            // consumer or the operands fully determine succeeds
-                            // here with no monomorph in scope at all (G5), and
-                            // an undetermined parameter is reported as itself
-                            // rather than as an unknown word (G1).
+                            // P7b.S11 (R-2/R-7; strict amendment 260910): the
+                            // zero-candidate arm splits. A name with no
+                            // generic header of this module's own declines
+                            // below to the unchanged unknown-word/intrinsic
+                            // fallthrough, so every existing golden holds; a
+                            // bare constructor of one grounds from the call
+                            // site alone -- a θ the consumer or the operands
+                            // fully determine succeeds here with no monomorph
+                            // in scope at all (G5), and an undetermined
+                            // parameter is reported as itself rather than as
+                            // an unknown word (G1). Scope is never consulted
+                            // to fill a parameter (strict amendment).
                             match ground_bare_generic_ctor(
                                 CtorCallSite {
                                     name,
@@ -988,15 +990,18 @@ fn check_term(
             } else {
                 candidates
             };
-            // P7b.S11 Phase 1 (R-1/R-3/R-4): a bare generic constructor's
-            // candidates are no longer a verdict. Grounding derives a θ from
-            // the call site and either names the monomorph outright, filters
-            // the existing mints for compatibility with it, or reports one of
-            // R-5's three located diagnostics. Declining (`None`) leaves this
-            // arm's selection -- the S8b span-keyed pin and the S3 splice
-            // redirect below among it -- byte-for-byte as it was, which is
-            // also the disposition for a sole compatible candidate: it is the
-            // one the `[only]` arm would have taken anyway.
+            // P7b.S11 (R-1; strict amendment 260910): a bare generic
+            // constructor grounds from its own call-site information alone --
+            // explicit args, its consumer's declared signature, its operand
+            // literals (R-2's order). A fully bound θ names the monomorph
+            // outright; any parameter those three inputs leave undetermined is
+            // the located unbound-parameter error. Module scope is never
+            // consulted to fill, disambiguate, or veto a parameter. Declining
+            // (`None`) happens only where this name has no groundable
+            // own-module ctor header, or the category fence preserves a
+            // same-named non-ctor candidate -- leaving this arm's selection
+            // (the S8b span-keyed pin and the S3 splice redirect below among
+            // it) byte-for-byte as it was.
             let s11_storage;
             let mut s11_grounded = false;
             let candidates: &[Overload] = match ground_bare_generic_ctor(
@@ -2100,18 +2105,15 @@ fn plural_s(n: usize) -> &'static str {
 /// invents no rule of its own: the candidates it yields are treated exactly
 /// as a present `env` entry's would be.
 ///
-/// P7b.S11 Phase 1 (R-3/R-4) inverts the *former* half of that sentence, the
-/// one that read "first-wins on a genuine collision, no ambiguity check".
-/// There is now an ambiguity check, and it is deliberately a stricter rule --
-/// but it is stricter for both provenances alike, applied in
-/// `ground_bare_generic_ctor` ahead of dispatch rather than inside either
-/// selector: for a bare generic constructor a mint is a *candidate*, never a
-/// verdict, and a tie among this module's own mints that the call site's θ
-/// and operands both fail to separate is a located error instead of the
-/// first-declared one. Two programs differing only in unrelated declaration
-/// order used to construct different runtime types from one bare call
-/// silently (`probes/dp_findings.md`, dp_g2/dp_g3), which is a correctness
-/// gap rather than a diagnostics gap.
+/// P7b.S11 (strict-grounding amendment 260910): this fallback still serves
+/// every NON-ctor bare name exactly as before -- dispatch over its result
+/// follows the existing env-overload discipline. For a bare generic
+/// constructor it no longer has any grounding role at all: the strict ladder
+/// in `ground_bare_generic_ctor` derives θ from the call site alone and
+/// never consults module mints to fill, disambiguate, or veto a parameter
+/// (the former candidate-filter/ambiguity machinery was retired with the
+/// ruling), so this function's output reaches the ctor path only through the
+/// category fence's identity check.
 ///
 /// P7b.S5 (R4/Fix D, Phase 2b's mint_fallback module-provenance probe --
 /// VERDICT: NOT reliably the declaring module). Each returned `Overload`'s
@@ -2274,8 +2276,9 @@ fn explicit_ctor_arity_error(
 /// deliberately narrow:
 ///
 /// - **own module only.** A foreign header's mints are S9/S10's territory
-///   (NFR-4); every tie this slice rules on is a tie between mints of one
-///   header this module declares itself.
+///   (NFR-4); strict grounding never consults scope, so the only headers
+///   whose bare calls this ladder ever re-grounds are ones this module
+///   declares itself.
 /// - **constructors only.** A destructure's single operand *is* the
 ///   monomorph, so the existing exact-operand match already grounds it and no
 ///   parameter can be left undetermined -- there is nothing here to add.
@@ -2348,12 +2351,19 @@ fn ctor_grounding_header(name: &str, span: Span, ctx: &Ctx) -> Option<CtorHeader
     found
 }
 
-/// P7b.S11 Phase 1 (R-3): every existing monomorph of `h` whose generated
-/// constructor `name` names, paired with the concrete argument list it was
-/// instantiated at. Read over the *extended* type slices, so a mint `env`
-/// never saw -- still pending in the live cell, or flushed into the registry
-/// after `env` was built (the gap `generated_word_entry`'s doc describes) --
-/// is a candidate here too.
+/// P7b.S11 (R-3 retired 260910): every existing monomorph of `h` whose
+/// generated constructor `name` names, paired with the concrete argument list
+/// it was instantiated at. Read over the *extended* type slices, so a mint
+/// `env` never saw -- still pending in the live cell, or flushed into the
+/// registry after `env` was built (the gap `generated_word_entry`'s doc
+/// describes) -- is a candidate here too.
+///
+/// Under the strict-grounding amendment this list no longer filters or binds
+/// anything: its one surviving reader is `ground_bare_generic_ctor`'s
+/// category fence, which checks *identity* (are the pre-existing resolution's
+/// candidates this header's mints, or a same-named user word / foreign
+/// generated word to be left alone?) and never reads parameter values off
+/// it.
 fn header_mint_candidates(name: &str, h: &CtorHeader, ctx: &Ctx) -> Vec<(Overload, Vec<Type>)> {
     // Collected out of the `with_extended_type_slices` closure: that helper
     // holds a shared borrow of the live cell for the closure's whole extent,
@@ -2465,7 +2475,9 @@ fn derive_ctor_theta(
     // field that *is* a bare header variable pins one: a variable nested
     // inside an array/reference/cell shape would need real unification, and
     // reading it wrongly would ground the site at the wrong monomorph, so
-    // those positions stay wildcards for R-3's filter to handle.
+    // those positions stay wildcards: under the strict-grounding amendment
+    // (260910) an undetermined parameter is the located unbound-parameter
+    // error, never a guess from scope.
     if stack.len() >= h.fields.len() {
         let base = stack.len() - h.fields.len();
         for (i, f) in h.fields.iter().enumerate() {
@@ -2491,13 +2503,15 @@ fn derive_ctor_theta(
 /// rather than a guessed one. Grounding the site at a guessed monomorph would
 /// be a miscompile, not a diagnostic.
 ///
-/// Two flavors (R-2). A **monomorphic** consumer's `env` signature names the
+/// Three flavors (R-2). A **monomorphic** consumer's `env` signature names the
 /// type outright (dp_g2's `only_takes_cstr_err` pins both parameters). A
 /// **polymorphic** consumer's own signature names it once its explicit type
 /// arguments are applied, through `apply_subst` -- the same route the
 /// consumer's own `check_poly_call` takes, so when that input is a
 /// `PolyType::Generic` the monomorph minted here and the one the consumer
-/// resolves are one monomorph (R-8).
+/// resolves are one monomorph (R-8). A call whose consumer was already
+/// determined upstream (explicit type args, a poly consumer's own type
+/// arguments) is pinned by those before any fallback below runs.
 ///
 /// Running off the end of the term list in **tail** position reaches a third
 /// consumer: the enclosing word's own declared output, which is the
@@ -2506,6 +2520,19 @@ fn derive_ctor_theta(
 /// variant constructor (`None`) can have, since it has no operands to infer
 /// from; a wrong read here cannot escape, because the word-exit output check
 /// compares that very slot against that very declaration.
+///
+/// Strict amendment (260910), the spliced-body half of the same channel:
+/// inside a poly-combinator splice, running off the *spliced body's* term
+/// list means the combinator's own declared output consumes the value -- the
+/// direct consumer of the body's result (the tail channel above reads the
+/// *caller's* outputs, the consumer one step removed, and only in tail
+/// position). The combinator's declared output is instantiated through the
+/// splice's own substitution (`apply_subst`, the same grounding Part 1
+/// performs ahead of the splice, so the mint dedups onto it), and a bare
+/// ctor at a spliced body's tail is use-determined by that signature --
+/// never by module scope. Mono combinators carry no `combinator_sig` and
+/// decline here byte-identically; this is a fallback, so a site the tail
+/// channel already pins keeps today's bytes.
 #[allow(clippy::too_many_arguments)]
 fn consumer_expected_type(
     siblings: &[Term],
@@ -2586,10 +2613,36 @@ fn consumer_expected_type(
     // Nothing consumes it inside this term list. In tail position the
     // enclosing word's declared output is what does.
     let outputs = ctx.declared_outputs();
-    match tail && depth < outputs.len() {
-        true => Some(outputs[outputs.len() - 1 - depth].ty),
-        false => None,
+    if tail && depth < outputs.len() {
+        return Some(outputs[outputs.len() - 1 - depth].ty);
     }
+    // Strict amendment (260910), the spliced-body consumer half: see this
+    // function's doc. A poly combinator's declared output, instantiated
+    // through the splice's own substitution, is what consumes the spliced
+    // body's result; `apply_subst` errors (an output variable the splice did
+    // not bind) decline the pin, as does a mono combinator (`combinator_sig`
+    // is `None`) or an empty output window at this depth.
+    if let Some(sig) = poly.combinator_sig.as_ref() {
+        if let (Some(subst), Some(cname)) = (&poly.combinator_subst, &poly.combinator_name) {
+            if depth < sig.outputs.len() {
+                let slot = &sig.outputs[sig.outputs.len() - 1 - depth];
+                if let Ok(ty) = apply_subst(
+                    sig,
+                    slot,
+                    subst,
+                    cname,
+                    siblings[at].span,
+                    ctx,
+                    arrays,
+                    cells,
+                    refs,
+                ) {
+                    return Some(ty);
+                }
+            }
+        }
+    }
+    None
 }
 
 /// P7b.S11 Phase 1 (R-8): lookup-or-mint of `h` at a fully bound θ, through
@@ -2649,34 +2702,31 @@ fn ground_ctor_overload(name: &str, ty: Type, ctx: &Ctx) -> Option<Overload> {
     }
 }
 
-/// Whether `o`'s declared operands are exactly what the stack holds -- the
-/// same predicate `select_overload`'s own Step 1 filters `matching` by. Used
-/// only to fence R-4's ambiguity error to a tie the pre-S11 selection would
-/// itself have broken by declaration order.
-fn ctor_operands_match(o: &Overload, stack: &[Slot]) -> bool {
-    let n = o.sig.inputs.len();
-    stack.len() >= n
-        && stack[stack.len() - n..]
-            .iter()
-            .map(|s| s.ty)
-            .eq(o.sig.inputs.iter().copied())
-}
-
-/// P7b.S11 Phase 1 (R-1 through R-5, R-7, R-8): per-call-site grounding for a
-/// bare generic constructor call. `Ok(Some(o))` grounds the site at `o`;
-/// `Ok(None)` declines, leaving the pre-S11 resolution byte-for-byte; `Err`
-/// is one of R-5's three located diagnostics.
+/// P7b.S11 (R-1, R-2, R-6, R-7, R-8; strict-grounding amendment 260910):
+/// per-call-site grounding for a bare generic constructor call.
+/// `Ok(Some(o))` grounds the site at `o`; `Err` is the located
+/// unbound-parameter diagnostic. `Ok(None)` declines only for a name with no
+/// groundable own-module constructor header here (a destructure, a foreign
+/// header, a length or higher-kinded parameter, two claimants) or a same-named
+/// non-ctor candidate the category fence below preserves -- never to let
+/// module scope fill a parameter.
 ///
-/// The outcome ladder (R-2's precedence order):
-/// 1. a **fully bound** θ grounds directly -- lookup-or-mint, no candidate
-///    selection at all, so a site with no monomorph in scope can still
-///    succeed (G5's fresh mid-check mint, G9's mid-check lookup);
-/// 2. a **partial** θ filters the existing mints for compatibility (R-3):
-///    a mint matches iff it agrees at every θ-bound position, unbound
-///    positions wildcarding;
-/// 3. errors in R-2's precedence: ambiguity (2+ compatible) >
-///    incompatible-grounding (a sole mint disagreeing at a bound position) >
-///    unbound type parameter (no mint at all).
+/// The outcome ladder (R-2's precedence order, strict per the 260910
+/// ruling -- determined by use, or an error):
+/// 1. explicit type args (full arity) pin every parameter outright;
+/// 2. a consumer's declared signature pins θ (ruling A: a mono consumer
+///    statically, a poly consumer through its own `check_poly_call` route,
+///    the enclosing word's declared output in tail position);
+/// 3. operand literals pin the leading *bare* header variables they cover.
+///
+/// Outcome on the θ derived: **fully bound** → ground directly --
+/// lookup-or-mint, no candidate selection at all, so a site with no monomorph
+/// in scope can still succeed (G5's fresh mid-check mint, G9's mid-check
+/// lookup). **Any parameter left undetermined** by those three inputs is a
+/// located `unbound_type_parameter_error` -- the module's mint registry is
+/// never consulted to fill, disambiguate, or veto a bare ctor call's
+/// parameters (retiring the 2+-mint ambiguity and sole-mint
+/// incompatible-grounding diagnostics of the original ladder).
 #[allow(clippy::too_many_arguments)]
 fn ground_bare_generic_ctor(
     call: CtorCallSite<'_>,
@@ -2785,67 +2835,18 @@ fn ground_bare_generic_ctor(
     if let Some(ty) = theta.pinned {
         return Ok(ground_ctor_overload(name, ty, ctx));
     }
-    let bound: Vec<(usize, Type)> = theta
-        .args
-        .iter()
-        .enumerate()
-        .filter_map(|(i, t)| t.map(|t| (i, t)))
-        .collect();
+    // Strict grounding (maintainer ruling, 260910): the three θ inputs above
+    // are the only things that can determine a parameter. Whatever mints the
+    // module happens to carry are never consulted to fill the rest, so an
+    // undetermined parameter is the located unbound-parameter error -- a
+    // genuinely undefined name has no header and never reaches here (R-7),
+    // so the two stay distinguishable.
     let Some(unbound) = theta.args.iter().position(|t| t.is_none()) else {
-        let args: Vec<Type> = bound.iter().map(|(_, t)| *t).collect();
+        let args: Vec<Type> = theta.args.iter().filter_map(|t| *t).collect();
         let ty = mint_header_instantiation(&h, &args, span, ctx, arrays, cells, refs);
         return Ok(ty.and_then(|ty| ground_ctor_overload(name, ty, ctx)));
     };
-    let compatible: Vec<&(Overload, Vec<Type>)> = mints
-        .iter()
-        .filter(|(_, args)| bound.iter().all(|(i, t)| args.get(*i) == Some(t)))
-        .collect();
-    // R-4: first-wins is retired, but only for a tie in one tier -- every
-    // tied candidate this module's own instantiation, and the operands unable
-    // to separate them either. A mixed own-module/foreign tie keeps S5's
-    // tier-1 own-module resolution, and a tie the operands do separate is
-    // still separated by it (NFR-2).
-    let same_tier_tie = compatible.len() >= 2
-        && compatible
-            .iter()
-            .all(|(o, _)| o.module == span.module && ctor_operands_match(o, stack));
-    match compatible.as_slice() {
-        _ if same_tier_tie => Err(ambiguous_grounding_error(
-            ctx,
-            span,
-            name,
-            &h,
-            unbound,
-            &compatible,
-        )),
-        // dp_f's real flow is the decline arm below plus the pre-existing
-        // `[only]` take of the same mint (outcome identical, pinned by
-        // `bare_ctor_sole_compatible_mint_binds_the_remaining_parameter`);
-        // this arm is currently unreachable at both call sites: at the
-        // zero-candidate arm `mints` is provably empty (header_mint_candidates
-        // reads the same extended slices and env-build sources as
-        // mint_fallback_candidates, so an env.get miss with empty fallback
-        // leaves no mints), and at the chosen arm `candidates` is non-empty
-        // for any name surviving the header fence. Kept because it is correct
-        // should a future registry change ever make it live: ground at the
-        // sole compatible mint, binding the remaining parameters from it,
-        // and only when the pre-existing resolution had no candidate of its
-        // own to take (with one it *is* this candidate, and declining keeps
-        // that arm's records -- the S8b span-keyed pin among them --
-        // byte-identical).
-        [only] if candidates.is_empty() => Ok(Some(only.0.clone())),
-        // R-2/R-7: no monomorph at all and an undetermined parameter. A
-        // genuinely undefined name has no header and never reaches here, so
-        // the two stay distinguishable.
-        [] if mints.is_empty() => Err(unbound_type_parameter_error(ctx, span, name, &h, unbound)),
-        // R-3/dp_d: the sole mint disagrees at a *bound* position, so it is
-        // not the monomorph this site names -- reported here rather than as
-        // the far-away operand mismatch forcing it produced.
-        [] if mints.len() == 1 => Err(incompatible_grounding_error(
-            ctx, span, name, &h, &bound, &mints[0],
-        )),
-        _ => Ok(None),
-    }
+    Err(unbound_type_parameter_error(ctx, span, name, &h, unbound))
 }
 
 /// The call-site facts `ground_bare_generic_ctor` reads, grouped so the
@@ -2878,11 +2879,13 @@ fn rendered_header(h: &CtorHeader) -> String {
     format!("{}[{}]", h.header, h.var_names.join(" "))
 }
 
-/// P7b.S11 Phase 1 (R-5): a bare generic constructor with no monomorph of its
-/// header in scope and a type parameter this call site does not determine.
-/// Replaces the `unknown_word_error` this shape used to borrow, which named
-/// the wrong word and was indistinguishable from a genuinely undefined name
-/// (R-7 keeps that one for the headerless case).
+/// P7b.S11 (R-5; strict-grounding amendment 260910): a bare generic
+/// constructor with a type parameter this call site does not determine --
+/// regardless of what monomorphs of its header exist in module scope, which
+/// strict grounding never consults. Replaces the `unknown_word_error` this
+/// shape used to borrow, which named the wrong word and was
+/// indistinguishable from a genuinely undefined name (R-7 keeps that one for
+/// the headerless case).
 fn unbound_type_parameter_error(
     ctx: &Ctx,
     span: Span,
@@ -2899,80 +2902,6 @@ fn unbound_type_parameter_error(
         h.var_names[unbound],
         unbound + 1,
         h.var_names.len(),
-        h.header,
-    )
-}
-
-/// P7b.S11 Phase 1 (R-3/R-5): the sole monomorph of this header in scope
-/// disagrees with θ at a position the call site *did* determine, so it is not
-/// the monomorph this site names. Replaces the far-away operand mismatch the
-/// old unconditional single-candidate take produced, which never mentioned
-/// grounding at all.
-fn incompatible_grounding_error(
-    ctx: &Ctx,
-    span: Span,
-    name: &str,
-    h: &CtorHeader,
-    bound: &[(usize, Type)],
-    mint: &(Overload, Vec<Type>),
-) -> String {
-    let name = crate::resolve::demangle_call(name);
-    let (at, want) = bound
-        .iter()
-        .copied()
-        .find(|(i, t)| mint.1.get(*i) != Some(t))
-        .expect("an incompatible mint disagrees at some bound position");
-    let found = mint.1[at];
-    let instantiated = mint
-        .0
-        .sig
-        .outputs
-        .first()
-        .copied()
-        .expect("a generated constructor outputs its own monomorph");
-    format!(
-        "error: `{name}`{} (line {}) cannot be grounded here: this call site needs `{}`'s `{}` to be `{want}`, but the only `{}` instantiation in scope is `{instantiated}`, whose `{}` is `{found}`\n  note: name the instantiation this call means in a signature, so it is minted here rather than borrowing the one that happens to exist",
-        in_word(ctx),
-        span.line,
-        rendered_header(h),
-        h.var_names[at],
-        h.header,
-        h.var_names[at],
-    )
-}
-
-/// P7b.S11 Phase 1 (R-4/R-5): 2+ monomorphs of this module's own header are
-/// compatible with the call site's θ and the operands separate none of them.
-/// The tied types are listed **sorted by rendered string**, so the text is
-/// stable across declaration orders (NFR-3) -- the silent first-declared pick
-/// this replaces was not.
-fn ambiguous_grounding_error(
-    ctx: &Ctx,
-    span: Span,
-    name: &str,
-    h: &CtorHeader,
-    unbound: usize,
-    tied: &[&(Overload, Vec<Type>)],
-) -> String {
-    let name = crate::resolve::demangle_call(name);
-    let mut shapes: Vec<String> = tied
-        .iter()
-        .filter_map(|(o, _)| {
-            o.sig
-                .outputs
-                .first()
-                .map(|t| format!("\n  candidate: `{t}`"))
-        })
-        .collect();
-    shapes.sort();
-    format!(
-        "error: `{name}`{} (line {}) is ambiguous: `{}`'s type parameter `{}` is determined by neither this call site's operands nor its consumer, and {} instantiations in scope fit it{}\n  note: pass the value to a consumer whose declared parameter names the concrete `{}[...]` this call means",
-        in_word(ctx),
-        span.line,
-        rendered_header(h),
-        h.var_names[unbound],
-        tied.len(),
-        shapes.concat(),
         h.header,
     )
 }
@@ -3891,71 +3820,41 @@ mod tests {
         assert!(err.contains("unknown word `Nope`"), "unexpected: {err}");
     }
 
-    /// P7b.S11 Phase 1 (R-3), the chosen-`[only]` arm: a sole mint is a
-    /// candidate, not a verdict. Here the operand pins `'T` to
-    /// `Res[i64 i64]`, which the sole `Res[i64 i64]` mint (whose `'T` is
-    /// `i64`) contradicts, so the take is refused at the grounding step
-    /// instead of producing an operand mismatch three checks later that never
-    /// mentions grounding.
+    /// The strict-grounding amendment (260910), witnessed on dp_d's shape:
+    /// the operand pins `'T` to `Res[i64 i64]`, but `'E` is determined by
+    /// nothing at the call site -- and the sole in-scope mint is never
+    /// consulted to fill it, so the located unbound-parameter error names
+    /// `'E` (the retired incompatible-grounding diagnostic, which did name
+    /// the mint, is gone with the scope consultation).
     #[test]
-    fn bare_ctor_sole_mint_disagreeing_at_a_bound_position_is_a_grounding_error() {
+    fn bare_ctor_whose_operand_leaves_a_parameter_undetermined_names_it_whatever_mints_exist() {
         let err = check_src(&format!(
             "{RES}: mkok ( i64 -- Res[i64 i64] ) Ok ;\n: main ( -- ) 1 mkok Ok drop ;\n"
         ))
-        .expect_err("the sole mint is not the monomorph this site names");
+        .expect_err("'E` is determined by neither operand nor consumer");
         assert!(
-            err.contains(
-                "the only `Res` instantiation in scope is `Res[i64 i64]`, whose `'T` is `i64`"
-            ),
+            err.contains("`Res['T 'E]`'s type parameter `'E` (parameter 2 of 2)"),
             "unexpected message: {err}"
         );
-        assert!(!err.contains("type mismatch"), "unexpected: {err}");
+        assert!(
+            !err.contains("instantiation in scope"),
+            "scope is never consulted: {err}"
+        );
     }
 
-    /// R-3's accepting half (dp_f, the G6 non-regression channel): the sole
-    /// mint agrees at the *bound* `'T` and wildcards at the unbound `'E`, so
-    /// it grounds the site and `'E` binds from it. The mint's declaration is
-    /// on an unused, uncalled sibling, exactly as dp_f has it.
+    /// The strict-grounding amendment (260910), witnessed on dp_f's shape: an
+    /// unused, uncalled sibling's sole mint is irrelevant -- `'E` is
+    /// undetermined at the call site, so the call is the unbound-parameter
+    /// error no matter what module scope carries.
     #[test]
-    fn bare_ctor_sole_compatible_mint_binds_the_remaining_parameter() {
-        check_src(&format!(
+    fn bare_ctor_with_a_sole_sibling_mint_and_no_determining_input_is_an_unbound_parameter_error() {
+        let err = check_src(&format!(
             "{RES}: unused ( Res[i64 i64] -- ) drop ;\n: main ( -- ) 1 Ok drop ;\n"
         ))
-        .expect("`'E` binds from the sole compatible mint");
-    }
-
-    /// P7b.S11 Phase 1 (R-4): first-wins retired. Two mints of this module's
-    /// own header both wildcard-match at the unbound `'E`, and the operands
-    /// separate neither, so the tie is a located error rather than a silent
-    /// declaration-order pick.
-    #[test]
-    fn bare_ctor_two_compatible_mints_is_an_ambiguity_error() {
-        let err = check_src(&format!(
-            "{RES}: unused_a ( Res[i64 i64] -- ) drop ;\n\
-             : unused_b ( Res[i64 cstr] -- ) drop ;\n\
-             : main ( -- ) 1 Ok drop ;\n"
-        ))
-        .expect_err("two mints fit and nothing separates them");
-        assert!(err.contains("is ambiguous"), "unexpected message: {err}");
-    }
-
-    /// NFR-3, at the unit level: the tied types are listed sorted by rendered
-    /// string, so swapping the two unrelated declarations leaves the message
-    /// byte-identical. The silent pick this replaces was the *opposite*: its
-    /// outcome was a function of that order and nothing else.
-    #[test]
-    fn ambiguous_grounding_text_is_identical_across_declaration_orders() {
-        let program = |first: &str, second: &str| {
-            format!("{RES}: {first} ;\n: {second} ;\n: main ( -- ) 1 Ok drop ;\n")
-        };
-        let a = "unused_a ( Res[i64 i64] -- ) drop";
-        let b = "unused_b ( Res[i64 cstr] -- ) drop";
-        let a_first = check_src(&program(a, b)).unwrap_err();
-        let b_first = check_src(&program(b, a)).unwrap_err();
-        assert_eq!(a_first, b_first);
+        .expect_err("the sibling's mint is never a parameter source");
         assert!(
-            a_first.contains("candidate: `Res[i64 cstr]`\n  candidate: `Res[i64 i64]`"),
-            "unexpected message: {a_first}"
+            err.contains("type parameter `'E`"),
+            "unexpected message: {err}"
         );
     }
 
@@ -4118,26 +4017,26 @@ mod tests {
         .expect("`nonei`'s declared output pins `'T`, with two monomorphs in scope");
     }
 
-    /// NFR-2: a tie the *operands* separate is still separated by them. R-4's
-    /// ambiguity error is fenced to a tie the pre-S11 selection would itself
-    /// have broken by declaration order, so widening θ's reach never costs a
-    /// program the exact-operand match already resolved.
-    ///
-    /// The field is `array['T 3]`, not a bare `'T`: θ's literal-driven step
-    /// reads only a field that *is* a header variable, so `'T` stays a
-    /// wildcard here and both mints pass R-3's compatibility filter. It is
-    /// the operand conjunct in `same_tier_tie` alone that keeps this program
-    /// resolving -- drop it and the fixture becomes an ambiguity error, which
-    /// a fixture whose θ already separates the two mints cannot witness.
+    /// The strict-grounding amendment (260910), on the shape that used to
+    /// resolve through the retired scope tie-break: the operand is an
+    /// `array['T 3]`, and θ's literal-driven step reads only a field that
+    /// *is* a bare header variable, so `'T` stays undetermined. Two mints in
+    /// scope used to be separated by the exact-operand match; scope is never
+    /// consulted now, so the call is the unbound-parameter error naming `'T`
+    /// (spell it `Box[i64]` or add a determining consumer to ground it).
     #[test]
-    fn bare_ctor_with_two_mints_the_operands_separate_still_resolves() {
-        check_src(
+    fn bare_ctor_with_an_operand_nested_variable_and_two_mints_names_the_unbound_parameter() {
+        let err = check_src(
             "type: Box['T] slot array['T 3] ;\n\
              : take_i ( Box[i64] -- ) Box> drop ;\n\
              : take_u ( Box[u32] -- ) Box> drop ;\n\
              : main ( -- ) 0 3 fill Box drop ;\n",
         )
-        .expect("the `array[i64 3]` operand admits only one of the two mints");
+        .expect_err("the operand's nested `'T` is not read, and scope is not consulted");
+        assert!(
+            err.contains("`Box['T]`'s type parameter `'T` (parameter 1 of 1)"),
+            "unexpected message: {err}"
+        );
     }
 
     /// P7b.S11 Phase 1 (R-8), the mid-check minting case P7.S3t's identity
