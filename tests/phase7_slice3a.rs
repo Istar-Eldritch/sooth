@@ -71,13 +71,18 @@ const RESULT_AND_REORDER: &str = "type: Result['T 'E] | Ok 'T | Err 'E ;\n\
 /// the shape that actually proves it.
 #[test]
 fn poly_word_consuming_result_over_its_own_vars_runs_at_two_asymmetric_instantiations() {
+    // Strict-grounding amendment (260910): the bare `Err` calls used to
+    // resolve through the parse-time mints the show words ground (the
+    // retired sole-compatible scope borrow); they now name their
+    // instantiations explicitly, leaving the two asymmetric `reorder`
+    // instantiations -- this test's subject -- byte-identical.
     let src = format!(
         "{RESULT_AND_REORDER}\
          : show_is ( Result[i64 str] -- ) ~[ ( Ok ) Ok> . ] ~[ ( Err ) Err> . ] Result? ;\n\
          : show_si ( Result[str i64] -- ) ~[ ( Ok ) Ok> . ] ~[ ( Err ) Err> . ] Result? ;\n\
          : main ( -- )\n\
-           1 \"boom\" Err reorder . show_is\n\
-           \"one\" 2 Err reorder . show_si ;\n"
+           1 \"boom\" Err[i64 str] reorder . show_is\n\
+           \"one\" 2 Err[str i64] reorder . show_si ;\n"
     );
     let prog = Scratch::write("t1", &src);
     let (binary, stdout, code) = build_and_run(prog.path());
@@ -99,13 +104,17 @@ fn poly_word_consuming_result_over_its_own_vars_runs_at_two_asymmetric_instantia
 /// `tests/symbol_hijack.rs`'s own `nm` pattern.
 #[test]
 fn two_asymmetric_instantiations_mint_distinct_symbols_nm() {
+    // Strict-grounding amendment (260910): the bare `Err` calls now name
+    // their instantiations explicitly (the retired scope borrow used to
+    // fill them from the show words' parse-time mints); the two asymmetric
+    // `reorder` instantiations and their symbols are unchanged.
     let src = format!(
         "{RESULT_AND_REORDER}\
          : show_is ( Result[i64 str] -- ) drop ;\n\
          : show_si ( Result[str i64] -- ) drop ;\n\
          : main ( -- )\n\
-           1 \"boom\" Err reorder drop show_is\n\
-           \"one\" 2 Err reorder drop show_si ;\n"
+           1 \"boom\" Err[i64 str] reorder drop show_is\n\
+           \"one\" 2 Err[str i64] reorder drop show_si ;\n"
     );
     let prog = Scratch::write("t2", &src);
     let binary =

@@ -992,16 +992,57 @@ fn check_term(
                             )? {
                                 return Ok(next);
                             }
-                            return Err(match gated {
-                                // P8 S2 (R6a): the name is a real intrinsic
-                                // that nothing else claimed, so the remedy is
-                                // the import, not a definition.
-                                true => ungated_intrinsic_error(ctx, span, name),
-                                false => unknown_word_error(ctx, span, name),
-                            });
+                            // P7b.S11 (R-2/R-7; strict amendment 260910): the
+                            // zero-candidate arm splits. A name with no
+                            // generic header of this module's own declines
+                            // below to the unchanged unknown-word/intrinsic
+                            // fallthrough, so every existing golden holds; a
+                            // bare constructor of one grounds from the call
+                            // site alone -- a θ the consumer or the operands
+                            // fully determine succeeds here with no monomorph
+                            // in scope at all (G5), and an undetermined
+                            // parameter is reported as itself rather than as
+                            // an unknown word (G1). Scope is never consulted
+                            // to fill a parameter (strict amendment).
+                            match ground_bare_generic_ctor(
+                                CtorCallSite {
+                                    name,
+                                    span,
+                                    candidates: &[],
+                                    type_args,
+                                    len_args,
+                                    stack: &stack,
+                                    siblings,
+                                    at,
+                                    tail,
+                                },
+                                ctx,
+                                env,
+                                scope,
+                                poly,
+                                arrays,
+                                cells,
+                                refs,
+                            )? {
+                                Some(g) => {
+                                    fallback_storage = vec![g];
+                                    fallback_storage.as_slice()
+                                }
+                                None => {
+                                    return Err(match gated {
+                                        // P8 S2 (R6a): the name is a real
+                                        // intrinsic that nothing else claimed,
+                                        // so the remedy is the import, not a
+                                        // definition.
+                                        true => ungated_intrinsic_error(ctx, span, name),
+                                        false => unknown_word_error(ctx, span, name),
+                                    });
+                                }
+                            }
+                        } else {
+                            fallback_storage = mints;
+                            fallback_storage.as_slice()
                         }
-                        fallback_storage = mints;
-                        fallback_storage.as_slice()
                     }
                 },
             };
@@ -1026,6 +1067,47 @@ fn check_term(
             } else {
                 candidates
             };
+            // P7b.S11 (R-1; strict amendment 260910): a bare generic
+            // constructor grounds from its own call-site information alone --
+            // explicit args, its consumer's declared signature, its operand
+            // literals (R-2's order). A fully bound θ names the monomorph
+            // outright; any parameter those three inputs leave undetermined is
+            // the located unbound-parameter error. Module scope is never
+            // consulted to fill, disambiguate, or veto a parameter. Declining
+            // (`None`) happens only where this name has no groundable
+            // own-module ctor header, or the category fence preserves a
+            // same-named non-ctor candidate -- leaving this arm's selection
+            // (the S8b span-keyed pin and the S3 splice redirect below among
+            // it) byte-for-byte as it was.
+            let s11_storage;
+            let mut s11_grounded = false;
+            let candidates: &[Overload] = match ground_bare_generic_ctor(
+                CtorCallSite {
+                    name,
+                    span,
+                    candidates,
+                    type_args,
+                    len_args,
+                    stack: &stack,
+                    siblings,
+                    at,
+                    tail,
+                },
+                ctx,
+                env,
+                scope,
+                poly,
+                arrays,
+                cells,
+                refs,
+            )? {
+                Some(g) => {
+                    s11_grounded = true;
+                    s11_storage = g;
+                    std::slice::from_ref(&s11_storage)
+                }
+                None => candidates,
+            };
             let chosen = match candidates {
                 [only] => {
                     // P7b.S3 (S3-1.e): inside a combinator splice, a generated
@@ -1048,7 +1130,17 @@ fn check_term(
                         // the backend would disagree about which `lt` a
                         // `Vec2 Vec2 lt` site means.
                         poly.builtin_overloads.insert(span, only.symbol.clone());
-                    } else if is_generated_enum_word(name, only, ctx) {
+                    } else if s11_grounded || is_generated_enum_word(name, only, ctx) {
+                        // P7b.S11 Phase 1 (R-1): an S11-grounded site's
+                        // resolution is a function of the *call site*, not of
+                        // the name -- and grounding collapses a site the
+                        // multi-candidate arm below used to resolve (and
+                        // record) down to a single candidate. Recording here
+                        // keeps that arm's span-keyed record, without which
+                        // lowering's bare-key map (last-write-wins across
+                        // instantiations, `src/ir/layout.rs`) re-types the
+                        // site to whichever monomorph was registered last.
+                        //
                         // P7b.S8b Phase 1 (R5): a generated enum word chosen
                         // by bare name while only one instantiation of its
                         // header existed. Lowering's own map keys every
@@ -1464,7 +1556,18 @@ fn poly_call_takes_type_args(
                 // (final-review fix; the clause used to admit the colliding
                 // spelling and the env call silently dropped the list).
                 t.members.iter().any(|m| m.name == name)
-            })))
+            }))
+            // P7b.S11 Phase 2 (R-6): the third admitted category -- a bare
+            // generic ctor/destructure name paired with a matching header.
+            // Full-arity validation is not this predicate's job (it has no
+            // access to the argument list, only to whether the category
+            // exists at all, and no knowledge of which route a name that is
+            // *also* a poly word or trait member will take): an admitted
+            // list that no earlier route consumed reaches
+            // `ground_bare_generic_ctor`, which either consumes it as R-2's
+            // first input or rejects it -- so a wrong-arity list is a
+            // located error rather than a silently dropped one.
+            || explicit_args_ctor_header(name, ctx).is_some())
 }
 
 /// P7.S12 (R7.1): the three outcomes of scanning forward from a tagged
@@ -2110,9 +2213,19 @@ fn plural_s(n: usize) -> &'static str {
 /// Returns *all* pending mints whose surface name matches `name` --
 /// variant-ctor env keys are module-blind, so two pending mints can in
 /// principle generate the same surface name. Dispatch over the result
-/// follows the existing env-overload discipline (first-wins on a genuine
-/// collision, no ambiguity check); this fallback must not invent a stricter
-/// rule than a present `env` entry would have had.
+/// follows the existing env-overload discipline, and this fallback still
+/// invents no rule of its own: the candidates it yields are treated exactly
+/// as a present `env` entry's would be.
+///
+/// P7b.S11 (strict-grounding amendment 260910): this fallback still serves
+/// every NON-ctor bare name exactly as before -- dispatch over its result
+/// follows the existing env-overload discipline. For a bare generic
+/// constructor it no longer has any grounding role at all: the strict ladder
+/// in `ground_bare_generic_ctor` derives θ from the call site alone and
+/// never consults module mints to fill, disambiguate, or veto a parameter
+/// (the former candidate-filter/ambiguity machinery was retired with the
+/// ruling), so this function's output reaches the ctor path only through the
+/// category fence's identity check.
 ///
 /// P7b.S5 (R4/Fix D, Phase 2b's mint_fallback module-provenance probe --
 /// VERDICT: NOT reliably the declaring module). Each returned `Overload`'s
@@ -2170,6 +2283,739 @@ fn mint_fallback_candidates(name: &str, ctx: &Ctx) -> Vec<Overload> {
         }
         out
     })
+}
+
+/// P7b.S11 Phase 2 (R-6): the generic header a bare ctor/destructure name
+/// names, for the explicit-args gate only -- deliberately wider than
+/// `ctor_grounding_header` below, whose fences (own module, constructors
+/// only, star-kinded, length-free) belong to Phase 1's *grounding* ladder,
+/// not to the question this answers ("can this name even carry a `[...]`
+/// list"). A destructure or a foreign header still gets its arity checked
+/// even though the ladder declines to ground it; a *concrete* (non-generic)
+/// header is not the category at all -- its generated words take no type
+/// arguments, and keep the pre-S11 `no_type_arguments_error` spelling.
+/// `None` on no match (a genuinely undefined name, R-7) or on 2+ same-named
+/// headers (ambiguous which arity applies; declining leaves the call to
+/// `no_type_arguments_error`'s pre-existing rejection).
+struct ExplicitCtorHeader {
+    /// The header's own declared spelling (`Res`), for diagnostics.
+    header: String,
+    /// The header's type-parameter names, `'`-prefixed, in binding order.
+    var_names: Vec<String>,
+    /// The header's length-parameter names, in binding order -- a
+    /// length-parameterized header is ungroundable through this route
+    /// wholesale (Phase 1's fence), so its list keeps the baseline
+    /// rejection rather than an arity verdict.
+    len_var_names: Vec<String>,
+}
+
+fn explicit_args_ctor_header(name: &str, ctx: &Ctx) -> Option<ExplicitCtorHeader> {
+    let base = name.strip_suffix('>').unwrap_or(name);
+    let guard = ctx.generics()?.borrow();
+    let mut found: Option<ExplicitCtorHeader> = None;
+    for d in guard.enums.iter() {
+        if d.ty_var_names.is_empty() {
+            continue;
+        }
+        if d.variants.iter().any(|v| v.name == base) {
+            if found.is_some() {
+                return None;
+            }
+            found = Some(ExplicitCtorHeader {
+                header: d.name.clone(),
+                var_names: d.ty_var_names.clone(),
+                len_var_names: d.len_var_names.clone(),
+            });
+        }
+    }
+    for d in guard.structs.iter() {
+        if d.name == base && !d.ty_var_names.is_empty() {
+            if found.is_some() {
+                return None;
+            }
+            found = Some(ExplicitCtorHeader {
+                header: d.name.clone(),
+                var_names: d.ty_var_names.clone(),
+                len_var_names: d.len_var_names.clone(),
+            });
+        }
+    }
+    found
+}
+
+/// P7b.S11 Phase 2 (R-6): a bare ctor/destructure name's explicit type-argument
+/// list must supply exactly one argument per the header's declared
+/// parameters -- prefix pinning (`Ok[i64]` meaning `Ok[i64 'E]`) is out of
+/// scope. Replaces nothing (Phase 1 had no explicit-args category at all,
+/// R-6); measured and pinned fresh.
+fn explicit_ctor_arity_error(
+    ctx: &Ctx,
+    span: Span,
+    name: &str,
+    header: &str,
+    var_names: &[String],
+    got_type: usize,
+    got_len: usize,
+) -> String {
+    let demangled = crate::resolve::demangle_call(name);
+    let want = var_names.len();
+    if got_type != want {
+        format!(
+            "error: `{demangled}`{} (line {}) takes {want} type argument{} (`{header}[{}]`), but {got_type} {} supplied",
+            in_word(ctx),
+            span.line,
+            plural_s(want),
+            var_names.join(" "),
+            if got_type == 1 { "was" } else { "were" },
+        )
+    } else {
+        // Right type arity, but the call also carried a length sublist. The
+        // caller only asks here for length-free headers, so the list names
+        // something the header does not declare at all.
+        format!(
+            "error: `{demangled}`{} (line {}) takes no length arguments (`{header}[{}]` declares type parameters only), but {got_len} {} supplied",
+            in_word(ctx),
+            span.line,
+            var_names.join(" "),
+            if got_len == 1 { "was" } else { "were" },
+        )
+    }
+}
+
+/// P7b.S11 Phase 1 (R-1): the generic header a bare generated *constructor*
+/// call grounds at, plus the header's own shape. Declining (`None`) leaves the
+/// call to its pre-S11 resolution byte-for-byte, and the fences are
+/// deliberately narrow:
+///
+/// - **own module only.** A foreign header's mints are S9/S10's territory
+///   (NFR-4); strict grounding never consults scope, so the only headers
+///   whose bare calls this ladder ever re-grounds are ones this module
+///   declares itself.
+/// - **constructors only.** A destructure's single operand *is* the
+///   monomorph, so the existing exact-operand match already grounds it and no
+///   parameter can be left undetermined -- there is nothing here to add.
+/// - **no length or higher-kinded parameters.** θ below reasons in the type
+///   domain over plain `Type` arguments; a `Len` parameter or an `Arrow`
+///   kind would need the `CtorImage`/`Len` reasoning
+///   `bare_generated_word_own_module_grounding` carries, and those headers
+///   keep their pre-S11 resolution instead.
+/// - **one claimant.** Two own-module headers whose variants share a surface
+///   name are declined rather than picked between: which header the name
+///   means is not this slice's question.
+struct CtorHeader {
+    is_enum: bool,
+    /// Index into `GenericTypes::enums` / `structs` per `is_enum`.
+    gi: usize,
+    /// The header's own declared spelling (`Res`), for diagnostics.
+    header: String,
+    /// The header's type-parameter names, `'`-prefixed, in binding order --
+    /// the id space a field's `PolyType::Var` indexes into.
+    var_names: Vec<String>,
+    /// The constructor's declared operand types, first field deepest, in the
+    /// header's own variable space.
+    fields: Vec<PolyType>,
+}
+
+fn ctor_grounding_header(name: &str, span: Span, ctx: &Ctx) -> Option<CtorHeader> {
+    if name.ends_with('>') {
+        return None;
+    }
+    let guard = ctx.generics()?.borrow();
+    let groundable = |vars: &[String], kinds: &[crate::ast::Kind], lens: &[String], module: u32| {
+        module == span.module
+            && !vars.is_empty()
+            && lens.is_empty()
+            && kinds.iter().all(|k| matches!(k, crate::ast::Kind::Star))
+    };
+    let mut found: Option<CtorHeader> = None;
+    for (gi, d) in guard.enums.iter().enumerate() {
+        if !groundable(&d.ty_var_names, &d.ty_kinds, &d.len_var_names, d.module) {
+            continue;
+        }
+        for v in d.variants.iter().filter(|v| v.name == name) {
+            if found.is_some() {
+                return None;
+            }
+            found = Some(CtorHeader {
+                is_enum: true,
+                gi,
+                header: d.name.clone(),
+                var_names: d.ty_var_names.clone(),
+                fields: v.fields.iter().map(|(_, p)| p.clone()).collect(),
+            });
+        }
+    }
+    for (gi, d) in guard.structs.iter().enumerate() {
+        if d.name != name || !groundable(&d.ty_var_names, &d.ty_kinds, &d.len_var_names, d.module) {
+            continue;
+        }
+        if found.is_some() {
+            return None;
+        }
+        found = Some(CtorHeader {
+            is_enum: false,
+            gi,
+            header: d.name.clone(),
+            var_names: d.ty_var_names.clone(),
+            fields: d.fields.iter().map(|(_, p)| p.clone()).collect(),
+        });
+    }
+    found
+}
+
+/// P7b.S11 (R-3 retired 260910): every existing monomorph of `h` whose
+/// generated constructor `name` names, paired with the concrete argument list
+/// it was instantiated at. Read over the *extended* type slices, so a mint
+/// `env` never saw -- still pending in the live cell, or flushed into the
+/// registry after `env` was built (the gap `generated_word_entry`'s doc
+/// describes) -- is a candidate here too.
+///
+/// Under the strict-grounding amendment this list no longer filters or binds
+/// anything: its one surviving reader is `ground_bare_generic_ctor`'s
+/// category fence, which checks *identity* (are the pre-existing resolution's
+/// candidates this header's mints, or a same-named user word / foreign
+/// generated word to be left alone?) and never reads parameter values off
+/// it.
+fn header_mint_candidates(name: &str, h: &CtorHeader, ctx: &Ctx) -> Vec<(Overload, Vec<Type>)> {
+    // Collected out of the `with_extended_type_slices` closure: that helper
+    // holds a shared borrow of the live cell for the closure's whole extent,
+    // and resolving each candidate's argument list borrows it again.
+    let sigs = ctx.with_extended_type_slices(|structs, enums| match h.is_enum {
+        true => enum_generated_sigs(enums),
+        false => struct_generated_sigs(structs),
+    });
+    let mut out = Vec::new();
+    for (n, symbol, module, sig) in sigs {
+        if n != name {
+            continue;
+        }
+        let o = Overload {
+            sig,
+            symbol,
+            module,
+        };
+        let Some(args) = o
+            .sig
+            .outputs
+            .first()
+            .copied()
+            .and_then(|t| header_args_of_type(t, h, ctx))
+        else {
+            continue;
+        };
+        out.push((o, args));
+    }
+    out
+}
+
+/// The concrete argument list `ty` instantiates `h` at, or `None` when `ty`
+/// is not a monomorph of this header at all.
+fn header_args_of_type(ty: Type, h: &CtorHeader, ctx: &Ctx) -> Option<Vec<Type>> {
+    let guard = ctx.generics()?.borrow();
+    let (gi, _, args, lens) = match (ty, h.is_enum) {
+        (Type::Enum(id, _), true) => guard.enum_instantiation_of(id)?,
+        (Type::Struct(id, _), false) => guard.struct_instantiation_of(id)?,
+        _ => return None,
+    };
+    (gi == h.gi && lens.is_empty() && args.len() == h.var_names.len()).then(|| args.to_vec())
+}
+
+/// P7b.S11 Phase 1 (R-2): the substitution this call site determines, in the
+/// header's own parameter order, plus the monomorph a consumer named outright
+/// (`pinned`).
+///
+/// `pinned` is grounded *at that very id*, never re-minted:
+/// `instantiate_enum`/`instantiate_struct` dedup on `(header, instantiating
+/// module, arguments)`, so re-minting a monomorph another module instantiated
+/// under the caller's own module id would fork a second, divergent monomorph
+/// of one `(word, θ)` -- exactly what R-8 forbids.
+struct CtorTheta {
+    args: Vec<Option<Type>>,
+    pinned: Option<Type>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn derive_ctor_theta(
+    h: &CtorHeader,
+    type_args: &[Type],
+    stack: &[Slot],
+    siblings: &[Term],
+    at: usize,
+    tail: bool,
+    ctx: &Ctx,
+    env: &HashMap<String, Vec<Overload>>,
+    scope: &Scope,
+    poly: &PolyCtx,
+    arrays: &mut Vec<ArrayDecl>,
+    cells: &mut Vec<OwnedCellDecl>,
+    refs: &mut Vec<RefDecl>,
+) -> CtorTheta {
+    let mut theta = CtorTheta {
+        args: vec![None; h.var_names.len()],
+        pinned: None,
+    };
+    // R-2 step 1 (explicit type args, P7b.S11 Phase 2/R-6): the gate
+    // admitted the list and the ladder validated full arity, so the list
+    // pins every parameter outright -- position `i` binds parameter `i`, the
+    // same positional contract `check_poly_call` seeds by (P7.S3t). Nothing
+    // is left for the consumer or the operands to determine, and the fully
+    // bound θ grounds below through the same lookup-or-mint every other
+    // route uses (R-8) -- so `Ok[i64 i64]` is accepted with no consumer at
+    // all (dp_e2) and with a competing mint in scope (the args'
+    // instantiation is minted fresh rather than borrowed).
+    if !type_args.is_empty() {
+        for (slot, t) in theta.args.iter_mut().zip(type_args) {
+            *slot = Some(*t);
+        }
+        return theta;
+    }
+    // R-2 step 2 (consumer constraints). Reached only on a bare call: with
+    // explicit type args the step above has already pinned every parameter
+    // and returned.
+    if let Some(ty) = consumer_expected_type(
+        siblings, at, tail, ctx, env, scope, poly, arrays, cells, refs,
+    ) {
+        if let Some(args) = header_args_of_type(ty, h, ctx) {
+            for (slot, a) in theta.args.iter_mut().zip(args) {
+                *slot = Some(a);
+            }
+            theta.pinned = Some(ty);
+        }
+    }
+    // R-2 step 3: literal-driven partial inference from the operand types
+    // already at the call site, which this path discarded before. Only a
+    // field that *is* a bare header variable pins one: a variable nested
+    // inside an array/reference/cell shape would need real unification, and
+    // reading it wrongly would ground the site at the wrong monomorph, so
+    // those positions stay wildcards: under the strict-grounding amendment
+    // (260910) an undetermined parameter is the located unbound-parameter
+    // error, never a guess from scope.
+    if stack.len() >= h.fields.len() {
+        let base = stack.len() - h.fields.len();
+        for (i, f) in h.fields.iter().enumerate() {
+            if let PolyType::Var(v) = f {
+                let slot = &mut theta.args[*v as usize];
+                if slot.is_none() {
+                    *slot = Some(stack[base + i].ty);
+                }
+            }
+        }
+    }
+    theta
+}
+
+/// P7b.S11 Phase 1 (R-2, consumer constraints): the concrete type the value
+/// this constructor is about to push is required to have by the first term
+/// that consumes it.
+///
+/// Deliberately narrow. Only *pure pushes* (a literal, a quotation literal, a
+/// named local) are stepped over, and the first real call must consume the
+/// constructed slot directly; nothing here simulates a call's net stack
+/// effect, so a consumer further down the term list yields no constraint
+/// rather than a guessed one. Grounding the site at a guessed monomorph would
+/// be a miscompile, not a diagnostic.
+///
+/// Three flavors (R-2). A **monomorphic** consumer's `env` signature names the
+/// type outright (dp_g2's `only_takes_cstr_err` pins both parameters). A
+/// **polymorphic** consumer's own signature names it once its explicit type
+/// arguments are applied, through `apply_subst` -- the same route the
+/// consumer's own `check_poly_call` takes, so when that input is a
+/// `PolyType::Generic` the monomorph minted here and the one the consumer
+/// resolves are one monomorph (R-8). A call whose consumer was already
+/// determined upstream (explicit type args, a poly consumer's own type
+/// arguments) is pinned by those before any fallback below runs.
+///
+/// Running off the end of the term list in **tail** position reaches a third
+/// consumer: the enclosing word's own declared output, which is the
+/// "expectation flows in from a concretely-typed helper's declared output
+/// effect" the dp_a control describes. It is the only pin a zero-field
+/// variant constructor (`None`) can have, since it has no operands to infer
+/// from; a wrong read here cannot escape, because the word-exit output check
+/// compares that very slot against that very declaration.
+///
+/// Strict amendment (260910), the spliced-body half of the same channel:
+/// inside a poly-combinator splice, running off the *spliced body's* term
+/// list means the combinator's own declared output consumes the value -- the
+/// direct consumer of the body's result (the tail channel above reads the
+/// *caller's* outputs, the consumer one step removed, and only in tail
+/// position). The combinator's declared output is instantiated through the
+/// splice's own substitution (`apply_subst`, the same grounding Part 1
+/// performs ahead of the splice, so the mint dedups onto it), and a bare
+/// ctor at a spliced body's tail is use-determined by that signature --
+/// never by module scope. Mono combinators carry no `combinator_sig` and
+/// decline here byte-identically; this is a fallback, so a site the tail
+/// channel already pins keeps today's bytes.
+#[allow(clippy::too_many_arguments)]
+fn consumer_expected_type(
+    siblings: &[Term],
+    at: usize,
+    tail: bool,
+    ctx: &Ctx,
+    env: &HashMap<String, Vec<Overload>>,
+    scope: &Scope,
+    poly: &PolyCtx,
+    arrays: &mut Vec<ArrayDecl>,
+    cells: &mut Vec<OwnedCellDecl>,
+    refs: &mut Vec<RefDecl>,
+) -> Option<Type> {
+    // Slots pushed between the construction and its consumer, so the
+    // consumer's own input window can be indexed from the top.
+    let mut depth = 0usize;
+    for term in siblings.get(at + 1..)? {
+        let (cname, type_args, len_args) = match &term.kind {
+            TermKind::IntLit(_)
+            | TermKind::FloatLit(_)
+            | TermKind::StrLit(_)
+            | TermKind::Quotation(..) => {
+                depth += 1;
+                continue;
+            }
+            TermKind::Bind(_) => return None,
+            TermKind::Call(n, t, l) => (n, t, l),
+        };
+        if scope.local_type(cname).is_some() {
+            depth += 1;
+            continue;
+        }
+        // A builtin, an operator, an eliminator and a combinator are all
+        // intercepted upstream of `env`/`poly.env`, so any window read off a
+        // signature here would be a guess about a route this lookahead does
+        // not model.
+        if is_builtin_word_name(cname)
+            || is_builtin_operator_name(cname)
+            || poly.eliminators.contains_key(cname)
+            || poly.combinators.contains_key(cname)
+        {
+            return None;
+        }
+        if let Some([only]) = env.get(cname).map(|v| v.as_slice()) {
+            let n = only.sig.inputs.len();
+            return (depth < n).then(|| only.sig.inputs[n - 1 - depth]);
+        }
+        let [sig] = poly.env.get(cname)?.as_slice() else {
+            return None;
+        };
+        // A row-carrying or length-parameterized consumer is out of scope:
+        // `row_in` makes the input window's *depth* a function of the call
+        // site rather than of `inputs.len()`.
+        if sig.row_in.is_some()
+            || !sig.len_var_names.is_empty()
+            || !len_args.is_empty()
+            || type_args.len() != sig.ty_var_names.len()
+            || depth >= sig.inputs.len()
+        {
+            return None;
+        }
+        // P7.S3t's positional contract: written argument `i` binds variable
+        // `i`, pushed in ascending id exactly as `check_poly_call` seeds it.
+        let subst = Subst {
+            ty: type_args
+                .iter()
+                .enumerate()
+                .map(|(v, t)| (v as u32, *t))
+                .collect(),
+            len: Vec::new(),
+        };
+        let slot = &sig.inputs[sig.inputs.len() - 1 - depth];
+        return apply_subst(
+            sig, slot, &subst, cname, term.span, ctx, arrays, cells, refs,
+        )
+        .ok();
+    }
+    // Nothing consumes it inside this term list. In tail position the
+    // enclosing word's declared output is what does.
+    let outputs = ctx.declared_outputs();
+    if tail && depth < outputs.len() {
+        return Some(outputs[outputs.len() - 1 - depth].ty);
+    }
+    // Strict amendment (260910), the spliced-body consumer half: see this
+    // function's doc. A poly combinator's declared output, instantiated
+    // through the splice's own substitution, is what consumes the spliced
+    // body's result; `apply_subst` errors (an output variable the splice did
+    // not bind) decline the pin, as does a mono combinator (`combinator_sig`
+    // is `None`) or an empty output window at this depth.
+    if let Some(sig) = poly.combinator_sig.as_ref() {
+        if let (Some(subst), Some(cname)) = (&poly.combinator_subst, &poly.combinator_name) {
+            if depth < sig.outputs.len() {
+                let slot = &sig.outputs[sig.outputs.len() - 1 - depth];
+                if let Ok(ty) = apply_subst(
+                    sig,
+                    slot,
+                    subst,
+                    cname,
+                    siblings[at].span,
+                    ctx,
+                    arrays,
+                    cells,
+                    refs,
+                ) {
+                    return Some(ty);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// P7b.S11 Phase 1 (R-8): lookup-or-mint of `h` at a fully bound θ, through
+/// the same `(header, module, arguments)`-keyed instantiator every other mint
+/// goes through, so one `(word, θ)` keeps one symbol.
+fn mint_header_instantiation(
+    h: &CtorHeader,
+    args: &[Type],
+    span: Span,
+    ctx: &Ctx,
+    arrays: &mut Vec<ArrayDecl>,
+    cells: &mut Vec<OwnedCellDecl>,
+    refs: &mut Vec<RefDecl>,
+) -> Option<Type> {
+    let cell = ctx.generics()?;
+    let mut guard = cell.borrow_mut();
+    let regs = crate::ast::MutRegistries {
+        structs: ctx.structs(),
+        enums: ctx.enums(),
+        arrays,
+        cells,
+        refs,
+    };
+    Some(match h.is_enum {
+        true => guard.instantiate_enum(h.gi, args, &[], span.module, regs),
+        false => guard.instantiate_struct(h.gi, args, &[], span.module, regs),
+    })
+}
+
+/// The generated constructor `name` of the monomorph `ty`, re-derived from
+/// the registered decl through the same rule env registration uses, so the
+/// whole `Overload` (`Sig`, lowering symbol, module) has one provenance.
+fn ground_ctor_overload(name: &str, ty: Type, ctx: &Ctx) -> Option<Overload> {
+    match ty {
+        Type::Struct(id, _) => {
+            generated_word_entry(ctx, id, false).and_then(|(k, symbol, module, sig)| {
+                (k == name).then_some(Overload {
+                    sig,
+                    symbol,
+                    module,
+                })
+            })
+        }
+        Type::Enum(id, _) => ctx.with_extended_type_slices(|_, enums| {
+            enum_generated_sigs(enums)
+                .into_iter()
+                .find(|(n, _, _, sig)| {
+                    n == name && matches!(sig.outputs.first(), Some(Type::Enum(e, _)) if *e == id)
+                })
+                .map(|(_, symbol, module, sig)| Overload {
+                    sig,
+                    symbol,
+                    module,
+                })
+        }),
+        _ => None,
+    }
+}
+
+/// P7b.S11 (R-1, R-2, R-6, R-7, R-8; strict-grounding amendment 260910):
+/// per-call-site grounding for a bare generic constructor call.
+/// `Ok(Some(o))` grounds the site at `o`; `Err` is the located
+/// unbound-parameter diagnostic. `Ok(None)` declines only for a name with no
+/// groundable own-module constructor header here (a destructure, a foreign
+/// header, a length or higher-kinded parameter, two claimants) or a same-named
+/// non-ctor candidate the category fence below preserves -- never to let
+/// module scope fill a parameter.
+///
+/// The outcome ladder (R-2's precedence order, strict per the 260910
+/// ruling -- determined by use, or an error):
+/// 1. explicit type args (full arity) pin every parameter outright;
+/// 2. a consumer's declared signature pins θ (ruling A: a mono consumer
+///    statically, a poly consumer through its own `check_poly_call` route,
+///    the enclosing word's declared output in tail position);
+/// 3. operand literals pin the leading *bare* header variables they cover.
+///
+/// Outcome on the θ derived: **fully bound** → ground directly --
+/// lookup-or-mint, no candidate selection at all, so a site with no monomorph
+/// in scope can still succeed (G5's fresh mid-check mint, G9's mid-check
+/// lookup). **Any parameter left undetermined** by those three inputs is a
+/// located `unbound_type_parameter_error` -- the module's mint registry is
+/// never consulted to fill, disambiguate, or veto a bare ctor call's
+/// parameters (retiring the 2+-mint ambiguity and sole-mint
+/// incompatible-grounding diagnostics of the original ladder).
+#[allow(clippy::too_many_arguments)]
+fn ground_bare_generic_ctor(
+    call: CtorCallSite<'_>,
+    ctx: &Ctx,
+    env: &HashMap<String, Vec<Overload>>,
+    scope: &Scope,
+    poly: &PolyCtx,
+    arrays: &mut Vec<ArrayDecl>,
+    cells: &mut Vec<OwnedCellDecl>,
+    refs: &mut Vec<RefDecl>,
+) -> Result<Option<Overload>, String> {
+    let CtorCallSite {
+        name,
+        span,
+        candidates,
+        type_args,
+        len_args,
+        stack,
+        siblings,
+        at,
+        tail,
+    } = call;
+    // P7b.S11 Phase 2 (R-6): an explicit-args call on a name the gate's
+    // ctor clause admitted. Every earlier route that reads an argument list
+    // (a poly word's interception, member dispatch) has already taken such
+    // a call; one reaching here would otherwise flow into a resolution that
+    // drops the list in silence, so this ladder consumes it or rejects it.
+    let explicit = !type_args.is_empty() || !len_args.is_empty();
+    let Some(h) = ctor_grounding_header(name, span, ctx) else {
+        if !explicit {
+            return Ok(None);
+        }
+        // The gate admitted the list because *a* matching header exists, but
+        // the name grounds at no own-module constructor here: a destructure,
+        // a foreign header, a length or higher-kinded parameter, or two
+        // claimants. The list is still checked for arity (against the wide
+        // lookup, and only where the header has no length parameters -- one
+        // of those is ungroundable through this route wholesale, so its list
+        // keeps the baseline rejection), then the spelling keeps the same
+        // `no_type_arguments_error` it met before this slice.
+        if let Some(w) = explicit_args_ctor_header(name, ctx) {
+            if w.len_var_names.is_empty()
+                && (type_args.len() != w.var_names.len() || !len_args.is_empty())
+            {
+                return Err(explicit_ctor_arity_error(
+                    ctx,
+                    span,
+                    name,
+                    &w.header,
+                    &w.var_names,
+                    type_args.len(),
+                    len_args.len(),
+                ));
+            }
+        }
+        return Err(no_type_arguments_error(
+            span,
+            name,
+            !type_args.is_empty(),
+            !len_args.is_empty(),
+        ));
+    };
+    // R-6: full arity, exact -- prefix pinning (`Ok[i64]` meaning
+    // `Ok[i64 'E]`) is out of scope. A groundable header is length-free, so
+    // a length sublist names nothing the header declares at any arity.
+    if explicit && (type_args.len() != h.var_names.len() || !len_args.is_empty()) {
+        return Err(explicit_ctor_arity_error(
+            ctx,
+            span,
+            name,
+            &h.header,
+            &h.var_names,
+            type_args.len(),
+            len_args.len(),
+        ));
+    }
+    let mints = header_mint_candidates(name, &h, ctx);
+    // The category fence: with candidates in hand, S11 only ever redirects a
+    // call the pre-existing resolution would itself have resolved to a
+    // monomorph of this header. A same-named user word, or another module's
+    // generated word, keeps its own resolution. An *empty* candidate list is
+    // the zero-candidate site whose only pre-S11 outcome was `unknown word`
+    // (R-7), so there is nothing there to preserve.
+    if !candidates.is_empty()
+        && !candidates
+            .iter()
+            .any(|c| mints.iter().any(|(m, _)| m.symbol == c.symbol))
+    {
+        // R-6: with explicit args a decline here would drop the list in
+        // silence -- the resolution that owns these candidates (a same-named
+        // user word's own `env` entry) reads no argument list -- so the
+        // spelling keeps its pre-S11 rejection instead.
+        if explicit {
+            return Err(no_type_arguments_error(
+                span,
+                name,
+                !type_args.is_empty(),
+                !len_args.is_empty(),
+            ));
+        }
+        return Ok(None);
+    }
+    let theta = derive_ctor_theta(
+        &h, type_args, stack, siblings, at, tail, ctx, env, scope, poly, arrays, cells, refs,
+    );
+    if let Some(ty) = theta.pinned {
+        return Ok(ground_ctor_overload(name, ty, ctx));
+    }
+    // Strict grounding (maintainer ruling, 260910): the three θ inputs above
+    // are the only things that can determine a parameter. Whatever mints the
+    // module happens to carry are never consulted to fill the rest, so an
+    // undetermined parameter is the located unbound-parameter error -- a
+    // genuinely undefined name has no header and never reaches here (R-7),
+    // so the two stay distinguishable.
+    let Some(unbound) = theta.args.iter().position(|t| t.is_none()) else {
+        let args: Vec<Type> = theta.args.iter().filter_map(|t| *t).collect();
+        let ty = mint_header_instantiation(&h, &args, span, ctx, arrays, cells, refs);
+        return Ok(ty.and_then(|ty| ground_ctor_overload(name, ty, ctx)));
+    };
+    Err(unbound_type_parameter_error(ctx, span, name, &h, unbound))
+}
+
+/// The call-site facts `ground_bare_generic_ctor` reads, grouped so the
+/// argument list stays legible at both of its call sites.
+struct CtorCallSite<'a> {
+    name: &'a str,
+    span: Span,
+    /// What the pre-existing resolution had to work with -- empty at the
+    /// zero-candidate arm.
+    candidates: &'a [Overload],
+    /// The call's explicit type/length argument lists, empty on a bare
+    /// call. P7b.S11 Phase 2 (R-6): a non-empty list on this name is the
+    /// explicit-args category -- either consumed here as R-2's first input
+    /// or rejected (wrong arity, or a header this ladder cannot ground),
+    /// never dropped in silence by the pre-S11 resolution.
+    type_args: &'a [Type],
+    len_args: &'a [crate::ast::Len],
+    stack: &'a [Slot],
+    siblings: &'a [Term],
+    at: usize,
+    /// Whether this term is the enclosing word's syntactic tail (the
+    /// syntactic `tail` flag, not the runtime tail-call back-edge that the
+    /// lowering pass tracks separately) -- the condition under which the
+    /// term's declared output is the consumer.
+    tail: bool,
+}
+
+/// The header as declared, `Res['T 'E]`.
+fn rendered_header(h: &CtorHeader) -> String {
+    format!("{}[{}]", h.header, h.var_names.join(" "))
+}
+
+/// P7b.S11 (R-5; strict-grounding amendment 260910): a bare generic
+/// constructor with a type parameter this call site does not determine --
+/// regardless of what monomorphs of its header exist in module scope, which
+/// strict grounding never consults. Replaces the `unknown_word_error` this
+/// shape used to borrow, which named the wrong word and was
+/// indistinguishable from a genuinely undefined name (R-7 keeps that one for
+/// the headerless case).
+fn unbound_type_parameter_error(
+    ctx: &Ctx,
+    span: Span,
+    name: &str,
+    h: &CtorHeader,
+    unbound: usize,
+) -> String {
+    let name = crate::resolve::demangle_call(name);
+    format!(
+        "error: `{name}`{} (line {}) cannot be grounded here: `{}`'s type parameter `{}` (parameter {} of {}) is determined by neither this call site's operands nor its consumer\n  note: pass the value to a consumer whose declared parameter names a concrete `{}[...]`, or name that instantiation in a signature so this call has one to ground at",
+        in_word(ctx),
+        span.line,
+        rendered_header(h),
+        h.var_names[unbound],
+        unbound + 1,
+        h.var_names.len(),
+        h.header,
+    )
 }
 
 /// P7b.S8b Phase 1 (R5): whether `chosen` is a generated enum word --
@@ -3060,6 +3906,367 @@ mod tests {
         let tokens = crate::lexer::lex(src).unwrap();
         let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
         crate::check::check(&mut module)
+    }
+
+    /// `check_src` keeping the checked module, so a unit can read back what
+    /// the run *minted* and *recorded* rather than only whether it passed.
+    fn checked_module(src: &str) -> Module {
+        let tokens = crate::lexer::lex(src).unwrap();
+        let mut module = crate::test_support::parse_with_core(&tokens).unwrap();
+        crate::check::check(&mut module).expect("the fixture should check");
+        module
+    }
+
+    /// The `Res['T 'E]` header every P7b.S11 unit below shares, verbatim from
+    /// `probes/dp_*.sth`.
+    const RES: &str = "type: Res['T 'E] | Ok 'T | Err 'E ;\n";
+
+    /// P7b.S11 Phase 1 (R-2/R-7), the `env.get`-miss zero-candidate arm: with
+    /// no monomorph of `Res` anywhere and nothing pinning `'E`, the parameter
+    /// is named as itself. Before this the arm borrowed `unknown word `Ok``,
+    /// which blamed the wrong word.
+    #[test]
+    fn bare_ctor_zero_mints_with_an_unbound_parameter_names_the_parameter() {
+        let err = check_src(&format!("{RES}: main ( -- ) 1 Ok drop ;\n"))
+            .expect_err("`'E` is determined by nothing here");
+        assert!(
+            err.contains("`Res['T 'E]`'s type parameter `'E` (parameter 2 of 2)"),
+            "unexpected message: {err}"
+        );
+        assert!(!err.contains("unknown word"), "unexpected message: {err}");
+    }
+
+    /// R-7's other half: a name no header claims never reaches the grounding
+    /// ladder, so the unchanged `unknown_word_error` still fires and the two
+    /// outcomes stay distinguishable.
+    #[test]
+    fn bare_call_with_no_generic_header_is_still_the_unknown_word_error() {
+        let err = check_src(&format!("{RES}: main ( -- ) 1 Nope drop ;\n"))
+            .expect_err("`Nope` is defined nowhere");
+        assert!(err.contains("unknown word `Nope`"), "unexpected: {err}");
+    }
+
+    /// The strict-grounding amendment (260910), witnessed on dp_d's shape:
+    /// the operand pins `'T` to `Res[i64 i64]`, but `'E` is determined by
+    /// nothing at the call site -- and the sole in-scope mint is never
+    /// consulted to fill it, so the located unbound-parameter error names
+    /// `'E` (the retired incompatible-grounding diagnostic, which did name
+    /// the mint, is gone with the scope consultation).
+    #[test]
+    fn bare_ctor_whose_operand_leaves_a_parameter_undetermined_names_it_whatever_mints_exist() {
+        let err = check_src(&format!(
+            "{RES}: mkok ( i64 -- Res[i64 i64] ) Ok ;\n: main ( -- ) 1 mkok Ok drop ;\n"
+        ))
+        .expect_err("'E` is determined by neither operand nor consumer");
+        assert!(
+            err.contains("`Res['T 'E]`'s type parameter `'E` (parameter 2 of 2)"),
+            "unexpected message: {err}"
+        );
+        assert!(
+            !err.contains("instantiation in scope"),
+            "scope is never consulted: {err}"
+        );
+    }
+
+    /// The strict-grounding amendment (260910), witnessed on dp_f's shape: an
+    /// unused, uncalled sibling's sole mint is irrelevant -- `'E` is
+    /// undetermined at the call site, so the call is the unbound-parameter
+    /// error no matter what module scope carries.
+    #[test]
+    fn bare_ctor_with_a_sole_sibling_mint_and_no_determining_input_is_an_unbound_parameter_error() {
+        let err = check_src(&format!(
+            "{RES}: unused ( Res[i64 i64] -- ) drop ;\n: main ( -- ) 1 Ok drop ;\n"
+        ))
+        .expect_err("the sibling's mint is never a parameter source");
+        assert!(
+            err.contains("type parameter `'E`"),
+            "unexpected message: {err}"
+        );
+    }
+
+    /// R-2's ruling (A), the monomorphic-consumer flavor (dp_g2/dp_g3): the
+    /// consumer's declared input pins *both* parameters statically, so a
+    /// fully bound θ grounds directly and the two competing mints are never
+    /// selected between at all. Acceptance is the proof of which monomorph
+    /// was chosen: `only_cstr` takes `Res[i64 cstr]` alone.
+    #[test]
+    fn bare_ctor_with_a_determining_mono_consumer_grounds_in_either_order() {
+        let program = |first: &str, second: &str| {
+            format!(
+                "{RES}: {first} ;\n: {second} ;\n\
+                 : only_cstr ( Res[i64 cstr] -- ) drop ;\n\
+                 : main ( -- ) 1 Ok only_cstr ;\n"
+            )
+        };
+        let a = "unused_a ( Res[i64 i64] -- ) drop";
+        let b = "unused_b ( Res[i64 cstr] -- ) drop";
+        check_src(&program(a, b)).expect("the consumer pins θ, i64-first order");
+        check_src(&program(b, a)).expect("the consumer pins θ, cstr-first order");
+    }
+
+    /// R-2's other consumer flavor: a *polymorphic* consumer whose declared
+    /// input names the header and whose explicit type arguments ground it.
+    /// Nothing in the program spells a concrete `Res[...]`, so this is the
+    /// zero-mint arm succeeding on a monomorph minted mid-check. The
+    /// quotation literal between the two calls is stepped over by the
+    /// lookahead, which reads the consumer's input window one slot down.
+    #[test]
+    fn bare_ctor_grounds_from_a_poly_consumers_explicit_type_arguments() {
+        check_src(&format!(
+            "{RES}: apply2 ( Res['T 'E] [ i64 -- i64 ] -- i64 ) | f | drop 41 f call ;\n\
+             : main ( -- ) 1 Ok [ 1 add ] apply2[i64 i64] drop ;\n"
+        ))
+        .expect("the poly consumer's type arguments pin both parameters");
+    }
+
+    // ------------------------------------------------------------------
+    // P7b.S11 Phase 2 (R-6): the explicit-args category.
+    // ------------------------------------------------------------------
+
+    /// The category itself: full-arity explicit args on a bare ctor with no
+    /// monomorph anywhere mint the named instantiation mid-check. `drop` is
+    /// invisible to the consumer lookahead (a builtin returns no constraint),
+    /// so acceptance here is attributable to the args alone -- without them
+    /// this exact shape is G1's unbound-parameter error.
+    #[test]
+    fn explicit_args_ctor_with_full_arity_grounds_with_no_mint() {
+        check_src(&format!("{RES}: main ( -- ) 1 Ok[i64 i64] drop ;\n"))
+            .expect("full-arity args pin every parameter directly");
+    }
+
+    /// R-6's arity rule: a prefix list is out of scope, so `Ok[i64]` is a
+    /// located error naming the header's full shape rather than a partial
+    /// pin. Byte-exact text is pinned by the G4-adjacent integration golden;
+    /// this unit pins the mechanism beside the site.
+    #[test]
+    fn explicit_args_ctor_with_wrong_arity_is_a_located_error() {
+        let err = check_src(&format!("{RES}: main ( -- ) 1 Ok[i64] drop ;\n"))
+            .expect_err("one arg for two parameters is a prefix pin, out of scope");
+        assert_eq!(
+            err,
+            "error: `Ok` in `main` (line 2) takes 2 type arguments (`Res['T 'E]`), but 1 was supplied"
+        );
+    }
+
+    /// The category's destructure half: the gate admits the spelling for a
+    /// destructure name too, so a wrong-arity list on one is the same located
+    /// arity error rather than the generic takes-no-type-arguments text.
+    #[test]
+    fn explicit_args_destructure_with_wrong_arity_names_the_header() {
+        let err = check_src(&format!("{RES}: t ( Res[i64 i64] -- ) Ok>[i64] drop ;\n"))
+            .expect_err("the destructure names the same 2-parameter header");
+        assert_eq!(
+            err,
+            "error: `Ok>` in `t` (line 2) takes 2 type arguments (`Res['T 'E]`), but 1 was supplied"
+        );
+    }
+
+    /// A groundable header is length-free, so a length sublist names nothing
+    /// the header declares at any type arity.
+    #[test]
+    fn explicit_args_length_sublist_on_a_length_free_header_is_rejected() {
+        let err = check_src(&format!("{RES}: main ( -- ) 1 Ok[i64 i64 3] drop ;\n"))
+            .expect_err("the header declares no length parameters");
+        assert_eq!(
+            err,
+            "error: `Ok` in `main` (line 2) takes no length arguments (`Res['T 'E]` declares type parameters only), but 1 was supplied"
+        );
+    }
+
+    /// dp_e2's substance: the args ground the construction with **no
+    /// consumer at all** -- the word declares the constructed value as its
+    /// output, so nothing is forgotten and the ordinary forgetting check is
+    /// satisfied. (The consumer-less literal probe shape, `1 Ok[i64 i64] ;`
+    /// in a `( -- )` word, is the next unit.)
+    #[test]
+    fn explicit_args_ctor_grounds_with_no_consumer_and_nothing_forgotten() {
+        check_src(&format!(
+            "{RES}: main ( -- Res[i64 i64] ) 1 Ok[i64 i64] ;\n"
+        ))
+        .expect("the construction grounds on the args alone");
+    }
+
+    /// The literal dp_e2 probe shape, recorded (spec open question): with the
+    /// category admitted, the fully concrete construction grounds and the
+    /// value then reaches the ordinary forgetting check, which reports the
+    /// leftover value -- the diagnostic dp_e2.sth now produces in place of
+    /// the old gate rejection.
+    #[test]
+    fn dp_e2_literal_no_output_shape_reaches_the_forgetting_check() {
+        let err = check_src(&format!("{RES}: main ( -- ) 1 Ok[i64 i64] ;\n"))
+            .expect_err("the constructed value is forgotten");
+        assert!(
+            err.contains("body leaves 1 values"),
+            "unexpected message: {err}"
+        );
+    }
+
+    /// R-8/precedence under explicit args: a competing mint in scope does
+    /// not become the verdict -- the fully bound θ names the args'
+    /// instantiation, minted fresh beside it, so the call still grounds at
+    /// `Res[i64 i64]` and both monomorphs exist.
+    #[test]
+    fn explicit_args_ctor_with_a_competing_mint_mints_the_args_instantiation() {
+        let module = checked_module(&format!(
+            "{RES}: unused ( Res[i64 cstr] -- ) drop ;\n\
+             : main ( -- ) 1 Ok[i64 i64] drop ;\n"
+        ));
+        let minted: Vec<&str> = module
+            .enums
+            .iter()
+            .map(|e| e.name.as_str())
+            .filter(|n| n.starts_with("Res["))
+            .collect();
+        assert!(
+            minted.contains(&"Res[i64 i64]"),
+            "the args' instantiation is minted, not borrowed: {minted:?}"
+        );
+        assert!(
+            minted.contains(&"Res[i64 cstr]"),
+            "the competing mint still exists: {minted:?}"
+        );
+    }
+
+    /// R-2's third consumer: the enclosing word's own declared output, in
+    /// tail position. It is the only pin a *zero-field* variant constructor
+    /// can have -- it has no operands to infer from -- and without it two
+    /// monomorphs of one header make every bare `None` a tie.
+    #[test]
+    fn zero_field_variant_ctor_grounds_at_the_declared_output() {
+        check_src(
+            "type: Opt['T] | None | Some 'T ;\n\
+             : somei ( i64 -- Opt[i64] ) Some ;\n\
+             : someb ( u32 -- Opt[u32] ) Some ;\n\
+             : nonei ( -- Opt[i64] ) None ;\n\
+             : main ( -- ) 1 somei drop 2 >u32 someb drop nonei drop ;\n",
+        )
+        .expect("`nonei`'s declared output pins `'T`, with two monomorphs in scope");
+    }
+
+    /// The strict-grounding amendment (260910), on the shape that used to
+    /// resolve through the retired scope tie-break: the operand is an
+    /// `array['T 3]`, and θ's literal-driven step reads only a field that
+    /// *is* a bare header variable, so `'T` stays undetermined. Two mints in
+    /// scope used to be separated by the exact-operand match; scope is never
+    /// consulted now, so the call is the unbound-parameter error naming `'T`
+    /// (spell it `Box[i64]` or add a determining consumer to ground it).
+    #[test]
+    fn bare_ctor_with_an_operand_nested_variable_and_two_mints_names_the_unbound_parameter() {
+        let err = check_src(
+            "type: Box['T] slot array['T 3] ;\n\
+             : take_i ( Box[i64] -- ) Box> drop ;\n\
+             : take_u ( Box[u32] -- ) Box> drop ;\n\
+             : main ( -- ) 0 3 fill Box drop ;\n",
+        )
+        .expect_err("the operand's nested `'T` is not read, and scope is not consulted");
+        assert!(
+            err.contains("`Box['T]`'s type parameter `'T` (parameter 1 of 1)"),
+            "unexpected message: {err}"
+        );
+    }
+
+    /// P7b.S11 Phase 1 (R-8), the mid-check minting case P7.S3t's identity
+    /// discipline exists for: two sites grounding the same `(header, θ)`
+    /// mid-check must reuse one monomorph, not mint two. Counted on the
+    /// checked module's own registry, so a forked mint (a second `Res[i64
+    /// i64]` under a different instantiating-module key, which would render
+    /// the *same* mangled name and hijack its symbol) fails here rather than
+    /// at link time.
+    #[test]
+    fn mid_check_grounding_reuses_one_monomorph_per_header_and_theta() {
+        let module = checked_module(&format!(
+            "{RES}: apply2 ( Res['T 'E] [ i64 -- i64 ] -- i64 ) | f | drop 41 f call ;\n\
+             : main ( -- )\n  \
+               1 Ok [ 1 add ] apply2[i64 i64] drop\n  \
+               2 Ok [ 1 add ] apply2[i64 i64] drop ;\n"
+        ));
+        let minted: Vec<&str> = module
+            .enums
+            .iter()
+            .map(|e| e.name.as_str())
+            .filter(|n| n.starts_with("Res["))
+            .collect();
+        assert_eq!(minted, ["Res[i64 i64]"], "one mint per (header, θ)");
+    }
+
+    /// The span-keyed record grounding *collapses a multi-candidate site into
+    /// the single-candidate arm* and therefore has to make itself: a bare
+    /// generated **struct** word is not an `is_generated_enum_word`, so the
+    /// `[only]` arm records nothing for it, and lowering's bare-key map is
+    /// last-write-wins across instantiations (`src/ir/layout.rs`). Two
+    /// monomorphs exist here and the two sites ground to different ones.
+    ///
+    /// Measured mutation: drop the S11 half of that arm's condition and
+    /// `projection_resolves_per_instantiation` (`tests/phase7_slice1.rs`)
+    /// prints a garbage field read for the first site -- a miscompile, not a
+    /// missing diagnostic. This unit is that guard's local witness.
+    #[test]
+    fn grounded_generated_struct_word_records_its_span_keyed_symbol() {
+        let module = checked_module(
+            "type: S1 a i64 ;\ntype: S2 a i64 b i64 ;\n\
+             type: Box['T] val 'T tag i64 ;\n\
+             : show1 ( Box[S1] -- ) Box> drop drop ;\n\
+             : show2 ( Box[S2] -- ) Box> drop drop ;\n\
+             : main ( -- ) 1 S1 11 Box show1 2 3 S2 22 Box show2 ;\n",
+        );
+        // The two `Box>` destructure sites record through the pre-existing
+        // multi-candidate arm and are not this guard's subject.
+        let mut pinned: Vec<&str> = module
+            .builtin_overloads
+            .values()
+            .map(|s| s.as_str())
+            .filter(|s| s.starts_with("Box[") && !s.ends_with('>'))
+            .collect();
+        pinned.sort();
+        assert_eq!(pinned, ["Box[S1]", "Box[S2]"]);
+    }
+
+    /// P7b.S8b's span-keyed pin, which the restructuring had to keep (G6's
+    /// gate): a bare generated enum word whose resolution is a function of
+    /// the *call site* records its resolved mangled symbol, for the same
+    /// last-write-wins reason. Two monomorphs exist here and the two sites
+    /// ground to different ones, so a dropped record silently re-types one of
+    /// them.
+    #[test]
+    fn grounded_generated_enum_word_records_its_span_keyed_symbol() {
+        let module = checked_module(&format!(
+            "{RES}: take_i ( Res[i64 i64] -- ) drop ;\n\
+             : take_c ( Res[i64 cstr] -- ) drop ;\n\
+             : main ( -- ) 1 Ok take_i 2 Ok take_c ;\n"
+        ));
+        let mut pinned: Vec<&str> = module
+            .builtin_overloads
+            .values()
+            .map(|s| s.as_str())
+            .filter(|s| s.starts_with("Ok["))
+            .collect();
+        pinned.sort();
+        assert_eq!(pinned, ["Ok[i64 cstr]", "Ok[i64 i64]"]);
+    }
+
+    /// The header fence: a length-parameterized header is declined outright
+    /// by `ctor_grounding_header`, so such a site keeps its pre-S11
+    /// resolution and θ never has to reason in the `Len` domain.
+    ///
+    /// Witnessed by the *outcome*, not by the absence of a message. The
+    /// operand is an `array[i64 3]`, so the exact-operand match resolves
+    /// `Buf` to `Buf[i64 3]` and the ordinary mismatch against `take_a`'s
+    /// declared `Buf[i64 2]` follows -- if the ladder ran, the consumer would
+    /// instead have pinned θ to `Buf[i64 2]` and grounded there, and this
+    /// exact text could not appear.
+    #[test]
+    fn length_parameterized_header_is_declined_by_the_grounding_ladder() {
+        let err = check_src(
+            "type: Buf['T 'N: Len] slot array['T 'N] ;\n\
+             : take_a ( Buf[i64 2] -- ) Buf> drop ;\n\
+             : take_b ( Buf[i64 3] -- ) Buf> drop ;\n\
+             : main ( -- ) 0 3 fill Buf take_a ;\n",
+        )
+        .expect_err("the operand selects `Buf[i64 3]`, which `take_a` refuses");
+        assert!(
+            err.contains("`take_a` expected `Buf[i64 2]`, found `Buf[i64 3]`"),
+            "a length-parameterized header must not reach the ladder: {err}"
+        );
     }
 
     /// P7 slice 3c (R12): naming a slice local is a *reborrow*, like naming a

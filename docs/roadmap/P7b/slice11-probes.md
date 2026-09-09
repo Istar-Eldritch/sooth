@@ -71,3 +71,112 @@ This fires at a gate strictly upstream of grounding: `TermKind::Call`'s top-of-a
 2. **Explicit type-argument syntax on a bare generic ctor doesn't exist yet as a category**, independent of grounding. If B's design leans on "annotate explicitly when ambiguous," that requires widening `poly_call_takes_type_args` (`src/check/terms.rs:1300`) to recognize a bare generic-ctor/destructure name paired with a matching header — new surface, not a grounding-only change.
 3. **The (iii) silent-wrong-pick shape is arguably the most important finding of this round** for prioritization: it means today's behavior is not merely "some legal programs are rejected with a bad error" (dp_c) but "some illegal-looking programs are silently accepted and construct the wrong type" (dp_g2 would have compiled clean and run with the *other* branch's shape had its consumer been anything less specific than a concretely-typed word — e.g. had it flowed into another bare polymorphic sink). Any B spec should treat closing (iii) as at least as urgent as sharpening (i)'s diagnostic.
 4. **No collision with S9/S10 has been found in this round.** `dp_c`/`dp_d`'s fall-through (the `env.get`-miss branch, `terms.rs:888-928`) is upstream of and structurally separate from `foreign_single_candidate_grounding` (which only runs for the struct/enum *generated-word cross-module* shape via `bare_generated_word_own_module_grounding`, reached only when candidates has already collapsed to `[only]`, `terms.rs:939-949`). The two share the same outer `Call` arm but not the same decision logic; `probes/dp_baseline.md` freezes today's exact stderr for `dp_c`/`dp_d` so an implementation pass can diff against it.
+
+## Post-implementation observations (Phase 3, 260910)
+
+Recorded after phases 1–2 landed (99c210a grounding ladder, bb8ad59
+explicit-args category). Everything above is the round-1 analysis, unchanged.
+Non-regression sweep at `bb8ad59`, all probes via the frozen invocation:
+dp_a/dp_b/dp_f/dp_h/dp_g3 byte-identical to the frozen baseline (exit 0,
+silent); dp_c/dp_d/dp_g/dp_e/dp_g2 at their spec-mandated post-S11 outcomes
+(G1/G2/G3/G4/G9); dp_e2 as below. `git diff 486eda4..HEAD -- src/ir
+src/parser.rs src/emit` is empty (NFR-1, behavioral fence).
+
+**dp_e2's observed diagnostic (spec open question, answered).** With the
+category admitted, the literal probe shape `1 Ok[i64 i64] ;` in a `( -- )`
+word grounds the construction, and the leftover value then reaches the
+ordinary forgetting check (`check.rs:1367`) — the spec-predicted outcome,
+in place of the old gate rejection:
+
+```text
+error: stack effect mismatch in `main` (line 7)
+  body leaves 1 values, but ( … ) declares 0 outputs
+  note: declared ( -- )
+```
+
+Rejection here is correct — the value *is* forgotten; what changed is that
+the spelling grounds and the ordinary check owns the verdict. The category's
+consumer-less acceptance is pinned separately (`explicit_args_ctor_grounds_with_no_consumer_and_nothing_forgotten`:
+the constructed value declared as the word's output).
+
+**dp_g's implemented ambiguity stderr, in place of the old silence:**
+
+```text
+error: `Ok` in `main` (line 8) is ambiguous: `Res['T 'E]`'s type parameter `'E` is determined by neither this call site's operands nor its consumer, and 2 instantiations in scope fit it
+  candidate: `Res[i64 cstr]`
+  candidate: `Res[i64 i64]`
+  note: pass the value to a consumer whose declared parameter names the concrete `Res[...]` this call means
+```
+
+**dp_g2 is accepted.** The monomorphic consumer's signature pins θ statically
+(ruling A), the fully bound θ never reaches candidate selection, and the
+program runs clean; dp_g3's swapped declaration order is byte-identical (G9).
+
+**Review round P2 records (260910), for the next passer-by:**
+
+- With 2+ mints and **none** compatible at the θ-bound positions, the ladder
+  declines and the call keeps the pre-S11 `no_overload_matches_error`
+  (`terms.rs:1119`) rather than a dedicated incompatible-grounding diagnostic
+  — verified live: `1 mkok Ok drop` beside a second sibling reports "no
+  overload of `Ok` … accepts these operands". Defensible per R-5's wording:
+  the dedicated diagnostic speaks of "the only `Res` instantiation in scope",
+  so the sole-mint arm (`mints.len() == 1`) is its whole territory.
+  *Superseded by the strict-grounding amendment (260910) below — an
+  undetermined parameter is the unbound-parameter error whatever the mints.*
+- **Length-parameterized headers keep the baseline rejection wholesale.**
+  `ctor_grounding_header` grounds length-free headers only, and for a header
+  with length parameters the explicit-args spelling skips even the arity
+  pre-check, keeping `no_type_arguments_error` — the pre-S11 gate rejection.
+- In the **struct-ctor/foreign-mint collision corner** the S9 pre-guard
+  (`bare_generated_word_own_module_grounding`) resolves the single-candidate
+  site at the caller's own header *before* the ladder's R-6 arity validation
+  runs, so a wrong-arity explicit-args list there surfaces the pre-guard's
+  own outcome rather than R-6's arity text.
+
+## Strict-grounding amendment (260910)
+
+Maintainer ruling: a bare generic-ctor call (and bare generic destructure name)
+must be groundable from its **own** information alone — explicit type args, its
+consumer's declared signature, or its operand literals; determined by use →
+ground, not determined → the located unbound-parameter error, **regardless of
+what monomorphs exist in module scope**. The mint registry is never consulted
+to fill, disambiguate, or veto a bare ctor call's parameters; the wildcard
+filter, sole-compatible take, ambiguity error, and incompatible-sole-mint
+error are retired with the scope consultation.
+
+Re-probe outcomes at the amendment:
+
+| probe | before | after |
+| --- | --- | --- |
+| dp_a (helper's declared output) | accepted | **unchanged** (accepted) |
+| dp_b (concrete consumer) | accepted | **unchanged** (accepted) |
+| dp_c (zero mints) | unbound-parameter error | **unchanged** (same bytes) |
+| dp_d (sole mint, operand-pinned `'T`) | incompatible-grounding error | **unbound-parameter error naming `'E`** |
+| dp_e / dp_e2 (explicit args) | accepted / forgetting-check | **unchanged** |
+| dp_f (unused sibling's sole mint) | accepted | **unbound-parameter error** |
+| dp_g (two sibling mints) | ambiguity error | **unbound-parameter error** (scope never consulted) |
+| dp_g2/dp_g3 (determining consumer) | accepted | **unchanged** (accepted, both orders) |
+| dp_h (mint declared after the caller) | accepted | **unbound-parameter error, byte-identical in both declaration orders** |
+
+dp_g3 stays as observed: accepted in both orders (ruling A's consumer pin).
+The amendment is not purely negative — see the spec's *Blast radius* section:
+`consumer_expected_type` gained the spliced-poly-combinator-output fallback
+(keeps the P7 slice-11 `wrap … call Ok` family and the HKT member arms
+grounding), and five fixtures whose mechanism was the retired sole-compatible
+scope borrow (phase7_slice3a T1/T2, the `unify_poly_input` unit in poly.rs,
+phase6_slice3b's eliminator twin, P7 slice-11 golden 2) now name their
+instantiations with explicit type args, subjects unchanged.
+
+Verbatim stderr, dp_d:
+
+```text
+error: `Ok` in `main` (line 8) cannot be grounded here: `Res['T 'E]`'s type parameter `'E` (parameter 2 of 2) is determined by neither this call site's operands nor its consumer
+  note: pass the value to a consumer whose declared parameter names a concrete `Res[...]`, or name that instantiation in a signature so this call has one to ground at
+```
+
+Verbatim stderr, dp_g:
+
+```text
+error: `Ok` in `main` (line 8) cannot be grounded here: `Res['T 'E]`'s type parameter `'E` (parameter 2 of 2) is determined by neither this call site's operands nor its consumer
+  note: pass the value to a consumer whose declared parameter names a concrete `Res[...]`, or name that instantiation in a signature so this call has one to ground at
+```

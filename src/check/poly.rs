@@ -14568,14 +14568,19 @@ mod tests {
         // through -- this test is about `reorder`'s own `unify_poly_input`
         // arm binding each swapped instantiation's arguments correctly, not
         // about R3 construction.
+        // Strict-grounding amendment (260910): the bare `Err` used to
+        // resolve through those parse-time mints (the retired sole-compatible
+        // scope borrow); the calls now name their instantiations explicitly,
+        // which leaves `reorder`'s two asymmetric instantiations -- this
+        // test's actual subject -- byte-identical.
         let module = checked_module(
             "type: Result['T 'E] | Ok 'T | Err 'E ;\n\
              : reorder ( 'T Result['T 'E] -- Result['T 'E] 'T ) swap ;\n\
              : show_is ( Result[i64 str] -- ) drop ;\n\
              : show_si ( Result[str i64] -- ) drop ;\n\
              : main ( -- )\n\
-               1 \"boom\" Err reorder drop show_is\n\
-               \"one\" 2 Err reorder drop show_si ;\n",
+               1 \"boom\" Err[i64 str] reorder drop show_is\n\
+               \"one\" 2 Err[str i64] reorder drop show_si ;\n",
         );
         assert!(module
             .words
