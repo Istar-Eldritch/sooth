@@ -207,6 +207,17 @@ pub(super) struct Provenance {
     /// through to the grounded-record path and lowering's splice-budget
     /// guard reports it, exactly as before S3-1.c.
     pub(super) member_splice_stack: Vec<usize>,
+    /// P7.S8 follow-up: the span and callee name of the outermost live
+    /// `inline_combinator` splice, i.e. the call the user actually wrote
+    /// before any splicing began. `inline_combinator` sets this once, when it
+    /// opens a splice with none already active, and leaves it untouched for
+    /// every combinator spliced transitively inside that one -- an error
+    /// raised while checking a spliced-in body (e.g. an unsatisfied bound
+    /// discovered inside `lib/core/cmp.sth`'s `cmp`, spliced into a user's
+    /// `lt` call) reads this instead of the live, spliced-body span/name, so
+    /// it names `lt` at the user's own call site rather than `cmp` at
+    /// `lib/core/cmp.sth`'s. `None` outside any splice.
+    pub(super) splice_origin: Option<(Span, String)>,
 }
 
 impl Provenance {

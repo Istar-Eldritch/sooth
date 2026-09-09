@@ -1959,11 +1959,21 @@ pub(super) fn resolve_splice_member_call(
         // R7 cycle detection and R3 most-specific selection -- so the inline
         // and non-inline callers cannot dispatch to different impls.
         let tr = poly.trait_resolve;
+        // P7.S8 follow-up: an unsatisfied bound discovered here is reached
+        // only once a library combinator's body (e.g. `lt`) has already been
+        // spliced into the caller, so `span`/`name` at this point are
+        // `lib/core/cmp.sth`'s own -- the `cmp` call inside `lt`, not the
+        // `lt` the user wrote. Name and locate the outermost splice instead,
+        // when one is active.
+        let (origin_span, origin_name) = prov
+            .splice_origin
+            .clone()
+            .unwrap_or_else(|| (span, name.to_string()));
         let Some((imp_idx, _impl_subst)) = found_impl else {
             return Err(unsatisfied_user_bound_error(
                 ctx,
-                span,
-                name,
+                origin_span,
+                &origin_name,
                 &sig.ty_var_names[var as usize],
                 trait_decl,
                 ty,
@@ -1981,12 +1991,12 @@ pub(super) fn resolve_splice_member_call(
         let Some(symbol) = symbol else {
             return Err(unresolved_trait_obligation_error(
                 ctx,
-                span,
-                name,
+                origin_span,
+                &origin_name,
                 &trait_decl.name,
                 member,
                 ty,
-                span,
+                origin_span,
             ));
         };
         let symbol = symbol.clone();

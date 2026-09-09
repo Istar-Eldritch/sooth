@@ -530,6 +530,17 @@ pub(super) fn inline_combinator(
     // so nested combinators resolve at their own `uid`.
     let saved_splice_uid = prov.splice_uid;
     prov.splice_uid = Some(uid);
+    // P7.S8 follow-up: record the outermost splice's own call site and name,
+    // for diagnostics raised while checking a spliced-in body. `saved_splice_
+    // uid` being `None` is exactly "no splice was already open", so this sets
+    // once per outermost splice and every transitively nested one below it
+    // (its own `prov.splice_origin.is_none()` check would be false) leaves it
+    // alone -- mirroring `saved_splice_uid`'s save/restore but answering
+    // "outermost", not "innermost".
+    let saved_splice_origin = prov.splice_origin.clone();
+    if prov.splice_origin.is_none() {
+        prov.splice_origin = Some((span, name.to_string()));
+    }
     // P7.S3o Phase 3: thread the combinator's own `PolySig` (carrying its
     // `Bound::User` bounds) and the concrete θ from `check_poly_combinator_args`
     // into the splice walk, so a bare trait member call in the body resolves
@@ -590,6 +601,7 @@ pub(super) fn inline_combinator(
         prov.self_tail_combinator = saved;
     }
     prov.splice_uid = saved_splice_uid;
+    prov.splice_origin = saved_splice_origin;
     poly.combinator_sig = saved_comb_sig;
     poly.combinator_subst = saved_comb_subst;
     poly.combinator_name = saved_comb_name;
