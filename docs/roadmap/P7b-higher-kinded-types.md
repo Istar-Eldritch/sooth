@@ -603,16 +603,21 @@ shipping a checker relaxation. Maintainer rulings recorded in the spec:
 declared aggregates admit shared `Slice[T]` fields only, `!Slice[T]`
 stays hard-banned as a declared field (Ruling A); the input-position ban
 is preserved, the capability is body-local, produced only via inline words
-(Ruling B); aggregate construction and `@` projection propagate in-frame
-borrow provenance — `Deriv`-primary (the channel `live_derivs`/`live_borrow_of`
-read), plus alias for the alias-keyed sites — closing a soundness hole
-boundary bans alone cannot see (Ruling C); a bare or aggregate slice-bearing capture is rejected
+(Ruling B); every in-frame site that moves a slice's borrow provenance
+between values propagates it — six sites (construction, `@` projection,
+`&`/`&!` of a provenance-carrying local, the poly-call/member-dispatch
+output pushes, the `!`/`+!` field store, the anonymous-receiver projection
+arm), `Deriv`-primary (the channel `live_derivs`/`live_borrow_of` read),
+plus alias for the alias-keyed sites — closing a soundness hole
+boundary bans alone cannot see, one form of which (a generic pass-through
+laundering a bare slice's deriv) is a live pre-existing bug at HEAD
+(Ruling C); a bare or aggregate slice-bearing capture is rejected
 at every closure materialization boundary by a dedicated checker fence,
 rather than widening the closure-env encoding (Ruling D); the
 slice-element gate stays an unchanged hard reject, so a recursive
-slice-of-self shape stays undeclarable (Ruling E); and a construction whose
-slice-bearing operands view different arrays is rejected until `Deriv` can
-carry multiple roots (Ruling F). Size: `L` + `M` + `S`
+slice-of-self shape stays undeclarable (Ruling E); and a construction or
+field store whose slice-bearing operands view different arrays is rejected
+until `Deriv` can carry multiple roots (Ruling F). Size: `L` + `M` + `S`
 across three phases (layout/backend/bans; return-bundle ABI; evidence).
 
 **P7b.S8c — Per-site binding for member signatures with free input type variables.**

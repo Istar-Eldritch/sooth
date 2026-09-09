@@ -6,16 +6,14 @@
 > (verbatim rounds S6d-1..S6d-4). This spec is the capability slice the S6d roadmap
 > entry defers behind; it is a **prerequisite**, not an S6d deliverable, and it
 > lands no `Iterator`-for-slice impl itself.
-> Base: `main` at `8985d6c` (S8b: construction-wall fix, two-defect pair, traitful
-> List members). Every `src/` citation in this spec was verified at branch HEAD
-> on 260907/260908 (`git grep -n`/direct read); the three files where this
-> branch diverges from `main` are re-verified directly against `main` (`git show main:...`): `check/terms.rs`
-> (REQ-4d's write side, round-2 review P0-A), `check/poly.rs` (REQ-4(a)'s
-> `contains_poly_reference` other-caller citation — `poly.rs:3137` on this
-> branch is `poly.rs:3166` on `main`, round-3 review P1-1), and
-> `ir/func_builder/mod.rs` (uncited in detail; its `bind_env_capture` is
-> touched only by Ruling D's Deferred env-widening, which this spec does not
-> build). **Companion-doc note (round-3 review P2-4):** `slice6d-brief.md` and
+> Base: `main` at `486eda4` (S8c: per-site binding for member signatures with
+> free input type variables). The branch was rebased onto that commit on
+> 260909, and `git diff HEAD main -- src/` is empty: `src/` at branch HEAD is
+> identical to `main`, so **every citation below is single-anchored at HEAD**
+> and needs no branch-versus-main caveat (the round-1..3 dual-anchoring
+> apparatus is retired with the rebase). Every `src/` citation was re-verified
+> by direct read at `486eda4` on 260909, including the ones S8c shifted
+> (`check/poly.rs`, round-5 finding B). **Companion-doc note (round-3 review P2-4):** `slice6d-brief.md` and
 > `slice6d-probes.md` are otherwise frozen/verbatim; the one edit either
 > received from this loop is a citation correction (`declarations.rs:1074` →
 > `:1081`), nothing else.
@@ -49,13 +47,20 @@ reviewer left open.
   deliberately — a spliced word has no frame of its own to escape). S6d's consumer
   shape (probe round S6d-4: produce inline, consume in-body) is unblocked by this.
 - **Ruling C (in-frame borrow propagation — soundness P0-1, required for
-  soundness; channel corrected to `Deriv`-primary per round-3 review P0-1).**
-  New **REQ-4d**: aggregate construction and `@` projection must propagate the
-  source slice's borrow provenance onto the containing/fetched value — on the
-  construction (write) side and the field-read (`@`) side, with both conflict
-  guards treated per P1-G. The propagating channel is **`deriv` (what
+  soundness; channel corrected to `Deriv`-primary per round-3 review P0-1;
+  widened to **six sites** per round-5 review P0-1/P0-2/P0-3).**
+  New **REQ-4d**: every site that moves a slice's borrow provenance from one
+  value to another must propagate it, or the value it produces launders the
+  borrow. The six are: aggregate construction (the word-call output push),
+  `@` projection, `&`/`&!` of a provenance-carrying local, the poly-call and
+  member-dispatch output pushes, the `!`/`+!` field store, and the
+  anonymous-receiver projection arm. Two of the six were found by probing the
+  live compiler in round 5, and one of them (the poly-call push) is a
+  **live pre-existing unsoundness at HEAD**, reproduced end-to-end: see
+  REQ-4(d). Both conflict guards are treated per P1-G. The propagating channel
+  is **`deriv` (what
   `live_derivs`/`live_borrow_of`/`live_mutable_borrow_of` actually read), plus
-  `alias` for the two alias-keyed sites**. (Round-2 review P0-A: the original
+  `alias` for the alias-keyed sites**. (Round-2 review P0-A: the original
   citation here for "the
   only alias-set site" — `word_families.rs:445-448` — was wrong; that is the
   anonymous-receiver field-*projection* arm, not a construction site. See
@@ -102,10 +107,13 @@ reviewer left open.
   fields stay unreachable behind REQ-4b"): REQ-4b as drafted there covers
   slice-bearing *aggregates* only; a bare slice capture takes
   `classify_capture`'s borrow arm, not the aggregate arm — that was the gap.
-- **Ruling F (single-root propagation — 260908, round-4 review P1).** A
-  construction whose slice-bearing operands carry derivs with distinct
+- **Ruling F (single-root propagation — 260908, round-4 review P1; extended to
+  field stores per round-5 review P0-2).** A construction **or field store**
+  whose slice-bearing operands carry derivs with distinct
   `owned_root`s is a **located error** (a two-view-of-two-arrays `Pair` is
-  rejected); same-root operands keep the first operand's deriv. Rationale and
+  rejected, and so is storing a view of one array into an aggregate already
+  rooted at another); same-root operands keep the first operand's deriv.
+  Rationale and
   mechanics in REQ-4(d)'s multi-operand rule; lifted only when `Deriv` gains
   a multi-root representation (Deferred).
 - **Ruling E (the slice-element gate stays hard — 260908).**
@@ -286,8 +294,11 @@ Each requirement is independently verifiable against a golden or a unit test.
     `type :Holder = { :sooth.slice }` with no preceding
     `type :sooth.slice = { l, l }` line — a QBE undefined-aggregate failure, not a
     Rust panic, so nothing catches it short of a QBE build error.
-  - **Two stale comments, falsified by this requirement, need updating** (same
-    practice as REQ-5's `check_recursion` comment fix): `qbe.rs:152-154` ("R5
+  - **Three stale comments, falsified by this spec, need updating** (same
+    practice as REQ-5's `check_recursion` comment fix). The third is
+    `src/check.rs:3262-3265`, `dup`'s "the copy denotes a region of its own"
+    rationale, falsified for a slice-bearing aggregate by REQ-4(d)'s `dup`
+    rule (round-5 review P1); the other two are backend comments: `qbe.rs:152-154` ("R5
     bans a slice from every field position, so unlike the array/quotation types
     above there is no struct member to declare it ahead of; emission order
     relative to structs is therefore not load-bearing" — falsified now that a
@@ -360,13 +371,18 @@ Each requirement is independently verifiable against a golden or a unit test.
     slice-bearing output reached only through a generic slot is therefore a
     named gap, not covered by this spec — see Deferred.
   - **(b) Capture (quotation boundary) — a fence at every materialization
-    boundary, per Ruling D.** `classify_capture` (`src/check/captures.rs:182-224`)
+    boundary, per Ruling D.** `classify_capture` (`src/check/captures.rs:182-233`)
     sends a slice-bearing struct/enum down the aggregate arm
     (`Type::Struct(..) | Type::Enum(..) | Type::Array(..) | Type::OwnedCell(..)`,
     `:212-214`) to `CaptureClass::FrameRooted`/`OuterRooted` like any other
     aggregate, and a **bare** `Slice[T]`/`!Slice[T]` local down the separate
-    borrow arm (`Type::Ref(..) | Type::Slice(..)`, `:224`) — neither arm needs
-    changing; the fix is in `check_capture_admission` (`captures.rs:253-345`),
+    borrow arm (`Type::Ref(..) | Type::Slice(..)`, `:224`). **One arm does need
+    changing (round-5 review P0-3): `Type::Variant` is absent from the
+    aggregate arm, so an eliminator arm's narrowed scrutinee falls to the
+    `_ => CaptureClass::Scalar` wildcard (`:232`)** and a slice-bearing variant
+    is snapshotted into the env as if it were an `i64`. `Type::Variant` is
+    added to the aggregate arm. The rest of the fix is in
+    `check_capture_admission` (`captures.rs:253-345`),
     which admits both today regardless of escaping/owning status (verified
     260908, Ruling D). Two-word slice values cannot fit the one-word-per-capture
     env encoding (`build_env`, `src/ir/func_builder/quotation.rs:175-192`)
@@ -377,7 +393,7 @@ Each requirement is independently verifiable against a golden or a unit test.
     alike. **Fix (required for NFR-3, Ruling D): `check_capture_admission`'s
     per-name loop (`captures.rs:297-330`) rejects, unconditionally and before
     any escaping/owning branch, any captured name whose type is `Type::Slice(..)`
-    directly, or a `Struct`/`Enum`/`Array`/`OwnedCell` for which
+    directly, or a `Struct`/`Enum`/`Array`/`OwnedCell`/**`Variant`**for which
     `contains_reference` is true** (a bare `Type::Ref(..)` capture is exempt —
     it is one pointer word and already works). **The fence gets its own
     one-line message** (round-3 review P1-5): the rejection reason is an
@@ -422,10 +438,13 @@ Each requirement is independently verifiable against a golden or a unit test.
     so this boundary needs its own input arm, mirroring the word-level one
     (`word_entry.rs:172-179`).
   - **(d) In-frame borrow propagation (Ruling C, new — closes the P0-1 soundness
-    hole; channel corrected per round-3 review P0-1).** Aggregate construction
-    and field projection must propagate the source slice's borrow provenance
-    onto the containing/fetched value — on **both** of the channels the
-    checker's guards actually read:
+    hole; channel corrected per round-3 review P0-1; **six** sites per round-5
+    review P0-1/P0-2/P0-3).** Every site that hands a slice's borrow from one
+    value to another must propagate its provenance, or the produced value
+    launders the borrow. **The site list is the requirement**: five of the six
+    were found by successive review rounds probing the live compiler, and a
+    missed one is not a missing nicety but an accepted program that violates
+    exclusivity. The channels are:
     - **The primary enforcement channel is `Deriv`, not alias sets.** The
       guards that fire for REQ-4d's goldens are the **borrow-side exclusivity
       scan** (`word_families.rs:242-262`: `live_deriv` →
@@ -442,28 +461,29 @@ Each requirement is independently verifiable against a golden or a unit test.
       borrow lives (the opposite order to the goldens), so neither is these
       goldens' firing path (round-4 review P1: the round-3 close-out
       misattributed them). Alias sets are consulted at exactly two places
-      (`word_families.rs:438`, the anonymous-receiver projection arm, and
+      (`word_families.rs:437`, the anonymous-receiver projection arm's
+      `overlapping_projection` call, and
       `:527`, `consumed_place_conflict`). Probed 260908: the bare-slice
       analogue `&a slice |s|  &!a |r|  ...` is rejected via the deriv path —
       so a propagation that forwards only `alias` ships inert. **REQ-4d
       therefore propagates `deriv` as the primary channel, and `alias`
-      alongside it for the two alias-keyed sites; the borrow-side exclusivity
+      alongside it for the alias-keyed sites; the borrow-side exclusivity
       scan (`word_families.rs:243`/`:268`) is added to the enforcing-reader
       list.**
-    - **Write side (construction) — the propagation site is the word-call
-      output push, `src/check/terms.rs:1194-1198` on `main`** (a struct/enum
+    - **Site 1, write side (construction) — the word-call
+      output push, `src/check/terms.rs:1194-1198`** (a struct/enum
       constructor is a generated `env` word, so its output goes through the
       ordinary word-call path): `stack.push(Slot { surviving, variant_idx:
-      nullary_variant_idx, ..Slot::computed(*ty) })` at `main:1194-1198`
+      nullary_variant_idx, ..Slot::computed(*ty) })`
       already forwards `surviving` — folded from carried inputs by
-      `prov.union_surviving` (the `carried` fold; branch arm
-      `terms.rs:1149-1150`, `main` ≈ `:1163-1164`) — but drops both `deriv`
-      and `alias` (`Slot::computed`'s defaults). This site must forward the
-      slice-bearing operand's `deriv` (e.g. via `Slot::derived`) **and** its
+      `prov.union_surviving` (the `carried` fold, `terms.rs:1163-1164`) — but
+      drops both `deriv`
+      and `alias` (`Slot::computed`'s defaults, `check.rs:328-340`). This site must forward the
+      slice-bearing operand's `deriv` (e.g. via `Slot::derived`, `check.rs:345`) **and** its
       `alias`, the same way `surviving` is folded. **Multi-operand rule
       (round-4 review P1, ruled — Ruling F):** `Slot.deriv` is a single
-      `Option<DerivId>` (`engine.rs:515`) and `Deriv.owned_root` a single
-      `String` (`engine.rs:56-83`); `union_surviving` (`engine.rs:343-355`)
+      `Option<DerivId>` (`src/check.rs:312`) and `Deriv.owned_root` a single
+      `Option<String>` (`engine.rs:63`, struct at `:56-84`); `union_surviving` (`engine.rs:343-355`)
       has no deriv analogue and none can be written without a multi-root
       `Deriv`. So "derivs mirroring the surviving fold" is unimplementable as
       stated, and a two-slice-field aggregate (`type: Pair a Slice[i64] b
@@ -477,20 +497,17 @@ Each requirement is independently verifiable against a golden or a unit test.
       `prov.alias_union` (`src/check/engine.rs:239`); the merged `Alias`'s
       `span` is the **first slice-bearing operand's** (ruled here, since the
       span is what `AliasOrigin::Stack` reports). Lifting this restriction
-      requires a multi-root `Deriv` — recorded in Deferred. **This is a `check/terms.rs` citation**
-      (round-2 review P0-A: the round-1 draft named `word_families.rs:445-448`
+      requires a multi-root `Deriv` — recorded in Deferred.
+      (Round-2 review P0-A: the round-1 draft named `word_families.rs:444-447`
       as "the only alias-set site", which is in fact the
       *anonymous-receiver field-projection* arm — its own comment at
-      `word_families.rs:428-435` says so — not a construction site at all; the
-      real alias **mint** is `projected_region` at `src/check/engine.rs:1029-1041`,
+      `word_families.rs:427-434` says so — not a construction site at all,
+      though site 6 below shows it *is* a propagation site; the
+      real alias **mint** is `projected_region` at `src/check/engine.rs:1023-1042`,
       `parent.alias = Some(Alias { set, span })` at `:1034`, reached from the
-      owned-receiver forward at `word_families.rs:423` and the anonymous-receiver
-      arm at `:436-448`). Because `check/terms.rs` differs between this
-      branch's HEAD and `main`, this citation is re-verified directly against
-      `main` (`git show main:src/check/terms.rs`), not this branch — see the
-      spec header.
-    - **Read side (`@`'s fetch arm) — round-2 review P0-B, a second propagation
-      site the round-2 draft missed entirely.** `@`'s fetch arm
+      owned-receiver forward at `word_families.rs:420` and the anonymous-receiver
+      arm at `:435-447`.)
+    - **Site 2, read side (`@`'s fetch arm) — round-2 review P0-B.** `@`'s fetch arm
       (`word_families.rs:583-587`) pushes `Slot { surviving, ..Slot::computed(referent)
       }` — it forwards `surviving` (computed just above at `:578-582`) but drops
       both `deriv` and `alias` unconditionally, even though the receiver
@@ -503,22 +520,131 @@ Each requirement is independently verifiable against a golden or a unit test.
       forward directly above it. New golden **G-alias-iii** (re-spelled per
       round-3 review P0-2 — see below): taking a `&!` of the root while an
       `@`-projection of the field is live is rejected.
-    - **Third propagation site — `&`/`&!` of a provenance-carrying local
-      (round-4 review P0).** `prov.borrow` (`src/check/engine.rs:363-379`)
-      sets `owned_root: Some(place)` from the borrowed local's *name* and
+    - **Site 3, `&`/`&!` of a provenance-carrying local
+      (round-4 review P0).** `prov.borrow` (`src/check/engine.rs:364-380`,
+      called from `word_families.rs:274`)
+      sets `owned_root: Some(place.to_string())` (`engine.rs:373`) from the
+      borrowed local's *name* and
       discards any deriv the borrowed local's binding carries — unlike
-      `reborrow` (`:384-400`), which inherits `held`'s `owned_root`. Without a
+      `reborrow` (`:384-402`), which inherits `held`'s `owned_root` (`:391`).
+      Without a
       fix here the chain severs at `&w`: `&w` mints a deriv rooted at `"w"`,
       `@`'s forwarding hands `s` a deriv rooted at `"w"`, and the second-`&!`
       scan (whose predicate is `d.owned_root.as_deref() == Some(rest)`,
-      `word_families.rs:242-245`) looks for `"a"` and finds nothing —
+      `word_families.rs:244`) looks for `"a"` and finds nothing —
       G-alias-iii goes green and the read-path hole survives. **Fix:
       `prov.borrow` inherits the borrowed local's binding deriv's
       `owned_root` when it has one** (exactly `reborrow`'s `held` logic at
-      `:384-400`), with a unit test beside it. Over-rejection risk is bounded:
+      `:391`), with a unit test beside it. Over-rejection risk is bounded:
       this only extends tracking along chains that already carry a deriv, in
       the same direction `reborrow` already does; any existing golden that
       goes red under it is a real signal, surfaced at implementation time.
+    - **Site 4, the poly-call and member-dispatch output pushes — a LIVE
+      pre-existing unsoundness at HEAD, not a future risk (round-5 review
+      P0-1).** A generic pass-through launders the deriv today. Reproduced
+      end-to-end at `486eda4` on 260909:
+
+      ```sooth
+      : thru ( 'T -- 'T ) ;
+
+      : main ( -- )
+        0 4 fill | a |
+        &a slice thru | s |
+        &!a | r |
+        r 0 >usize &!> 99 !
+        s 0 >usize &> @ .
+        a drop
+      ;
+      ```
+
+      This **builds and prints `99`**: a write through the exclusive `&!a` is
+      observed through the shared view `s`. Deleting `thru` from the same
+      program restores the rejection ("`&!a` conflicts with a live borrow of
+      `a`"), so the pass-through call is precisely what launders it. The cause
+      is that every dispatch path truncates the operands and re-pushes outputs
+      as `Slot::computed`, which zeroes `deriv` and `alias`:
+      `check_poly_call`'s two pushes (`src/check/poly.rs:7955-7957` and
+      `:7994-7996`), `resolve_splice_member_call`'s
+      (`poly.rs:2090-2092`), and `resolve_mono_member_call`'s
+      (`poly.rs:2614-2616` — a fourth push found by re-verifying the site list
+      at HEAD, not named in the round-5 report; a worker must fix all four or
+      the hole survives on the monomorphic-impl dispatch path).
+      `check_reference_free_signature` never fires on `thru` because a
+      declared `'T` slot is `PolyType::Var`, which `audits.rs:366` returns
+      `false` for unconditionally.
+      **Fix: all four pushes forward the slice-bearing operands' `deriv`
+      (primary) and `alias` onto the outputs, under Ruling F's single-root
+      rule verbatim.** Note the bare-slice form above needs no new capability,
+      so this is a today-red regression test (G-poly-launder's twin) that the
+      same one-line-per-site forward closes; `Window` merely widens the same
+      hole to aggregates.
+    - **Site 5, the `!`/`+!` field store — an unenumerated write site
+      (round-5 review P0-2).** The store's type-check arm
+      (`word_families.rs:589-642`) has **zero** provenance handling: it checks
+      quotation-ness, `ref_parts`, mutability, `is_copy` of the referent
+      (`:622-626`), the `+!` integer rule and `match_slot`, then truncates
+      (`:642`). A shared `Slice[T]` referent passes the `is_copy` gate
+      (`builtins.rs:520`, `Type::Slice(_, mutable, _) => !mutable`). Two
+      exploits follow once REQ-5 admits a slice field:
+      **(a) in-frame root swap.** Construct a `Window` from root `b` (legal,
+      single-root), then `&!w &!view  &a slice  !`. The `Window` now views `a`
+      while its propagated deriv still says `b`: Ruling F is bypassed, and
+      site 2's `@` forward then propagates the **wrong** root, which is worse
+      than propagating none.
+      **(b) cross-frame stash.** Ruling B's input ban exempts a top-level
+      reference (`word_entry.rs:173`, `!slot.ty.is_ref() && ...`), so a
+      **non-inline** word may take `&!Window` and store into its field a view
+      of its own frame's array. Verified at HEAD on 260909 with an `i64`
+      field standing in for the slice (`: stash ( &!Window -- ) |w| 0 4 fill
+      |own| ... w &!view 7 ! own drop ;`, caller reads `7`): the shape is
+      reachable today, and with a `Slice[i64]` field the stored value is a
+      view of storage that dies at `stash`'s frame exit. This is a dangling
+      view produced without crossing any REQ-4a/b/c boundary, because the
+      reference input is exactly the exemption those bans grant.
+      The pre-existing out-of-frame escape guard on stores
+      (`terms.rs:478-481`, via `ref_root_is_in_frame`, `captures.rs:140-152`)
+      does not catch it: it is gated on `stack[vi].surviving` being `Some`
+      (`:478`), and a slice value carries no surviving set.
+      **Fix: the `!`/`+!` store gains two rules**, placed in `terms.rs`'s
+      existing `!`/`+!` provenance block (`terms.rs:449-510`), not in the
+      type-check arm, because the machinery is already there:
+      (i) if the stored value is reference-bearing and the receiver's root is
+      not in-frame (`ref_root_is_in_frame` false), a located error with its
+      own one-line message — the exact structural twin of the surviving-set
+      escape guard at `:478-481`, extended to a channel that has no surviving
+      set; (ii) otherwise the stored value's `deriv`/`alias` **joins the
+      receiver's root binding**, under Ruling F's distinct-root rule (storing
+      a view of a different root into an already-rooted container is the same
+      located error). The mechanics have a precedent to copy verbatim:
+      `terms.rs:500-508` already looks the root binding up through
+      `deriv → owned_root → scope.local` and unions the stored value's
+      surviving set onto it (rationale at `:495-499`), and `@`'s fetch arm
+      reads the same channel back out at `:578-582`. The new rule is that
+      join, over `deriv`/`alias` instead of `surviving`.
+    - **Site 6, the anonymous-receiver projection arm (round-5 review P0-3).**
+      `&f`/`&!f` off an **anonymous** receiver (`word_families.rs:426-448`)
+      pushes `Slot { alias: Some(alias), ..Slot::computed(out) }` (`:444-447`):
+      it forwards `alias` but **drops `deriv`**, unlike the owned-receiver arm
+      directly above it, which forwards `prov.project(top.deriv)` (`:415`) and
+      `top.alias` (`:420`). Since `deriv` is the primary enforcement channel,
+      the anonymous path is alias-only and therefore weaker on exactly the
+      shape site 2 relies on. **Fix: the anonymous arm forwards
+      `prov.project(top.deriv)` alongside the alias it already carries.** The
+      irony is worth recording so no later round re-litigates it: round 2
+      correctly struck this site as *not a construction site*, and round 5
+      finds it *is* a propagation site.
+    - **`dup` must not void the alias channel for a reference-bearing
+      aggregate (round-5 review P1).** `dup` pushes
+      `Slot { alias: None, ..top }` (`src/check.rs:3266`) on the rationale
+      (comment, `check.rs:3262-3265`) that "`dup` of an aggregate deep-copies
+      it (`Alloc`+`Blit`), so the copy denotes a region of its own". That is
+      **false for a slice-bearing aggregate**: the blit copies the two slice
+      words, so the copy views the same buffer as the original. `deriv`
+      survives `dup` (only `alias` is cleared), so there is no full exploit
+      today, but the alias half of every rule above is voidable by one token.
+      **Rule: `dup`'s alias reset is retained only for a non-reference-bearing
+      aggregate; a reference-bearing one keeps `top.alias`.** The stale
+      comment is listed for update in REQ-2.
     - **Both conflict guards, widened in opposite directions (round-2 review
       P1-G — read carefully, these are two different fixes, not one).**
       `overlapping_projection`'s `conflicts` closure (`word_families.rs:477-488`,
@@ -614,7 +740,32 @@ Each requirement is independently verifiable against a golden or a unit test.
   struct field of that type could be admitted — retained in the definition
   only for symmetry, and a worker must not read it as an admission path.
   This still rejects a field typed `&T`/`&!T` directly or transitively, and
-  rejects `!Slice[T]` outright per Ruling A). Concretely: `type: Outer h Holder ;` (nesting a
+  rejects `!Slice[T]` outright per Ruling A).
+  - **`contains_reference` gains a `Type::Variant` arm (round-5 review P0-3 —
+    a monotone widening of the taint test, not a carve-out).**
+    `contains_reference` (`builtins.rs:564-593`) has arms for `Ref` (`:571`),
+    `Slice` (`:578`), `Struct` (`:579-582`), `Enum` (`:583-587`) and `Array`
+    (`:588-590`), and **no `Type::Variant` arm**, so a variant type falls to
+    `_ => false` (`:591`) and is reported reference-free. `Type::Variant`
+    (`src/ast.rs:3161`) is what an owning eliminator arm receives: `check.rs`
+    narrows the scrutinee to the matched variant and hands the arm
+    `Slot { ty: narrowed, ..scrutinee }` (`check.rs:2593-2595`), which
+    correctly inherits the scrutinee's full provenance, but the *type* it
+    carries is invisible to every consumer of the taint test. With Ruling A's
+    enum payloads admitted (G1's enum twin), an arm-bound slice-bearing
+    payload is therefore untracked end to end. **Fix: a
+    `Type::Variant(id, vi, _)` arm testing that variant's own fields**, the
+    exact shape of the existing `Enum` arm restricted to one variant.
+    This **strengthens** the predicate (more types report `true`), so **NFR-1
+    holds**: it is the opposite of the `Type::Slice => false` carve-out NFR-1
+    forbids, and it adds no position-local skip. **Implementation instruction:
+    the worker must walk every call site of `contains_reference` before Phase 1
+    lands** (it is the predicate "every escape rejection is stated over", per
+    its own doc comment) and record the result. The only risk of a monotone
+    widening is **over**-rejection, which is safe-by-default and surfaced by
+    the existing goldens; a call site that must keep the old answer is a
+    finding to raise, not to paper over.
+  Concretely: `type: Outer h Holder ;` (nesting a
   slice-bearing struct inside another struct) is **admitted and tainted**, per
   REQ-4's "transitively contains" containment model — the naive "reject unless
   the field type is exactly `Type::Slice`" would wrongly reject this composition,
@@ -761,7 +912,10 @@ Phase 1 goldens (layout + backend + all bans + declared-aggregate relaxation):
   type-checks through to `len`). **Enum twin**
   (parseable form, per contract review's P1-7 fix — an unnamed concrete payload
   does not parse):`type: Cell | Empty | Full v Slice[i64] ;`, constructed,
-  matched, and its payload projected and dropped. **One residual (round-2
+  matched, and its payload projected and dropped. **This twin asserts
+  *build-and-run* only** (round-5 review P0-3): the variant path's borrow
+  tracking is witnessed separately by **G-alias-iv**, because a passing build
+  proves nothing about whether the arm-bound payload is tracked. **One residual (round-2
   review, G1 note):** `total` takes `Window` **by value** and never `drop`s
   it — correct as written, not an omission: `Window` is `Copy` under Ruling A
   (a shared-slice-only container with a plain `usize` field), so it carries no
@@ -849,6 +1003,38 @@ Phase 1 goldens (layout + backend + all bans + declared-aggregate relaxation):
   `owned_root`s, REQ-4(d)'s multi-operand rule); the same type built from two
   views of **one** array builds and runs — pinning both the ban and its
   boundary.
+- **G-poly-launder (NEW — round-5 review P0-1 / REQ-4d site 4).** Two twins,
+  because the hole predates this spec:
+  (i) **today-red regression twin, bare slice, no new capability needed** — the
+  exact `thru` program in REQ-4(d) site 4 builds and prints `99` at `486eda4`
+  and must become a rejection ("conflicts with a live borrow of `a`", the same
+  diagnostic the `thru`-free program already produces);
+  (ii) **aggregate twin** — the same shape with `&a slice 0 >usize Window`
+  passed through `thru` in place of the bare slice, rejected at the second
+  `&!a`. A worker must keep twin (i): it is the one golden in this spec that
+  fails on an unmodified tree, so it is the proof that site 4's forward is
+  load-bearing rather than decorative.
+- **G-store-escape (NEW — round-5 review P0-2 / REQ-4d site 5 rule (i)).** The
+  cross-frame stash: a **non-inline** `: stash ( &!Window -- )` that builds an
+  array in its own frame, slices it, and stores the view into the caller's
+  `Window` through the `&!` input. Rejected with site 5's own one-line
+  message. The `i64`-field analogue of this program builds and runs today
+  (verified 260909, caller reads `7`), so the golden pins a genuinely new
+  rejection on a reachable path, not a hypothetical one.
+- **G-store-distinct-root (NEW — round-5 review P0-2 / REQ-4d site 5 rule
+  (ii), Ruling F).** In-frame: a `Window` constructed over root `b`, then
+  `&!w &!view  &a slice  !` storing a view of a *different* array into it —
+  rejected (distinct `owned_root`s). The same store from a view of `b`
+  (the root the `Window` already carries) is admitted, pinning the boundary
+  rather than a blanket ban on field stores.
+- **G-alias-iv (NEW — round-5 review P0-3 / REQ-4d site 6 + the `Variant`
+  taint arm).** A shared slice packed into an enum variant
+  (`type: Cell | Empty | Full v Slice[i64] ;`), eliminated through an owning
+  arm (`~[ ( Full ) &v @ swap drop ]`), and a second `&!` of the root array
+  taken while the extracted slice is live — **rejected**. This is the variant
+  path's conflict witness, and it fails without either half of the fix (the
+  `Type::Variant` taint arm or site 6's deriv forward), which is why G1's enum
+  twin cannot stand in for it.
 - **G-sweep-array (NEW — REQ-4c).** A slice-bearing type as an interned array
   element is rejected (`declarations.rs:1117`, unchanged).
 - **G-sweep-cell (NEW — REQ-4c).** A slice-bearing type as an interned cell payload
@@ -913,20 +1099,33 @@ Phase 2 goldens (return-bundle ABI/plumbing only):
   `out_arity >= 2` resolved output builds and runs, exercising the
   per-instantiation bundle sites (`check.rs:1111`, `:1125`).
 
-Unit tests sit beside each changed stage function (`layout.rs` sizer/projection,
-`qbe.rs` member/load/store/`module_has_slice`, `declarations.rs::check_no_stored_references`,
-`word_entry.rs::check_reference_free_signature`, `check/terms.rs`'s output-push
-deriv+alias forwarding and the distinct-root rejection (the write side,
-`main:1194-1198`, Ruling F), `ir/func_builder/word_families.rs`'s
-`store_field`/`slot_value` aggregate-arm slice routing (round-4 contract review
-P1-1), `check/engine.rs`'s `prov.borrow` deriv inheritance (the third
-propagation site, round-4 review P0), `word_families.rs`'s `@`
-fetch-arm deriv+alias forwarding (the read side, `:583-587`) and its
-`conflicts`/`consumed_place_conflict` widening, `captures.rs`'s
-`check_capture_admission` (the materialization fence) and
-`check_quotation_reference_free_effect`,
-`audits.rs::contains_poly_reference`), happy path plus one rejection each, named
-`thing_condition_expected`.
+Unit tests sit beside each changed stage function, happy path plus one
+rejection each, named `thing_condition_expected`:
+
+- `layout.rs` sizer/projection; `qbe.rs`
+  member/load/store/`module_has_slice`; `declarations.rs::check_no_stored_references`;
+  `word_entry.rs::check_reference_free_signature`.
+- `ir/func_builder/word_families.rs`'s `store_field`/`slot_value` aggregate-arm
+  slice routing (round-4 contract review P1-1).
+- REQ-4(d)'s six propagation sites, one test each: `check/terms.rs`'s
+  output-push deriv+alias forwarding and the distinct-root rejection (site 1,
+  `terms.rs:1194-1198`, Ruling F); `word_families.rs`'s `@` fetch-arm
+  forwarding (site 2, `:583-587`); `check/engine.rs`'s `prov.borrow` deriv
+  inheritance (site 3, `:364-380`); the four dispatch output pushes (site 4,
+  `poly.rs:7955-7957`/`:7994-7996`/`:2090-2092`/`:2614-2616`); the `!`/`+!`
+  store's two rules (site 5, in `terms.rs:449-510`); and the
+  anonymous-receiver projection arm's deriv forward (site 6,
+  `word_families.rs:444-447`).
+- `check.rs`'s `dup` alias retention for a reference-bearing aggregate
+  (`:3266`).
+- `builtins.rs::contains_reference`'s new `Type::Variant` arm, and
+  `captures.rs::classify_capture`'s `Type::Variant` aggregate arm.
+- `word_families.rs`'s `conflicts`/`consumed_place_conflict` widening;
+  `captures.rs`'s `check_capture_admission` (the materialization fence) and
+  `check_quotation_reference_free_effect`; `audits.rs::contains_poly_reference`.
+- A guard test beside `back_edge_outs_forwards_surviving_set_along_index_map`
+  (`terms.rs:3055`) asserting `check_reference_across_back_edge` rejects a
+  deriv-carrying argument, per the Deferred back-edge note.
 
 ## Phases
 
@@ -968,7 +1167,9 @@ Concretely:
 
   Goldens: G1 (+ enum twin, G1-input, G1-mut-hard-ban, G1-nested), G2, G3
   (+ owning twin), G-capture-fence, G-alias-ii (write side), G-alias-iii (read
-  side), G-distinct-root (Ruling F), all G-sweep-* goldens,
+  side), G-alias-iv (enum elimination, site 6 + the `Variant` taint arm),
+  G-distinct-root (Ruling F), G-poly-launder (site 4, both twins),
+  G-store-escape and G-store-distinct-root (site 5), all G-sweep-* goldens,
   G-quot-effect-output, G-quot-effect-input, G-poly-twin, G6. Unit tests beside
   every changed function listed above. This ordering is load-bearing (NFR-3):
   the taint bans and the capture fence gate every new construction the layout
@@ -1015,7 +1216,7 @@ Effort **S**, difficulty **standard**.
   "phases": [
     {
       "phase": 1,
-      "focus": "Declared reference-bearing aggregates: two-word slice-slot IR layout via LayoutBuilder::size_align with frontend blit routing in ir/func_builder store_field/slot_value, backend member/load/store/module_has_slice refusals retained, the REQ-4 escape bans (non-inline output/input incl. poly twin, Ruling D's unconditional materialization-boundary capture fence for bare and aggregate slices, closed-enumeration guard re-verification, three-site in-frame deriv+alias propagation (construction push, @ fetch, prov.borrow inheritance) plus both conflict-guard treatments and Ruling F's distinct-root rejection) landed in the same commit as the check_no_stored_references admit-and-taint relaxation for shared Slice[T] fields only (corrected predicate); the recursive Slice[Holder] shape stays deferred (Ruling E)",
+      "focus": "Declared reference-bearing aggregates: two-word slice-slot IR layout via LayoutBuilder::size_align with frontend blit routing in ir/func_builder store_field/slot_value, backend member/load/store/module_has_slice refusals retained, the REQ-4 escape bans (non-inline output/input incl. poly twin, Ruling D's unconditional materialization-boundary capture fence for bare and aggregate slices, closed-enumeration guard re-verification, six-site in-frame deriv+alias propagation (construction push, @ fetch, prov.borrow inheritance, poly-call/member-dispatch output pushes, the !/+! field store with its out-of-frame store error, the anonymous-receiver projection arm) plus both conflict-guard treatments, the Type::Variant taint-predicate widening with its consumer-inventory walk, dup's alias retention for reference-bearing aggregates, and Ruling F's distinct-root rejection at construction or field store) landed in the same commit as the check_no_stored_references admit-and-taint relaxation for shared Slice[T] fields only (corrected predicate); the recursive Slice[Holder] shape stays deferred (Ruling E)",
       "effort": "L",
       "difficulty": "hard"
     },
@@ -1069,24 +1270,44 @@ Effort **S**, difficulty **standard**.
   future slice ever needs to capture a slice into a closure, this is the
   mechanism it would have to build (with `bind_env_capture`,
   `ir/func_builder/mod.rs`).
-- **The instantiation-time poly gap (round-3 review P1-3 — now recorded, with
-  its reachability argument).** A poly word's declared effect is empty
+- **The instantiation-time poly gap (round-3 review P1-3; its reachability
+  argument was WRONG and is retracted — round-5 review P0-1).** A poly word's
+  declared effect is empty
   (`word_entry.rs:53-55`) and `audit_poly_reference_free_signature` runs once
   over the declared signature, where a generic slot is `PolyType::Var(_) =>
   false` (`audits.rs:366`); there is no per-instantiation audit (sole
   production caller `audits.rs:289`). So once REQ-5 makes `Window`
   declarable, a non-inline poly word `( 'T -- 'T )` instantiated at `Window`
-  passes both of Ruling B's arms — a slice-bearing value crosses a non-inline
-  word boundary. **Why this is not exploitable today:** a poly body cannot
-  construct or project a slice-bearing aggregate (construction and field
-  projection over a generic type are rejected inside the poly body), so the
-  only shape is a pass-through — the value was built in the caller's frame and
-  returns to it, and the callee's frame is nested inside the caller's, so the
-  referent never outlives the frame that owns it. The gap remains open for
-  shapes that combine instantiation with construction (a future poly word that
-  could build a slice-bearing aggregate from a generic argument), and closing
-  it means a per-instantiation signature audit — its own slice. S6d does not
-  need it (its consumers are monomorphic or inline).
+  passes both of Ruling B's arms.
+  **The round-3/round-4 text then argued this was not exploitable, on the
+  ground that a pass-through only returns the value to the frame that built
+  it. That argument is about lifetime and is silent about exclusivity, which
+  is the property that actually breaks:** the pass-through *is* the exploit,
+  it needs no aggregate, and it runs today (the `thru` program in REQ-4(d)
+  site 4 prints `99` at `486eda4`). **The site is therefore no longer
+  deferred**: it moves into REQ-4(d) as site 4, and its bare-slice form is a
+  live pre-existing bug fixed by the same one-line-per-push forward in Phase
+  1. What remains deferred is only the **signature audit**: a per-instantiation
+  `audit_poly_reference_free_signature` that would reject a non-inline poly
+  word instantiated at a slice-bearing type outright, rather than relying on
+  propagation to make its misuse a located error. That is its own slice; S6d
+  does not need it (its consumers are monomorphic or inline).
+- **Self-tail loops over a tainted aggregate (round-5 review P2).** Two notes
+  from the round-5 back-edge probe. (1) A stated capability boundary: once
+  REQ-4d propagates a deriv onto a `Window`, `check_reference_across_back_edge`
+  (`check.rs:1670-1693`) rejects any argument whose deriv has a non-static
+  `owned_root`, so a tainted `Window` can **never** cross a self-tail back
+  edge. That is safe (the guard is the mask, see (2)) but real: S6d's iterator
+  consumers are loop-shaped, and driving one over a `Window` in a self-tail
+  loop will be rejected until a loop-aware borrow story exists. This spec does
+  not change the guard. (2) The mask is load-bearing: `back_edge_outs`
+  (`terms.rs:2815`) forwards only `surviving` along the index map and drops
+  `deriv`, a latent twin of the poly-push laundering (site 4) that is
+  unreachable only because the guard rejects first. If that guard is ever
+  narrowed, the hole opens with no test watching, so Phase 1 adds a guard
+  test beside `back_edge_outs_forwards_surviving_set_along_index_map`
+  (`terms.rs:3055`) asserting the rejection, not the forward (see the
+  unit-test list).
 - **Multi-root `Deriv` (Ruling F's lifting condition).** `Slot.deriv` is a
   single `Option<DerivId>` (`engine.rs:515`) and `Deriv.owned_root` a single
   `String` (`engine.rs:56-83`); until `Deriv` can represent several roots,
