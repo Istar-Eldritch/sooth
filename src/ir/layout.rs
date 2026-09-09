@@ -751,6 +751,20 @@ impl LayoutBuilder<'_> {
                 let l = quotation_layout(self.word_width);
                 (l.size, l.align)
             }
+            // P7b.S6d-PREREQ (REQ-1): a slice field is the fixed two-slot
+            // `{ ptr, len }` value, word-width-derived (`slice_layout`), and
+            // like a quotation field it is sized here rather than by
+            // `scalar_size_align_ww` -- that function's `(bytes, bytes)`
+            // contract cannot express a two-word size with a one-word align,
+            // so its refusal stays as the bare-scalar backstop. Mutability is
+            // irrelevant to the layout (both flavours are ptr+len); the
+            // shared-only restriction is a checker rule (Ruling A), enforced
+            // at the declaration sweeps, and a synthesized return bundle does
+            // carry a `!Slice[T]` field through here on purpose.
+            Type::Slice(..) => {
+                let l = slice_layout(self.word_width);
+                (l.size, l.align)
+            }
             _ => scalar_size_align_ww(ir_type_of(ty), self.word_width),
         }
     }
@@ -1607,5 +1621,39 @@ mod tests {
             &module.enums,
             &module.arrays
         ));
+    }
+
+    /// P7b.S6d-PREREQ (REQ-1): the two-word slice slot in a declared struct.
+    /// Every figure is word-width-derived (`slice_layout`), and the *second*
+    /// field's offset is the load-bearing half: a one-word slice would put
+    /// `lo` at 8, so this pins the size as much as the offset.
+    #[test]
+    fn struct_layout_places_a_slice_field_in_the_two_word_slot() {
+        let s = structs_of("type: Window view Slice[i64] lo usize ; : main ( -- ) 1 drop ;");
+        let w = layout(&s, "Window");
+        let sl = slice_layout(WORD_WIDTH);
+        assert_eq!(w.fields[0].offset, 0);
+        assert_eq!(w.fields[0].size, sl.size);
+        assert_eq!(w.fields[0].align, sl.align);
+        assert_eq!(w.fields[0].size, 2 * WORD_WIDTH);
+        assert_eq!(w.fields[1].offset, 2 * WORD_WIDTH);
+        assert_eq!(w.size, 3 * WORD_WIDTH);
+        assert_eq!(w.align, WORD_WIDTH);
+    }
+
+    /// P7b.S6d-PREREQ (REQ-1/REQ-5's linearity note): the slice slot carries
+    /// no destructor obligation, so a shared-slice-only container stays
+    /// non-linear -- which is what makes "drop is a no-op over the slot" true.
+    /// A cell field alongside it still forces the container linear, so the
+    /// wildcard `field_is_linear` sends a slice to is not swallowing the cell.
+    #[test]
+    fn struct_layout_slice_field_is_not_linear_but_a_cell_beside_it_is() {
+        let shared = structs_of("type: Window view Slice[i64] lo usize ; : main ( -- ) 1 drop ;");
+        assert!(!layout(&shared, "Window").is_linear);
+        let mixed = structs_of(
+            "type: Mixed view Slice[i64] cell ^i64 ;\n\
+             : main ( -- ) 0 4 fill |a| &a slice 7 ^ Mixed drop a drop ;\n",
+        );
+        assert!(layout(&mixed, "Mixed").is_linear);
     }
 }

@@ -2086,11 +2086,23 @@ pub(super) fn resolve_splice_member_call(
         };
         poly.splice_trait_calls.insert((uid, span), record);
     }
-    // Consume operands, produce outputs.
-    stack.truncate(base);
-    for ty in &output_types {
-        stack.push(Slot::computed(*ty));
-    }
+    // Consume operands, produce outputs. P7b.S6d-PREREQ (review round, P1-2):
+    // measured, not assumed -- reverting this call to a bare `Slot::computed`
+    // push survives the entire suite, and probing shows why. `bearing` (in
+    // `push_dispatch_outputs`) is false unless the output type is itself
+    // reference-bearing, and any non-`declares_inline` word with such an
+    // output is rejected outright at word-check time
+    // (`check_reference_free_signature`, no top-level exemption on the output
+    // side). A `declares_inline` member reaching *this* push (rather than the
+    // `mword.declares_inline && !re_entry` branch above, which diverts into
+    // `inline_combinator` instead) requires `re_entry`, i.e. a member whose
+    // own body bound-dispatches back to itself -- and every such shape tried
+    // is a self-recursive call, which the self-tail-call back-edge hazard
+    // (`poly_self_tail_backedge_hazards`) rejects before this push is ever
+    // reached carrying a live borrow. No reference-bearing type has been
+    // found that reaches this push with `bearing` true; if one is found later,
+    // wire a golden through it.
+    push_dispatch_outputs(stack, base, &output_types, name, span, ctx, arrays, prov)?;
     Ok(Some(std::mem::take(stack)))
 }
 /// P7b.S3 (S3-7): ground a trait member signature's slots at a splice's θ.
@@ -2602,19 +2614,26 @@ pub(super) fn resolve_mono_member_call(
         // does (`check_poly_call`'s own guard): the same move/borrow
         // discipline applies to the member word's consumption.
         for i in base..stack.len() {
-            let origin = consumed_place_conflict(stack[i], &stack[..i], scope, prov, live, at)
-                .or_else(|| {
-                    consumed_place_conflict(stack[i], &stack[i + 1..], scope, prov, live, at)
-                });
+            let origin =
+                consumed_place_conflict(stack[i], &stack[..i], ctx, arrays, scope, prov, live, at)
+                    .or_else(|| {
+                        consumed_place_conflict(
+                            stack[i],
+                            &stack[i + 1..],
+                            ctx,
+                            arrays,
+                            scope,
+                            prov,
+                            live,
+                            at,
+                        )
+                    });
             if let Some(origin) = origin {
                 return Err(consuming_borrowed_value_error(ctx, span, name, origin));
             }
         }
         poly.builtin_overloads.insert(span, word_sym);
-        stack.truncate(base);
-        for ty in &output_types {
-            stack.push(Slot::computed(*ty));
-        }
+        push_dispatch_outputs(stack, base, &output_types, name, span, ctx, arrays, prov)?;
         Ok(Some(std::mem::take(stack)))
     } else {
         // Generic impl: the member word is polymorphic, its grounded S2-6 sig
@@ -7905,8 +7924,20 @@ pub(super) fn check_poly_call(
     // moving a place a live projection still reaches -- `'T` binds to the
     // receiver's struct type as readily as a declared `Point` does.
     for i in base..stack.len() {
-        let origin = consumed_place_conflict(stack[i], &stack[..i], scope, prov, live, at)
-            .or_else(|| consumed_place_conflict(stack[i], &stack[i + 1..], scope, prov, live, at));
+        let origin =
+            consumed_place_conflict(stack[i], &stack[..i], ctx, arrays, scope, prov, live, at)
+                .or_else(|| {
+                    consumed_place_conflict(
+                        stack[i],
+                        &stack[i + 1..],
+                        ctx,
+                        arrays,
+                        scope,
+                        prov,
+                        live,
+                        at,
+                    )
+                });
         if let Some(origin) = origin {
             return Err(consuming_borrowed_value_error(ctx, span, name, origin));
         }
@@ -7952,10 +7983,7 @@ pub(super) fn check_poly_call(
                     enum_words,
                 },
             );
-            stack.truncate(base);
-            for ty in outputs {
-                stack.push(Slot::computed(ty));
-            }
+            push_dispatch_outputs(stack, base, &outputs, name, span, ctx, arrays, prov)?;
             return Ok(std::mem::take(stack));
         }
     }
@@ -7991,11 +8019,43 @@ pub(super) fn check_poly_call(
             poly_calls: HashMap::new(),
         },
     );
+    push_dispatch_outputs(stack, base, &outputs, name, span, ctx, arrays, prov)?;
+    Ok(std::mem::take(stack))
+}
+
+/// P7b.S6d-PREREQ (REQ-4d site 4): push a dispatch call's outputs, carrying
+/// the operands' borrow provenance onto the reference-bearing ones.
+///
+/// Every dispatch path truncates the operands and re-pushes outputs, and a
+/// bare `Slot::computed` there launders the borrow. This is not a future
+/// hazard: a generic `( 'T -- 'T )` pass-through over a bare slice was enough
+/// to defeat exclusivity outright before this forward existed (a write through
+/// `&!a` was observable through a shared view of `a` that had been handed
+/// through the pass-through). All four dispatch pushes go through here so the
+/// hole cannot survive on one path.
+#[allow(clippy::too_many_arguments)]
+fn push_dispatch_outputs(
+    stack: &mut Vec<Slot>,
+    base: usize,
+    outputs: &[Type],
+    name: &str,
+    span: Span,
+    ctx: &Ctx,
+    arrays: &[ArrayDecl],
+    prov: &mut Provenance,
+) -> Result<(), String> {
+    let (deriv, alias) = carried_borrow(ctx, span, name, &stack[base..], outputs, arrays, prov)?;
     stack.truncate(base);
     for ty in outputs {
-        stack.push(Slot::computed(ty));
+        let bearing = ctx.with_extended_type_slices(|structs, enums| {
+            contains_reference(*ty, structs, enums, arrays)
+        });
+        stack.push(Slot {
+            alias: bearing.then_some(alias).flatten(),
+            ..Slot::derived(*ty, bearing.then_some(deriv).flatten())
+        });
     }
-    Ok(std::mem::take(stack))
+    Ok(())
 }
 
 /// P7.S3k (R4/N3): the monomorphs reachable only *through* a generic body's
@@ -23373,5 +23433,103 @@ mod tests {
              : main ( -- ) 1 2 go drop ;\n",
         )
         .expect("Ord's concrete-target bound dispatch passes the site check");
+    }
+
+    /// P7b.S6d-PREREQ (REQ-4d site 4): every dispatch path truncates the
+    /// operands and re-pushes outputs, and a bare `Slot::computed` there
+    /// laundered the borrow. This drives the top-level, non-splice
+    /// `check_poly_call` push (`poly.rs:8007`); the other three named pushes
+    /// each need their own witness (review round, P1-2):
+    /// `dispatch_output_push_inside_a_spliced_combinator_body_forwards_provenance`
+    /// (`:7971`), `dispatch_output_push_at_a_mono_member_call_forwards_provenance`
+    /// (`:2618`), and the comment above `resolve_splice_member_call`'s own push
+    /// (`:2090`, measured unreachable with a reference-bearing operand rather
+    /// than witnessed). This is not a future hazard: the bare-slice form
+    /// below **built and printed `99`** before this slice -- a write through
+    /// the exclusive `&!a` observed through a shared view of `a` handed
+    /// through a `( 'T -- 'T )` pass-through -- and deleting `thru` from the
+    /// same program already produced the rejection.
+    ///
+    /// Measured mutation: forcing `(None, None)` in `push_dispatch_outputs`
+    /// makes both cases build.
+    #[test]
+    fn dispatch_output_push_forwards_the_operands_borrow_provenance() {
+        let bare = check_src(
+            ": thru ( 'T -- 'T ) ;\n\
+             : main ( -- )\n  0 4 fill | a |\n  &a slice thru | s |\n  \
+             &!a | r |\n  r 0 >usize &!> 99 !\n  s len drop\n  a drop\n;\n",
+        )
+        .unwrap_err();
+        assert!(
+            bare.contains("`&!a` conflicts with a live borrow of `a`"),
+            "{bare}"
+        );
+        let aggregate = check_src(
+            "type: Window view Slice[i64] lo usize ;\n\
+             : thru ( 'T -- 'T ) ;\n\
+             : main ( -- )\n  0 4 fill | a |\n  \
+             &a slice 0 >usize Window thru | w |\n  \
+             &!a | r |\n  r 0 >usize &!> 99 !\n  &w &view @ len drop\n  a drop\n;\n",
+        )
+        .unwrap_err();
+        assert!(
+            aggregate.contains("`&!a` conflicts with a live borrow of `a`"),
+            "{aggregate}"
+        );
+    }
+
+    /// P7b.S6d-PREREQ (P1-2, second push site): the bound-dispatch push at
+    /// `poly.rs:7971` -- reached only when a poly call happens *while
+    /// checking a spliced combinator body* (`prov.splice_uid` is `Some`),
+    /// which is a different branch of `check_poly_call` from the top-level
+    /// call the test above drives (`prov.splice_uid` is `None` there).
+    /// `usebody`'s own body is what gets spliced; `thru`'s call from inside
+    /// it is the one that carries `prov.splice_uid`.
+    ///
+    /// Measured mutation: forcing this specific push (not the one above) to
+    /// drop the operand's deriv makes this program build silently.
+    #[test]
+    fn dispatch_output_push_inside_a_spliced_combinator_body_forwards_provenance() {
+        let err = check_src(
+            ": pass ( 'T -- 'T ) ;\n\
+             : usebody inline['S] ( 'S -- 'S ) pass ;\n\
+             : main ( -- )\n  0 4 fill | a |\n  \
+             &a slice usebody | s |\n  \
+             &!a | r |\n  r 0 >usize &!> 99 !\n  s len drop\n  a drop\n;\n",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("`&!a` conflicts with a live borrow of `a`"),
+            "{err}"
+        );
+    }
+
+    /// P7b.S6d-PREREQ (P1-2, third push site): `resolve_mono_member_call`'s
+    /// concrete-target push (`poly.rs:2618`), driven by a bare trait-member
+    /// call from a *mono* (non-generic, non-spliced) caller -- `main` calls
+    /// `thru` directly, so the member name resolves through the whole-program
+    /// trait/impl tables rather than through `env` or a combinator splice.
+    /// `thru` must declare `inline` for the concrete impl's own signature to
+    /// pass `check_reference_free_signature` at all (Ruling B bans a
+    /// reference-bearing output from any non-`declares_inline` word), which
+    /// is also why this witness needs a real trait, not a plain generic word.
+    ///
+    /// Measured mutation: forcing this push to drop the operand's deriv makes
+    /// this program build silently.
+    #[test]
+    fn dispatch_output_push_at_a_mono_member_call_forwards_provenance() {
+        let err = check_src(
+            "trait: Thru['S] :\n  thru inline ( 'S -- 'S ) ;\n  ;\n\
+             type: Window view Slice[i64] lo usize ;\n\
+             impl: Thru for Window\n: thru ;\n;\n\
+             : main ( -- )\n  0 4 fill | a |\n  \
+             &a slice 0 >usize Window thru | w |\n  \
+             &!a | r |\n  r 0 >usize &!> 99 !\n  &w &view @ len drop\n  a drop\n;\n",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("`&!a` conflicts with a live borrow of `a`"),
+            "{err}"
+        );
     }
 }

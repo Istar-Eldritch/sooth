@@ -148,10 +148,12 @@ pub fn emit(ir: &IrModule) -> Result<String, String> {
     }
     // P7 slice 3c (R2.1): the shared `{ ptr, len }` slice aggregate, emitted
     // only when the module actually holds a slice so a slice-free program's
-    // QBE text stays byte-identical. R5 bans a slice from every field
-    // position, so unlike the array/quotation types above there is no struct
-    // member to declare it ahead of; emission order relative to structs is
-    // therefore not load-bearing.
+    // QBE text stays byte-identical. P7b.S6d-PREREQ (REQ-2): a slice *is* a
+    // struct member now, so unlike the array/quotation types above there is a
+    // declare-before-reference edge into the struct loop below -- satisfied
+    // because this line is unconditionally first, not because
+    // `topo_sorted_structs` orders it (that DFS walks by-value struct
+    // containment only, and has nothing to say about the shared slice type).
     if module_has_slice(ir) {
         writeln!(out, "type :{SLICE_TYPE_SYMBOL} = {{ l, l }}").unwrap();
     }
@@ -252,13 +254,19 @@ fn emit_array_type(out: &mut String, idx: usize, layout: &ArrayLayout) {
     .unwrap();
 }
 
-/// Whether any function in the module mentions a slice, in a param, a return,
-/// or a value: the gate on emitting the shared slice aggregate type. A scan
+/// Whether the module mentions a slice, in a param, a return, a value, or a
+/// struct field: the gate on emitting the shared slice aggregate type. A scan
 /// rather than a registry length, because every slice shares one layout, so
-/// there is nothing per-`SliceId` for the backend to tabulate. Scans only
-/// `params`/`ret`/`value_types`, not struct field layouts: R5 bans a slice
-/// from every field position, so there is no member-position slice this scan
-/// needs to (and does not) see.
+/// there is nothing per-`SliceId` for the backend to tabulate.
+///
+/// P7b.S6d-PREREQ (REQ-2): the `ir.structs` half is not optional. Every
+/// declared struct is laid out with no reachability pruning, and `emit` writes
+/// a `type` line for every entry, so a declared-but-never-constructed struct
+/// with a slice field would emit `type :Holder = { :sooth.slice }` with no
+/// `:sooth.slice` declaration ahead of it -- a QBE undefined-aggregate error,
+/// not a Rust panic, so nothing else in the pipeline catches it. An *enum*
+/// payload needs no such reach: an enum type is emitted as an opaque byte
+/// blob, which names no member type at all.
 fn module_has_slice(ir: &IrModule) -> bool {
     ir.funcs.iter().any(|f| {
         f.params
@@ -266,7 +274,10 @@ fn module_has_slice(ir: &IrModule) -> bool {
             .chain(f.ret.iter())
             .chain(f.value_types.iter())
             .any(|ty| matches!(ty, IrType::Slice(_)))
-    })
+    }) || ir
+        .structs
+        .iter()
+        .any(|s| s.fields.iter().any(|f| matches!(f.ty, IrType::Slice(_))))
 }
 
 /// The QBE aggregate symbol for array `idx`: the `array[T N]` spelling is not a
@@ -445,15 +456,17 @@ fn member_ty(ty: IrType, layouts: Layouts) -> String {
         IrType::Quotation(sig) | IrType::OwningQuotation(sig) => {
             format!(":Q{}", quot_index(layouts, sig))
         }
-        // P7 slice 3c (R5): a slice is banned from every field position, so
-        // unlike the aggregates above it is never a struct member. This arm
-        // refuses rather than spelling `:{SLICE_TYPE_SYMBOL}`, so the ban is
-        // asserted here instead of being assumed by the type-emission order
-        // in `emit` (which declares the slice aggregate without ordering it
-        // against the structs that would have to reference it), and so it
-        // agrees with `field_load_op`/`field_store_op`/`scalar_size_align_ww`,
-        // which refuse a slice on the same grounds.
-        IrType::Slice(_) => unreachable!("a slice is banned from every field position"),
+        // P7b.S6d-PREREQ (REQ-2): a slice field is spelled with the shared
+        // two-word aggregate, exactly as `qbe_abi_ty` spells it at a
+        // param/return boundary. `emit` declares `:{SLICE_TYPE_SYMBOL}`
+        // unconditionally before the struct loop, which is what satisfies
+        // QBE's declare-before-reference rule for this member -- not
+        // `topo_sorted_structs`, whose edges are by-value struct containment.
+        // `field_load_op`/`field_store_op` still refuse a slice: a two-word
+        // field is blit-copied like every other aggregate field, and the
+        // routing that keeps it away from the scalar ops lives in the IR
+        // builder (`store_field`/`slot_value`), not here.
+        IrType::Slice(_) => format!(":{SLICE_TYPE_SYMBOL}"),
     }
 }
 
@@ -2726,20 +2739,46 @@ type: Counter n i64 ;
         assert!(!emit_src(": main ( -- ) 1 drop ;").contains(&format!("type :{SLICE_TYPE_SYMBOL}")));
     }
 
-    /// P7 slice 3c (R5): the struct-member speller refuses a slice, the same
-    /// answer `field_load_op`/`field_store_op`/`scalar_size_align_ww` give.
-    /// R5 bans a slice from every field position, and `emit` relies on that
-    /// ban when it declares the shared slice aggregate without ordering it
-    /// against the structs a member would force it ahead of; spelling a
-    /// member here instead would make that unordered emission wrong the first
-    /// time the ban lapsed, with no diagnostic.
+    /// P7b.S6d-PREREQ (REQ-2/NFR-4): the inverted twin of the retired
+    /// `member_ty_refuses_a_slice` pin. The struct-member speller now spells
+    /// the shared two-word aggregate, byte-identical to `qbe_abi_ty`'s
+    /// param/return spelling, so a slice field crosses a member position with
+    /// QBE's own by-value classification rather than as a truncated `l`.
     #[test]
-    #[should_panic(expected = "a slice is banned from every field position")]
-    fn member_ty_refuses_a_slice() {
+    fn member_ty_spells_a_slice_as_the_shared_aggregate() {
         let mut slices = Vec::new();
         let slice =
             crate::ir::ir_type_of(crate::ast::intern_slice_type(&mut slices, Type::I64, false));
-        member_ty(slice, empty_layouts());
+        assert_eq!(
+            member_ty(slice, empty_layouts()),
+            format!(":{SLICE_TYPE_SYMBOL}")
+        );
+        assert_eq!(
+            member_ty(slice, empty_layouts()),
+            qbe_abi_ty(slice, empty_layouts())
+        );
+    }
+
+    /// P7b.S6d-PREREQ (REQ-2): a struct with a slice field emits the shared
+    /// `:sooth.slice` declaration *before* the struct that references it, and
+    /// does so even though the module never constructs one -- the
+    /// `module_has_slice` extension over `ir.structs` is what makes the QBE
+    /// text well-formed rather than referencing an undeclared aggregate.
+    #[test]
+    fn emit_declares_the_slice_aggregate_before_a_struct_member() {
+        let src = "type: Window view Slice[i64] lo usize ;\n: main ( -- ) 1 drop ;";
+        let text = emit_src(src);
+        let slice_at = text
+            .find(&format!("type :{SLICE_TYPE_SYMBOL} ="))
+            .expect("the shared slice aggregate should be declared");
+        let window_at = text
+            .find("type :Window =")
+            .expect("the struct type should be declared");
+        assert!(slice_at < window_at, "{text}");
+        assert!(
+            text.contains(&format!("type :Window = {{ :{SLICE_TYPE_SYMBOL}, l }}")),
+            "{text}"
+        );
     }
 
     /// Review finding (Phase 2): a user struct literally named `slice` used to
@@ -2874,5 +2913,47 @@ type: Counter n i64 ;
             .find(|l| l.contains("call $twice"))
             .expect("the user-word call is emitted");
         assert_eq!(user.trim(), "%v5 =l call $twice(l %v4)");
+    }
+
+    /// P7b.S6d-PREREQ (REQ-2): `module_has_slice` must see a slice in a
+    /// *struct field*, not only in a param/return/value. Every declared struct
+    /// is laid out with no reachability pruning and `emit` writes a `type` line
+    /// per entry, so a struct nobody constructs still emits
+    /// `type :Holder = { :sooth.slice }` -- and without the field scan the
+    /// aggregate it names would never be declared, a QBE error no Rust panic
+    /// catches.
+    #[test]
+    fn module_has_slice_scans_struct_fields_not_only_signatures() {
+        let text = emit_src("type: Holder val Slice[i64] ; : main ( -- ) 1 drop ;");
+        assert!(text.contains("type :Holder = { :sooth.slice }"), "{text}");
+        assert!(
+            text.contains(&format!("type :{SLICE_TYPE_SYMBOL} = {{ l, l }}")),
+            "a never-constructed slice field still needs the aggregate declared: {text}"
+        );
+        // The negative half: no slice anywhere, no declaration.
+        assert!(!emit_src(": main ( -- ) 1 drop ;").contains(&format!("type :{SLICE_TYPE_SYMBOL}")));
+    }
+
+    /// P7b.S6d-PREREQ (REQ-2): the four backend refusals *stay*. A slice field
+    /// is blit-copied like every other aggregate field, and the routing that
+    /// keeps it away from the scalar ops lives in the IR builder -- giving
+    /// these arms a scalar spelling instead would store one word of two with
+    /// no diagnostic.
+    #[test]
+    #[should_panic(expected = "an aggregate field is copied by blit, not scalar-loaded")]
+    fn field_load_op_still_refuses_a_slice() {
+        let mut slices = Vec::new();
+        let slice =
+            crate::ir::ir_type_of(crate::ast::intern_slice_type(&mut slices, Type::I64, false));
+        field_load_op(slice, empty_layouts());
+    }
+
+    #[test]
+    #[should_panic(expected = "an aggregate field is copied by blit, not scalar-stored")]
+    fn field_store_op_still_refuses_a_slice() {
+        let mut slices = Vec::new();
+        let slice =
+            crate::ir::ir_type_of(crate::ast::intern_slice_type(&mut slices, Type::I64, false));
+        field_store_op(slice, empty_layouts());
     }
 }

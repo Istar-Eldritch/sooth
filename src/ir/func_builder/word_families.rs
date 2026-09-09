@@ -179,10 +179,16 @@ impl<'a> FuncBuilder<'a> {
                         self.push_instr(Instr::FieldLoad(v, ptr));
                         self.stack.push(v);
                     }
+                    // P7b.S6d-PREREQ (REQ-2): `@` through a `&Slice[T]` --
+                    // the field projection of a slice-bearing aggregate --
+                    // copies both words into a fresh frame slot, exactly as
+                    // it copies a Copy struct. The scalar arm below would
+                    // fetch the pointer word and drop the length.
                     IrType::Struct(_)
                     | IrType::Enum(_)
                     | IrType::Array(_)
-                    | IrType::Quotation(_) => {
+                    | IrType::Quotation(_)
+                    | IrType::Slice(_) => {
                         let dst = self.alloc_aggregate(referent);
                         let size = self.value_size(referent);
                         if size > 0 {
@@ -211,10 +217,19 @@ impl<'a> FuncBuilder<'a> {
                     IrType::Enum(id) if self.enums.layouts[id.index()].is_scalar => {
                         self.push_instr(Instr::FieldStore(ptr, val));
                     }
+                    // P7b.S6d-PREREQ (REQ-2): the store twin of `@`'s slice
+                    // arm -- `!` into a `&!Slice[T]` field blits both words.
+                    // REQ-4d's site 5 rule (ii) does admit an in-frame store
+                    // whose provenance joins the container's existing root
+                    // (`g_store_distinct_root_field_store_of_same_root_is_accepted`),
+                    // so this is a live path, not merely correct-by-construction:
+                    // the `_` arm below would truncate a two-word value to one
+                    // with no diagnostic on that accepted program.
                     IrType::Struct(_)
                     | IrType::Enum(_)
                     | IrType::Array(_)
-                    | IrType::Quotation(_) => {
+                    | IrType::Quotation(_)
+                    | IrType::Slice(_) => {
                         let size = self.value_size(referent);
                         if size > 0 {
                             self.push_instr(Instr::Blit(val, ptr, size));
@@ -1052,11 +1067,17 @@ impl<'a> FuncBuilder<'a> {
             IrType::Enum(id) if self.enums.layouts[id.index()].is_scalar => {
                 self.push_instr(Instr::FieldStore(fptr, val));
             }
+            // P7b.S6d-PREREQ (REQ-2): a slice field joins the aggregates. It
+            // is two words, so a `FieldStore` would emit one `storel` and drop
+            // the length silently -- the backend's own scalar store refuses a
+            // slice for exactly that reason, and the routing that keeps it
+            // away from there is this arm.
             IrType::Struct(_)
             | IrType::Enum(_)
             | IrType::Array(_)
             | IrType::Quotation(_)
-            | IrType::OwningQuotation(_) => {
+            | IrType::OwningQuotation(_)
+            | IrType::Slice(_) => {
                 if field.size > 0 {
                     self.push_instr(Instr::Blit(val, fptr, field.size));
                 }
@@ -1081,11 +1102,15 @@ impl<'a> FuncBuilder<'a> {
                 self.push_instr(Instr::FieldLoad(v, fptr));
                 v
             }
+            // P7b.S6d-PREREQ (REQ-2): the read side of `store_field`'s slice
+            // arm -- a slice field is read back as the interior pointer to its
+            // two words, never as a one-word `FieldLoad`.
             IrType::Struct(_)
             | IrType::Enum(_)
             | IrType::Array(_)
             | IrType::Quotation(_)
-            | IrType::OwningQuotation(_) => self.field_aggregate_value(base, offset, ty),
+            | IrType::OwningQuotation(_)
+            | IrType::Slice(_) => self.field_aggregate_value(base, offset, ty),
             _ => {
                 let fptr = self.field_ptr(base, offset);
                 let v = self.fresh_value(ty);
@@ -1915,5 +1940,53 @@ mod tests {
             .flat_map(|b| b.instrs.iter())
             .any(|i| matches!(i, Instr::Phi(..)));
         assert!(!has_phi, "no loop for N=1: {:?}", instrs(f));
+    }
+
+    /// P7b.S6d-PREREQ (REQ-2): `store_field`'s slice arm. Constructing an
+    /// aggregate with a slice field blits the whole two-word view; a
+    /// `FieldStore` would emit one `storel` and drop the length, which is
+    /// exactly why the backend's scalar store refuses a slice. The count is
+    /// the assertion: the `usize` field beside it is the one `FieldStore`.
+    #[test]
+    fn store_field_blits_a_slice_field_rather_than_scalar_storing_it() {
+        let ir = lower_src(
+            "type: Window view Slice[i64] lo usize ;\n\
+             : w ( -- ) 0 4 fill | a | &a slice 0 >usize Window drop a drop ;\n",
+        );
+        let w = &ir.funcs[0];
+        let sl = crate::ir::types::slice_layout(WORD_WIDTH);
+        assert!(
+            instrs(w)
+                .iter()
+                .any(|i| matches!(i, Instr::Blit(_, _, n) if *n == sl.size)),
+            "the slice field is blit-copied at its full two-word size: {:?}",
+            instrs(w)
+        );
+    }
+
+    /// P7b.S6d-PREREQ (REQ-2): `slot_value`'s slice arm, the read side. A
+    /// slice field is handed back as the interior pointer to its two words
+    /// (`PtrOffset`), never as a one-word `FieldLoad` -- the destructure route
+    /// (`Window>`), which reads every field through `slot_value` directly.
+    #[test]
+    fn slot_value_reads_a_slice_field_as_an_interior_pointer() {
+        let ir = lower_src(
+            "type: Window view Slice[i64] lo usize ;\n\
+             : w ( -- ) 0 4 fill | a | &a slice 0 >usize Window Window> drop drop a drop ;\n",
+        );
+        let w = &ir.funcs[0];
+        // One `FieldLoad` for the `usize` field; the slice field contributes
+        // none, since it is read as an address rather than a value.
+        assert!(
+            count(w, |i| matches!(i, Instr::FieldLoad(..))) <= 1,
+            "the slice field must not be scalar-loaded: {:?}",
+            instrs(w)
+        );
+        // P7b.S6d-PREREQ (review round, P2): a `>= 1` `PtrOffset` count was
+        // dropped here -- `field_ptr` emits a `PtrOffset` for the `usize`
+        // field's own address too (any struct field access does), so the
+        // count holds regardless of whether the slice field ever reaches
+        // one; it discriminated nothing. The `FieldLoad <= 1` assertion above
+        // is what actually pins the slice field off the scalar-load path.
     }
 }

@@ -67,6 +67,22 @@ pub(super) fn past_owning_frame_error(ctx: &Ctx, span: Span, name: &str, linear:
     )
 }
 
+/// P7b.S6d-PREREQ (REQ-4b, Ruling D): the materialization fence. Its cause is
+/// an IR-encoding limit, not escape: `build_env` gives every capture exactly
+/// one word (`ir/func_builder/quotation.rs`), and a slice value is two, so the
+/// single-capture path would overwrite whatever follows the env slot and the
+/// multi-capture path would stomp the next capture. That is true of a
+/// frame-rooted and an outer-rooted capture alike, and of a plain, escaping or
+/// owning boundary alike, so the rejection is unconditional and does not reuse
+/// `past_owning_frame_error`'s escape wording (nor its `owning [ ... ]`
+/// remedy, which fixes nothing here).
+pub(super) fn captured_slice_error(span: Span, name: &str, ty: Type) -> String {
+    format!(
+        "error: a closure cannot capture `{name}`, whose type `{ty}` carries a slice (line {})\n  a captured value gets one word in the closure's env block and a slice is two; pass the view as an argument instead",
+        span.line,
+    )
+}
+
 /// R24: a captured reference is read after its referent's last use -- the
 /// referent is consumed or exclusively re-borrowed while an erased closure
 /// still holds a borrow of it (kept live past the store by R20's surviving-set
@@ -209,9 +225,16 @@ pub(super) fn classify_capture(
         // over-rejected at an escaping boundary rather than admitted -- sound
         // (it never under-rejects), just more conservative than case 2's full
         // rule. See `docs/roadmap/P4/slice7b-spec.md`'s R15 section.
-        Type::Struct(..) | Type::Enum(..) | Type::Array(..) | Type::OwnedCell(..) => {
-            CaptureClass::FrameRooted
-        }
+        // P7b.S6d-PREREQ (REQ-4b): `Type::Variant` -- an eliminator arm's
+        // narrowed scrutinee -- belongs on this arm too. Left to the scalar
+        // wildcard below it was snapshotted into the env as if it were an
+        // `i64`, which is wrong for the same reason it is wrong for the enum
+        // this variant came out of.
+        Type::Struct(..)
+        | Type::Enum(..)
+        | Type::Variant(..)
+        | Type::Array(..)
+        | Type::OwnedCell(..) => CaptureClass::FrameRooted,
         // Case 3: a borrow. A `Deriv` whose `owned_root` names a current-frame
         // local is frame-rooted; a `&T` parameter carries no deriv (or a
         // reborrow with no owned root) and is outer-rooted by construction,
@@ -287,6 +310,22 @@ pub(super) fn check_capture_admission(
         }
         if b.quot.is_some() || crate::ast::is_quotation_type(b.ty).is_some() {
             return Err(captured_quotation_name_deferred_error(ctx, span));
+        }
+        // P7b.S6d-PREREQ (REQ-4b, Ruling D): the slice fence, ahead of every
+        // escaping/owning branch below because the one-word env slot cannot
+        // hold a two-word value on any of those paths. A bare `Type::Ref` is
+        // exempt: it is one pointer word and already works.
+        let carries_slice = match b.ty {
+            Type::Slice(..) => true,
+            Type::Struct(..)
+            | Type::Enum(..)
+            | Type::Variant(..)
+            | Type::Array(..)
+            | Type::OwnedCell(..) => contains_reference(b.ty, ctx.structs(), enums, arrays),
+            _ => false,
+        };
+        if carries_slice {
+            return Err(captured_slice_error(span, name, b.ty));
         }
     }
     // Classify each capture and, for an aggregate/borrow one, record it as a
@@ -497,10 +536,15 @@ fn owning_capture_not_consumed_error(ctx: &Ctx, span: Span, name: &str, ty: Type
 /// its own frame, so a declared output that transitively contains a
 /// reference borrows a local of that frame, gone by the time whatever calls
 /// the quotation value reads it, reusing `stored_reference_output_error`'s
-/// wording (`builtins.rs`). Unlike the word-level check, there is no input
-/// arm: an *aggregate* input carrying a nested reference is already rejected
-/// at its struct/array declaration (a field or element typed `&T` is a
-/// located error there), which is the only shape this literal boundary sees.
+/// wording (`builtins.rs`).
+///
+/// P7b.S6d-PREREQ (REQ-4c): there is an input arm now. The old rationale for
+/// not having one -- "an aggregate input carrying a nested reference is
+/// already rejected at its struct/array declaration" -- is false for a
+/// shared-slice-bearing aggregate, which REQ-5 admits at its declaration, so
+/// this boundary needs the word-level rule of its own (`word_entry.rs`'s
+/// input arm): an input may *be* a reference, but not carry one.
+///
 /// A declared quotation *parameter* whose own effect returns a reference
 /// (`( &!Sprite [ &!Sprite -- &!i64 ] -- i64 )`) never reaches a
 /// materialization boundary and still panics in `referent_of`: an indirect
@@ -518,6 +562,16 @@ fn check_quotation_reference_free_effect(
             return Err(stored_reference_output_error(
                 eff.name_static,
                 *ty,
+                &location,
+            ));
+        }
+    }
+    for ty in &eff.inputs {
+        if !ty.is_ref() && contains_reference(*ty, ctx.structs(), ctx.enums(), arrays) {
+            let location = format!("{} (line {})", in_word(ctx), span.line);
+            return Err(stored_reference_input_error(
+                eff.name_static,
+                &ty.to_string(),
                 &location,
             ));
         }
@@ -604,7 +658,7 @@ mod tests {
         // Case 3a: a borrow whose `owned_root` names a current-frame local ->
         // FrameRooted.
         let mut prov = Provenance::default();
-        let d = prov.borrow("arr", false, false, span);
+        let d = prov.borrow("arr", None, false, false, span);
         let mut framed = Scope::default();
         framed.bound.push(capture_binding("arr", arr_ty, None));
         let borrow_local = capture_binding("r", ref_ty, Some(d));
@@ -657,7 +711,7 @@ mod tests {
         // Rooted in a current-frame local: the view dies with the storage it
         // views, so it may not escape.
         let mut prov = Provenance::default();
-        let d = prov.borrow("arr", true, false, span);
+        let d = prov.borrow("arr", None, true, false, span);
         let mut framed = Scope::default();
         framed.bound.push(capture_binding("arr", arr_ty, None));
         let framed_view = capture_binding("s", slice_ty, Some(d));
@@ -989,5 +1043,126 @@ mod tests {
             err.contains("`outer`"),
             "a captured `~` local should name the enclosing word: {err}"
         );
+    }
+
+    /// P7b.S6d-PREREQ (REQ-4b): `Type::Variant` belongs on the aggregate arm.
+    /// An eliminator arm's narrowed scrutinee fell to the scalar wildcard, so
+    /// a slice-bearing variant was snapshotted into the one-word env as if it
+    /// were an `i64`. Both directions are pinned: an arm answering
+    /// `FrameRooted` for a *scalar-represented* variant would be wrong too,
+    /// and the payload-free case is what separates them.
+    #[test]
+    fn classify_capture_variant_is_aggregate_not_scalar() {
+        let variant = |name: &'static str, fields: Vec<(String, Type)>| VariantDecl {
+            name: name.to_string(),
+            name_static: name,
+            display_static: name,
+            fields,
+            span: Span::default(),
+        };
+        let mut slices = Vec::new();
+        let slice = crate::ast::intern_slice_type(&mut slices, Type::I64, false);
+        let enums = vec![EnumDecl {
+            name: "Cell".to_string(),
+            name_static: "Cell",
+            variants: vec![
+                variant("Empty", vec![]),
+                variant("Full", vec![("v".to_string(), slice)]),
+            ],
+            span: Span::default(),
+            module: 0,
+        }];
+        let prov = Provenance::default();
+        let scope = Scope::default();
+        let id = EnumId::from_index(0);
+
+        let payload = capture_binding("c", Type::Variant(id, 1, "Cell.Full"), None);
+        assert!(matches!(
+            classify_capture(&payload, &prov, &scope, &enums),
+            CaptureClass::FrameRooted
+        ));
+        let empty = capture_binding("c", Type::Variant(id, 0, "Cell.Empty"), None);
+        assert!(matches!(
+            classify_capture(&empty, &prov, &scope, &enums),
+            CaptureClass::FrameRooted
+        ));
+    }
+
+    /// P7b.S6d-PREREQ (REQ-4b, Ruling D): the materialization fence, over
+    /// source so the whole admission path runs. Unconditional is the claim
+    /// being tested: the same capture is rejected at a plain in-frame
+    /// boundary, at an escaping one and at an `owning` one, because the cause
+    /// is the one-word-per-capture env encoding rather than escape. A bare
+    /// `&T` capture stays admitted -- it is one pointer word and already
+    /// works, so the fence is not a blanket ban on borrows.
+    #[test]
+    fn check_capture_admission_fences_every_slice_bearing_capture() {
+        let plain = check_src(
+            ": use ( [ -- ] -- ) call ;\n\
+             : main ( -- ) 0 4 fill | a | &a slice | v | [ v len drop ] use a drop ;\n",
+        )
+        .unwrap_err();
+        assert!(
+            plain.contains("a closure cannot capture `v`, whose type `Slice[i64]` carries a slice"),
+            "{plain}"
+        );
+        assert!(
+            plain.contains(
+                "a captured value gets one word in the closure's env block and a slice is two"
+            ),
+            "{plain}"
+        );
+
+        let window = "type: Window view Slice[i64] lo usize ;\n";
+        let escaping = check_src(&format!(
+            "{window}: mk ( -- [ -- usize ] ) 0 4 fill | a | &a slice 0 >usize Window | w | [ &w &view @ len ] ;\n"
+        ))
+        .unwrap_err();
+        assert!(
+            escaping.contains("a closure cannot capture `w`, whose type `Window` carries a slice"),
+            "{escaping}"
+        );
+
+        let owning = check_src(&format!(
+            "{window}: mk ( -- owning [ -- ] ) 0 4 fill | a | &a slice 0 >usize Window | w | [ &w &view @ len drop a drop ] ;\n"
+        ))
+        .unwrap_err();
+        assert!(
+            owning.contains("a closure cannot capture `w`, whose type `Window` carries a slice"),
+            "{owning}"
+        );
+
+        check_src(
+            ": use ( [ -- ] -- ) call ;\n\
+             : main ( -- ) 0 4 fill | a | &a | r | [ r 0 &> @ drop ] use a drop ;\n",
+        )
+        .expect("a bare reference capture is one word and stays admitted");
+    }
+
+    /// P7b.S6d-PREREQ (REQ-4c's addendum): the input arm
+    /// `check_quotation_reference_free_effect` did not have. Its absence
+    /// rested on "an aggregate input carrying a nested reference is already
+    /// rejected at its struct declaration", which REQ-5 falsifies for a
+    /// shared-slice-bearing aggregate. The top-level-reference exemption is
+    /// preserved, mirroring the word-level rule.
+    #[test]
+    fn quotation_effect_input_carrying_a_slice_is_a_located_error() {
+        let window = "type: Window view Slice[i64] lo usize ;\n";
+        let err = check_src(&format!(
+            "{window}: use ( [ Window -- ] -- ) drop ;\n\
+             : main ( -- ) [ ( Window -- ) drop ] use ;\n"
+        ))
+        .unwrap_err();
+        assert!(
+            err.contains("declares the input `Window`, which contains a reference"),
+            "{err}"
+        );
+        assert!(err.contains("(line 3)"), "the boundary is located: {err}");
+
+        check_src(
+            ": use ( [ &i64 -- ] -- ) drop ;\n\
+             : main ( -- ) [ ( &i64 -- ) drop ] use ;\n",
+        )
+        .expect("an input may *be* a reference");
     }
 }

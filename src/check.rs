@@ -3144,6 +3144,95 @@ fn reject_quotation_argument(ctx: &Ctx, span: Span, word: &str) -> String {
     )
 }
 
+/// P7b.S6d-PREREQ (REQ-4d, Ruling F): the borrow provenance a call's
+/// reference-bearing outputs inherit from its reference-bearing operands, and
+/// the rejection when they disagree about what is being viewed.
+///
+/// A value that transitively contains a slice *carries that slice's borrow*,
+/// so every site handing one out — a struct or enum constructor, a generic
+/// pass-through, a trait-member dispatch — has to hand the provenance out with
+/// it. Drop it and the produced value is invisible to every exclusivity scan,
+/// which is a laundered borrow, not a missing nicety: a second `&!` of the
+/// root is then accepted while the view is still readable.
+///
+/// `Slot.deriv` is one `DerivId` and `Deriv.owned_root` one place, so there is
+/// no representation for a value viewing two roots at once. Operands rooted at
+/// two different places are therefore a located error rather than a silent
+/// choice of one, which would leave the discarded root freely re-borrowable —
+/// the laundering hole again, at arity two. Operands agreeing on the root keep
+/// the first one's deriv, a choice with no observable content.
+fn carried_borrow(
+    ctx: &Ctx,
+    span: Span,
+    site: &str,
+    operands: &[Slot],
+    outputs: &[Type],
+    arrays: &[ArrayDecl],
+    prov: &mut Provenance,
+) -> Result<(Option<DerivId>, Option<Alias>), String> {
+    let bears = |ty: Type| {
+        ctx.with_extended_type_slices(|structs, enums| {
+            contains_reference(ty, structs, enums, arrays)
+        })
+    };
+    // Nothing is handed out, so nothing is laundered and there is no single
+    // root to insist on: `: flush ( &!'S &!StrBuf -- )` takes two references
+    // rooted at two places and produces no value that could view either.
+    if !outputs.iter().copied().any(bears) {
+        return Ok((None, None));
+    }
+    let bearing: Vec<Slot> = operands
+        .iter()
+        .copied()
+        .filter(|slot| bears(slot.ty))
+        .collect();
+    let mut chosen: Option<DerivId> = None;
+    let mut root: Option<String> = None;
+    for slot in &bearing {
+        let Some(id) = slot.deriv else { continue };
+        match (&root, prov.deriv(id).owned_root.clone()) {
+            // A deriv with no owned root is a reborrow of a reference reaching
+            // into an ancestor frame: there is no place in this body to
+            // protect, so it never conflicts with a rooted operand -- but it
+            // does win the slot if nothing rooted has claimed it yet
+            // (`chosen.or(...)`), since some deriv is better than none when no
+            // root is in contention.
+            (_, None) => chosen = chosen.or(Some(id)),
+            (None, Some(next)) => {
+                chosen = Some(id);
+                root = Some(next);
+            }
+            (Some(held), Some(next)) if *held != next => {
+                return Err(distinct_root_error(ctx, span, site, held, &next));
+            }
+            (Some(_), Some(_)) => {}
+        }
+    }
+    let alias = bearing
+        .iter()
+        .filter_map(|slot| slot.alias)
+        .reduce(|acc, next| Alias {
+            set: prov.alias_union(acc.set, next.set),
+            // The first operand's span: it is what `AliasOrigin::Stack`
+            // reports, so a conflict points at where the view was taken.
+            span: acc.span,
+        });
+    Ok((chosen, alias))
+}
+
+/// Ruling F's rejection: two views of two different places packed into one
+/// value. Lifting this needs a multi-root `Deriv`, which is a borrow-checker
+/// design question of its own, so the ban is conservative on purpose.
+fn distinct_root_error(ctx: &Ctx, span: Span, site: &str, first: &str, second: &str) -> String {
+    let site = crate::resolve::render_call(site);
+    format!(
+        "error: {site} would leave a value viewing both `{first}` and `{second}`{} (line {}, col {})\n  a value tracks a single borrowed place, so two views of two different places cannot be packed into one\n  build one value per place instead",
+        in_word(ctx),
+        span.line,
+        span.col,
+    )
+}
+
 /// Exclusivity, in whichever of its two symmetric directions was
 /// violated — a new mutable borrow conflicts with any live borrow of the place,
 /// a new shared one with a live mutable borrow. When the live borrow is a
@@ -3263,7 +3352,21 @@ fn check_shuffle(
             // copy denotes a region of its own — this is the whole remedy for an
             // aliased place. `over` below reuses the value instead, and so
             // deliberately keeps the region it copies.
-            stack.push(Slot { alias: None, ..top });
+            //
+            // P7b.S6d-PREREQ (REQ-4d): except for a reference-bearing
+            // aggregate, where the rationale above is false. The blit copies
+            // the slice's two words, so the copy views the *same* buffer as
+            // the original: it denotes no region of its own, and clearing the
+            // alias would make one token void the alias half of every rule
+            // REQ-4d states. (`deriv` already survives `dup`, which is why
+            // this was a latent hole rather than a live exploit.)
+            let bearing = ctx.with_extended_type_slices(|structs, enums| {
+                contains_reference(top.ty, structs, enums, arrays)
+            });
+            stack.push(match bearing {
+                true => top,
+                false => Slot { alias: None, ..top },
+            });
         }
         "drop" => {
             let top = stack.pop().ok_or_else(|| need("drop", 1, 0))?;
@@ -3276,7 +3379,9 @@ fn check_shuffle(
             // that no longer exists; the anonymous analogue of
             // `consume_of_borrowed_place_error`, keyed by region rather than
             // by a place name.
-            if let Some(origin) = consumed_place_conflict(top, stack, scope, prov, live, at) {
+            if let Some(origin) =
+                consumed_place_conflict(top, stack, ctx, arrays, scope, prov, live, at)
+            {
                 return Err(consuming_borrowed_value_error(ctx, span, "drop", origin));
             }
             // R6 (slice 8b): a side observation only. `drop` still pops one
@@ -5157,5 +5262,40 @@ mod tests {
              \x20 ~[ ( Circle ) Circle> drop f drop ] ~[ ( Rect ) Rect> drop drop f drop ] Shape? ;\n"
         ))
         .expect("each arm may consume the same outer local: only one arm runs");
+    }
+
+    /// P7b.S6d-PREREQ (REQ-4d): `dup`'s alias reset. The old rationale --
+    /// "`dup` of an aggregate deep-copies it, so the copy denotes a region of
+    /// its own" -- is false for a reference-bearing aggregate: the blit copies
+    /// the slice's two words, so the copy views the same buffer. `deriv`
+    /// already survived `dup`, so this was a latent hole rather than a live
+    /// exploit, but the alias half of every REQ-4d rule was voidable by one
+    /// token.
+    ///
+    /// The witness needs the widened `conflicts` closure to observe it (the
+    /// only live alias-keyed reader on this shape), so the two are pinned
+    /// together on purpose. Measured mutations: clearing the alias
+    /// unconditionally, *or* reverting the `conflicts` widening, makes the
+    /// first case build. The second case pins that a plain aggregate still
+    /// gets a fresh region, which is the whole remedy for an aliased place.
+    #[test]
+    fn dup_keeps_the_region_of_a_reference_bearing_aggregate_only() {
+        let window = "type: Window view Slice[i64] lo usize ;\n";
+        let err = check_src(&format!(
+            "{window}: main ( -- )\n  0 4 fill | a |\n  \
+             &a slice 0 >usize Window | w |\n  w dup &!view drop\n  \
+             drop drop\n  a drop\n;\n"
+        ))
+        .unwrap_err();
+        assert!(
+            err.contains("`&!view` conflicts with a live projection of the same field"),
+            "{err}"
+        );
+        check_src(
+            "type: Box v i64 ;\n\
+             : main ( -- )\n  0 Box | b |\n  b dup &!v drop\n  \
+             drop drop\n;\n",
+        )
+        .expect("a reference-free aggregate's copy denotes a region of its own");
     }
 }

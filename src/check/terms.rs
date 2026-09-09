@@ -300,6 +300,14 @@ fn check_term(
                             // carrier's) surviving set across the read so the
                             // captured referents stay live to the call.
                             surviving,
+                            // P7b.S6d-PREREQ (REQ-4d site 7): naming a
+                            // reference-bearing aggregate must not sever its
+                            // borrow chain. A *reference*-typed local takes
+                            // the reborrow arm above, which inherits; this arm
+                            // is where an aggregate carrying a slice arrives,
+                            // and dropping the deriv here would make `w |x|`
+                            // a one-token launder.
+                            deriv: scope.local(name).and_then(|b| b.deriv),
                             ..Slot::computed(ty)
                         });
                     }
@@ -505,6 +513,75 @@ fn check_term(
                         let unioned = prov.union_surviving(existing, Some(set));
                         if let Some(b) = scope.bound.iter_mut().find(|b| b.name == root) {
                             b.surviving = unioned;
+                        }
+                    }
+                }
+                // P7b.S6d-PREREQ (REQ-4d site 5): the field store had no
+                // provenance handling at all, and a shared `Slice[T]`
+                // referent passes `@`/`!`'s `Copy` gate, so once REQ-5 admits
+                // a slice field this is an unguarded write into a
+                // reference-bearing aggregate. Placed here, in the store's
+                // existing provenance block, because the machinery the two
+                // rules need is already here -- the surviving-set escape
+                // guard above is rule (i)'s structural twin, and the
+                // root-binding join directly above it is rule (ii)'s.
+                let bearing = ctx.with_extended_type_slices(|structs, enums| {
+                    contains_reference(stack[vi].ty, structs, enums, arrays)
+                });
+                if bearing && ref_parts(stack[vi - 1].ty, refs).is_some() {
+                    // (i) The receiver's root is not a local of this frame, so
+                    // the container outlives the frame whose storage the
+                    // stored view points into. The surviving-set guard above
+                    // cannot see this: it is gated on the stored value having
+                    // a surviving set, and a slice carries none. Ruling B's
+                    // input ban exempts a top-level reference, so a non-inline
+                    // word taking `&!Window` is exactly the reachable shape.
+                    if !ref_root_is_in_frame(stack[vi - 1].deriv, prov, scope) {
+                        return Err(stored_view_escapes_frame_error(
+                            ctx,
+                            span,
+                            name,
+                            stack[vi].ty,
+                        ));
+                    }
+                    // (ii) In-frame: the stored value's provenance joins the
+                    // receiver's root binding, so the container now tracks the
+                    // borrow it holds. Ruling F applies here as much as at a
+                    // construction -- storing a view of another place into an
+                    // already-rooted container would leave the container's
+                    // deriv naming a place it no longer views, which is worse
+                    // than carrying none (site 2 would then propagate the
+                    // *wrong* root on every read).
+                    // The container is the place the receiver reference was
+                    // taken from (`Deriv.place`, copied through every
+                    // projection step), *not* `owned_root`: site 3's
+                    // inheritance means `&!w`'s root already names the array
+                    // the container views, which is the thing being compared
+                    // against rather than the thing being updated.
+                    let container = stack[vi - 1].deriv.map(|did| prov.deriv(did).place.clone());
+                    if let Some(container) = container {
+                        let held = scope.local(&container).and_then(|b| b.deriv);
+                        let held_root = held.and_then(|id| prov.deriv(id).owned_root.clone());
+                        let stored_root = stack[vi]
+                            .deriv
+                            .and_then(|id| prov.deriv(id).owned_root.clone());
+                        if let (Some(h), Some(n)) = (&held_root, &stored_root) {
+                            if h != n {
+                                return Err(distinct_root_error(ctx, span, name, h, n));
+                            }
+                        }
+                        let alias = match (
+                            scope.local(&container).and_then(|b| b.aliases),
+                            stack[vi].alias,
+                        ) {
+                            (Some(a), Some(b)) => Some(prov.alias_union(a, b.set)),
+                            (Some(a), None) => Some(a),
+                            (None, Some(b)) => Some(b.set),
+                            (None, None) => None,
+                        };
+                        if let Some(b) = scope.bound.iter_mut().find(|b| b.name == container) {
+                            b.deriv = stack[vi].deriv.or(b.deriv);
+                            b.aliases = alias;
                         }
                     }
                 }
@@ -1152,16 +1229,42 @@ fn check_term(
             // left below it, so the scan covers the whole stack bar the
             // operand being consumed itself.
             for i in base..stack.len() {
-                let origin = consumed_place_conflict(stack[i], &stack[..i], scope, prov, live, at)
-                    .or_else(|| {
-                        consumed_place_conflict(stack[i], &stack[i + 1..], scope, prov, live, at)
-                    });
+                let origin = consumed_place_conflict(
+                    stack[i],
+                    &stack[..i],
+                    ctx,
+                    arrays,
+                    scope,
+                    prov,
+                    live,
+                    at,
+                )
+                .or_else(|| {
+                    consumed_place_conflict(
+                        stack[i],
+                        &stack[i + 1..],
+                        ctx,
+                        arrays,
+                        scope,
+                        prov,
+                        live,
+                        at,
+                    )
+                });
                 if let Some(origin) = origin {
                     return Err(consuming_borrowed_value_error(ctx, span, name, origin));
                 }
             }
             let carried = (base..stack.len())
                 .fold(None, |acc, i| prov.union_surviving(acc, stack[i].surviving));
+            // P7b.S6d-PREREQ (REQ-4d site 1): a struct/enum constructor is a
+            // generated `env` word, so a construction packing a slice into an
+            // aggregate is an ordinary word call and its output push is this
+            // one. `surviving` was already folded across the operands just
+            // above; the borrow provenance is folded the same way, and is what
+            // keeps the constructed value visible to the exclusivity scans.
+            let (carried_deriv, carried_alias) =
+                carried_borrow(ctx, span, name, &stack[base..], &sig.outputs, arrays, prov)?;
             // R3: detect a nullary variant constructor to set `variant_idx`
             // on the output slot, so `fill`'s element gate can admit a linear
             // nullary-variant seed (a nullary variant has no payload to
@@ -1191,9 +1294,18 @@ fn check_term(
                 } else {
                     None
                 };
+                // Only a reference-bearing output can carry a borrow onward,
+                // so a plain `i64`/`Point` output keeps `Slot::computed`'s
+                // empty provenance even when an operand had some: forwarding
+                // there would root a value that views nothing.
+                let bearing = ctx.with_extended_type_slices(|structs, enums| {
+                    contains_reference(*ty, structs, enums, arrays)
+                });
                 stack.push(Slot {
                     surviving,
                     variant_idx: nullary_variant_idx,
+                    deriv: bearing.then_some(carried_deriv).flatten(),
+                    alias: bearing.then_some(carried_alias).flatten(),
                     ..Slot::computed(*ty)
                 });
             }
@@ -2909,6 +3021,20 @@ fn consume_of_borrowed_place_error(
         live.span.col,
     )
 }
+/// P7b.S6d-PREREQ (REQ-4d site 5, rule (i)): storing a reference-bearing
+/// value through a receiver whose root is not a local of this frame. The
+/// structural twin of the surviving-set escape guard, over a channel that has
+/// no surviving set: the stored view points into storage that dies with this
+/// frame, while the container it lands in does not.
+fn stored_view_escapes_frame_error(ctx: &Ctx, span: Span, name: &str, ty: Type) -> String {
+    format!(
+        "error: `{name}` cannot store the borrow-carrying `{ty}`{} (line {}, col {}): the receiver is not rooted in this frame\n  the container outlives this frame, so the view it would hold points into storage that does not\n  return the view instead, or take the storage as an input",
+        in_word(ctx),
+        span.line,
+        span.col,
+    )
+}
+
 /// The symmetric direction: naming an aggregate while a mutable borrow of
 /// its storage is live. The converse of an exclusivity rule is
 /// easy to omit, and this is that omission: checking only at the borrow
@@ -3066,6 +3192,33 @@ mod tests {
             outs[0].surviving,
             Some(set),
             "the aggregate's surviving capture set must ride across the back-edge"
+        );
+    }
+
+    /// P7b.S6d-PREREQ (Deferred, the back-edge note): `back_edge_outs` above
+    /// forwards `surviving` alone and drops `deriv`, a latent twin of the
+    /// dispatch-push laundering -- unreachable only because
+    /// `check_reference_across_back_edge` rejects a deriv-carrying argument
+    /// first. Now that REQ-4d propagates a deriv onto a slice-bearing
+    /// aggregate, this test asserts the *rejection*, not the forward: if that
+    /// guard is ever narrowed, the hole opens with nothing else watching.
+    ///
+    /// It is also the stated capability boundary: a tainted `Window` can never
+    /// cross a self-tail back edge, which S6d's loop-shaped consumers will
+    /// meet until a loop-aware borrow story exists.
+    #[test]
+    fn back_edge_rejects_a_deriv_carrying_aggregate_argument() {
+        let err = check_src(
+            "type: Window view Slice[i64] lo usize ;\n\
+             : sum inline ( Window i64 -- i64 )\n  | w acc |\n  \
+             acc 0 gt ~[ w acc 1 sub sum ] ~[ acc ] if\n;\n\
+             : main ( -- ) 0 4 fill |a| &a slice 0 >usize Window 3 sum drop a drop ;\n",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("a reference to a local cannot cross a loop")
+                && err.contains("a reference derived from `a`"),
+            "{err}"
         );
     }
 
@@ -4318,5 +4471,132 @@ mod tests {
             err.contains("is ambiguous: declared in modules"),
             "unexpected message: {err}"
         );
+    }
+
+    /// P7b.S6d-PREREQ (REQ-4d site 1): the construction push. A struct
+    /// constructor is a generated `env` word, so packing a view into an
+    /// aggregate goes through the ordinary word-call output push -- which
+    /// forwarded `surviving` and dropped `deriv`, leaving the constructed
+    /// value invisible to every exclusivity scan.
+    ///
+    /// Measured mutation: forcing `deriv: None` on this push makes the
+    /// rejection below build.
+    #[test]
+    fn construction_push_forwards_the_operands_borrow_provenance() {
+        let err = check_src(
+            "type: Holder val Slice[i64] ;\n\
+             : main ( -- )\n  0 4 fill | a |\n  &a slice Holder | h |\n  \
+             &!a | r |\n  r 0 >usize &!> 7 !\n  &h &val @ len drop\n  a drop\n;\n",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("`&!a` conflicts with a live borrow of `a`"),
+            "{err}"
+        );
+        // A non-reference-bearing output inherits nothing: a word taking a
+        // view and returning a plain `usize` roots no value, so the second
+        // borrow is free once the view itself is dead.
+        check_src(
+            ": main ( -- )\n  0 4 fill | a |\n  &a slice len drop\n  \
+             &!a | r |\n  r 0 >usize &!> 7 !\n  a drop\n;\n",
+        )
+        .expect("a scalar output carries no borrow onward");
+    }
+
+    /// P7b.S6d-PREREQ (REQ-4d site 1, Ruling F): `Slot.deriv` is one id and
+    /// `Deriv.owned_root` one place, so a value viewing two arrays cannot be
+    /// represented -- and silently keeping one root would leave the other
+    /// freely re-borrowable, which is the laundering hole at arity two. Both
+    /// sides are pinned, since a blanket ban on two-slice aggregates would
+    /// pass the rejection half alone.
+    #[test]
+    fn construction_push_rejects_operands_rooted_at_two_places() {
+        let pair = "type: Pair a Slice[i64] b Slice[i64] ;\n";
+        let err = check_src(&format!(
+            "{pair}: main ( -- )\n  0 4 fill | p |\n  0 4 fill | q |\n  \
+             &p slice &q slice Pair drop\n  p drop q drop\n;\n"
+        ))
+        .unwrap_err();
+        assert!(
+            err.contains("would leave a value viewing both `p` and `q`"),
+            "{err}"
+        );
+        check_src(&format!(
+            "{pair}: main ( -- )\n  0 4 fill | p |\n  \
+             &p slice &p slice Pair drop\n  p drop\n;\n"
+        ))
+        .expect("two views of one array agree on the root");
+        // A call that hands out nothing reference-bearing insists on no single
+        // root at all: `flush ( &!'S &!StrBuf -- )` takes two references
+        // rooted at two places and is how `core::show` prints.
+        check_src(
+            ": both ( &i64 &i64 -- ) drop drop ;\n\
+             : main ( -- )\n  0 4 fill | p |\n  0 4 fill | q |\n  \
+             &p 0 &> &q 0 &> both\n  p drop q drop\n;\n",
+        )
+        .expect("no reference-bearing output, so no single-root rule");
+    }
+
+    /// P7b.S6d-PREREQ (REQ-4d site 7): the name-read push. A *reference*-typed
+    /// local takes the reborrow arm above, which inherits; an aggregate takes
+    /// this push, and dropping the deriv here made `w |x|` a one-token
+    /// launder. Measured mutation: deleting the `deriv` field from the push
+    /// makes this build.
+    #[test]
+    fn name_read_push_forwards_an_aggregates_borrow_provenance() {
+        let window = "type: Window view Slice[i64] lo usize ;\n";
+        let err = check_src(&format!(
+            "{window}: main ( -- )\n  0 4 fill | a |\n  \
+             &a slice 0 >usize Window | w |\n  w | x |\n  \
+             &!a | r |\n  r 0 >usize &!> 7 !\n  &x &view @ len drop\n  a drop\n;\n"
+        ))
+        .unwrap_err();
+        assert!(
+            err.contains("`&!a` conflicts with a live borrow of `a`"),
+            "{err}"
+        );
+    }
+
+    /// P7b.S6d-PREREQ (REQ-4d site 5): the field store's two rules. (i) A
+    /// receiver whose root is not a local of this frame is an escape -- the
+    /// pre-existing surviving-set guard cannot see it, since a slice carries
+    /// no surviving set, and Ruling B's top-level-reference exemption is what
+    /// makes `&!Window` a reachable input. (ii) In-frame, a view of a
+    /// *different* place is Ruling F again: propagating the wrong root on
+    /// every later read is worse than propagating none.
+    #[test]
+    fn field_store_rejects_an_out_of_frame_receiver_and_a_second_root() {
+        let window = "type: Window view Slice[i64] lo usize ;\n";
+        let escape = check_src(&format!(
+            "{window}: stash ( &!Window -- )\n  | w |\n  0 4 fill | own |\n  \
+             w &!view &own slice !\n  own drop\n;\n"
+        ))
+        .unwrap_err();
+        assert!(
+            escape.contains("cannot store the borrow-carrying `Slice[i64]`")
+                && escape.contains("the receiver is not rooted in this frame"),
+            "{escape}"
+        );
+
+        let second_root = check_src(&format!(
+            "{window}: main ( -- )\n  0 4 fill | b |\n  0 4 fill | a |\n  \
+             &b slice 0 >usize Window | w |\n  &!w &!view &a slice !\n  \
+             &w &view @ len drop\n  a drop b drop\n;\n"
+        ))
+        .unwrap_err();
+        assert!(
+            second_root.contains("would leave a value viewing both `b` and `a`"),
+            "{second_root}"
+        );
+
+        // A non-reference-bearing store through the same out-of-frame receiver
+        // stays legal: rule (i) is about the borrow the stored value carries,
+        // not about the receiver's rootedness on its own.
+        check_src(
+            "type: Box v i64 ;\n\
+             : set ( &!Box -- ) | b | b &!v 7 ! ;\n\
+             : main ( -- ) 0 Box | b | &!b set b drop ;\n",
+        )
+        .expect("storing an `i64` through a reference input is unaffected");
     }
 }

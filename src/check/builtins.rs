@@ -585,6 +585,16 @@ pub(super) fn contains_reference(
             .iter()
             .flat_map(|v| v.fields.iter())
             .any(|(_, f)| contains_reference(*f, structs, enums, arrays)),
+        // P7b.S6d-PREREQ (REQ-5): the `Enum` arm restricted to one variant.
+        // `Type::Variant` is what an owning eliminator arm binds, and without
+        // this arm it fell to the wildcard and reported a slice-bearing
+        // payload reference-free -- untracked end to end the moment a slice
+        // payload became declarable. A monotone widening of the predicate
+        // (strictly more types report `true`), never a carve-out.
+        Type::Variant(id, vi, _) => enums[id.index()].variants[vi]
+            .fields
+            .iter()
+            .any(|(_, f)| contains_reference(*f, structs, enums, arrays)),
         Type::Array(id, _) => {
             contains_reference(arrays[id.index()].element, structs, enums, arrays)
         }
@@ -603,6 +613,21 @@ pub(super) fn contains_reference(
 pub(super) fn stored_reference_output_error(name: &str, ty: Type, location: &str) -> String {
     format!(
         "error: a reference cannot be stored: {} declares the output `{ty}`{location}\n  a `&T`/`&!T` borrows a local of the callee's own frame, which is gone by the time the caller reads it; take the reference as an input instead",
+        crate::resolve::render_word(name)
+    )
+}
+
+/// P7b.S6d-PREREQ (P1-3): the input-side twin of `stored_reference_output_error`,
+/// extracted for the same reason -- `check_reference_free_signature`
+/// (`word_entry.rs`, a `Slot` signature), `audit_poly_reference_free_signature`
+/// (`audits.rs`, a `PolyType` signature, rendered to a `String` first since it
+/// has no `Type` to hand this directly) and
+/// `check_quotation_reference_free_effect` (`captures.rs`, a `QuotEffect`) all
+/// hit this over three different row representations. `ty` is a rendered
+/// string rather than a `Type` because the poly caller has none.
+pub(super) fn stored_reference_input_error(name: &str, ty: &str, location: &str) -> String {
+    format!(
+        "error: a reference cannot be stored: {} declares the input `{ty}`, which contains a reference{location}\n  an input may *be* a `&T`/`&!T`, but not carry one nested inside an aggregate",
         crate::resolve::render_word(name)
     )
 }
@@ -1094,5 +1119,39 @@ mod tests {
         let mutable = crate::ast::intern_slice_type(&mut slices, Type::I64, true);
         assert!(contains_reference(shared, &[], &[], &[]));
         assert!(contains_reference(mutable, &[], &[], &[]));
+    }
+
+    /// P7b.S6d-PREREQ (REQ-5): the `Type::Variant` arm. An owning eliminator
+    /// arm binds its scrutinee at `Type::Variant`, which fell to the
+    /// `_ => false` wildcard and was reported reference-free -- so a
+    /// slice-bearing payload was untracked end to end once such a payload
+    /// became declarable. Restricted to the *matched* variant, so a
+    /// reference-free variant of a reference-bearing enum still answers
+    /// `false`, which the whole-enum `Enum` arm cannot.
+    #[test]
+    fn contains_reference_sees_a_slice_through_a_variant() {
+        let tokens = lex("type: Cell | Empty | Full v Slice[i64] ;\n").unwrap();
+        let module = crate::test_support::parse_with_core(&tokens).unwrap();
+        let id = EnumId::from_index(
+            module
+                .enums
+                .iter()
+                .position(|e| e.name == "Cell")
+                .expect("Cell is declared"),
+        );
+        let regs = (&module.structs[..], &module.enums[..], &module.arrays[..]);
+        let (structs, enums, arrays) = regs;
+        let empty = Type::Variant(id, 0, "Cell.Empty");
+        let full = Type::Variant(id, 1, "Cell.Full");
+        assert!(contains_reference(full, structs, enums, arrays));
+        assert!(!contains_reference(empty, structs, enums, arrays));
+        // The whole enum was already reference-bearing; the point of the new
+        // arm is the per-variant answer above.
+        assert!(contains_reference(
+            Type::Enum(id, "Cell"),
+            structs,
+            enums,
+            arrays
+        ));
     }
 }

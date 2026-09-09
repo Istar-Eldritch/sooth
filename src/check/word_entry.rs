@@ -171,11 +171,7 @@ pub(super) fn check_reference_free_signature(
     }
     for slot in &effect.inputs {
         if !slot.ty.is_ref() && contains_reference(slot.ty, structs, enums, arrays) {
-            let ty = slot.ty;
-            return Err(format!(
-                "error: a reference cannot be stored: {} declares the input `{ty}`, which contains a reference\n  an input may *be* a `&T`/`&!T`, but not carry one nested inside an aggregate",
-                crate::resolve::render_word(name)
-            ));
+            return Err(stored_reference_input_error(name, &slot.ty.to_string(), ""));
         }
     }
     Ok(())
@@ -521,5 +517,32 @@ mod tests {
              : bump inline ( A A -- i64 ) | x y | &x &n @ drop &y &n @ drop 1000 ;\n",
         )
         .expect("an `inline` word whose name no operator claims is accepted");
+    }
+
+    /// P7b.S6d-PREREQ (REQ-4a, Ruling B): both arms of the signature check
+    /// now fire over an *aggregate* that merely carries a slice, and the
+    /// existing texts are reused verbatim. The combinator exemption is what
+    /// makes body-local production possible at all, so it is pinned here as
+    /// the third case: without it G1's `total` could not exist.
+    #[test]
+    fn reference_free_signature_rejects_a_slice_bearing_aggregate_in_both_positions() {
+        let window = "type: Window view Slice[i64] lo usize ;\n";
+        let err = check_src(&format!(
+            "{window}: mk ( -- Window ) 0 4 fill |a| &a slice 0 >usize Window ;\n"
+        ))
+        .unwrap_err();
+        assert!(err.contains("`mk` declares the output `Window`"), "{err}");
+
+        let err = check_src(&format!("{window}: takes ( Window -- ) drop ;\n")).unwrap_err();
+        assert!(
+            err.contains("`takes` declares the input `Window`, which contains a reference"),
+            "{err}"
+        );
+
+        check_src(&format!(
+            "{window}: total inline ( Window -- i64 ) |w| &w &view @ len >i64 ;\n\
+             : main ( -- ) 0 4 fill |a| &a slice 0 >usize Window total drop a drop ;\n"
+        ))
+        .expect("a spliced word has no frame of its own to outlive");
     }
 }

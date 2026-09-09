@@ -1086,6 +1086,9 @@ fn check_no_stored_references(
 ) -> Result<(), String> {
     for decl in structs {
         for (field, ty) in &decl.fields {
+            if is_shared_slice_bearing(*ty, structs, enums, arrays) {
+                continue;
+            }
             if contains_reference(*ty, structs, enums, arrays) {
                 return Err(stored_reference_error(
                     &format!("field `{field}` of type `{}`", decl.name_static),
@@ -1098,6 +1101,9 @@ fn check_no_stored_references(
     for decl in enums {
         for variant in &decl.variants {
             for (idx, (field, ty)) in variant.fields.iter().enumerate() {
+                if is_shared_slice_bearing(*ty, structs, enums, arrays) {
+                    continue;
+                }
                 if contains_reference(*ty, structs, enums, arrays) {
                     return Err(stored_reference_error(
                         &format!(
@@ -1132,6 +1138,47 @@ fn check_no_stored_references(
         }
     }
     Ok(())
+}
+
+/// P7b.S6d-PREREQ (REQ-5, Ruling A): the admit-and-taint predicate the two
+/// *declared-aggregate* sweeps of `check_no_stored_references` skip on. True
+/// for a reference-free type (admitted trivially, the base case), for a
+/// **shared** `Slice[T]`, and for a struct or enum every one of whose fields
+/// (resp. variant payload fields) is itself admissible. A `&T`/`&!T` -- and a
+/// `!Slice[T]`, which `@` could never read back out of a field, since its
+/// referent is not `Copy` and Sooth has no move-out-of-a-field -- is still
+/// rejected, directly or nested.
+///
+/// Admitting a field does not make it *free*: the containing type stays
+/// reference-bearing under `contains_reference`, so every escape ban stated
+/// over that predicate (a non-inline word's inputs and outputs, a capture, an
+/// array element, a cell payload, a slice element) still applies to it. This
+/// is a position-local skip at two named call sites, not a change to the taint
+/// test itself.
+///
+/// No `Type::Array` arm, deliberately: an array of admissible elements is
+/// rejected by the array sweep below regardless of what this predicate says,
+/// so an arm here would decide nothing except which of the two messages the
+/// user reads -- and the field-located one is the better of them.
+fn is_shared_slice_bearing(
+    ty: Type,
+    structs: &[StructDecl],
+    enums: &[EnumDecl],
+    arrays: &[ArrayDecl],
+) -> bool {
+    match ty {
+        Type::Slice(_, mutable, _) => !mutable,
+        Type::Struct(id, _) => structs[id.index()]
+            .fields
+            .iter()
+            .all(|(_, f)| is_shared_slice_bearing(*f, structs, enums, arrays)),
+        Type::Enum(id, _) => enums[id.index()]
+            .variants
+            .iter()
+            .flat_map(|v| v.fields.iter())
+            .all(|(_, f)| is_shared_slice_bearing(*f, structs, enums, arrays)),
+        _ => !contains_reference(ty, structs, enums, arrays),
+    }
 }
 
 /// The one wording every escape rejection shares. `position` names the
@@ -1683,8 +1730,11 @@ fn type_node(ty: &Type) -> Option<TypeNode> {
         Type::Ref(..) => None,
         // P7 slice 3c (R1.3): a slice is reference-shaped -- it views storage
         // it does not own, so it holds no inline copy of its element and
-        // closes no size cycle. The same no-stored-reference rule keeps it out
-        // of every field position too (`contains_reference` reports it).
+        // closes no size cycle. P7b.S6d-PREREQ (REQ-5): a *shared* slice is
+        // an admitted field type now, so this arm is load-bearing rather than
+        // moot -- `type: Holder val Slice[Holder] ;` passes this check on its
+        // own merits, and is rejected instead by `check_slice_element_gate`,
+        // which still refuses a reference-bearing slice *element*.
         Type::Slice(..) => None,
         // `bool` is `Type::Enum` and so caught by the arm above; a zero-payload
         // enum has no fields, hence no containment edges, so it is a leaf.
@@ -4368,6 +4418,86 @@ mod tests {
         assert_eq!(
             &extended_variant_sigs[..base_variant_sigs.len()],
             &base_variant_sigs[..]
+        );
+    }
+    /// P7b.S6d-PREREQ (REQ-5, Ruling A): the two relaxed sweeps. A shared
+    /// `Slice[T]` is an admitted struct field and enum payload; `!Slice[T]`
+    /// and a bare `&T`/`&!T` are not, and the mutable case is the one that
+    /// matters -- `@` is the only value-fetch through a field reference and it
+    /// gates on `is_copy` of the referent, which `!Slice` fails.
+    #[test]
+    fn check_no_stored_references_admits_a_shared_slice_field_only() {
+        check_src("type: Window view Slice[i64] lo usize ;\n: main ( -- ) 1 drop ;\n")
+            .expect("a shared slice is an admitted struct field");
+        check_src("type: Cell | Empty | Full v Slice[i64] ;\n: main ( -- ) 1 drop ;\n")
+            .expect("a shared slice is an admitted enum payload");
+
+        let err =
+            check_src("type: MutHolder val !Slice[i64] ;\n: main ( -- ) 1 drop ;\n").unwrap_err();
+        assert!(
+            err.contains("field `val` of type `MutHolder` has type `!Slice[i64]`"),
+            "{err}"
+        );
+        let err = check_src("type: RefHolder val &i64 ;\n: main ( -- ) 1 drop ;\n").unwrap_err();
+        assert!(
+            err.contains("field `val` of type `RefHolder` has type `&i64`"),
+            "{err}"
+        );
+        let err = check_src("type: MutCell | E | F v !Slice[i64] ;\n: main ( -- ) 1 drop ;\n")
+            .unwrap_err();
+        assert!(err.contains("`!Slice[i64]`"), "{err}");
+    }
+
+    /// P7b.S6d-PREREQ (REQ-5): the predicate is *recursive*, and the base case
+    /// is the half the round-2 draft's version lacked -- its "all fields are
+    /// shared-slice-bearing" reading rejected `Window` itself, whose `lo`
+    /// field is a plain `usize`. Nesting is admitted for the same reason: the
+    /// naive "reject unless the field type is exactly `Type::Slice`" would
+    /// reject a composition `contains_reference` already reports as tainted.
+    #[test]
+    fn check_no_stored_references_admits_a_nested_slice_bearing_struct() {
+        check_src(
+            "type: Holder val Slice[i64] ;\n\
+             type: Outer h Holder ;\n\
+             : main ( -- ) 1 drop ;\n",
+        )
+        .expect("nesting a slice-bearing struct is admitted and tainted");
+        let err = check_src(
+            "type: Bad val !Slice[i64] ;\n\
+             type: Outer h Bad ;\n\
+             : main ( -- ) 1 drop ;\n",
+        )
+        .unwrap_err();
+        assert!(err.contains("`!Slice[i64]`"), "{err}");
+    }
+
+    /// P7b.S6d-PREREQ (REQ-4c): the other two sweeps and the element gate are
+    /// unchanged, and they are what keeps the relaxation position-local -- an
+    /// admitted *field* type is still refused as an array element, a cell
+    /// payload and a slice element.
+    #[test]
+    fn check_no_stored_references_keeps_array_cell_and_slice_element_hard() {
+        let holder = "type: Holder val Slice[i64] ;\n";
+        let err = check_src(&format!(
+            "{holder}: mk inline ( Holder -- array[Holder 3] ) 3 fill ;\n: main ( -- ) 1 drop ;\n"
+        ))
+        .unwrap_err();
+        assert!(
+            err.contains("element of array type `array[Holder 3]`"),
+            "{err}"
+        );
+        let err = check_src(&format!(
+            "{holder}: keep inline ( ^Holder -- ^Holder ) ;\n: main ( -- ) 1 drop ;\n"
+        ))
+        .unwrap_err();
+        assert!(err.contains("payload of cell type `^Holder`"), "{err}");
+        let err = check_src(&format!(
+            "{holder}: w inline ( Slice[Holder] -- Slice[Holder] ) ;\n: main ( -- ) 1 drop ;\n"
+        ))
+        .unwrap_err();
+        assert!(
+            err.contains("element of slice type `Slice[Holder]`"),
+            "{err}"
         );
     }
 }

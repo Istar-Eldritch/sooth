@@ -330,9 +330,10 @@ fn audit_poly_reference_free_signature(
         let top_level_ref =
             matches!(pt, PolyType::Ref(..)) || matches!(pt, PolyType::Concrete(t) if t.is_ref());
         if !top_level_ref && contains_poly_reference(pt, structs, enums, arrays) {
-            return Err(format!(
-                "error: a reference cannot be stored: `{word}` declares the input `{}`, which contains a reference\n  an input may *be* a `&T`/`&!T`, but not carry one nested inside an aggregate",
-                poly_type_str(pt, sig)
+            return Err(stored_reference_input_error(
+                &w.name,
+                &poly_type_str(pt, sig),
+                "",
             ));
         }
     }
@@ -1139,5 +1140,35 @@ mod tests {
             generic.contains("`g` is generic and declares `owning [ -- ]`"),
             "unexpected message: {generic}"
         );
+    }
+
+    /// P7b.S6d-PREREQ (REQ-4a): the poly twin's `PolyType::Concrete` arm
+    /// delegates to `contains_reference`, so it sees a slice-bearing aggregate
+    /// the same way the monomorphic check does. The witness has to be a
+    /// *declared concrete* slot: a declared generic slot is `PolyType::Var`,
+    /// which the audit answers `false` for unconditionally, and there is no
+    /// per-instantiation audit anywhere in the tree (a named gap, deferred) --
+    /// which the second case pins so nobody mistakes it for coverage.
+    #[test]
+    fn poly_concrete_slice_bearing_aggregate_output_is_rejected() {
+        let window = "type: Window view Slice[i64] lo usize ;\n";
+        let err = check_src(&format!(
+            "{window}: w ( 'T -- Window ) drop 0 4 fill |a| &a slice 0 >usize Window ;\n"
+        ))
+        .unwrap_err();
+        assert!(err.contains("`w` declares the output `Window`"), "{err}");
+
+        let err = check_src(&format!("{window}: t ( Window -- Window ) ;\n")).unwrap_err();
+        assert!(err.contains("declares the output `Window`"), "{err}");
+
+        // The deferred gap, stated as behaviour: a generic slot instantiated
+        // at a slice-bearing type passes both arms. Its misuse is a located
+        // error via REQ-4d's propagation instead (see `check/poly.rs`'s
+        // dispatch-push test), not via this audit.
+        check_src(&format!(
+            "{window}: thru ( 'T -- 'T ) ;\n\
+             : main ( -- ) 0 4 fill |a| &a slice 0 >usize Window thru drop a drop ;\n"
+        ))
+        .expect("the instantiation-time audit is a named gap, not a rejection");
     }
 }

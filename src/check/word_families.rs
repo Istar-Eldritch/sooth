@@ -166,6 +166,7 @@ pub(super) fn check_reference_word(
                 span,
                 stack,
                 ctx,
+                arrays,
                 scope,
                 refs,
                 prov,
@@ -240,8 +241,16 @@ pub(super) fn check_reference_word(
             // any live borrow of the place; a new shared one conflicts with a
             // live mutable borrow. Per place, never a global counter: two live
             // `&!` rooted at different locals do not conflict.
+            // P7b.S6d-PREREQ (REQ-4d site 3, second half): `d.place == rest`
+            // is not redundant with the root test. `prov.borrow` inherits the
+            // borrowed local's own chain when it has one, which re-roots the
+            // deriv away from that local's name -- so a *later* borrow of the
+            // same local (`&!w` while `&w` is live) matches neither the old
+            // root nor the new one, and the shared-then-exclusive guard on the
+            // local itself would go blind. `Deriv.place` still records the
+            // borrowed place, so it is the half that keeps firing.
             if let Some(id) = live_deriv(stack, scope, prov, live, at, |d| {
-                d.owned_root.as_deref() == Some(rest) && (mutable || d.mutable)
+                (d.owned_root.as_deref() == Some(rest) || d.place == rest) && (mutable || d.mutable)
             }) {
                 // R24: if the conflicting borrow is live *only* because an
                 // erased closure's surviving set keeps its holder alive past
@@ -271,7 +280,8 @@ pub(super) fn check_reference_word(
                 }
             }
             let out = intern_ref_type(refs, referent_ty, mutable);
-            let deriv = prov.borrow(rest, mutable, static_root, span);
+            let held = scope.local(rest).and_then(|b| b.deriv);
+            let deriv = prov.borrow(rest, held, mutable, static_root, span);
             stack.push(Slot::derived(out, Some(deriv)));
         }
     }
@@ -305,6 +315,7 @@ fn check_field_projection(
     span: Span,
     stack: &mut Vec<Slot>,
     ctx: &Ctx,
+    arrays: &[ArrayDecl],
     scope: &Scope,
     refs: &mut Vec<RefDecl>,
     prov: &mut Provenance,
@@ -434,17 +445,31 @@ fn check_field_projection(
             // duplicating its value, so a linear field is not special here
             // (`@`/`!` still refuse to move one through it).
             let alias = projected_region(&mut stack[n - 1], field, span, prov);
-            if let Some(origin) =
-                overlapping_projection(&stack[..n - 1], scope, prov, live, at, alias.set, mutable)
-            {
+            if let Some(origin) = overlapping_projection(
+                &stack[..n - 1],
+                ctx,
+                arrays,
+                scope,
+                prov,
+                live,
+                at,
+                alias.set,
+                mutable,
+            ) {
                 return Err(conflicting_projection_error(
                     ctx, span, name, mutable, origin,
                 ));
             }
             let out = intern_ref_type(refs, field_ty, mutable);
+            // P7b.S6d-PREREQ (REQ-4d site 6): the deriv forward the
+            // owned-receiver arm above already does. This arm carried the
+            // alias alone, which made the anonymous path alias-only and so
+            // weaker on exactly the shape the `@` fetch below relies on --
+            // `deriv` is the primary enforcement channel.
+            let deriv = prov.project(stack[n - 1].deriv);
             stack.push(Slot {
                 alias: Some(alias),
-                ..Slot::computed(out)
+                ..Slot::derived(out, deriv)
             });
         }
     }
@@ -465,8 +490,19 @@ fn check_field_projection(
 /// live projection, a new `&` only with a live mutable one). Only
 /// *reference*-typed values are candidates: the receiver and its copies denote
 /// the same regions but hold no borrow, and consuming one is what ends it.
+/// P7b.S6d-PREREQ (REQ-4d): whether `ty` carries a borrow, resolved against
+/// the live registries (a check-time monomorph's id can sit past `ctx`'s own
+/// slices, which is what `with_extended_type_slices` exists for). The taint
+/// test the two region guards below are stated over.
+fn reference_bearing(ty: Type, ctx: &Ctx, arrays: &[ArrayDecl]) -> bool {
+    ctx.with_extended_type_slices(|structs, enums| contains_reference(ty, structs, enums, arrays))
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(super) fn overlapping_projection<'a>(
     below: &[Slot],
+    ctx: &Ctx,
+    arrays: &[ArrayDecl],
     scope: &'a Scope,
     prov: &Provenance,
     live: &Liveness,
@@ -480,8 +516,21 @@ pub(super) fn overlapping_projection<'a>(
         // matches the shape directly rather than through `is_ref()` (it
         // needs the mutability bit), so the widening does not reach it on
         // its own -- and without the arm a view keeps nothing borrowed.
+        //
+        // P7b.S6d-PREREQ (REQ-4d): an aggregate *holding* a shared view is
+        // the third shape, and it is what makes packing a `Slice[T]` into a
+        // `Holder` visible to the other side of a conflict check. It is
+        // shared-only by construction (Ruling A), so it contributes no
+        // mutability of its own -- a new `&!` is what turns it into a
+        // conflict.
         let other_mutable = match ty {
             Type::Ref(_, m, _) | Type::Slice(_, m, _) => m,
+            Type::Struct(..) | Type::Enum(..) | Type::Variant(..) | Type::Array(..) => {
+                match reference_bearing(ty, ctx, arrays) {
+                    true => false,
+                    false => return false,
+                }
+            }
             _ => return false,
         };
         (mutable || other_mutable) && alias.is_some_and(|other| prov.alias_sets_overlap(set, other))
@@ -513,18 +562,41 @@ pub(super) fn overlapping_projection<'a>(
 /// A *reference* being consumed is not a place ending: consuming one of two
 /// shared projections of a field is how a borrow ends, and the storage it
 /// pointed into outlives it either way.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn consumed_place_conflict<'a>(
     consumed: Slot,
     others: &[Slot],
+    ctx: &Ctx,
+    arrays: &[ArrayDecl],
     scope: &'a Scope,
     prov: &Provenance,
     live: &Liveness,
     at: usize,
 ) -> Option<AliasOrigin<'a>> {
-    if matches!(consumed.ty, Type::Ref(..) | Type::Slice(..)) {
+    // P7b.S6d-PREREQ (REQ-4d): the exemption extends to a reference-bearing
+    // aggregate, which is likewise not a place ending -- consuming a `Holder`
+    // whose view has already gone dead is a legal drop, and site 1's alias
+    // forward is what would otherwise make it look like one. Note the
+    // direction: this side *exempts*, while `overlapping_projection`'s
+    // `conflicts` closure above *includes*. They answer opposite questions --
+    // "does consuming this end a place" versus "is this other slot a live
+    // borrow of the region I am about to touch".
+    if matches!(consumed.ty, Type::Ref(..) | Type::Slice(..))
+        || reference_bearing(consumed.ty, ctx, arrays)
+    {
         return None;
     }
-    overlapping_projection(others, scope, prov, live, at, consumed.alias?.set, true)
+    overlapping_projection(
+        others,
+        ctx,
+        arrays,
+        scope,
+        prov,
+        live,
+        at,
+        consumed.alias?.set,
+        true,
+    )
 }
 
 /// `@` fetches, `!` stores, `+!` adds in place. All three are restricted
@@ -580,10 +652,22 @@ pub(super) fn check_access_word(
                 .and_then(|id| prov.deriv(id).owned_root.clone())
                 .and_then(|root| scope.local(&root))
                 .and_then(|b| b.surviving);
+            // P7b.S6d-PREREQ (REQ-4d site 2): a reference-bearing referent is
+            // a borrow being handed out, so the receiver reference's own
+            // provenance rides onto the fetched value -- the read-side mirror
+            // of the surviving forward directly above. Without it `&w &view @
+            // |s|` re-launders on read: the fetched slice would be invisible
+            // to every guard even with the write side propagating correctly.
+            let bearing = ctx.with_extended_type_slices(|structs, enums| {
+                contains_reference(referent, structs, enums, arrays)
+            });
+            let deriv = bearing.then_some(stack[n - 1].deriv).flatten();
+            let alias = bearing.then_some(stack[n - 1].alias).flatten();
             stack.truncate(n - 1);
             stack.push(Slot {
                 surviving,
-                ..Slot::computed(referent)
+                alias,
+                ..Slot::derived(referent, deriv)
             });
         }
         "!" | "+!" => {
@@ -1089,9 +1173,16 @@ pub(super) fn check_owned_cell_word(
             // Review fix (P7 slice 1): `^` consumes its payload just as
             // `drop` does, so a payload a live projection still reaches
             // cannot be moved into the cell out from under that reference.
-            if let Some(origin) =
-                consumed_place_conflict(stack[n - 1], &stack[..n - 1], scope, prov, live, at)
-            {
+            if let Some(origin) = consumed_place_conflict(
+                stack[n - 1],
+                &stack[..n - 1],
+                ctx,
+                arrays,
+                scope,
+                prov,
+                live,
+                at,
+            ) {
                 return Err(consuming_borrowed_value_error(ctx, span, "^", origin));
             }
             // Review fix: forward the payload's surviving set (R19) onto the
@@ -2178,7 +2269,7 @@ mod tests {
         );
         let mut refs = Vec::new();
         let mut prov = Provenance::default();
-        let operand = prov.borrow("s", operand_mutable, false, Span::default());
+        let operand = prov.borrow("s", None, operand_mutable, false, Span::default());
         let ref_ty = intern_ref_type(&mut refs, shape_variant(module, 0), operand_mutable);
         let mut stack = vec![Slot::derived(ref_ty, Some(operand))];
         let out = check_reference_word(
@@ -3103,5 +3194,129 @@ mod tests {
             err.contains("ordinary `[ ... ]` quotation"),
             "unexpected message: {err}"
         );
+    }
+
+    /// P7b.S6d-PREREQ (REQ-4d site 2): `@`'s fetch arm. The receiver
+    /// reference's provenance was in hand (the `surviving` forward directly
+    /// above reads it) and dropped, so `&w &view @ |s|` re-laundered the
+    /// borrow on read even with the write side propagating correctly.
+    ///
+    /// Measured mutation: forcing `deriv: None` on the fetched slot makes the
+    /// rejection below build. The reference-bearing gate is pinned too: `@`
+    /// of a plain `i64` field roots nothing.
+    #[test]
+    fn access_fetch_forwards_the_receivers_borrow_provenance() {
+        let window = "type: Window view Slice[i64] lo usize ;\n";
+        let err = check_src(&format!(
+            "{window}: main ( -- )\n  0 4 fill | a |\n  \
+             &a slice 0 >usize Window | w |\n  &w &view @ | s |\n  \
+             &!a | r |\n  r 0 >usize &!> 7 !\n  s len drop\n  a drop\n;\n"
+        ))
+        .unwrap_err();
+        assert!(
+            err.contains("`&!a` conflicts with a live borrow of `a`"),
+            "{err}"
+        );
+        check_src(&format!(
+            "{window}: main ( -- )\n  0 4 fill | a |\n  \
+             &a slice 0 >usize Window | w |\n  &w &lo @ | n |\n  \
+             &!a | r |\n  r 0 >usize &!> 7 !\n  n drop\n  a drop\n;\n"
+        ))
+        .expect("a `usize` field carries no borrow, so the fetch roots nothing");
+    }
+
+    /// P7b.S6d-PREREQ (REQ-4d site 3): the two halves only work together.
+    /// (a) `prov.borrow` inherits the borrowed local's own chain, which is
+    /// what carries the root through `&w` -- without it the chain severs and
+    /// the read path goes blind. (b) The exclusivity scan gains `d.place ==
+    /// rest`, because that inheritance re-roots the deriv away from the
+    /// local's own name, so a *later* borrow of that same local would match
+    /// neither root.
+    ///
+    /// Measured mutations: reverting (a) makes the first rejection build;
+    /// reverting (b) makes the second build.
+    #[test]
+    fn borrow_inherits_a_chain_and_the_scan_still_sees_the_local_itself() {
+        let window = "type: Window view Slice[i64] lo usize ;\n";
+        let inherited = check_src(&format!(
+            "{window}: main ( -- )\n  0 4 fill | a |\n  \
+             &a slice 0 >usize Window | w |\n  &w &view @ | s |\n  \
+             &!a | r |\n  r 0 >usize &!> 7 !\n  s len drop\n  a drop\n;\n"
+        ))
+        .unwrap_err();
+        assert!(
+            inherited.contains("conflicts with a live borrow of `a`"),
+            "the chain reaches the array through `&w`: {inherited}"
+        );
+        let own_place = check_src(&format!(
+            "{window}: main ( -- )\n  0 4 fill | a |\n  \
+             &a slice 0 >usize Window | w |\n  &w | r1 |\n  &!w | r2 |\n  \
+             r1 &view @ len drop\n  a drop\n;\n"
+        ))
+        .unwrap_err();
+        assert!(
+            own_place.contains("`&!w` conflicts with a live borrow of `w`"),
+            "the shared-then-exclusive guard on `w` itself still fires: {own_place}"
+        );
+    }
+
+    /// P7b.S6d-PREREQ (REQ-4d site 6): the anonymous-receiver projection arm
+    /// forwarded `alias` alone, which made that path alias-only and so weaker
+    /// on exactly the shape `@`'s fetch relies on -- `deriv` is the primary
+    /// enforcement channel. Round 2 struck this site as "not a construction
+    /// site", correctly; round 5 found it *is* a propagation site.
+    ///
+    /// Measured mutation: reverting the arm to `Slot::computed` makes this
+    /// build (and leaves every reference-receiver golden green, which is why
+    /// it needs its own witness).
+    #[test]
+    fn anonymous_receiver_projection_forwards_the_receivers_deriv() {
+        let err = check_src(
+            "type: Window view Slice[i64] lo usize ;\n\
+             : main ( -- )\n  0 4 fill | a |\n  \
+             &a slice 0 >usize Window | w |\n  w &view @ | s |\n  drop\n  \
+             &!a | r |\n  r 0 >usize &!> 7 !\n  s len drop\n  a drop\n;\n",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("`&!a` conflicts with a live borrow of `a`"),
+            "{err}"
+        );
+    }
+
+    /// P7b.S6d-PREREQ (REQ-4d): the two region guards take *opposite* fixes,
+    /// because they answer opposite questions.
+    ///
+    /// `conflicts` (inside `overlapping_projection`) asks "is this other slot
+    /// a live borrow of the region I am about to touch", and is **widened**:
+    /// a reference-bearing aggregate holding a shared view counts, which is
+    /// what makes packing a slice into a struct visible to the other side of
+    /// a projection check. `consumed_place_conflict` asks "does consuming
+    /// this end a place", and its exemption is **extended**: consuming such
+    /// an aggregate is no more a place ending than consuming a reference is,
+    /// so a legal drop of a container whose view has gone dead stays legal.
+    ///
+    /// Measured mutations: reverting the widening makes the first case build;
+    /// reverting the exemption makes the second case fail (and takes G1's own
+    /// enum twin with it, so the over-rejection is not hypothetical).
+    #[test]
+    fn region_guards_widen_the_conflict_side_and_exempt_the_consumed_side() {
+        let window = "type: Window view Slice[i64] lo usize ;\n";
+        let widened = check_src(&format!(
+            "{window}: main ( -- )\n  0 4 fill | a |\n  \
+             &a slice 0 >usize Window | w |\n  w dup &!view drop\n  \
+             drop drop\n  a drop\n;\n"
+        ))
+        .unwrap_err();
+        assert!(
+            widened.contains("`&!view` conflicts with a live projection of the same field"),
+            "{widened}"
+        );
+        check_src(&format!(
+            "{window}: main ( -- )\n  0 4 fill | a |\n  \
+             &a slice 0 >usize Window | w |\n  w &view | r |\n  drop\n  \
+             r @ len drop\n  a drop\n;\n"
+        ))
+        .expect("consuming a container whose view is still live is not a place ending");
     }
 }

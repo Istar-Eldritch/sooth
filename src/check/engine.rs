@@ -361,13 +361,29 @@ impl Provenance {
     }
 
     /// A fresh borrow of an owned aggregate place, or (R3) of a module static.
+    ///
+    /// P7b.S6d-PREREQ (REQ-4d site 3): `held` is whatever provenance the
+    /// borrowed local's own binding carries, and when there is any this is not
+    /// a fresh chain at all -- it is a reborrow, inheriting the root the same
+    /// way naming a reference local does. A reference-bearing aggregate
+    /// carrying a view is the case that matters: without the inheritance the
+    /// chain severs at `&w`, whose root would be `w` while the view it holds
+    /// is rooted at the array, so the scan for a second borrow of that array
+    /// finds nothing and the read path goes blind. The borrow-side exclusivity
+    /// scan is widened to `d.place` in the same breath (`word_families.rs`),
+    /// because re-rooting away from `w` would otherwise blind the
+    /// shared-then-exclusive guard on `w` itself.
     pub(super) fn borrow(
         &mut self,
         place: &str,
+        held: Option<DerivId>,
         mutable: bool,
         static_root: bool,
         span: Span,
     ) -> DerivId {
+        if held.is_some() {
+            return self.reborrow(place, held, mutable, span);
+        }
         self.add(Deriv {
             place: place.to_string(),
             owned_root: Some(place.to_string()),
@@ -988,6 +1004,13 @@ pub(super) fn live_deriv(
 
 /// A live borrow rooted at the owned place `place`, whatever its
 /// mutability and however many projection steps away.
+///
+/// P7b.S6d-PREREQ (REQ-4d, P1-1): `d.place == place` is not redundant with
+/// the root test, for the same reason `check_reference_word`'s scan needs it
+/// (`word_families.rs`, site 3). Site 3's inheritance re-roots a slice-bearing
+/// local's own borrow away from that local's name, so a later reader keyed on
+/// `owned_root` alone goes blind to a borrow of the local itself; `d.place`
+/// still records the borrowed place directly.
 pub(super) fn live_borrow_of(
     stack: &[Slot],
     scope: &Scope,
@@ -997,12 +1020,13 @@ pub(super) fn live_borrow_of(
     place: &str,
 ) -> Option<DerivId> {
     live_deriv(stack, scope, prov, live, at, |d| {
-        d.owned_root.as_deref() == Some(place)
+        d.owned_root.as_deref() == Some(place) || d.place == place
     })
 }
 
 /// The naming side: a live *mutable* borrow rooted at `place`, which any new
-/// name for that place would then silently observe mutations through.
+/// name for that place would then silently observe mutations through. Same
+/// `d.place` widening as `live_borrow_of` above, and for the same reason.
 pub(super) fn live_mutable_borrow_of(
     stack: &[Slot],
     scope: &Scope,
@@ -1012,7 +1036,7 @@ pub(super) fn live_mutable_borrow_of(
     place: &str,
 ) -> Option<DerivId> {
     live_deriv(stack, scope, prov, live, at, |d| {
-        d.mutable && d.owned_root.as_deref() == Some(place)
+        d.mutable && (d.owned_root.as_deref() == Some(place) || d.place == place)
     })
 }
 
@@ -1985,7 +2009,7 @@ mod tests {
             col: 1,
             module: 0,
         };
-        let fresh = prov.borrow("v", true, false, span);
+        let fresh = prov.borrow("v", None, true, false, span);
         let reborrow = prov.reborrow("r", Some(fresh), true, span);
         let projected = prov.project(Some(reborrow)).expect("a projection");
         assert!(prov.deriv(projected).reborrow, "still suspends `r`");
