@@ -11,13 +11,13 @@ links to the commits that landed it.
 - Roadmap entry: [P7b-higher-kinded-types.md](../P7b-higher-kinded-types.md),
   section "P7b.S6d-PREREQ".
 - Implementation base: `main` at `486eda4`. Landed on branch `p7b-s6d`:
-  - `76e84a0` — Phase 1: declared reference-bearing aggregates (layout, bans,
+  - `aa590d2` — Phase 1: declared reference-bearing aggregates (layout, bans,
     seven-site propagation).
-  - `0aa4e25` — Phase 2: return-bundle ABI. **Evidence-only** — the ABI already
+  - `613c301` — Phase 2: return-bundle ABI. **Evidence-only** — the ABI already
     existed; Phase 1 supplied the layout gate, member spelling, and pack/unpack
     routing, and `push_dispatch_outputs` already forwarded provenance and
     enforced Ruling F. The deliverable was the golden set, not code.
-  - `6799e74` — Phase 3: roadmap entry, growth re-check.
+  - `f27c34d` — Phase 3: roadmap entry, growth re-check.
 - Goldens live in `tests/phase7b_slice6d_prereq.rs` (39 tests). They are the
   regression pinning for everything below.
 
