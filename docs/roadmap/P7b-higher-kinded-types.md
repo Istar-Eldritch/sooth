@@ -604,10 +604,11 @@ declared aggregates admit shared `Slice[T]` fields only, `!Slice[T]`
 stays hard-banned as a declared field (Ruling A); the input-position ban
 is preserved, the capability is body-local, produced only via inline words
 (Ruling B); every in-frame site that moves a slice's borrow provenance
-between values propagates it — six sites (construction, `@` projection,
+between values propagates it — seven sites (construction, `@` projection,
 `&`/`&!` of a provenance-carrying local, the poly-call/member-dispatch
 output pushes, the `!`/`+!` field store, the anonymous-receiver projection
-arm), `Deriv`-primary (the channel `live_derivs`/`live_borrow_of` read),
+arm, naming a reference-bearing aggregate into a local), `Deriv`-primary
+(the channel `live_derivs`/`live_borrow_of` read),
 plus alias for the alias-keyed sites — closing a soundness hole
 boundary bans alone cannot see, one form of which (a generic pass-through
 laundering a bare slice's deriv) is a live pre-existing bug at HEAD
