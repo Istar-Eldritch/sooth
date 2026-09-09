@@ -755,6 +755,57 @@ mod tests {
         assert_eq!(count(main, |i| matches!(i, Instr::FieldLoad(..))), 2);
     }
 
+    /// P7b.S6d-PREREQ Phase 2 (REQ-3): the return-bundle ABI over a slice
+    /// output. The word is polymorphic because a *declared* slice output is
+    /// banned on a non-inline word (REQ-4a) and an inline one is spliced --
+    /// a `PolyType::Var` output slot is the one shape that reaches a real
+    /// bundle pack/unpack with a slice in it. Callee side: the two-word view
+    /// is packed with a `Blit`, and the `i64` beside it is the single
+    /// `FieldStore`, so a regression to a one-word `storel` shows up as a
+    /// count. Caller side: the view is unpacked as an interior pointer, never
+    /// as a scalar `FieldLoad` of a slice-typed value.
+    #[test]
+    fn bundle_of_a_slice_output_blits_on_pack_and_unpacks_as_a_pointer() {
+        let ir = lower_src(
+            ": pair ( 'T -- i64 'T ) 0 swap ;\n\
+             : main ( -- ) 0 3 fill | a | &a slice pair | x r | x drop r len drop a drop ;\n",
+        );
+        let pair = ir
+            .funcs
+            .iter()
+            .find(|f| f.name.starts_with("sooth_mono_pair"))
+            .unwrap_or_else(|| panic!("one instantiation at `Slice[i64]`"));
+        let IrType::Struct(bundle) = pair.ret.expect("a two-output word returns its bundle") else {
+            panic!("expected a struct return, got {:?}", pair.ret);
+        };
+        assert!(ir.structs[bundle.index()].bundle);
+        let sl = crate::ir::types::slice_layout(WORD_WIDTH);
+        assert!(
+            instrs(pair)
+                .iter()
+                .any(|i| matches!(i, Instr::Blit(_, _, n) if *n == sl.size)),
+            "the slice output is packed at its full two-word size: {:?}",
+            instrs(pair)
+        );
+        assert_eq!(
+            count(pair, |i| matches!(i, Instr::FieldStore(..))),
+            1,
+            "only the `i64` output is a scalar store: {:?}",
+            instrs(pair)
+        );
+
+        let main = func(&ir, "main");
+        assert!(
+            !instrs(main).iter().any(|i| matches!(
+                i,
+                Instr::FieldLoad(v, _)
+                    if matches!(main.value_types[v.0 as usize], IrType::Slice(_))
+            )),
+            "the unpacked view is an interior pointer, not a scalar load: {:?}",
+            instrs(main)
+        );
+    }
+
     #[test]
     fn monomorphization_emits_one_mangled_func_per_instantiation() {
         // R9/R14: a polymorphic word is never emitted under its plain name;

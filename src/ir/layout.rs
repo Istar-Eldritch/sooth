@@ -1656,4 +1656,41 @@ mod tests {
         );
         assert!(layout(&mixed, "Mixed").is_linear);
     }
+
+    /// P7b.S6d-PREREQ Phase 2 (REQ-3): the *synthesized* return bundle takes
+    /// the same two-word slot a declared field does. The bundle is interned
+    /// after every declaration check, so this layout is its only gate -- and
+    /// unlike a declared field (Ruling A) it carries a `!Slice[T]` too, since
+    /// its unpack is positional at the return boundary rather than through
+    /// `@`'s `is_copy` gate. The `i64` beside the view is the discriminator:
+    /// a one-word slice would put it at 8.
+    #[test]
+    fn bundle_layout_places_a_slice_output_in_the_two_word_slot() {
+        let sl = slice_layout(WORD_WIDTH);
+        for spelling in ["Slice[i64]", "!Slice[i64]"] {
+            let s = structs_of(&format!(
+                ": two inline ( {spelling} -- {spelling} i64 ) |s| s 0 ;\n\
+                 : main ( -- ) 1 drop ;\n"
+            ));
+            let mut slice_bundles = s
+                .layouts
+                .iter()
+                .filter(|l| l.bundle && l.fields.iter().any(|f| matches!(f.ty, IrType::Slice(_))));
+            let b = slice_bundles
+                .next()
+                .unwrap_or_else(|| panic!("a `( -- {spelling} i64 )` word interns its bundle"));
+            assert!(slice_bundles.next().is_none(), "one bundle, not several");
+            assert_eq!(b.fields[0].offset, 0);
+            assert_eq!(b.fields[0].size, sl.size);
+            assert_eq!(b.fields[0].align, sl.align);
+            assert_eq!(b.fields[1].offset, 2 * WORD_WIDTH);
+            assert_eq!(b.size, 3 * WORD_WIDTH);
+            assert_eq!(b.align, WORD_WIDTH);
+            assert!(
+                !b.is_linear,
+                "`field_is_linear` sends both slice flavours to its wildcard, so the \
+                 bundle owes no destructor over the slot"
+            );
+        }
+    }
 }

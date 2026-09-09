@@ -1,11 +1,17 @@
-//! P7b.S6d-PREREQ Phase 1 goldens: reference-bearing aggregates.
+//! P7b.S6d-PREREQ goldens, Phase 1 and Phase 2: reference-bearing aggregates,
+//! and the multi-output return bundle when one of its members carries a slice.
 //!
-//! A shared `Slice[T]` is a legal struct field and enum payload now (REQ-1/2/5,
-//! Ruling A), which means every escape ban stated over `contains_reference`
-//! has to hold over the *containing* value as well (REQ-4), and every in-frame
-//! site that hands the borrow from one value to another has to propagate its
-//! provenance (REQ-4d's seven sites) or the value it produces launders the
-//! borrow.
+//! Phase 1: a shared `Slice[T]` is a legal struct field and enum payload now
+//! (REQ-1/2/5, Ruling A), which means every escape ban stated over
+//! `contains_reference` has to hold over the *containing* value as well
+//! (REQ-4), and every in-frame site that hands the borrow from one value to
+//! another has to propagate its provenance (REQ-4d's seven sites) or the
+//! value it produces launders the borrow.
+//!
+//! Phase 2: the return bundle a multi-output call synthesizes (REQ-3) is laid
+//! out and passed like any other struct once a member is a slice, over both
+//! the monomorphic and polymorphic (per-instantiation and splice-record)
+//! interning sites, with no destructor synthesized over the bundle itself.
 //!
 //! Fixtures are written verbatim (no harness-appended imports) so every
 //! `(line N)` in an assertion means the line the fixture literally shows.
@@ -1112,5 +1118,278 @@ type: Mixed view Slice[i64] cell ^i64 ;
         drop_glue.matches("add %v0,").count(),
         1,
         "drop is a no-op over the slice slot: only the cell field is reached: {drop_glue}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2 (REQ-3): the synthesized return bundle. Unlike a declared aggregate
+// (Ruling A) a bundle may carry a `!Slice[T]` too -- its unpack is positional
+// at the return boundary, so `@`'s `is_copy` gate is never involved. The
+// bundle is interned after every declaration check, so IR layout and this
+// calling convention are its only gates.
+// ---------------------------------------------------------------------------
+
+/// G4: the inline `>= 2`-output slice word, verbatim from the spec. This exact
+/// fixture panics at `layout.rs:271` without the two-word slot arm.
+#[test]
+fn g4_inline_two_output_slice_word_builds_and_runs() {
+    let out = build_and_run(
+        "g4",
+        "\
+import: intrinsics * ;
+import: hosted::show | . | ;
+import: core::prelude * ;
+
+: two-out inline ( Slice[i64] -- i64 Slice[i64] )
+  |s| 0 s
+;
+
+: main ( -- )
+  0 3 fill | a |
+  &a slice two-out | x r |
+  x .
+  a drop
+;
+",
+    );
+    assert_eq!(out, "0");
+}
+
+/// G5: G4's body without `inline`. The output arm of
+/// `check_reference_free_signature` rejects it with the same unlocated,
+/// type-naming text G2 gets -- byte-identical, since both reach the one call
+/// site (REQ-6). Asserted against G2's own wording, not a paraphrase.
+#[test]
+fn g5_noninline_two_output_slice_word_is_error() {
+    let err = build_error(
+        "g5",
+        "\
+import: intrinsics * ;
+import: hosted::show | . | ;
+import: core::prelude * ;
+
+: two-out ( Slice[i64] -- i64 Slice[i64] )
+  |s| 0 s
+;
+
+: main ( -- )
+  0 3 fill | a |
+  &a slice two-out | x r |
+  x .
+  a drop
+;
+",
+    );
+    assert!(
+        err.contains(&format!(
+            "{STORED} `two-out` declares the output `Slice[i64]`\n  a `&T`/`&!T` borrows a local of the callee's own frame, which is gone by the time the caller reads it; take the reference as an input instead"
+        )),
+        "{err}"
+    );
+}
+
+/// G4's capturing-closure twin: unpacking a slice off the bundle produces an
+/// ordinary bare-slice local, so Ruling D's fence still owns it. Worth its own
+/// golden because the bundle is the one path that hands a program a slice it
+/// never spelled a `slice` call for.
+#[test]
+fn g4_capture_of_a_bundle_output_slice_is_error() {
+    let err = build_error(
+        "g4c",
+        "\
+import: intrinsics * ;
+import: hosted::show | . | ;
+import: core::prelude * ;
+
+: pair ( 'T -- i64 'T )
+  0 swap
+;
+
+: use ( [ -- ] -- ) call ;
+
+: main ( -- )
+  0 3 fill | a |
+  &a slice pair | x r |
+  x .
+  [ r len >i64 . ] use
+  a drop
+;
+",
+    );
+    assert!(
+        err.contains("error: a closure cannot capture `r`, whose type `Slice[i64]` carries a slice (line 15)\n  a captured value gets one word in the closure's env block and a slice is two; pass the view as an argument instead"),
+        "{err}"
+    );
+}
+
+/// G-poly-bundle: the per-instantiation bundle site. A declared `'T` output is
+/// `PolyType::Var`, which the signature audit returns `false` for, so this is
+/// the one shape that reaches a real (non-spliced) call returning a bundle
+/// with a slice in it -- the ABI this phase is about. Both slice flavours,
+/// since a bundle carries `!Slice[T]` too.
+#[test]
+fn g_poly_bundle_instantiated_slice_output_builds_and_runs() {
+    for (tag, borrow) in [("gpb-shared", "&a"), ("gpb-mut", "&!a")] {
+        let out = build_and_run(
+            tag,
+            &format!(
+                "\
+import: intrinsics * ;
+import: hosted::show | . | ;
+import: core::prelude * ;
+
+: pair ( 'T -- i64 'T )
+  0 swap
+;
+
+: main ( -- )
+  0 3 fill | a |
+  {borrow} slice pair | x r |
+  x .
+  r len >i64 .
+  a drop
+;
+"
+            ),
+        );
+        assert_eq!(out, "0\n3", "{tag}");
+    }
+}
+
+/// G-poly-bundle, the splice-record half: the same call made from inside a
+/// combinator body, whose inner `CallInst` is keyed by `(inline_uid, span)` in
+/// `splice_records` rather than by span in `instantiations`, and whose bundle
+/// is interned on that record. Three sites intern it, redundantly: `check.rs`'s
+/// own loop (runs unconditionally, before `discover_transitive_instantiations`
+/// is even called), `poly.rs`'s early-return branch (dead for this fixture,
+/// since `outer` calling `pair` makes `poly_cross_calls` non-empty, so the
+/// fixpoint runs instead), and `poly.rs`'s post-fixpoint pass (which does run
+/// here, over every `splice_records` entry unconditionally). Verified
+/// load-bearing by stubbing all three at once: only then does this golden go
+/// red. Stubbing `check.rs`'s loop alone, or the post-fixpoint pass alone,
+/// each leave it green, since the other still covers this fixture's record.
+#[test]
+fn g_poly_bundle_splice_record_slice_output_builds_and_runs() {
+    let out = build_and_run(
+        "gpbs",
+        "\
+import: intrinsics * ;
+import: hosted::show | . | ;
+import: core::prelude * ;
+
+: pair ( 'T -- i64 'T )
+  0 swap
+;
+
+: outer inline ( 'T -- i64 'T )
+  pair
+;
+
+: main ( -- )
+  0 3 fill | a |
+  &a slice outer | x r |
+  x .
+  r len >i64 .
+  a drop
+;
+",
+    );
+    assert_eq!(out, "0\n3");
+}
+
+/// G-poly-bundle, the aggregate half: a slice-bearing *struct* travelling in
+/// the bundle rather than a bare view. The projection afterwards proves the
+/// field survived the pack/return/unpack round trip intact.
+#[test]
+fn g_poly_bundle_slice_bearing_aggregate_output_builds_and_runs() {
+    let out = build_and_run(
+        "gpba",
+        "\
+import: intrinsics * ;
+import: hosted::show | . | ;
+import: core::prelude * ;
+
+type: Window view Slice[i64] lo usize ;
+
+: pair ( 'T -- i64 'T )
+  0 swap
+;
+
+: main ( -- )
+  0 3 fill | a |
+  &a slice 0 >usize Window pair | x w |
+  x .
+  &w &view @ len >i64 .
+  a drop
+;
+",
+    );
+    assert_eq!(out, "0\n3");
+}
+
+/// The bundle's ABI pin, G6's synthesized-aggregate twin: the bundle spells
+/// its slice member as `:sooth.slice` in member position (not a raw one-word
+/// view), the shared aggregate is declared before the bundle that references
+/// it, and the bundle is returned by value across a real call. The only
+/// `:sooth.slice` in ABI (parameter) position here is pre-existing
+/// `qbe_abi_ty` behavior, asserted below purely as context; the member
+/// position and the return are what this golden is actually pinning.
+#[test]
+fn g_poly_bundle_spells_the_slice_member_and_returns_by_value() {
+    let (_t, entry) = fixture(
+        "gpbabi",
+        "\
+import: intrinsics * ;
+import: hosted::show | . | ;
+import: core::prelude * ;
+
+: pair ( 'T -- 'T i64 )
+  0
+;
+
+: main ( -- )
+  0 3 fill | a |
+  &a slice pair | r x |
+  x .
+  r len >i64 .
+  a drop
+;
+",
+    );
+    let ssa = sooth::driver::emit_ssa(&entry)
+        .unwrap_or_else(|e| panic!("emitting the fixture should succeed: {e}"));
+
+    let slice_at = ssa
+        .find("type :sooth.slice = { l, l }")
+        .expect("the shared slice aggregate should be declared");
+    let bundle_decl = ssa
+        .match_indices("= { :sooth.slice, l }")
+        .next()
+        .map(|(at, _)| at)
+        .unwrap_or_else(|| panic!("the bundle should spell its slice member: {ssa}"));
+    assert!(
+        slice_at < bundle_decl,
+        "QBE needs the member type declared first: {ssa}"
+    );
+
+    let sig = ssa
+        .lines()
+        .find(|l| l.starts_with("export function") && l.contains("$sooth_mono_pair"))
+        .unwrap_or_else(|| panic!("one instantiation at `Slice[i64]`: {ssa}"));
+    assert!(
+        sig.contains("(:sooth.slice %"),
+        "pre-existing qbe_abi_ty behavior, asserted only as context -- the \
+         parameter is passed as the two-word aggregate: {sig}"
+    );
+    assert!(
+        sig.contains("export function :__ret_"),
+        "the instantiation returns its bundle by value: {sig}"
+    );
+    assert!(
+        !ssa.lines()
+            .any(|l| l.contains("sooth_struct_drop") && l.contains(":__ret_")),
+        "a bundle owes no destructor over the slice slot (guaranteed by the \
+         !bundle filter in destructors.rs; the slot-level claim itself is \
+         pinned by layout.rs's !b.is_linear assertion): {ssa}"
     );
 }

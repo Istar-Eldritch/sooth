@@ -1118,7 +1118,13 @@ Phase 1 goldens (layout + backend + all bans + declared-aggregate relaxation):
   `PolyType::Concrete` arm) — not a generic output slot *later instantiated*
   at a slice-bearing type: a declared `PolyType::Var` output returns `false`
   unconditionally (`audits.rs:366`), and no per-instantiation audit exists to
-  reject that shape (a named gap, Deferred).
+  reject that shape (a named gap, Deferred). **If that gap is ever closed,
+  note the interaction discovered at Phase 2 (round-6 review P2-6): the only
+  shape that reaches a genuine bundle pack/unpack carrying a slice is a
+  `PolyType::Var` output, so a blanket instantiation-time audit would strand
+  REQ-3's ABI behind its own gate — whoever closes the gap must leave an
+  exempt path for synthesized multi-output bundles (the four G-poly-bundle
+  goldens are the witnesses that die otherwise).**
 - **G6 (IR pin).** An `emit_ssa_with_manifest`-captured pin (`src/driver.rs:897`)
   that the slice field lays out at the two-word offsets and drop is a no-op over
   the slot. Uses a **mixed** linear+slice struct (a slice field alongside an
@@ -1248,7 +1254,16 @@ plumbing that makes an inline `>= 2`-output word with a slice output actually
 build and run end-to-end (G4), including the polymorphic and splice-record bundle
 sites (`check.rs:1111`/`:1125`, G-poly-bundle), plus re-witnessing that the
 non-inline twin (G5) and a capturing closure (already covered by Phase 1's REQ-4b)
-stay rejected. Effort **M** (downsized from the first draft's "M-L": the
+stay rejected. **(Round-6 finding, recorded at implementation: the plumbing
+already existed — Phase 2 turned out to be evidence-only.** Bundle interning is
+output-count-gated only (`check.rs:1109-1133`, `intern_output_bundles`
+`check.rs:1191`); the checker never sees a bundle, since `push_dispatch_outputs`
+(`poly.rs:8037`) forwards deriv+alias via `carried_borrow` and already enforces
+Ruling F there; `qbe_abi_ty`'s slice arm predates this slice; and Phase 1
+supplied the member spelling, the pack/unpack routing, and the global layout
+gate. The four kept backend refusals are field-slot scalar ops — there is no
+return-boundary refusal to reduce. Phase 2's deliverable is therefore the
+golden set that proves this, not code.) Effort **M** (downsized from the first draft's "M-L": the
 soundness-critical layout and bans landed in Phase 1; this phase is ABI plumbing
 over an already-answered layout gate), difficulty **hard**. Re-run growth signals
 (CLAUDE.md) on `layout.rs`, `check.rs`, and `qbe.rs` at phase exit.
