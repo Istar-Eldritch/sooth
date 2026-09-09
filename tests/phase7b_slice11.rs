@@ -337,14 +337,12 @@ fn explicit_args_ctor_with_wrong_arity_is_a_located_error() {
 }
 
 // ---------------------------------------------------------------------------
-// G6 (NFR-3): the non-regression half, end to end.
+// G6 (NFR-2/4): the non-regression half, end to end.
 // ---------------------------------------------------------------------------
 
-/// dp_a / dp_b / dp_f: the three shapes the pre-S11 mint-registry coincidence
-/// already accepted. Each still builds and runs, and each now does so through
-/// the ladder -- dp_a and dp_b on a fully bound θ (the enclosing word's
-/// declared output, resp. the consumer's declared input), dp_f on R-3's
-/// wildcard filter binding `'E` from its sole compatible mint.
+/// dp_a / dp_b / dp_f still build and run: dp_a and dp_b on a fully bound θ (the word's
+/// declared output, resp. the consumer's declared input); dp_f's ladder declines (its
+/// sole-mint arm is unreachable at both call sites) and the pre-existing `[only]` take grounds it.
 #[test]
 fn the_accepting_probe_shapes_still_build_and_run() {
     let show = "import: hosted::show | . | ;\n";

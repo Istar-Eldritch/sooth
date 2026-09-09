@@ -11,6 +11,22 @@ fixtures `probes/dp_*.sth`. The cross-module sibling is
 [slice10-spec](./slice10-spec.md); this slice is the same-module counterpart and
 is verified structurally separate from it.
 
+## Ruling tags
+
+Legend for the `R-x` tags cited in `src/check/terms.rs` comments (and below):
+
+- **R-1** — bare generic ctor calls re-ground at the resolve loop from call-site inputs, not the whole-module mint scan.
+- **R-2** — θ inputs in precedence order (explicit type args > consumer constraints > operand literals); error precedence ambiguity > incompatible-grounding > unbound parameter.
+- **R-3** — mints are candidates, not verdicts: a mint is compatible iff it agrees at every θ-bound position; unbound positions wildcard.
+- **R-4** — the tie-break: first-wins retired — fully-bound θ > single compatible candidate > located ambiguity error, listed sorted by rendered string, same-tier own-module ties only.
+- **R-5** — the three located diagnostics: unbound type parameter (dp_c), incompatible sole mint (dp_d), ambiguous grounding (dp_g).
+- **R-6** — the explicit-args category: full arity, generic headers only, consumer-independent; a wrong-arity list is a located error.
+- **R-7** — a genuinely undefined name keeps the unchanged `unknown word` error; zero-mints-of-a-known-header stays distinguishable from it.
+- **R-8** — one monomorph per (word, θ): lookup-or-mint through the existing keyed instantiators (`mint_header_instantiation`), never a forked duplicate.
+
+The full requirement text behind these tags lives in the pre-condensation spec
+(git history, `261acdc`).
+
 ## Why
 
 Bare generic constructor/destructure calls (`Ok`, `Err`, and enum/struct
@@ -142,10 +158,10 @@ forgetting check (probe appendix).
 
 ### Fences
 
-- **Checker-stage only (NFR-1, verified at condensation):** the full branch
-  diff vs `486eda4` touches exactly `src/check/terms.rs` and
-  `src/check/builtins.rs` (the latter +13 doc lines) — no `src/ir`,
-  `src/parser.rs`, or `src/emit` change. The byte-level "zero IR diff" fence of
+- **Checker-stage only (NFR-1, verified at condensation):** no diff in
+  `src/ir`, `src/parser.rs`, or `src/emit` since `486eda4`; code changes are
+  confined to `src/check/terms.rs` (ladder) and `src/check/builtins.rs` (doc
+  only), plus tests and roadmap docs. The byte-level "zero IR diff" fence of
   the draft was retired during recon; behavior is the operative guarantee.
 - **Non-regression (NFR-2/4):** S10's diagnostics byte-identical (S10 suite
   17/0, G8); S5's declared-overload tier policy, S2-9 member dispatch, S9's
@@ -191,6 +207,10 @@ this base: it hits the pre-existing `poly_generic_not_yet_groundable_error`
 - **Proposed `src/check/ctor_grounding.rs` split** — recorded in `30b9fac`'s
   growth-signal re-run (terms.rs at 1/5 signals, below the 2-signal bar); cut
   the module when a second signal fires.
+- **Unreachable-decline defense-in-depth** (bb8ad59 review P2): on the explicit-args path a silent decline cannot happen — explicit args pin and return (`terms.rs:2747-2749`) or fence-error (`:2768-2776`) before the decline arms — so the residual `Ok(None)` arms (`:2780` the category fence's designed decline; `:2847` dp_f's live flow, exercised by G6) stay reachable for bare calls and are correct as-is. The only unreachable-by-construction arm is the sole-mint take at `:2836` (proof at `:2824-2829`). A `debug_assert` against silent list-drops on the explicit-args path remains available — deferred, left as-is (260909).
+- **Decline-path coverage gaps** (bb8ad59 review P2): the right-arity
+  destructure, name-collision fence, and foreign-header decline shapes are
+  unpinned by tests — deferred (260909).
 
 ## Implementation
 
@@ -199,7 +219,7 @@ this base: it hits the pre-existing `poly_generic_not_yet_groundable_error`
 | Checker grounding core — ladder, θ derivation, three located diagnostics, unknown-word split | `99c210a` | `ground_bare_generic_ctor`, `derive_ctor_theta`, `consumer_expected_type`, `header_mint_candidates`, `mint_header_instantiation`, `ground_ctor_overload`, `unbound_type_parameter_error`, `incompatible_grounding_error`, `ambiguous_grounding_error` (`src/check/terms.rs`); `select_overload_fallback_sourced` doc update (`src/check/builtins.rs`); spec G5-row correction in-commit |
 | Explicit-args category | `bb8ad59` | third `poly_call_takes_type_args` category, `explicit_args_ctor_header`, `explicit_ctor_arity_error` (`src/check/terms.rs`) |
 | Non-regression sweep + docs | `30b9fac` | 11-probe baseline sweep; post-implementation appendix (`docs/roadmap/P7b/slice11-probes.md`); roadmap S11 entry marked landed, Exit line corrected to the `apply2` shape (`docs/roadmap/P7b-higher-kinded-types.md`); dp_h golden |
-| Goldens + units | `99c210a` + `bb8ad59` | 11 goldens in `tests/phase7b_slice11.rs`; 21 units beside the changed sites (`src/check/terms.rs`), including the mid-check-mint dedup unit (R-8) and the span-keyed-pin survivor units |
+| Goldens + units | `99c210a` + `bb8ad59`, dp_h in `30b9fac` | 11 goldens in `tests/phase7b_slice11.rs` (7 by phase 1, 10 by phase 2, dp_h by phase 3); 21 units beside the changed sites (`src/check/terms.rs`), including the mid-check-mint dedup unit (R-8) and the span-keyed-pin survivor units |
 
 Final gate verified at condensation time (HEAD `30b9fac`): `cargo fmt --check`
 green; full `cargo test` 3390 passed / 0 failed; slice11 suite 11/11.

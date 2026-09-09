@@ -627,10 +627,10 @@ unconditionally (`terms.rs:952-990`); two or more → silent first-declared-wins
 can construct different runtime types from the same call (dp_g2/dp_g3 — a correctness
 gap, not a diagnostics gap). Explicit type args on a bare ctor are category-illegal
 today (`poly_call_takes_type_args`, `terms.rs:1314-1356`). The slice builds per-call-site
-grounding: literal-driven partial inference, consumer-driven re-grounding in S2-9's
-obligation style, an explicit-type-args category for bare ctor/destructure names (full
-arity), and a deterministic tie-break — explicit args > single compatible candidate >
-located ambiguity error, first-wins retired. Checker-stage only; S5's declared-overload
+grounding: literal-driven partial inference, θ from the consumer's monomorphic
+signature per ruling (A), an explicit-type-args category for bare ctor/destructure
+names (full arity), and a deterministic tie-break — explicit args > single compatible
+candidate > located ambiguity error, first-wins retired. Checker-stage only; S5's declared-overload
 tier policy, S2-9's member dispatch, and S10's foreign grounding + exemptions stay
 byte-unchanged (baseline `probes/dp_baseline.md`). Maintainer ruling: ground at the
 call site ("B"), 260907; consumer-pins reading (A) confirmed at spec review round 1,
