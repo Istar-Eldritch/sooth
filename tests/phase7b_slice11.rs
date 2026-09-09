@@ -257,6 +257,57 @@ fn bare_ctor_with_a_determining_mono_consumer_grounds_identically_in_both_orders
 }
 
 // ---------------------------------------------------------------------------
+// G4 (dp_e) + dp_e2 (R-6): the explicit-args category.
+// ---------------------------------------------------------------------------
+
+/// dp_e verbatim: full-arity explicit args on a bare ctor name are the
+/// category R-6 admits. The args pin every parameter outright (R-2 input 1),
+/// the fully bound θ mints `Res[i64 i64]` mid-check through the ordinary
+/// lookup-or-mint (R-8), and the program runs clean. Before this slice the
+/// spelling was rejected upstream at the type-args gate, consumer or not
+/// (`probes/dp_findings.md`, dp_e).
+#[test]
+fn explicit_args_ctor_spelling_is_accepted_and_runs_clean() {
+    let out = build_and_run(
+        "g4-dp-e",
+        &format!("{RES}: main ( -- ) 1 Ok[i64 i64] drop ;\n"),
+    );
+    assert_eq!(out, "");
+}
+
+/// dp_e2's substance: the category is independent of whether a consumer
+/// exists. Nothing consumes the construction here -- no `drop`, no call after
+/// it -- the word's declared output is what keeps it from being forgotten,
+/// and the args alone ground it. (The literal dp_e2 probe shape, `1
+/// Ok[i64 i64] ;` in a `( -- )` word, now reaches the ordinary forgetting
+/// check instead of the old gate rejection; that diagnostic is pinned by the
+/// unit `dp_e2_literal_no_output_shape_reaches_the_forgetting_check` beside
+/// the grounding site.)
+#[test]
+fn explicit_args_ctor_grounds_with_no_consumer_and_nothing_forgotten() {
+    let out = build_and_run(
+        "dp-e2",
+        &format!("{RES}: main ( -- Res[i64 i64] ) 1 Ok[i64 i64] ;\n"),
+    );
+    assert_eq!(out, "");
+}
+
+/// R-6's arity rule, byte-exact: a prefix list (`Ok[i64]` meaning
+/// `Ok[i64 'E]`) is out of scope, so a wrong-arity list is a located error
+/// naming the header's full declared shape -- measure-then-pin.
+#[test]
+fn explicit_args_ctor_with_wrong_arity_is_a_located_error() {
+    let err = build_error(
+        "g4-arity",
+        &format!("{RES}: main ( -- ) 1 Ok[i64] drop ;\n"),
+    );
+    assert_eq!(
+        err,
+        "error: `Ok` in `main` (line 3) takes 2 type arguments (`Res['T 'E]`), but 1 was supplied\n"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // G6 (NFR-3): the non-regression half, end to end.
 // ---------------------------------------------------------------------------
 

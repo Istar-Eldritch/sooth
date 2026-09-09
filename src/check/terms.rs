@@ -930,6 +930,8 @@ fn check_term(
                                     name,
                                     span,
                                     candidates: &[],
+                                    type_args,
+                                    len_args,
                                     stack: &stack,
                                     siblings,
                                     at,
@@ -1002,6 +1004,8 @@ fn check_term(
                     name,
                     span,
                     candidates,
+                    type_args,
+                    len_args,
                     stack: &stack,
                     siblings,
                     at,
@@ -1435,7 +1439,18 @@ fn poly_call_takes_type_args(
                 // (final-review fix; the clause used to admit the colliding
                 // spelling and the env call silently dropped the list).
                 t.members.iter().any(|m| m.name == name)
-            })))
+            }))
+            // P7b.S11 Phase 2 (R-6): the third admitted category -- a bare
+            // generic ctor/destructure name paired with a matching header.
+            // Full-arity validation is not this predicate's job (it has no
+            // access to the argument list, only to whether the category
+            // exists at all, and no knowledge of which route a name that is
+            // *also* a poly word or trait member will take): an admitted
+            // list that no earlier route consumed reaches
+            // `ground_bare_generic_ctor`, which either consumes it as R-2's
+            // first input or rejects it -- so a wrong-arity list is a
+            // located error rather than a silently dropped one.
+            || explicit_args_ctor_header(name, ctx).is_some())
 }
 
 /// P7.S12 (R7.1): the three outcomes of scanning forward from a tagged
@@ -2156,6 +2171,103 @@ fn mint_fallback_candidates(name: &str, ctx: &Ctx) -> Vec<Overload> {
     })
 }
 
+/// P7b.S11 Phase 2 (R-6): the generic header a bare ctor/destructure name
+/// names, for the explicit-args gate only -- deliberately wider than
+/// `ctor_grounding_header` below, whose fences (own module, constructors
+/// only, star-kinded, length-free) belong to Phase 1's *grounding* ladder,
+/// not to the question this answers ("can this name even carry a `[...]`
+/// list"). A destructure or a foreign header still gets its arity checked
+/// even though the ladder declines to ground it; a *concrete* (non-generic)
+/// header is not the category at all -- its generated words take no type
+/// arguments, and keep the pre-S11 `no_type_arguments_error` spelling.
+/// `None` on no match (a genuinely undefined name, R-7) or on 2+ same-named
+/// headers (ambiguous which arity applies; declining leaves the call to
+/// `no_type_arguments_error`'s pre-existing rejection).
+struct ExplicitCtorHeader {
+    /// The header's own declared spelling (`Res`), for diagnostics.
+    header: String,
+    /// The header's type-parameter names, `'`-prefixed, in binding order.
+    var_names: Vec<String>,
+    /// The header's length-parameter names, in binding order -- a
+    /// length-parameterized header is ungroundable through this route
+    /// wholesale (Phase 1's fence), so its list keeps the baseline
+    /// rejection rather than an arity verdict.
+    len_var_names: Vec<String>,
+}
+
+fn explicit_args_ctor_header(name: &str, ctx: &Ctx) -> Option<ExplicitCtorHeader> {
+    let base = name.strip_suffix('>').unwrap_or(name);
+    let guard = ctx.generics()?.borrow();
+    let mut found: Option<ExplicitCtorHeader> = None;
+    for d in guard.enums.iter() {
+        if d.ty_var_names.is_empty() {
+            continue;
+        }
+        if d.variants.iter().any(|v| v.name == base) {
+            if found.is_some() {
+                return None;
+            }
+            found = Some(ExplicitCtorHeader {
+                header: d.name.clone(),
+                var_names: d.ty_var_names.clone(),
+                len_var_names: d.len_var_names.clone(),
+            });
+        }
+    }
+    for d in guard.structs.iter() {
+        if d.name == base && !d.ty_var_names.is_empty() {
+            if found.is_some() {
+                return None;
+            }
+            found = Some(ExplicitCtorHeader {
+                header: d.name.clone(),
+                var_names: d.ty_var_names.clone(),
+                len_var_names: d.len_var_names.clone(),
+            });
+        }
+    }
+    found
+}
+
+/// P7b.S11 Phase 2 (R-6): a bare ctor/destructure name's explicit type-argument
+/// list must supply exactly one argument per the header's declared
+/// parameters -- prefix pinning (`Ok[i64]` meaning `Ok[i64 'E]`) is out of
+/// scope. Replaces nothing (Phase 1 had no explicit-args category at all,
+/// R-6); measured and pinned fresh.
+fn explicit_ctor_arity_error(
+    ctx: &Ctx,
+    span: Span,
+    name: &str,
+    header: &str,
+    var_names: &[String],
+    got_type: usize,
+    got_len: usize,
+) -> String {
+    let demangled = crate::resolve::demangle_call(name);
+    let want = var_names.len();
+    if got_type != want {
+        format!(
+            "error: `{demangled}`{} (line {}) takes {want} type argument{} (`{header}[{}]`), but {got_type} {} supplied",
+            in_word(ctx),
+            span.line,
+            plural_s(want),
+            var_names.join(" "),
+            if got_type == 1 { "was" } else { "were" },
+        )
+    } else {
+        // Right type arity, but the call also carried a length sublist. The
+        // caller only asks here for length-free headers, so the list names
+        // something the header does not declare at all.
+        format!(
+            "error: `{demangled}`{} (line {}) takes no length arguments (`{header}[{}]` declares type parameters only), but {got_len} {} supplied",
+            in_word(ctx),
+            span.line,
+            var_names.join(" "),
+            if got_len == 1 { "was" } else { "were" },
+        )
+    }
+}
+
 /// P7b.S11 Phase 1 (R-1): the generic header a bare generated *constructor*
 /// call grounds at, plus the header's own shape. Declining (`None`) leaves the
 /// call to its pre-S11 resolution byte-for-byte, and the fences are
@@ -2303,6 +2415,7 @@ struct CtorTheta {
 #[allow(clippy::too_many_arguments)]
 fn derive_ctor_theta(
     h: &CtorHeader,
+    type_args: &[Type],
     stack: &[Slot],
     siblings: &[Term],
     at: usize,
@@ -2319,9 +2432,24 @@ fn derive_ctor_theta(
         args: vec![None; h.var_names.len()],
         pinned: None,
     };
-    // R-2 step 2 (consumer constraints). Step 1, explicit type arguments, is
-    // Phase 2's: `poly_call_takes_type_args` still rejects them upstream of
-    // this whole route, so no list can reach here to consume.
+    // R-2 step 1 (explicit type args, P7b.S11 Phase 2/R-6): the gate
+    // admitted the list and the ladder validated full arity, so the list
+    // pins every parameter outright -- position `i` binds parameter `i`, the
+    // same positional contract `check_poly_call` seeds by (P7.S3t). Nothing
+    // is left for the consumer or the operands to determine, and the fully
+    // bound θ grounds below through the same lookup-or-mint every other
+    // route uses (R-8) -- so `Ok[i64 i64]` is accepted with no consumer at
+    // all (dp_e2) and with a competing mint in scope (the args'
+    // instantiation is minted fresh rather than borrowed).
+    if !type_args.is_empty() {
+        for (slot, t) in theta.args.iter_mut().zip(type_args) {
+            *slot = Some(*t);
+        }
+        return theta;
+    }
+    // R-2 step 2 (consumer constraints). Reached only on a bare call: with
+    // explicit type args the step above has already pinned every parameter
+    // and returned.
     if let Some(ty) = consumer_expected_type(
         siblings, at, tail, ctx, env, scope, poly, arrays, cells, refs,
     ) {
@@ -2564,14 +2692,67 @@ fn ground_bare_generic_ctor(
         name,
         span,
         candidates,
+        type_args,
+        len_args,
         stack,
         siblings,
         at,
-        tail: _,
+        tail,
     } = call;
+    // P7b.S11 Phase 2 (R-6): an explicit-args call on a name the gate's
+    // ctor clause admitted. Every earlier route that reads an argument list
+    // (a poly word's interception, member dispatch) has already taken such
+    // a call; one reaching here would otherwise flow into a resolution that
+    // drops the list in silence, so this ladder consumes it or rejects it.
+    let explicit = !type_args.is_empty() || !len_args.is_empty();
     let Some(h) = ctor_grounding_header(name, span, ctx) else {
-        return Ok(None);
+        if !explicit {
+            return Ok(None);
+        }
+        // The gate admitted the list because *a* matching header exists, but
+        // the name grounds at no own-module constructor here: a destructure,
+        // a foreign header, a length or higher-kinded parameter, or two
+        // claimants. The list is still checked for arity (against the wide
+        // lookup, and only where the header has no length parameters -- one
+        // of those is ungroundable through this route wholesale, so its list
+        // keeps the baseline rejection), then the spelling keeps the same
+        // `no_type_arguments_error` it met before this slice.
+        if let Some(w) = explicit_args_ctor_header(name, ctx) {
+            if w.len_var_names.is_empty()
+                && (type_args.len() != w.var_names.len() || !len_args.is_empty())
+            {
+                return Err(explicit_ctor_arity_error(
+                    ctx,
+                    span,
+                    name,
+                    &w.header,
+                    &w.var_names,
+                    type_args.len(),
+                    len_args.len(),
+                ));
+            }
+        }
+        return Err(no_type_arguments_error(
+            span,
+            name,
+            !type_args.is_empty(),
+            !len_args.is_empty(),
+        ));
     };
+    // R-6: full arity, exact -- prefix pinning (`Ok[i64]` meaning
+    // `Ok[i64 'E]`) is out of scope. A groundable header is length-free, so
+    // a length sublist names nothing the header declares at any arity.
+    if explicit && (type_args.len() != h.var_names.len() || !len_args.is_empty()) {
+        return Err(explicit_ctor_arity_error(
+            ctx,
+            span,
+            name,
+            &h.header,
+            &h.var_names,
+            type_args.len(),
+            len_args.len(),
+        ));
+    }
     let mints = header_mint_candidates(name, &h, ctx);
     // The category fence: with candidates in hand, S11 only ever redirects a
     // call the pre-existing resolution would itself have resolved to a
@@ -2584,10 +2765,22 @@ fn ground_bare_generic_ctor(
             .iter()
             .any(|c| mints.iter().any(|(m, _)| m.symbol == c.symbol))
     {
+        // R-6: with explicit args a decline here would drop the list in
+        // silence -- the resolution that owns these candidates (a same-named
+        // user word's own `env` entry) reads no argument list -- so the
+        // spelling keeps its pre-S11 rejection instead.
+        if explicit {
+            return Err(no_type_arguments_error(
+                span,
+                name,
+                !type_args.is_empty(),
+                !len_args.is_empty(),
+            ));
+        }
         return Ok(None);
     }
     let theta = derive_ctor_theta(
-        &h, stack, siblings, at, call.tail, ctx, env, scope, poly, arrays, cells, refs,
+        &h, type_args, stack, siblings, at, tail, ctx, env, scope, poly, arrays, cells, refs,
     );
     if let Some(ty) = theta.pinned {
         return Ok(ground_ctor_overload(name, ty, ctx));
@@ -2663,6 +2856,13 @@ struct CtorCallSite<'a> {
     /// What the pre-existing resolution had to work with -- empty at the
     /// zero-candidate arm.
     candidates: &'a [Overload],
+    /// The call's explicit type/length argument lists, empty on a bare
+    /// call. P7b.S11 Phase 2 (R-6): a non-empty list on this name is the
+    /// explicit-args category -- either consumed here as R-2's first input
+    /// or rejected (wrong arity, or a header this ladder cannot ground),
+    /// never dropped in silence by the pre-S11 resolution.
+    type_args: &'a [Type],
+    len_args: &'a [crate::ast::Len],
     stack: &'a [Slot],
     siblings: &'a [Term],
     at: usize,
@@ -3792,6 +3992,114 @@ mod tests {
              : main ( -- ) 1 Ok [ 1 add ] apply2[i64 i64] drop ;\n"
         ))
         .expect("the poly consumer's type arguments pin both parameters");
+    }
+
+    // ------------------------------------------------------------------
+    // P7b.S11 Phase 2 (R-6): the explicit-args category.
+    // ------------------------------------------------------------------
+
+    /// The category itself: full-arity explicit args on a bare ctor with no
+    /// monomorph anywhere mint the named instantiation mid-check. `drop` is
+    /// invisible to the consumer lookahead (a builtin returns no constraint),
+    /// so acceptance here is attributable to the args alone -- without them
+    /// this exact shape is G1's unbound-parameter error.
+    #[test]
+    fn explicit_args_ctor_with_full_arity_grounds_with_no_mint() {
+        check_src(&format!("{RES}: main ( -- ) 1 Ok[i64 i64] drop ;\n"))
+            .expect("full-arity args pin every parameter directly");
+    }
+
+    /// R-6's arity rule: a prefix list is out of scope, so `Ok[i64]` is a
+    /// located error naming the header's full shape rather than a partial
+    /// pin. Byte-exact text is pinned by the G4-adjacent integration golden;
+    /// this unit pins the mechanism beside the site.
+    #[test]
+    fn explicit_args_ctor_with_wrong_arity_is_a_located_error() {
+        let err = check_src(&format!("{RES}: main ( -- ) 1 Ok[i64] drop ;\n"))
+            .expect_err("one arg for two parameters is a prefix pin, out of scope");
+        assert_eq!(
+            err,
+            "error: `Ok` in `main` (line 2) takes 2 type arguments (`Res['T 'E]`), but 1 was supplied"
+        );
+    }
+
+    /// The category's destructure half: the gate admits the spelling for a
+    /// destructure name too, so a wrong-arity list on one is the same located
+    /// arity error rather than the generic takes-no-type-arguments text.
+    #[test]
+    fn explicit_args_destructure_with_wrong_arity_names_the_header() {
+        let err = check_src(&format!("{RES}: t ( Res[i64 i64] -- ) Ok>[i64] drop ;\n"))
+            .expect_err("the destructure names the same 2-parameter header");
+        assert_eq!(
+            err,
+            "error: `Ok>` in `t` (line 2) takes 2 type arguments (`Res['T 'E]`), but 1 was supplied"
+        );
+    }
+
+    /// A groundable header is length-free, so a length sublist names nothing
+    /// the header declares at any type arity.
+    #[test]
+    fn explicit_args_length_sublist_on_a_length_free_header_is_rejected() {
+        let err = check_src(&format!("{RES}: main ( -- ) 1 Ok[i64 i64 3] drop ;\n"))
+            .expect_err("the header declares no length parameters");
+        assert_eq!(
+            err,
+            "error: `Ok` in `main` (line 2) takes no length arguments (`Res['T 'E]` declares type parameters only), but 1 was supplied"
+        );
+    }
+
+    /// dp_e2's substance: the args ground the construction with **no
+    /// consumer at all** -- the word declares the constructed value as its
+    /// output, so nothing is forgotten and the ordinary forgetting check is
+    /// satisfied. (The consumer-less literal probe shape, `1 Ok[i64 i64] ;`
+    /// in a `( -- )` word, is the next unit.)
+    #[test]
+    fn explicit_args_ctor_grounds_with_no_consumer_and_nothing_forgotten() {
+        check_src(&format!(
+            "{RES}: main ( -- Res[i64 i64] ) 1 Ok[i64 i64] ;\n"
+        ))
+        .expect("the construction grounds on the args alone");
+    }
+
+    /// The literal dp_e2 probe shape, recorded (spec open question): with the
+    /// category admitted, the fully concrete construction grounds and the
+    /// value then reaches the ordinary forgetting check, which reports the
+    /// leftover value -- the diagnostic dp_e2.sth now produces in place of
+    /// the old gate rejection.
+    #[test]
+    fn dp_e2_literal_no_output_shape_reaches_the_forgetting_check() {
+        let err = check_src(&format!("{RES}: main ( -- ) 1 Ok[i64 i64] ;\n"))
+            .expect_err("the constructed value is forgotten");
+        assert!(
+            err.contains("body leaves 1 values"),
+            "unexpected message: {err}"
+        );
+    }
+
+    /// R-8/precedence under explicit args: a competing mint in scope does
+    /// not become the verdict -- the fully bound θ names the args'
+    /// instantiation, minted fresh beside it, so the call still grounds at
+    /// `Res[i64 i64]` and both monomorphs exist.
+    #[test]
+    fn explicit_args_ctor_with_a_competing_mint_mints_the_args_instantiation() {
+        let module = checked_module(&format!(
+            "{RES}: unused ( Res[i64 cstr] -- ) drop ;\n\
+             : main ( -- ) 1 Ok[i64 i64] drop ;\n"
+        ));
+        let minted: Vec<&str> = module
+            .enums
+            .iter()
+            .map(|e| e.name.as_str())
+            .filter(|n| n.starts_with("Res["))
+            .collect();
+        assert!(
+            minted.contains(&"Res[i64 i64]"),
+            "the args' instantiation is minted, not borrowed: {minted:?}"
+        );
+        assert!(
+            minted.contains(&"Res[i64 cstr]"),
+            "the competing mint still exists: {minted:?}"
+        );
     }
 
     /// R-2's third consumer: the enclosing word's own declared output, in
