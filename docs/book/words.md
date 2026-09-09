@@ -106,8 +106,11 @@ binding for every slot.
 Two slots in the same effect cannot share a name — that's a duplicate
 slot name and it's a compile error, not a rebind:
 
+```sooth
+: f ( x : i64 x : i64 -- i64 ) x ;
+```
+
 ```text
-> : f ( x : i64 x : i64 -- i64 ) x ;
 error: slot name `x` is declared more than once in `f` (defined at line 1, col 3)
 ```
 
@@ -132,21 +135,32 @@ the same file (or a builtin, poly word, or combinator): that's a
 **collision**, not a shadow, and it's a compile error, whether the
 local comes from a body `| ... |` block or a named input slot:
 
+```sooth
+import: intrinsics * ;
+import: hosted::show | . | ;
+
+: foo ( -- i64 ) 1 ;
+: bar ( i64 -- i64 ) | x | foo x add ;
+
+: main ( -- )
+  5 bar . ;
+```
+
 ```text
-> : foo ( -- i64 ) 1 ;
-> : bar ( i64 -- i64 ) | x | foo x add ;
-> 5 bar .
 6
-stack: (empty)
 ```
 
 Here `x` doesn't collide with anything, so `bar` calls the word `foo`
 and adds it to the local `x`. Naming the local `foo` instead is
 rejected:
 
+```sooth
+: foo ( -- i64 ) 1 ;
+: bar ( i64 -- i64 ) | foo | foo foo add ;
+```
+
 ```text
-> : bar ( i64 -- i64 ) | foo | foo foo add ;
-error: local `foo` in `bar` collides with the callable name `foo` (line 1)
+error: local `foo` in `bar` collides with the callable name `foo` (line 5)
   a local cannot shadow a builtin, word, poly word, or combinator name
 ```
 
@@ -173,10 +187,6 @@ import: hosted::show | . | ;
 : factorial ( i64 -- i64 )
   dup 0 eq ~[ drop 1 ] ~[ dup 1 sub factorial mul ] if ;
 ```
-
-**In the REPL**, each line is processed independently. A word must
-exist before it can be called — there is no forward reference within a
-session. Define helpers first, then words that use them.
 
 ## Recursion
 
@@ -236,9 +246,6 @@ import: hosted::show | . | ;
 : main ( -- )
   10 15 gcd . ;
 ```
-
-The REPL does not use `main`. Each line you type is compiled and
-executed immediately.
 
 ## What's next
 

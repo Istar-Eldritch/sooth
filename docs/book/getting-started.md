@@ -57,41 +57,6 @@ understand every word of it. For now, notice the `| a b |` line: it
 binds the two inputs to names, and the rest of the word uses those
 names instead of shuffling them around on the stack.
 
-## The REPL
-
-The fastest way to learn is the REPL. Start it:
-
-```sh
-sooth repl
-```
-
-You get a prompt. Type a number and print it:
-
-```text
-> 42 .
-42
-stack: (empty)
-```
-
-What just happened? You pushed `42` onto the stack. The word `.`
-popped the top of the stack and printed it. After printing, the stack
-is empty, and the REPL tells you so.
-
-Push two numbers and add them:
-
-```text
-> 1 2
-stack: 1 2
-> add
-stack: 3
-> .
-3
-stack: (empty)
-```
-
-The REPL shows the stack after each line. `1 2` pushes both numbers.
-`add` pops them and pushes their sum. `.` prints the result.
-
 ## The stack is the program
 
 Every value in Sooth lives on a single stack. Words consume values from
@@ -106,10 +71,16 @@ words. `1 2 add` means: push 1, push 2, add. `42 .` means: push 42, print.
 
 Try a longer chain:
 
+```sooth
+import: intrinsics * ;
+import: hosted::show | . | ;
+
+: main ( -- )
+  3 4 add 5 add . ;
+```
+
 ```text
-> 3 4 add 5 add .
 12
-stack: (empty)
 ```
 
 Read it left to right: push 3, push 4, add (stack: 7), push 5, add
@@ -124,22 +95,28 @@ need, then use the names.
 
 Square a number:
 
+```sooth
+: main ( -- )
+  5 | x | x x mul . ;
+```
+
 ```text
-> 5 | x | x x mul .
 25
-stack: (empty)
 ```
 
 `5` pushes the value. `| x |` binds it to the name `x`. Then `x x mul`
 pushes x twice and multiplies, and `.` prints the result. The name `x`
-is available for the rest of the line.
+is available for the rest of the word.
 
 Add three numbers:
 
+```sooth
+: main ( -- )
+  1 2 3 | a b c | a b add c add . ;
+```
+
 ```text
-> 1 2 3 | a b c | a b add c add .
 6
-stack: (empty)
 ```
 
 `| a b c |` binds the top three values: `c` gets 3 (top), `b` gets 2,
@@ -159,18 +136,16 @@ of the stack. In Part II you will learn that `drop` is not just
 resources without a garbage collector. For now, think of it as the way
 to remove a value you no longer need:
 
+```sooth
+: main ( -- )
+  1 2 drop . ;
+```
+
 ```text
-> 1 2 drop .
 1
-stack: (empty)
 ```
 
 Push 1, push 2 (stack: 1 2). `drop` removes 2 (stack: 1). `.` prints 1.
-
-## Quitting
-
-Type `:quit` to exit. The REPL disposes any remaining values on the
-stack (you will learn what "dispose" means in Part II).
 
 ## What's next
 

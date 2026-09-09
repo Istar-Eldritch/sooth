@@ -11,7 +11,8 @@ without lifetime annotations, and without a runtime garbage collector.
 This book teaches Sooth by building from the stack up. You will start
 with pushing numbers and work toward writing a bytecode interpreter in
 the language itself. Every example in this book compiles and runs. If
-you have the repository checked out, you can follow along in the REPL.
+you have the repository checked out, you can follow along with
+`sooth run`.
 
 ## Who this is for
 
@@ -34,15 +35,25 @@ teaches the *what* and the *how*, not the *why we chose this over that*.
 
 ## Conventions
 
-Code blocks show Sooth source on their own, or REPL sessions with the
-`stack:` prompt line that the REPL prints after each evaluation:
+Code blocks show complete Sooth source files, followed by the command
+that runs them and the output they produce:
 
-```text
-> 1 2 add .
-3
-stack: (empty)
+```sooth
+import: intrinsics * ;
+import: hosted::show | . | ;
+
+: main ( -- )
+  1 2 add . ;
 ```
 
-The `>` prefix marks what you type. Everything else is output. In the
-REPL, `.` prints the top of the stack and removes it; after a print the
-stack is often empty, which the REPL reports as `stack: (empty)`.
+```sh
+sooth run example.sth
+```
+
+```text
+3
+```
+
+`.` prints the top of the stack and removes it. Where a snippet omits
+the surrounding `import:`/`main` boilerplate for brevity, it is still
+something you can drop into a `main` word and run.
