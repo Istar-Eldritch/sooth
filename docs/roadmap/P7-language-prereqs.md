@@ -1439,3 +1439,89 @@ eliminator/construction responsibility the file already carries, not on a fourth
 `src/ir/func_builder/calls.rs` stays at 0 of 5: the `enum_words`
 read sits in the existing `lower_call` -> `lower_enum_call` -> `lower_eliminator` chain, one
 `use super::*`, no import divergence, no mixed high/low-level code. Neither splits.
+
+**P7.S13 -- The poly.rs ruling: band extraction plus a deliberate core holdout.** `[ done ]`
+Ruled outcome **A + C** at the D1 gate on the Phase 1 dossier
+([poly-split-ruling-audit.md](./poly-split-ruling-audit.md) §4–§6); execution evidence in
+[poly-split-ruling-phase-notes.md](./poly-split-ruling-phase-notes.md). SOO-32's exit
+criterion ("either land a responsibility-shaped split whose cut reduces the firing-signal
+count on both sides, or write a durable holdout ruling") is satisfied by the combination:
+the measured-clean bands landed under the amended D2 rule, and the irreducible remainder is
+recorded as a deliberate holdout with reopen conditions, not left as an open debt.
+
+The evidence chain is two probe rounds, both fully reverted before this slice. Phase 1
+(audit §4) probed the three spec-named single seams (unify, instantiate, ground) from the
+pristine file: every seam side came out clean (0–weak), every remainder stayed at 3 firing
+signals. The user-directed job-partition round (audit §6) then moved all five job bands
+simultaneously, plus a member-dispatch re-probe in the partitioned world — 48% of the
+non-test mass out, five single-job modules, the second recursion SCC transferred whole,
+and the remainder *still* fired all three. That refuted the pre-committed "both sides < 2"
+rule and produced the amended one the maintainer ruled under: **a band qualifies iff the
+dossier measured it clean post-cut (0 or weak on the band side), its move neither splits
+nor crosses either recursion SCC, and its wiring stays inside the proven recipe** — the
+core's persistent 3-of-5 is accepted as the holdout, not treated as a failed split.
+
+What landed: seven single-job bands in `src/check/poly/`, cut by line-span extraction with
+the probe round's cutter, wired per the audit's recipes (visibility widenings + glob
+re-exports; a band nothing outside poly consumes gets a private glob), green after every
+band — `cargo check`, `cargo clippy -- -D warnings`, and the test target compiled between
+every wiring change and every test relocation: `poly/unify.rs` (905 lines moved,
+unification/substitution), `poly/instantiate.rs` (795; instantiation, `CrossGround`
+struct + impl as one cut unit), `poly/r#trait.rs` — `trait.rs` with the `mod r#trait;`
+spelling (1,835; trait-obligation resolution and specificity, the
+`find_bound_impl`↔`candidate_bounds_discharge` SCC moved whole), `poly/overload.rs` (338;
+overload resolution), `poly/crosscall.rs` (559; cross-module call checking),
+`poly/ground.rs` (1,661; member-call signature grounding/dispatch), and `poly/construction.rs`
+(677; generic construction/elimination — the ruled candidate 7th band
+`poly_construction_header`/`poly_bind_construction_arg`/`poly_destructure_generic`/
+`poly_construct_generic` plus their construction-local helper/formatter closure, which
+passed the full revert-protocol probe before landing). Six thousand seven hundred and
+seventy lines of non-test code — 53% of poly.rs's 12,828 non-test lines — moved with zero
+items retyped. Attributed unit tests moved verbatim beside their bands into each band's
+own inline `#[cfg(test)] mod tests` (80 test fns; helper fixtures as per-module copies
+exactly as `terms.rs`/`declarations.rs`/`engine.rs` already do), the one double-attributed
+test (§6.7) ruled to instantiate (its subject is `ground_into_word_scoped_registries`'s
+contract; `apply_subst` appears only inside its driver closure), and overload's zero
+attribution left its single word-mention test with the core (core behavior through a band
+entry point). Crosscall's single attributed test
+(`poly_cross_match_app_slot_is_unsupported_not_a_panic`) is the one test that did not move:
+it stayed in the core's test module — a recorded deviation from the §6.7 attribution map —
+its body driving the band's `poly_cross_match` directly at unit level, not through the core
+dispatch hub, beside the core test module's own `app_sig`/`probe_word`/`probe_ctx` fixtures. The core's remaining test region moved verbatim to
+`src/check/poly/tests.rs` behind `#[cfg(test)] mod tests;` — the ruling blessed that
+convention. No diagnostic string moved: a comment/string-aware scan of every literal in
+the eight resulting files (1,648 string literals — the 1,655 earlier tallied counted
+multi-line strings per segment rather than per literal) found zero not present in the
+pristine file,
+and the full suite — 3,462 tests, including the `tests/phase7_*.rs` and
+`tests/phase7b_*.rs` goldens — passes unchanged.
+
+Post-landing shape (CLAUDE.md's five signals, every file): every band is 0–weak —
+unify 0/0/0 (914 non-test, 8 fns, 4 formatters, 2 comps), instantiate 0/0/weak (803, 4,
+0, 3 islands), trait 0/0/0 (1,868, 29, 6, **1 comp of all 29 fns**, second SCC whole),
+overload 0/0/weak (346, 7, 3, 5 comps), crosscall 0/0/0 (576, 12, 4, 1 comp), ground
+0/0/weak (1,679, 16, 6, 2 comps), construction 0/0/weak (687, 9, 3, 2 comps) — each
+single-job and at or below house scale. The 7-fn walk SCC is whole and solely in poly.rs;
+the `find_bound_impl`↔`candidate_bounds_discharge` SCC is whole and solely in trait.rs;
+no recursion cycle spans a file boundary.
+
+The core holdout ruling: **poly.rs stays whole at 5,985 non-test lines / 93 fns / 56
+interleaved formatters / 17 components, still firing 3 of 5 — by ruling, not for lack of
+trying.** The abstract walk, generic construction/elimination, the copy/borrow/slice
+gating, the dispatch hub and its glue, the shared type plumbing, and the 56 formatters
+that serve them are one interlocking mass: the walk hub `poly_call_term` calls directly
+into construction, elimination, cross-call, and member dispatch, and the formatter
+vocabulary interleaves all of it (three probe rounds measured the remainder at 3 firing
+signals after every cut shape tried — 48% of the mass out first). Two shapes are rejected
+with standing reasons: `poly/diagnostics.rs` is the layer-shaped split CLAUDE.md names as
+wrong, with no precedent in this checker (the house interleaves formatters with their
+checks: `check.rs` 42, `declarations.rs` 28, `terms.rs` 18); `poly/eliminator.rs` moves
+the recursive cluster across a file boundary, buying more coupling than lines.
+
+What would reopen the question: import divergence starting to fire — `RefCell` has
+already drifted to the instantiation cluster (post-split it lives in `instantiate.rs`
+plus the walk's three threading sites; `GenericTypes` reaches four files, each confined
+to one job's signatures); a new responsibility axis appearing in the core; or the core's
+own count dropping on its own (a future slice making the gating or dispatch vocabulary
+extract cleanly). Until one of those fires, the split question is closed with evidence,
+not fatigue: the bands that could go clean went, and the part that cannot is named.
