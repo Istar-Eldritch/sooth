@@ -1,0 +1,19 @@
+\ S12 probe C — variable-layout mismatch: the leak mis-types silently.
+\ 'E is var 0, 'It is var 1; the member row's element var (member id 1) leaks
+\ unrendered, so the Some payload reads as 'It (the * -> * constructor).
+import: intrinsics * ;
+
+type: Option['T]
+| None
+| Some 'T
+;
+
+trait: Cursor['It: * -> *]
+  : next ( 'It['T] -- Option['T] 'It['T] ) ;
+;
+
+: drainC ['E 'It: Cursor] ( 'E 'It['E] -- 'E )
+  next swap
+  ~[ ( None ) drop drop ]
+  ~[ ( Some ) Some> |v| drop drop v ]
+  Option? ;

@@ -1,0 +1,21 @@
+\ S12 probe F — control: the leak lands in the caller's id space.
+\ Variable ids follow EFFECT-MENTION order: this sig's effect mentions 'T
+\ first, so 'T=0 and 'It=1. The member row's element variable (member id 1)
+\ is cloned verbatim into the caller's id space, where id 1 is 'It — the
+\ silently-wrong in-range rendering (Option['It] instead of Option['T]).
+\ This is the same mechanism lib/core/iterator.sth's fold survives: its
+\ effect ( 'It['T] 'A [...] -- 'A ) mentions 'It first, so its element 'T
+\ sits at id 1 and the leaked id coincidentally reads correctly.
+import: intrinsics * ;
+
+type: Option['T]
+| None
+| Some 'T
+;
+
+trait: Cursor['It: * -> *]
+  : next ( 'It['T] -- Option['T] 'It['T] ) ;
+;
+
+: drainF ['It: Cursor 'T] ( 'T 'It['T] -- 'T 'It['T] Option['T] )
+  next swap ;

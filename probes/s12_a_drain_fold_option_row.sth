@@ -1,0 +1,19 @@
+\ S12 probe A — the S6d-4-faithful drain fold (SOO-39's recorded failure).
+\ A `['It: Cursor]` consumer whose `next` row returns the remainder as a bare
+\ App-headed value. Expected today: stack-effect mismatch at `add`.
+import: intrinsics * ;
+
+type: Option['T]
+| None
+| Some 'T
+;
+
+trait: Cursor['It: * -> *]
+  : next ( 'It['T] -- Option['T] 'It['T] ) ;
+;
+
+: drain ['It: Cursor] ( i64 'It[i64] -- i64 )
+  next swap
+  ~[ ( None ) drop drop ]
+  ~[ ( Some ) Some> rot add swap drain ]
+  Option? ;
