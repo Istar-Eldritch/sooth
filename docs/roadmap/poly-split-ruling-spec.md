@@ -60,58 +60,75 @@ delivers:
 
 The audit's output is a dossier, not a code change. Nothing from Phase 1 is committed.
 
-### Gate — D1: split or holdout
+### Gate — D1: RULED — band extraction + core holdout (A + C), 260910
 
-A genuine user ruling, taken after the audit, on the audit's dossier. The evidence
-selects the branch; the outcome is not pre-committed:
+Ruled by the maintainer on the Phase 1 dossier
+([poly-split-ruling-audit.md](./poly-split-ruling-audit.md) §4–§6). The pre-committed
+rule ("both sides < 2 firing signals") was tested to exhaustion and is unsatisfiable
+for this file: three single-seam probes and a full six-band job partition (48% of
+non-test mass moved, every band landing at 0/weak) each left the remainder firing all
+three signals — the walk core is one interlocking mass that no job boundary separates
+(§6.9). The ruled outcome combines the ticket's two named exits: **land the
+measured-clean bands under supervision** (D2, amended rule below) **and record the
+irreducible core as a deliberate holdout** (D3), with the core's tests moving to a
+sibling file (C).
 
-- **Take the split branch (D2)** iff the audit found **at least one qualifying seam**:
-  a responsibility-shaped cut whose measured signal count is **< 2 on both sides**,
-  that also cuts (not increases) the recursion cycle, and that relocates unit tests
-  beside their stage code without touching any assertion.
-- **Take the holdout branch (D3)** iff **no seam qualifies**: every probed cut leaves
-  one side at ≥ 2 firing signals, or buys more coupling (a crossed call cycle, a new
-  import spread) than lines. This is the standing outcome unless the audit overturns
-  it with a measurement.
+**Amended D2 rule (supersedes "both sides < 2"):** a band qualifies to land iff the
+dossier measured it clean post-cut (0 or weak firing signals on the band side), its
+move neither splits nor crosses either recursion SCC, and its wiring stays inside the
+proven recipe (visibility widenings + re-exports; zero behavior change). The core's
+persistent 3-firing count is accepted and recorded as an explicit holdout with reopen
+conditions — it is not a failed split. Churn stays excluded: a band that cannot land
+green, or that lands with new recursion-crossing coupling, does not land. The ruled
+band set: unify, instantiate, trait, overload, crosscall, ground (dossier §6.1–§6.6
+recipes), plus a construction/elimination band **only if** it first passes the same
+revert-protocol measurement (candidate: `poly_construction_header`,
+`poly_bind_construction_arg`, `poly_destructure_generic` (verified leaf),
+`poly_construct_generic` and construction-local helpers).
 
-If the split branch is available, the seam (D2) is confirmed at this same gate from
-the qualifying candidates.
+### Phase 2a — execute the band extraction (D2, as ruled)
 
-### Phase 2a — execute the split (only if D1 = split)
+Land the ruled band set into `src/check/poly/` (`mod r#trait;` spelling for
+`trait.rs`), in the proven order, **green after every band** (`cargo check`,
+`cargo clippy -- -D warnings`, test target compiles — the tree is never left red
+between bands):
 
-Land the seam chosen at the gate:
+- Follow the dossier's per-band recipes: §4 protocol with §6.1–§6.6 move lists,
+  visibility widenings, and re-export mechanics (the corrected counts: unify needs 4
+  widenings, not 2; a `pub(super)` glob re-export fails outright when nothing is
+  visible enough, E0365; a struct and its impl move as one cut unit).
+- Relocate each band's attributed unit tests beside it, per the §6.7 attribution map:
+  the band's test fns move verbatim into its own inline `#[cfg(test)] mod tests`
+  (house style), helper fixtures are per-module copies exactly as
+  `terms.rs`/`declarations.rs`/`engine.rs` already do (`checked_module` et al.). No
+  assertion text changes — imports and visibility only. A test that exercises core
+  behavior *through* a band entry point stays with the core; deviations from the
+  attribution map are recorded in the phase notes. The one double-attributed test
+  (§6.7) gets a recorded judgment.
+- The 7th (construction) band: probe under the full revert protocol first; land only
+  if measured clean under the amended D2 rule; otherwise skip and record why.
+- At phase exit, re-run CLAUDE.md's five signals over the core and every band and
+  record the counts in the roadmap entry.
 
-- Move the responsibility cluster to its own file under `src/check/poly/` (module
-  wiring adjusted, `use super::*` or explicit re-exports as the existing checker
-  files do).
-- Relocate the covering unit tests beside the moved code. No assertion text changes;
-  the goldens (`tests/phase7_*.rs`, `tests/phase7b_*.rs`) are untouched.
-- Re-run CLAUDE.md's five signals over **both** resulting files at phase exit and
-  record the new counts. A split that leaves either side at 2+ firing signals is
-  churn, not a split, and must not land.
-- Record the split beside the S12/S11 growth records in
-  `docs/roadmap/P7-language-prereqs.md`: the seam, the pre/post signal counts on both
-  sides, and why this cut qualified where the two rejected shapes did not. Reflect it
-  in the ROADMAP row.
+### Phase 2b — the core holdout (D3) + tests-out (C)
 
-### Phase 2b — record the holdout (only if D1 = holdout)
-
-Write the durable holdout ruling into `docs/roadmap/P7-language-prereqs.md` beside
-the S12/S11 growth records, and reflect it in the ROADMAP row. The ruling states:
-
-- The file stays whole.
-- The current measured signal counts (firing and quiet), test vs non-test size.
-- The coupling facts that make every probed cut cost more than it buys: for each
-  audited candidate seam, the side that stays at ≥ 2 signals or the coupling the cut
-  crosses. The two rejected shapes are named with their standing reasons
-  (`poly/diagnostics.rs` layer-shaped with no precedent in this checker;
-  `poly/eliminator.rs` crosses the recursion cluster).
-- **What would reopen the question**: the concrete change that would make a cut
-  qualify (e.g. a fourth responsibility axis appearing, or import divergence starting
-  to fire), so a future exit knows when to re-run the audit rather than re-cite this
-  ruling.
-
-This closes the ticket's exit criterion. It is documentary: no code moves.
+- **C, tests-out:** move the core's remaining test region (dossier §6.7: 347 fns /
+  ~7,698 lines) verbatim to `src/check/poly/tests.rs`, included from poly.rs as
+  `#[cfg(test)] mod tests;` — same attribute, same directory; convention blessed by
+  this ruling. Imports adjusted only; no assertion changes.
+- **D3, the holdout record:** write the ruling into `docs/roadmap/P7-language-prereqs.md`
+  beside the S12/S11 growth records, reflected in the ROADMAP row. It states: the
+  core stays whole; the measured facts (dossier §2/§6.7 — walk, construction/
+  elimination, copy/borrow gating, dispatch hub, shared plumbing, and their 59
+  formatters are one interlocking mass; both probe rounds' evidence); the two
+  rejected shapes named with their standing reasons (`poly/diagnostics.rs`
+  layer-shaped with no precedent in this checker; `poly/eliminator.rs` crosses the
+  recursion cluster); and **what would reopen the question** — import divergence
+  starting to fire (`RefCell` has already drifted to the instantiation cluster), a
+  new responsibility axis appearing in the core, or the core's own count dropping.
+- The record states the ticket's exit criterion is satisfied by the combination: a
+  supervised split of the measured-clean bands plus a written holdout ruling for the
+  core, with the post-landing signal counts for every file.
 
 ### Phases (JSON)
 
@@ -132,7 +149,7 @@ This closes the ticket's exit criterion. It is documentary: no code moves.
     },
     {
       "phase": 3,
-      "focus": "Execute the ruling: if split, land the chosen seam under src/check/poly/ with unit tests relocated beside their code and no assertion touched, re-run all five signals over both resulting files (2+ on either side means the split does not land), and record the seam with pre/post counts beside the S12/S11 growth records; if holdout, write the durable ruling with the coupling facts and the reopen condition; either way update the ROADMAP row, run the growth re-check, and hold the green gate (fmt, clippy -D warnings, test, phase7/phase7b goldens)",
+      "focus": "Execute the ruled A+C outcome: land the six measured-clean bands (unify, instantiate, trait, overload, crosscall, ground) into src/check/poly/ per the dossier recipes, green after every band, plus a construction band only if it passes the revert-protocol measurement; relocate attributed unit tests beside their bands verbatim with per-module helper copies; move the core's remaining tests to src/check/poly/tests.rs behind #[cfg(test)] mod tests; write the core holdout ruling beside the S12/S11 records with post-landing signal counts and reopen conditions; update the ROADMAP row; hold the green gate (fmt, clippy -D warnings, test, phase7/phase7b goldens)",
       "effort": "L",
       "difficulty": "hard"
     }
