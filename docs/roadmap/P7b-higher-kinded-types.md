@@ -644,15 +644,7 @@ sentinel-substitution grounding route, and the deferred per-instantiation
 leave an exempt path for synthesized multi-output bundles, since a genuine
 bundle pack/unpack carrying a slice reaches a `PolyType::Var` output and a
 blanket instantiation-time audit would otherwise strand REQ-3's ABI behind its
-own gate. Growth-structure re-check (CLAUDE.md, at S12's phase exit) over the
-only edited band that slice grew — `src/check/poly/ground.rs`: its
-member-dispatch grounding band now includes the Generic-complete render
-arms (`render_member_decl`, `substitute_member_var`) and the
-`poly_type_mentions_var` walk, sitting beside the unification arms they
-serve as more pure-render functions of the kind already there. The render
-band stays cohesive, signals not tripped — single `use super::*`, no
-import divergence, no high/low mixing, no forced circularity — so no split
-is warranted.
+own gate.
 
 **P7b.S8c — Per-site binding for member signatures with free input type variables.**
 Closes the lowering panic the P7b.S8 integrated review found (260906; pre-existing, not
@@ -778,6 +770,23 @@ refusal, not a grounding gap; revisit when poly words ground explicit args);
 genuinely undefined names keep `unknown word`; S10's diagnostics and the
 dp_a/dp_b behaviors are byte-identical to baseline (dp_f is the documented delta:
 the amendment turns it into the unbound-parameter error, ruling 260910).
+
+**P7b.S12 — Poly-body App-dispatch output rendering.** Implemented in
+`6c75be0` + `f6576f0` (260910; spec [slice12-spec](./P7b/slice12-spec.md)):
+the fourth wall from the S6d-PREREQ walls list is closed — the poly-body
+member-output render is Generic-complete (see that entry's walls list, not
+restated here) — and member-sig diagnostics render caller-space via the
+`substitute_member_var` Generic arm. Goldens live in
+`tests/phase7b_slice12.rs`.
+Growth-structure re-check (CLAUDE.md, at S12's phase exit) over the
+only edited band this slice grew — `src/check/poly/ground.rs`: its
+member-dispatch grounding band now includes the Generic-complete render
+arms (`render_member_decl`, `substitute_member_var`) and the
+`poly_type_mentions_var` walk, sitting beside the unification arms they
+serve as more pure-render functions of the kind already there. The render
+band stays cohesive, signals not tripped — single `use super::*`, no
+import divergence, no high/low mixing, no forced circularity — so no split
+is warranted.
 
 **Dogfood:** S6 — a program that `map`s and folds over `Option`, `Result`, and `List` through
 shared bounds, with the impls declared against the real lib types and output matching

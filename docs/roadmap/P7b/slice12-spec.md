@@ -140,7 +140,7 @@ test`.
 | G4 `some_payload_types_as_the_element_variable_not_the_constructor` | payload types as `'E` not `'It`; arms agree; build_ok |
 | G5 `leaked_member_id_renders_through_bindings_in_range` | Generic arm renders through bindings; build_ok |
 | G6 `end_to_end_list_backed_cursor_drain_prints_6` (exit criterion) | List-backed cursor drain, stdout `6`, exit 0 |
-| G7 `member_sig_diagnostics_render_generic_args_in_caller_space` | `substitute_member_var` renders `Option['T]` in caller space; byte-pinned from live binary |
+| G7 `member_sig_diagnostics_render_generic_args_in_caller_space` | `substitute_member_var` renders the member sig in the dispatched variable's name (e.g. `'V['V] Option['V]` for caller var `'V`) — caller space, no member-space ids; byte-pinned from live binary |
 | G8 `cross_call_app_fence_stays_byte_identical` (R4 pin) | S1-17.i fence byte-identical |
 | G9 `iterator_consumers_survive_the_render_fix` (R6 canary) | slice8 List+Range `for_each`/`fold` stay green (cited, not duplicated) |
 | G10 `existing_suite_green` (global gate) | full suite green |
