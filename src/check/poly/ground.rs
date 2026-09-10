@@ -190,18 +190,26 @@ pub(super) fn unify_member_operand(
 
 /// P7b.S2 (S2-16, poly caller): render a member's declared output `PolyType`
 /// into the caller's variable space through the unification's binding map.
-/// A declared variable the call's inputs never bound renders as the caller's
-/// bound variable -- the fallback `substitute_member_var` had for every bare
-/// mention (and the only rendering a nullary member's fresh local can get);
-/// bound variables render as what the call bound them to.
-pub(super) fn render_member_decl(t: &PolyType, bindings: &[(u32, PolyType)], var: u32) -> PolyType {
-    let render = |t: &PolyType| render_member_decl(t, bindings, var);
+/// A bound variable renders as what the call bound it to. An unbound one is
+/// two-tier (S12 R3): pinned by the admitting structural equality on a
+/// ctor-headed input (`unify_member_operand`'s tail) it renders verbatim --
+/// the member-local id IS the caller's answer -- and only a never-pinned,
+/// output-only local falls back to the caller's bound variable, the fallback
+/// `substitute_member_var` had for every bare mention (and the only rendering
+/// a nullary member's fresh local can get).
+pub(super) fn render_member_decl(
+    t: &PolyType,
+    bindings: &[(u32, PolyType)],
+    var: u32,
+    inputs: &[PolyType],
+) -> PolyType {
+    let render = |t: &PolyType| render_member_decl(t, bindings, var, inputs);
     match t {
-        PolyType::Var(v) => bindings
-            .iter()
-            .find(|(id, _)| id == v)
-            .map(|(_, pt)| pt.clone())
-            .unwrap_or_else(|| PolyType::Var(var)),
+        PolyType::Var(v) => match bindings.iter().find(|(id, _)| id == v) {
+            Some((_, pt)) => pt.clone(),
+            None if inputs.iter().any(|i| poly_type_mentions_var(i, *v)) => PolyType::Var(*v),
+            None => PolyType::Var(var),
+        },
         PolyType::App { head, args } => {
             let rendered_head = match bindings.iter().find(|(id, _)| id == head) {
                 Some((_, PolyType::Var(u))) => *u,
@@ -222,7 +230,60 @@ pub(super) fn render_member_decl(t: &PolyType, bindings: &[(u32, PolyType)], var
         PolyType::Ref(r, m) => PolyType::Ref(Box::new(render(r)), *m),
         PolyType::Array(e, l) => PolyType::Array(Box::new(render(e)), l.clone()),
         PolyType::OwnedCell(p) => PolyType::OwnedCell(Box::new(render(p))),
+        PolyType::Generic {
+            is_enum,
+            idx,
+            module,
+            args,
+            len_args,
+            name,
+        } => PolyType::Generic {
+            is_enum: *is_enum,
+            idx: *idx,
+            module: *module,
+            args: args.iter().map(render).collect(),
+            len_args: len_args.clone(),
+            // `name` is `&'static str`, so the pattern binds `&&str` and the
+            // deref is a coercion -- an explicit `*` trips
+            // clippy::explicit_auto_deref. Still verbatim: the pointer, not
+            // a re-render.
+            name,
+        },
+        // S12 R3.5 posture: a `GenericVariant` has no bespoke arm and keeps
+        // cloning through `other` verbatim. It is unconstructible outside an
+        // eliminator arm's own scrutinee (`trait.rs:1157`'s reachability
+        // argument), so it can never ride a member row into this render, and
+        // pinning the posture keeps any future arm addition deliberate.
         other => other.clone(),
+    }
+}
+
+/// P7b.S12 (R3): whether a member row's declared type mentions the member
+/// variable `v` anywhere -- the pinning test for the render's verbatim tier.
+/// Structural walk over every `PolyType` variant, mirroring
+/// `first_unbound_sig_var`'s walk (`unify.rs`): an `App` head is a variable
+/// in its own right, and a `Len::Var` hides inside an `Array`/`Generic`.
+fn poly_type_mentions_var(pt: &PolyType, v: u32) -> bool {
+    match pt {
+        PolyType::Concrete(_) | PolyType::QuotLit => false,
+        PolyType::Var(u) => *u == v,
+        PolyType::Array(elem, len) => {
+            poly_type_mentions_var(elem, v) || matches!(len, Len::Var(lv) if *lv == v)
+        }
+        PolyType::Ref(inner, _) | PolyType::OwnedCell(inner) => poly_type_mentions_var(inner, v),
+        PolyType::Quotation(ins, outs, ..) => {
+            ins.iter().chain(outs).any(|p| poly_type_mentions_var(p, v))
+        }
+        PolyType::App { head, args } => {
+            *head == v || args.iter().any(|a| poly_type_mentions_var(a, v))
+        }
+        PolyType::Generic { args, len_args, .. }
+        | PolyType::GenericVariant { args, len_args, .. } => {
+            args.iter().any(|a| poly_type_mentions_var(a, v))
+                || len_args
+                    .iter()
+                    .any(|l| matches!(l, Len::Var(lv) if *lv == v))
+        }
     }
 }
 
@@ -269,6 +330,25 @@ fn substitute_member_var(t: &PolyType, var: u32) -> PolyType {
         PolyType::App { head, args } => PolyType::App {
             head: if *head == 0 { var } else { *head },
             args: args.iter().map(|a| substitute_member_var(a, var)).collect(),
+        },
+        // S12: the mirror Generic arm for diagnostics. This twin's semantics
+        // are a total rewrite (S2-16/F6): every member variable renders as
+        // the dispatched variable, so R3's input-pinning two-tier rule does
+        // not apply here -- args recurse through the twin itself.
+        PolyType::Generic {
+            is_enum,
+            idx,
+            module,
+            args,
+            len_args,
+            name,
+        } => PolyType::Generic {
+            is_enum: *is_enum,
+            idx: *idx,
+            module: *module,
+            args: args.iter().map(|a| substitute_member_var(a, var)).collect(),
+            len_args: len_args.clone(),
+            name,
         },
         other => other.clone(),
     }
@@ -1675,7 +1755,9 @@ pub(super) fn poly_trait_member_call(
     let site_slots: Vec<PolyType> = stack[base..].iter().map(|s| s.pt.clone()).collect();
     stack.truncate(base);
     for out in &member_decl.sig.outputs {
-        stack.push(PolySlot::new(render_member_decl(out, &bindings, var)));
+        stack.push(PolySlot::new(render_member_decl(
+            out, &bindings, var, inputs,
+        )));
     }
     tctx.obligations.push(TraitObligation {
         span,
@@ -1930,7 +2012,23 @@ mod tests {
             (0, PolyType::Var(dispatch_var)),
             (2, PolyType::Var(caller_u)),
         ];
-        let rendered = render_member_decl(&declared_output, &bindings, dispatch_var);
+        // The member row `bind`'s shape declares: the App-headed dispatchable
+        // input over `'T`, then the quotation parameter over `'T`/`'U`.
+        let member_inputs = vec![
+            PolyType::App {
+                head: 0,
+                args: vec![PolyType::Var(1)],
+            },
+            PolyType::Quotation(
+                vec![PolyType::Var(1)],
+                vec![PolyType::Var(2)],
+                false,
+                None,
+                None,
+            ),
+        ];
+        let rendered =
+            render_member_decl(&declared_output, &bindings, dispatch_var, &member_inputs);
         let PolyType::Quotation(_, outs, ..) = rendered else {
             panic!("rendered declared output should stay a Quotation");
         };
@@ -1941,6 +2039,343 @@ mod tests {
                 args: vec![PolyType::Var(caller_u)],
             },
             "the row-nested App renders back into the caller's own variable space"
+        );
+    }
+
+    #[test]
+    fn render_member_decl_renders_generic_args_through_bindings() {
+        // P7b.S12: the Generic arm recurses its args through the same
+        // bindings -- an `Option['T]` member output renders to `Option[i64]`
+        // when the call bound member var 1 to `i64`. Header identity rides
+        // along verbatim.
+        let dispatch_var = 10;
+        let declared_output = PolyType::Generic {
+            is_enum: true,
+            idx: 0,
+            module: 0,
+            args: vec![PolyType::Var(1)],
+            len_args: Vec::new(),
+            name: "Option",
+        };
+        let bindings = vec![(1, PolyType::Concrete(Type::I64))];
+        let rendered = render_member_decl(&declared_output, &bindings, dispatch_var, &[]);
+        assert_eq!(
+            rendered,
+            PolyType::Generic {
+                is_enum: true,
+                idx: 0,
+                module: 0,
+                args: vec![PolyType::Concrete(Type::I64)],
+                len_args: Vec::new(),
+                name: "Option",
+            },
+            "the Generic output's args render through the bindings"
+        );
+    }
+
+    #[test]
+    fn render_member_decl_input_pinned_unbound_var_renders_verbatim() {
+        // P7b.S12 (R3, tier 1): a member var pinned by the admitting
+        // structural equality on a ctor-headed input renders verbatim -- the
+        // id IS the caller's answer. The output's unbound Var(2) must stay
+        // Var(2), NOT fall back to the dispatch variable (which would
+        // re-type the G11 structurally-pinned subclass).
+        let dispatch_var = 10;
+        let declared_inputs = vec![PolyType::Generic {
+            is_enum: true,
+            idx: 0,
+            module: 0,
+            args: vec![PolyType::Var(2)],
+            len_args: Vec::new(),
+            name: "Option",
+        }];
+        let declared_output = PolyType::Generic {
+            is_enum: true,
+            idx: 0,
+            module: 0,
+            args: vec![PolyType::Var(2)],
+            len_args: Vec::new(),
+            name: "Option",
+        };
+        // Only the header pre-binding: member var 2 is never bound -- a
+        // ctor-headed input pins it structurally instead of binding it.
+        let bindings = vec![(0, PolyType::Var(dispatch_var))];
+        let rendered =
+            render_member_decl(&declared_output, &bindings, dispatch_var, &declared_inputs);
+        assert_eq!(
+            rendered, declared_output,
+            "the input-pinned unbound var renders verbatim, not as the dispatch var"
+        );
+    }
+
+    #[test]
+    fn render_member_decl_generic_falls_back_to_the_bound_variable() {
+        // P7b.S12 (R3, tier 2): a member var no input pins and no binding
+        // binds -- an output-only local -- falls back to the caller's bound
+        // variable, the rendering a nullary member's fresh local can get.
+        let dispatch_var = 10;
+        // The row only mentions the header var (id 0), never the output's
+        // member var 2.
+        let declared_inputs = vec![PolyType::Var(0)];
+        let declared_output = PolyType::Generic {
+            is_enum: true,
+            idx: 0,
+            module: 0,
+            args: vec![PolyType::Var(2)],
+            len_args: Vec::new(),
+            name: "Option",
+        };
+        let bindings = vec![(0, PolyType::Var(dispatch_var))];
+        let rendered =
+            render_member_decl(&declared_output, &bindings, dispatch_var, &declared_inputs);
+        assert_eq!(
+            rendered,
+            PolyType::Generic {
+                is_enum: true,
+                idx: 0,
+                module: 0,
+                args: vec![PolyType::Var(dispatch_var)],
+                len_args: Vec::new(),
+                name: "Option",
+            },
+            "the never-pinned output-only local falls back to the caller's variable"
+        );
+    }
+
+    #[test]
+    fn render_member_decl_generic_carries_len_args_verbatim() {
+        // P7b.S12 (R2/S2-5): the header's own length args ride along
+        // verbatim. A `Len::Var` inside them is unreachable in member space
+        // (S2-5: the member grammar declares no length variables -- locals
+        // are `Star` type variables only), so the arm carries the list
+        // without rendering it; pinned here with concrete lengths.
+        let dispatch_var = 10;
+        let declared_output = PolyType::Generic {
+            is_enum: false,
+            idx: 1,
+            module: 0,
+            args: vec![PolyType::Var(1)],
+            len_args: vec![Len::Concrete(4)],
+            name: "Slice",
+        };
+        let bindings = vec![(1, PolyType::Concrete(Type::I64))];
+        let rendered = render_member_decl(&declared_output, &bindings, dispatch_var, &[]);
+        assert_eq!(
+            rendered,
+            PolyType::Generic {
+                is_enum: false,
+                idx: 1,
+                module: 0,
+                args: vec![PolyType::Concrete(Type::I64)],
+                len_args: vec![Len::Concrete(4)],
+                name: "Slice",
+            },
+            "len_args carry through verbatim while args render"
+        );
+    }
+
+    #[test]
+    fn render_member_decl_renders_app_inside_generic_args() {
+        // P7b.S12: a nested `App` inside a Generic's args recurses through
+        // the same bindings -- `Step['T 'It['T]]` with `'T` bound to `i64`
+        // and `'It` bound to the caller's variable renders
+        // `Step[i64 'caller[i64]]`, App head included.
+        let dispatch_var = 10;
+        let declared_output = PolyType::Generic {
+            is_enum: false,
+            idx: 2,
+            module: 0,
+            args: vec![
+                PolyType::Var(1),
+                PolyType::App {
+                    head: 2,
+                    args: vec![PolyType::Var(1)],
+                },
+            ],
+            len_args: Vec::new(),
+            name: "Step",
+        };
+        let bindings = vec![
+            (1, PolyType::Concrete(Type::I64)),
+            (2, PolyType::Var(dispatch_var)),
+        ];
+        let rendered = render_member_decl(&declared_output, &bindings, dispatch_var, &[]);
+        assert_eq!(
+            rendered,
+            PolyType::Generic {
+                is_enum: false,
+                idx: 2,
+                module: 0,
+                args: vec![
+                    PolyType::Concrete(Type::I64),
+                    PolyType::App {
+                        head: dispatch_var,
+                        args: vec![PolyType::Concrete(Type::I64)],
+                    },
+                ],
+                len_args: Vec::new(),
+                name: "Step",
+            },
+            "the nested App inside the Generic args renders through the bindings"
+        );
+    }
+
+    #[test]
+    fn render_member_decl_generic_variant_posture_stays_verbatim_clone() {
+        // P7b.S12 (R3.5 posture, pinned): a `GenericVariant` has no bespoke
+        // arm -- it clones through `other` verbatim, args NOT rendered
+        // through the bindings. It is unconstructible outside an eliminator
+        // arm's own scrutinee (`trait.rs:1157`'s reachability argument), so
+        // it can never ride a member row into this render; hand-built here
+        // only to pin the posture so a future arm addition cannot silently
+        // change it.
+        let dispatch_var = 10;
+        let scrutinee = PolyType::GenericVariant {
+            idx: 0,
+            module: 0,
+            vi: 1,
+            args: vec![PolyType::Var(1)],
+            len_args: Vec::new(),
+            name: "Opt.Some",
+        };
+        let bindings = vec![(1, PolyType::Concrete(Type::I64))];
+        let rendered = render_member_decl(&scrutinee, &bindings, dispatch_var, &[]);
+        assert_eq!(
+            rendered, scrutinee,
+            "GenericVariant clones through verbatim -- args stay unrendered"
+        );
+    }
+
+    #[test]
+    fn poly_type_mentions_var_walks_all_variants() {
+        // P7b.S12 (R3): the pinning test walks every variant -- an App head
+        // is a variable in its own right, and a `Len::Var` hides inside an
+        // Array/Generic (mirroring `first_unbound_sig_var`'s walk).
+        let v = 7;
+        // App head and App arg positions.
+        assert!(poly_type_mentions_var(
+            &PolyType::App {
+                head: 7,
+                args: Vec::new(),
+            },
+            v
+        ));
+        assert!(poly_type_mentions_var(
+            &PolyType::App {
+                head: 0,
+                args: vec![PolyType::Var(7)],
+            },
+            v
+        ));
+        // Generic arg and len_args positions.
+        assert!(poly_type_mentions_var(
+            &PolyType::Generic {
+                is_enum: true,
+                idx: 0,
+                module: 0,
+                args: vec![PolyType::App {
+                    head: 1,
+                    args: vec![PolyType::Var(7)],
+                }],
+                len_args: Vec::new(),
+                name: "Option",
+            },
+            v
+        ));
+        assert!(poly_type_mentions_var(
+            &PolyType::Generic {
+                is_enum: false,
+                idx: 1,
+                module: 0,
+                args: vec![PolyType::Concrete(Type::I64)],
+                len_args: vec![Len::Var(7)],
+                name: "Slice",
+            },
+            v
+        ));
+        // Quotation rows.
+        assert!(poly_type_mentions_var(
+            &PolyType::Quotation(Vec::new(), vec![PolyType::Var(7)], false, None, None),
+            v
+        ));
+        // Ref / OwnedCell elements.
+        assert!(poly_type_mentions_var(
+            &PolyType::Ref(Box::new(PolyType::Var(7)), true),
+            v
+        ));
+        assert!(poly_type_mentions_var(
+            &PolyType::OwnedCell(Box::new(PolyType::Var(7))),
+            v
+        ));
+        // Array element and length.
+        assert!(poly_type_mentions_var(
+            &PolyType::Array(Box::new(PolyType::Var(7)), Len::Concrete(2)),
+            v
+        ));
+        assert!(poly_type_mentions_var(
+            &PolyType::Array(Box::new(PolyType::Concrete(Type::I64)), Len::Var(7)),
+            v
+        ));
+        // GenericVariant's carried-forward args.
+        assert!(poly_type_mentions_var(
+            &PolyType::GenericVariant {
+                idx: 0,
+                module: 0,
+                vi: 0,
+                args: vec![PolyType::Var(7)],
+                len_args: Vec::new(),
+                name: "Opt.Some",
+            },
+            v
+        ));
+        // Negatives: a different var, the leaf variants, and concrete
+        // lengths (a concrete `7` is a length, not the var id 7).
+        assert!(!poly_type_mentions_var(&PolyType::Var(8), v));
+        assert!(!poly_type_mentions_var(&PolyType::Concrete(Type::I64), v));
+        assert!(!poly_type_mentions_var(&PolyType::QuotLit, v));
+        assert!(!poly_type_mentions_var(
+            &PolyType::Array(Box::new(PolyType::Concrete(Type::I64)), Len::Concrete(7)),
+            v
+        ));
+        assert!(!poly_type_mentions_var(
+            &PolyType::Generic {
+                is_enum: false,
+                idx: 1,
+                module: 0,
+                args: vec![PolyType::Concrete(Type::I64)],
+                len_args: vec![Len::Concrete(7)],
+                name: "Slice",
+            },
+            v
+        ));
+    }
+
+    #[test]
+    fn substitute_member_var_renders_generic_args_for_diagnostics() {
+        // P7b.S12: the diagnostics twin rewrites EVERY member variable to
+        // the dispatched variable -- total rewrite (S2-16/F6), no two-tier
+        // rule and no bindings. An `Option['T 'U]` member output renders
+        // `Option['caller 'caller]`; `len_args` ride along verbatim.
+        let var = 10;
+        let declared = PolyType::Generic {
+            is_enum: true,
+            idx: 0,
+            module: 0,
+            args: vec![PolyType::Var(1), PolyType::Var(2)],
+            len_args: vec![Len::Concrete(4)],
+            name: "Option",
+        };
+        assert_eq!(
+            substitute_member_var(&declared, var),
+            PolyType::Generic {
+                is_enum: true,
+                idx: 0,
+                module: 0,
+                args: vec![PolyType::Var(var), PolyType::Var(var)],
+                len_args: vec![Len::Concrete(4)],
+                name: "Option",
+            },
+            "the twin rewrites every member var to the dispatched variable"
         );
     }
 
