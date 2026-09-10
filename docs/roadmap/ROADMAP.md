@@ -53,7 +53,7 @@ lines. Each phase file is self-contained: exit criteria, dogfood, slice breakdow
 | **P5** | [Errors as values](./P5-errors-as-values.md) | `[S]`  ✅ done |
 | **P6** | [Term-level enum elimination](./P6-enum-elimination.md) | `[L]`  ✅ done (S5 deferred by design) |
 | **P7** | [Language prerequisites for the stdlib](./P7-language-prereqs.md) | `[L]` — in progress (S3u/S3w parked; S6c brief outstanding; S13 poly.rs ruling landed: 7 bands extracted + core holdout recorded) |
-| **P7b** | [Higher-kinded types](./P7b-higher-kinded-types.md) | `[L]` — in progress (S1–S10, S8b, S8c landed; follow-ups pending: S6d-PREREQ (reference-bearing aggregates) — specced; S6d — slices as Iterator targets, deferred behind S6d-PREREQ) |
+| **P7b** | [Higher-kinded types](./P7b-higher-kinded-types.md) | `[L]` — in progress (S1–S10, S8b, S8c, S11, S6d-PREREQ, S12 landed; follow-ups pending: S6d-PREREQ residuals (the DQ4 sentinel-substitution grounding route; the instantiation-audit exemption for synthesized bundles); S6d — slices as Iterator targets, deferred behind those residuals) |
 | **P8** | [Packages and modules](./P8-packages-modules.md) | `[L]` |
 | **P9** | [The stdlib layers](./P9-stdlib-layers.md) | `[L]` |
 | **P10** | [Concurrency (library)](./P10-concurrency.md) | `[M]` |
