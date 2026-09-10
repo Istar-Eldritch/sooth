@@ -1,0 +1,15 @@
+\ S12 probe G — expose the member row's own variable table: a mismatching
+\ operand renders the declared member sig against the member's own names.
+import: intrinsics * ;
+
+type: Option['T]
+| None
+| Some 'T
+;
+
+trait: Cursor['It: * -> *]
+  : next ( 'It['T] -- Option['T] 'It['T] ) ;
+;
+
+: drainG ['It: Cursor] ( 'It[str] -- )
+  next ;

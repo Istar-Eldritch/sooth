@@ -556,8 +556,11 @@ protocol whose `next` has two outputs, slices-as-Iterator is gated on one missin
 capability: slice-shaped fields in aggregates (IR layout) plus a storage-class/taint
 rule for reference-bearing aggregates. Ruling direction (maintainer consistency
 preference, 260907): no protocol fork, no carve-out — S6d is **deferred behind that
-prerequisite capability slice**; once it exists the Step-row protocol works for slices
-unchanged.
+prerequisite capability slice** (the S6d-PREREQ entry below; its layout, taint, and
+capture-fence core is in place). What remains before S6d resumes is that entry's
+residual pair — the DQ4 sentinel-substitution grounding route and the
+instantiation-audit exemption for synthesized bundles — after which the Step-row
+protocol works for slices unchanged.
 
 **P7b.S6d-PREREQ — Reference-bearing aggregates (the capability S6d defers
 behind; prerequisite, not an S6d deliverable).** Recorded 260907 from probe
@@ -569,7 +572,7 @@ and unreturnable: `check_no_stored_references`
 (`check/declarations.rs:1081`, the sole escape-safety mechanism — no
 lifetime tracker exists in Sooth) bans reference-shaped payloads from
 struct/enum fields, and `check_reference_free_signature` bans a non-inline
-word from declaring a reference-shaped output. Four walls close every
+word from declaring a reference-shaped output. Three walls close every
 shortcut past them: a `contains_reference` carve-out for `Type::Slice` is
 unsound by the rule's own rationale (a `Step[i64 Slice[i64]]` could
 outlive the buffer it views, with no tracker to catch it) *and* ICEs at
@@ -579,11 +582,13 @@ slice is two words `{ptr, len}`, not one); an Option-row protocol shape
 (remainder as a bare stack value) dodges the user-visible storage rule but
 not the IR — `intern_output_bundles` (R8/R10) synthesizes a return-bundle
 struct for every ≥2-output word, and that struct hits the identical layout
-refusal; a bare slice local captured by a quotation is checker-admitted
+refusal; and a bare slice local captured by a quotation is checker-admitted
 today and ICEs at the backend instead (a capture-fence matter, not a layout
-one — see Ruling D below); and the poly-body stack checker
-loses an App-headed dispatch call's outputs (standing S8-era limitation,
-independent). The capability slice's content, when it is taken up: (1)
+one — see Ruling D below). The checker closes no fourth wall: the poly-body
+member-output render is Generic-complete — a bound-generic consumer dispatches
+an App-headed member row and its outputs render in caller space, with no
+member-space id leaking into the consumer's types — independent of the
+storage rules. The capability slice's content, when it is taken up: (1)
 slice-shaped fields in declared and synthesized aggregates — new enum/struct
 payload layout for a two-word slot (tag placement, projection, codegen) via
 **`LayoutBuilder::size_align`** (the ruled route; the bare-scalar sizer's
@@ -595,8 +600,9 @@ rule extending the no-stored-reference discipline to *containing* values
 returned from a non-inline word, cannot be captured, and cannot outlive
 the frame its borrowed storage lives in — which without real lifetime
 tracking must remain a conservative ban pattern, not an escape-permitting
-one; and (3) the standing poly-body App-dispatch output loss, if generic
-Iterator consumers over slices are to type-check. Landing (1) without (2)
+one. The checker side needs no slice-specific work (see the walls list
+above — the member-output render is Generic-complete), so generic
+consumers over slices type-check against it as-is. Landing (1) without (2)
 opens the exact escape the current rules exist to prevent; that is why
 this is a design-bearing slice and why S6d waits for it rather than
 shipping a checker relaxation. Maintainer rulings recorded in the spec:
@@ -764,6 +770,23 @@ refusal, not a grounding gap; revisit when poly words ground explicit args);
 genuinely undefined names keep `unknown word`; S10's diagnostics and the
 dp_a/dp_b behaviors are byte-identical to baseline (dp_f is the documented delta:
 the amendment turns it into the unbound-parameter error, ruling 260910).
+
+**P7b.S12 — Poly-body App-dispatch output rendering.** Implemented in
+`6c75be0` + `f6576f0` (260910; spec [slice12-spec](./P7b/slice12-spec.md)):
+the fourth wall from the S6d-PREREQ walls list is closed — the poly-body
+member-output render is Generic-complete (see that entry's walls list, not
+restated here) — and member-sig diagnostics render caller-space via the
+`substitute_member_var` Generic arm. Goldens live in
+`tests/phase7b_slice12.rs`.
+Growth-structure re-check (CLAUDE.md, at S12's phase exit) over the
+only edited band this slice grew — `src/check/poly/ground.rs`: its
+member-dispatch grounding band now includes the Generic-complete render
+arms (`render_member_decl`, `substitute_member_var`) and the
+`poly_type_mentions_var` walk, sitting beside the unification arms they
+serve as more pure-render functions of the kind already there. The render
+band stays cohesive, signals not tripped — single `use super::*`, no
+import divergence, no high/low mixing, no forced circularity — so no split
+is warranted.
 
 **Dogfood:** S6 — a program that `map`s and folds over `Option`, `Result`, and `List` through
 shared bounds, with the impls declared against the real lib types and output matching

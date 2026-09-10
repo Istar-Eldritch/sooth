@@ -1,0 +1,19 @@
+\ S12 probe A2 — probe A with the add directly on the Some payload.
+\ A `['It: Cursor]` consumer whose `next` row returns the remainder as a bare
+\ both non-concrete, so the operator path extracts an empty concrete suffix.
+import: intrinsics * ;
+
+type: Option['T]
+| None
+| Some 'T
+;
+
+trait: Cursor['It: * -> *]
+  : next ( 'It['T] -- Option['T] 'It['T] ) ;
+;
+
+: drain ['It: Cursor] ( i64 'It[i64] -- i64 )
+  next swap
+  ~[ ( None ) drop drop ]
+  ~[ ( Some ) Some> add drain ]
+  Option? ;

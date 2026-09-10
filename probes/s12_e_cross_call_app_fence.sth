@@ -1,0 +1,13 @@
+\ S12 probe E — control: the cross-call App fence (S1-17.i).
+\ Expected today: located rejection, not a stack loss.
+import: intrinsics * ;
+
+trait: Cursor['It: * -> *]
+  : next ( 'It['T] -- 'It['T] ) ;
+;
+
+: step ['It: Cursor] ( i64 'It[i64] -- i64 )
+  drop ;
+
+: outer ['It: Cursor] ( i64 'It[i64] -- i64 )
+  step ;

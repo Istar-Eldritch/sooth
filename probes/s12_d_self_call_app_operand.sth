@@ -1,0 +1,12 @@
+\ S12 probe D — control: the self-call arm with an App-headed operand.
+\ Expected today: checks fine (structural pointwise match, no rendering).
+import: intrinsics * ;
+
+trait: Cursor['It: * -> *]
+  : next ( 'It['T] -- 'It['T] ) ;
+;
+
+: looper ['It: Cursor] ( i64 'It[i64] -- i64 )
+  looper ;
+
+: main ( -- ) 0 ;
