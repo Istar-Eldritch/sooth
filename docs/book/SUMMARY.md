@@ -49,7 +49,3 @@
 - [The Standard Library](./the-standard-library.md)
 - [Building an Event Loop](./building-an-event-loop.md)
 - [Actors and Coroutines](./actors-and-coroutines.md)
-
-# The Environment
-
-- [The Interactive Book](./the-interactive-book.md)

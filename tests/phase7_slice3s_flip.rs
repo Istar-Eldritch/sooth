@@ -134,15 +134,15 @@ fn an_ord_bounded_generic_word_instantiates_over_a_user_struct() {
 /// exact text, minus the line/column, which is the fixture's layout rather
 /// than the diagnostic's content.
 ///
-/// The error names `cmp`, the trait member, not `lt`, the word the caller
-/// wrote: the six surface comparisons are `inline`, so `lt`'s body is spliced
-/// and the failing instantiation is `cmp`'s, reported at `lib/cmp.sth`'s own
-/// line. The second line -- the useful one, naming the missing `impl:`
-/// signature -- is unaffected. Restoring the caller's own attribution needs a
-/// splice-origin span carried through unsatisfied-bound reporting, which is a
-/// diagnostics feature of its own (recorded as a P7 follow-up).
+/// The error names `lt`, the word the caller wrote, not `cmp`, the trait
+/// member the six `inline` surface comparisons splice in -- the P7.S8
+/// follow-up fix (`Provenance::splice_origin`, `src/check/engine.rs`): the
+/// outermost live splice's own call site and name are threaded through
+/// `unsatisfied_user_bound_error` instead of the spliced-in `cmp` call's own
+/// span inside `lib/core/cmp.sth`. The second line -- the useful one, naming
+/// the missing `impl:` signature -- is unaffected either way.
 #[test]
-fn an_unsatisfied_ord_bound_names_the_missing_impl() {
+fn an_unsatisfied_ord_bound_names_the_callers_own_word_not_the_spliced_member() {
     let (_t, entry) = program(
         "no-impl",
         "import: intrinsics * ;\n\
@@ -152,8 +152,52 @@ fn an_unsatisfied_ord_bound_names_the_missing_impl() {
     );
     let err = build_error(&entry);
     assert!(
-        err.contains("cannot instantiate `'T` of `cmp` with `Vec2` in `main`"),
+        err.contains("cannot instantiate `'T` of `lt` with `Vec2` in `main`"),
         "unexpected diagnostic: {err}"
+    );
+    assert!(
+        !err.contains("of `cmp` with"),
+        "must not attribute to the spliced-in `cmp` call: {err}"
+    );
+    assert!(
+        err.contains("`Vec2` does not satisfy `Ord`: no `( Vec2 Vec2 -- Ordering )` found"),
+        "unexpected diagnostic: {err}"
+    );
+}
+
+/// The previous test pins one level of splicing (`lt` spliced into `main`).
+/// This pins the reason `Provenance::splice_origin` is a single field set
+/// once by `inline_combinator`'s `is_none()` gate (`src/check/combinators.rs`)
+/// rather than overwritten on every nested splice: `mymax` is itself `inline`
+/// and calls `gt`, which splices in turn and dispatches the bare `cmp`
+/// member -- three frames deep. The error must still name `mymax`, the word
+/// the user actually called, not `gt` (the intermediate splice) or `cmp` (the
+/// innermost). Removing or inverting the gate (always taking the innermost
+/// splice) makes this fail while leaving every other test in this file
+/// green, since none of them nest one `inline` combinator inside another.
+#[test]
+fn an_unsatisfied_ord_bound_two_levels_of_inline_nesting_names_the_outermost_word() {
+    let (_t, entry) = program(
+        "no-impl-nested",
+        "import: intrinsics * ;\n\
+         import: core::prelude | if Bool Ord gt | ;\n\
+         type: Vec2 x i64 y i64 ;\n\
+         : mymax inline ['T: Copy Ord] ( 'T 'T -- 'T )\n\
+           over over gt ~[ drop ] ~[ swap drop ] if ;\n\
+         : main ( -- ) 1 1 Vec2 2 2 Vec2 mymax drop ;\n",
+    );
+    let err = build_error(&entry);
+    assert!(
+        err.contains("cannot instantiate `'T` of `mymax` with `Vec2` in `main`"),
+        "unexpected diagnostic: {err}"
+    );
+    assert!(
+        !err.contains("of `gt` with"),
+        "must not attribute to the intermediate splice `gt`: {err}"
+    );
+    assert!(
+        !err.contains("of `cmp` with"),
+        "must not attribute to the innermost spliced-in `cmp` call: {err}"
     );
     assert!(
         err.contains("`Vec2` does not satisfy `Ord`: no `( Vec2 Vec2 -- Ordering )` found"),

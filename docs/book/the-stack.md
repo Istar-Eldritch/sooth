@@ -15,10 +15,15 @@ through your program.
 
 This is why the compiler catches this:
 
+```sooth
+: main ( -- )
+  1 "hello" add . ;
+```
+
 ```text
-> 1 "hello" add .
-error: type mismatch: `add` requires two operands of the same numeric
-type, found `i64` and `str`
+error: type mismatch in `main` (line 1)
+  `add` requires two operands of the same numeric type, found `i64` and `str`
+  note: declared ( -- )
 ```
 
 `add` requires two operands of the same numeric type. The compiler sees
@@ -111,8 +116,11 @@ declares, and that every call site provides what the effect requires.
 **The body is checked against its own declaration.** If the body
 leaves the wrong number of values, the compiler catches it:
 
+```sooth
+: bad2 ( i64 i64 -- ) drop ;
+```
+
 ```text
-> : bad2 ( i64 i64 -- ) drop ;
 error: stack effect mismatch in `bad2` (line 1)
   body leaves 1 values, but ( … ) declares 0 outputs
   note: declared ( i64 i64 -- )
@@ -124,8 +132,11 @@ declaration.
 
 If the body leaves the wrong *type*, that's caught too:
 
+```sooth
+: bad-type ( i64 -- str ) | x | x ;
+```
+
 ```text
-> : bad-type ( i64 -- str ) | x | x ;
 error: type mismatch in `bad-type` (line 1)
   body leaves `i64` where the declaration requires `str`
   note: declared ( i64 -- str )
@@ -134,10 +145,17 @@ error: type mismatch in `bad-type` (line 1)
 **Each call site is checked against the word's declared effect.**
 If you call a word that needs two values but the stack only has one:
 
+```sooth
+: needs-two ( i64 i64 -- i64 ) add ;
+
+: main ( -- )
+  1 needs-two . ;
+```
+
 ```text
-> : needs-two ( i64 i64 -- i64 ) add ;
-> 1 needs-two .
-error: stack underflow: needs 2 values, but the stack holds 1
+error: stack effect mismatch in `main` (line 7)
+  `needs-two` needs 2 values, but the stack holds 1
+  note: declared ( -- )
 ```
 
 The compiler sees one `i64` on the stack and knows `needs-two` needs
@@ -149,12 +167,16 @@ never runs.
 Words compose by stacking their effects. The output of one word
 becomes the input of the next:
 
+```sooth
+: double ( i64 -- i64 ) | x | x 2 mul ;
+: quadruple ( i64 -- i64 ) double double ;
+
+: main ( -- )
+  3 quadruple . ;
+```
+
 ```text
-> : double ( i64 -- i64 ) | x | x 2 mul ;
-> : quadruple ( i64 -- i64 ) double double ;
-> 3 quadruple .
 12
-stack: (empty)
 ```
 
 Read `quadruple`'s body: `double` takes one `i64` and leaves one, then
@@ -170,38 +192,36 @@ don't have to trace the failure at runtime.
 
 ## Reading the stack
 
-The stack is ordered. The REPL shows it bottom-to-top, left-to-right:
+The stack is ordered, bottom-to-top. Printing it with `.` three times
+in a row pops it top-first:
 
-```text
-> 1 2 3
-stack: 1 2 3
+```sooth
+: main ( -- )
+  1 2 3 . . . ;
 ```
 
-`1` is at the bottom, `3` is at the top. Words consume from the top.
-`.` prints the top, so:
-
 ```text
-> .
 3
-stack: 1 2
-> .
 2
-stack: 1
-> .
 1
-stack: (empty)
 ```
+
+`1` was pushed first and sits at the bottom, `3` was pushed last and
+sits on top; `.` pops and prints the top, so `3` prints first.
 
 When you write `| a b c |`, the names bind bottom-to-top: `a` gets the
 bottom value, `c` gets the top. Remember this — it's the most common
 source of off-by-one confusion when reading Sooth for the first time:
 
+```sooth
+: main ( -- )
+  1 2 3 | a b c | a . b . c . ;
+```
+
 ```text
-> 1 2 3 | a b c | a . b . c .
 1
 2
 3
-stack: (empty)
 ```
 
 `a` is `1` (bottom), `b` is `2`, `c` is `3` (top).
