@@ -4444,12 +4444,27 @@ impl<'t> Parser<'t> {
     ) -> Result<(String, WordDef), String> {
         self.expect_word(":")?;
         let (member_name, member_span) = self.expect_word_any_spanned()?;
+        // P7b.S6d (REQ-3): the optional per-impl `inline` keyword sits in the
+        // one slot between the member's name and its body terms -- the
+        // impl-member twin of `parse_worddef`'s keyword slot between a word's
+        // name and its `(`. That slot is delimited there but not here (an
+        // impl member restates no signature), so the keyword reading wins:
+        // only one occurrence is consumed, and a body opening with a call to
+        // a word literally named `inline` must spell the call past another
+        // term.
+        let impl_spelled_inline = matches!(self.peek(), Some((Token::Word(w), _)) if w == "inline");
+        if impl_spelled_inline {
+            self.pos += 1;
+        }
         let trait_name = self.traits[trait_id.index()].name.clone();
         let trait_module = self.traits[trait_id.index()].module;
         // P7.S3s-follow: widen the member lookup to take `(sig,
         // declares_inline)` in one pass, so both branches below inherit the
         // member's `inline` flag instead of hardcoding `false`.
-        let Some((sig, declares_inline)) = self.traits[trait_id.index()]
+        // P7b.S6d (REQ-3): the impl's own spelling wins when present; a
+        // silent impl member inherits the trait member's flag unchanged
+        // (trait-level behaviour, pinned by the G22 List/Range canaries).
+        let Some((sig, trait_declares_inline)) = self.traits[trait_id.index()]
             .members
             .iter()
             .find(|m| m.name == member_name)
@@ -4461,6 +4476,7 @@ impl<'t> Parser<'t> {
                 member_span,
             ));
         };
+        let declares_inline = impl_spelled_inline || trait_declares_inline;
         if let Some((Token::LParen, s)) = self.peek() {
             return Err(impl_member_restated_signature_error(
                 &member_name,
@@ -12800,6 +12816,90 @@ mod tests {
             .expect("the member body is spliced in as a top-level word");
         assert!(synth.declares_inline);
         assert!(synth.poly.is_some(), "generic target stays polymorphic");
+    }
+
+    /// P7b.S6d (REQ-3): an impl member's own `inline` keyword
+    /// (`: cmp inline ... ;`) sets the synthesized member word's
+    /// `declares_inline` even though the trait member is NOT inline -- the
+    /// per-impl spelling overrides the inherited flag, it is not a
+    /// passthrough of it. The keyword itself is consumed: it must not leak
+    /// into the body as a call (that would surface later as an unknown
+    /// word at check time).
+    #[test]
+    fn impl_member_inline_keyword_sets_the_member_words_declares_inline() {
+        let module = parse_src(
+            "trait: Ord['T] : cmp ( 'T 'T -- i64 ) ; ;
+\
+             impl: Ord for i64
+\
+               : cmp inline | a b | a b sub ;
+\
+             ;",
+        )
+        .unwrap();
+        let ord = module.traits.iter().find(|t| t.name == "Ord").unwrap();
+        assert!(
+            !ord.members[0].declares_inline,
+            "the trait member stays non-inline; the keyword is the impl's"
+        );
+        let synth = module
+            .words
+            .iter()
+            .find(|w| w.name == "cmp;Ord;0;i64")
+            .expect("the member body is spliced in as a top-level word");
+        assert!(synth.declares_inline);
+        assert!(
+            !synth
+                .body
+                .iter()
+                .any(|t| matches!(&t.kind, TermKind::Call(name, _, _) if name == "inline")),
+            "the keyword is consumed, not left as a body call"
+        );
+    }
+
+    /// P7b.S6d (REQ-3): a silent impl member (no `inline` spelled) inherits
+    /// the trait member's flag in BOTH directions -- an inline trait member
+    /// stays inline, a non-inline one stays non-inline. The false direction
+    /// is the G22 canary's pin: the new keyword must not lift a silent impl
+    /// member to inline just by existing.
+    #[test]
+    fn impl_member_without_inline_keyword_inherits_the_trait_member_flag() {
+        let module = parse_src(
+            "trait: Ord['T] : cmp inline ( 'T 'T -- i64 ) ; ;
+\
+             trait: Show['T] : show ( &'T -- ) ; ;
+\
+             impl: Ord for i64
+\
+               : cmp | a b | a b sub ;
+\
+             ;
+\
+             impl: Show for i64
+\
+               : show | p | p drop ;
+\
+             ;",
+        )
+        .unwrap();
+        let cmp = module
+            .words
+            .iter()
+            .find(|w| w.name == "cmp;Ord;0;i64")
+            .expect("the member body is spliced in as a top-level word");
+        assert!(
+            cmp.declares_inline,
+            "an inline trait member's flag stays inherited"
+        );
+        let show = module
+            .words
+            .iter()
+            .find(|w| w.name == "show;Show;0;i64")
+            .expect("the member body is spliced in as a top-level word");
+        assert!(
+            !show.declares_inline,
+            "a non-inline trait member's flag stays inherited"
+        );
     }
 
     /// P7.S3r (R4a): the member's own name binds to the synthesized word
