@@ -22,7 +22,7 @@ use crate::ast::{
     poly_type_is_var_free, ArrayDecl, Bound, EnumDecl, ExternDecl, GenericTypes, GlobalEntry,
     GlobalMode, ImplDecl, ImplTarget, Import, ImportAnchor, ImportBinding, ImportTarget,
     IntrinsicVisibility, Kind, Len, MemberGrounding, MemberVarMap, Module, ModuleInfo, ModuleName,
-    MutRegistries, OwnedCellDecl, PolySig, PolyType, QuotAnnot, RefDecl, SliceDecl, Span,
+    MutRegistries, OwnedCellDecl, PolySig, PolyType, QuotAnnot, RefDecl, SliceDecl, SliceId, Span,
     StackEffect, StaticDecl, StaticInit, StructDecl, Term, TermKind, TraitDecl, TraitId, TraitKind,
     TraitMember, Type, TypedSlot, VariantDecl, VariantTag, VariantTagMode, WordDef,
     OWNING_QUOTATION_KEYWORD,
@@ -850,6 +850,146 @@ fn build_member_var_union(
         ));
     }
     Ok(MemberVarUnion { map, appended })
+}
+
+/// P7b.S6d (REQ-2, S6d-8.1): the marker index the slice branch of
+/// `parse_impl_member_body` builds its sentinel `PolyType::Generic` under.
+/// `u32::MAX` is unreachable as a real `GenericTypes::structs`/`enums` index
+/// (a registry that size cannot exist in a `u32`-indexed program), so a
+/// sentinel is recognizable by construction and can never collide with a
+/// declared header.
+///
+/// INVARIANT EXCEPTION (documented, mutual pointer): `PolyType::Generic`'s
+/// own invariant -- "`idx` indexes `GenericTypes::structs`/`enums` per
+/// `is_enum`" (the variant's doc, `src/ast.rs`'s `Generic` arm) -- is
+/// violated for the brief, parse-time-only lifetime of a sentinel. A slice
+/// target (`impl: Iterator for Slice[i64]`) grounds as a bare
+/// `Concrete(Type::Slice(..))` with no ctor header for `is_mono_ctor_app` to
+/// recognize, so the desugar momentarily re-clothes it as a ctor application
+/// to reuse the unmodified `build_member_var_union` + `ground_member_poly`
+/// machinery on the member's App-headed row. The sentinel is erased by
+/// `rewrite_slice_sentinel` before either header-dereferencing path --
+/// `GenericTypes::ground_var_free` (via `ground_mono_member_slots`) or
+/// `substitute_generic_field` -- ever sees it, and the dispatch half
+/// (`resolve_mono_member_call`'s slice guard, `src/check/poly/ground.rs`)
+/// reads the already-grounded member word, so no call site re-derives
+/// through a sentinel either. The `PolyType::Generic` variant's doc carries
+/// the matching pointer back to this exception; `PolyType::SliceApp` (a
+/// dedicated variant) is the recorded fallback if the exception is ever
+/// ruled unacceptable (S6d-2's ledger), not the plan.
+const SLICE_SENTINEL_IDX: u32 = u32::MAX;
+
+/// P7b.S6d (REQ-2): the sentinel itself -- a fake `PolyType::Generic`
+/// carrying the slice's element as its single type argument, `slice_sentinel`
+/// its only constructor and `rewrite_slice_sentinel` its only consumer.
+/// `name` is the slice's own leaked spelling (`SliceDecl::name_static`, e.g.
+/// `Slice[i64]`), diagnostics only, exactly as a real header's `name` field
+/// is; identity rides `idx`/`is_enum`/`module` alone. `module: 0` is the
+/// reserved compiler module, unreachable for a user-declared header at a
+/// real index, one more accidental-collision guard on top of `idx` itself.
+fn slice_sentinel(element: Type, name: &'static str) -> PolyType {
+    PolyType::Generic {
+        is_enum: false,
+        idx: SLICE_SENTINEL_IDX,
+        module: 0,
+        args: vec![PolyType::Concrete(element)],
+        len_args: Vec::new(),
+        name,
+    }
+}
+
+/// P7b.S6d (REQ-2): erase every sentinel occurrence in a grounded member
+/// slot, replacing each with the `Concrete(Type::Slice(id, mutable, name))`
+/// it stood for. Recursion mirrors `member_ty_mentions_app`'s shape over the
+/// six nesting positions a *var-free* grounding can carry a sentinel in --
+/// `Generic`/`GenericVariant`/`Array`/`Ref`/`OwnedCell`/`Quotation` (an
+/// `App`'s arguments are walked too, defensively, though a grounding that
+/// still carries an `App` is not var-free and is discarded at the standing
+/// fences before these types are ever used). `Concrete`/`Var`/`QuotLit`
+/// cannot carry a sentinel. The sentinel check is the `Generic` arm's `idx`
+/// test alone: `slice_sentinel` is the only constructor, so nothing else can
+/// wear the marker.
+fn rewrite_slice_sentinel(
+    ty: PolyType,
+    id: SliceId,
+    mutable: bool,
+    name: &'static str,
+) -> PolyType {
+    match ty {
+        PolyType::Concrete(t) => PolyType::Concrete(t),
+        PolyType::Var(v) => PolyType::Var(v),
+        PolyType::QuotLit => PolyType::QuotLit,
+        PolyType::App { head, args } => PolyType::App {
+            head,
+            args: args
+                .into_iter()
+                .map(|a| rewrite_slice_sentinel(a, id, mutable, name))
+                .collect(),
+        },
+        PolyType::Array(elem, len) => PolyType::Array(
+            Box::new(rewrite_slice_sentinel(*elem, id, mutable, name)),
+            len,
+        ),
+        PolyType::Ref(referent, m) => PolyType::Ref(
+            Box::new(rewrite_slice_sentinel(*referent, id, mutable, name)),
+            m,
+        ),
+        PolyType::OwnedCell(payload) => PolyType::OwnedCell(Box::new(rewrite_slice_sentinel(
+            *payload, id, mutable, name,
+        ))),
+        PolyType::Generic {
+            is_enum,
+            idx,
+            module,
+            args,
+            len_args,
+            name: header,
+        } => {
+            if idx == SLICE_SENTINEL_IDX {
+                return PolyType::Concrete(Type::Slice(id, mutable, name));
+            }
+            PolyType::Generic {
+                is_enum,
+                idx,
+                module,
+                args: args
+                    .into_iter()
+                    .map(|a| rewrite_slice_sentinel(a, id, mutable, name))
+                    .collect(),
+                len_args,
+                name: header,
+            }
+        }
+        PolyType::GenericVariant {
+            idx,
+            module,
+            vi,
+            args,
+            len_args,
+            name: header,
+        } => PolyType::GenericVariant {
+            idx,
+            module,
+            vi,
+            args: args
+                .into_iter()
+                .map(|a| rewrite_slice_sentinel(a, id, mutable, name))
+                .collect(),
+            len_args,
+            name: header,
+        },
+        PolyType::Quotation(ins, outs, is_inline, row_in, row_out) => PolyType::Quotation(
+            ins.into_iter()
+                .map(|t| rewrite_slice_sentinel(t, id, mutable, name))
+                .collect(),
+            outs.into_iter()
+                .map(|t| rewrite_slice_sentinel(t, id, mutable, name))
+                .collect(),
+            is_inline,
+            row_in,
+            row_out,
+        ),
+    }
 }
 
 /// P7b.S2 (S2-5): one member-local name bound by two different dispatchable
@@ -4512,6 +4652,86 @@ impl<'t> Parser<'t> {
                 _ => None,
             },
         };
+        // P7b.S6d (REQ-2, S6d-8.1): the slice branch -- the parser half of
+        // the two-half sentinel fence lift. A slice target (`impl: Iterator
+        // for Slice[i64]`) grounds as a bare `Concrete(Type::Slice(..))`: it
+        // has no ctor header for `is_mono_ctor_app` to recognize (that is why
+        // S8's lifted-mono route does not transfer), so the member's
+        // App-headed row (`'It['T] -- Step['T 'It['T]]`) would hit the S2-6
+        // concrete-target fence below. The lift here reuses the mono-ctor-app
+        // machinery on a *sentinel*: the target is momentarily re-clothed as
+        // a fake ctor application (`slice_sentinel` -- a documented, momentary
+        // violation of `PolyType::Generic`'s registry-index invariant, see
+        // `SLICE_SENTINEL_IDX`), the UNMODIFIED `build_member_var_union` +
+        // `ground_member_poly` dissolve the App against it (the sentinel's
+        // single argument is the slice's element, so a member local in an
+        // identifying position binds to `Concrete(element)`), and every
+        // sentinel is rewritten back to `Concrete(Type::Slice(..))` before
+        // `ground_mono_member_slots`'s `ground_var_free` -- the first
+        // header-dereferencing path -- could see the bogus header. A fully
+        // var-free grounding mints the mono member word exactly as the
+        // mono-ctor-app branch does (`poly: None`; `declares_inline` is the
+        // REQ-3 spelling already resolved above). A non-var-free grounding
+        // falls through to the same two fences that branch raises, scanning
+        // the raw signature, so the diagnostics stay byte-identical (G10's
+        // today-fence, G11's permanent shadow). The dispatch half reading the
+        // already-grounded word lives in `resolve_mono_member_call`
+        // (`src/check/poly/ground.rs`), a slice target being `is_concrete()`
+        // there.
+        if let PolyType::Concrete(Type::Slice(id, mutable, slice_name)) = &target.pattern {
+            let (id, mutable, slice_name) = (*id, *mutable, *slice_name);
+            let element = self.slices[id.index()].element;
+            let mut sentinel_target = target.clone();
+            sentinel_target.pattern = slice_sentinel(element, slice_name);
+            let union = build_member_var_union(&sentinel_target, &sig, &dg)?;
+            let ground = |slots: &[PolyType]| {
+                slots
+                    .iter()
+                    .map(|t| ground_member_poly(t, &sentinel_target.pattern, &union.map, &dg))
+                    .collect::<Result<Vec<_>, String>>()
+            };
+            let inputs = ground(&sig.inputs)?;
+            let outputs = ground(&sig.outputs)?;
+            // The rewrite runs before the var-free check so the minted
+            // word's slots are already sentinel-free; a non-var-free
+            // grounding is discarded at the fences below either way.
+            let inputs = inputs
+                .into_iter()
+                .map(|t| rewrite_slice_sentinel(t, id, mutable, slice_name))
+                .collect::<Vec<_>>();
+            let outputs = outputs
+                .into_iter()
+                .map(|t| rewrite_slice_sentinel(t, id, mutable, slice_name))
+                .collect::<Vec<_>>();
+            if inputs.iter().chain(&outputs).all(poly_type_is_var_free) {
+                let effect = StackEffect {
+                    inputs: self.ground_mono_member_slots(&inputs),
+                    outputs: self.ground_mono_member_slots(&outputs),
+                };
+                return Ok((
+                    member_name,
+                    WordDef {
+                        name,
+                        effect,
+                        body,
+                        poly: None,
+                        declares_inline,
+                        module: self.module,
+                        span: member_span,
+                        declared_globals: None,
+                        is_trait_member: true,
+                    },
+                ));
+            }
+            fence_member_app_against_concrete_target(&sig.inputs, &sig.outputs, &dg)?;
+            fence_member_ctor_application_against_concrete_target(
+                &sig.inputs,
+                &sig.outputs,
+                &dg,
+                &sig.ty_var_names,
+                &sig.len_var_names,
+            )?;
+        }
         // P7b.S8 (REQ-7/REQ-8, Delta B): the lifted-target route. A
         // fully-applied all-concrete ctor target (`for Range[i64]`) grounds
         // its members monomorphically, but through the *generic* machinery:
@@ -8622,7 +8842,7 @@ fn describe_token(tok: &Token) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::{EnumId, StructId};
+    use crate::ast::{EnumId, SliceId, StructId};
     use crate::lexer::lex;
 
     fn parse_src(src: &str) -> Result<Module, String> {
@@ -12899,6 +13119,293 @@ mod tests {
         assert!(
             !show.declares_inline,
             "a non-inline trait member's flag stays inherited"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // P7b.S6d (REQ-2): the two-half sentinel fence lift. Units beside the
+    // sentinel helpers (SLICE_SENTINEL_IDX / slice_sentinel /
+    // rewrite_slice_sentinel) and beside `parse_impl_member_body`'s slice
+    // branch. The dispatch half's units live in
+    // `src/check/poly/ground.rs`'s test module.
+    // ------------------------------------------------------------------
+
+    /// P7b.S6d (REQ-2): the rewrite erases a sentinel from every nesting
+    /// position a grounded member slot can carry one in --
+    /// Generic/GenericVariant/Array/Ref/OwnedCell/Quotation, plus an App's
+    /// arguments defensively -- and preserves every other field of the
+    /// carrying shape (mutability, lengths, row ids, variant index, header
+    /// name), while a sentinel-free type passes through untouched.
+    #[test]
+    fn rewrite_slice_sentinel_erases_every_sentinel_occurrence() {
+        let id = SliceId::from_index(7);
+        let erased = || PolyType::Concrete(Type::Slice(id, false, "Slice[i64]"));
+        let sentinel = || slice_sentinel(Type::I64, "Slice[i64]");
+        // (grounded slot with a sentinel in one nesting position, expected
+        // rewrite) pairs -- one case per recursion arm.
+        let cases: Vec<(PolyType, PolyType)> = vec![
+            // A bare sentinel at the slot's top level.
+            (sentinel(), erased()),
+            // A ctor application carrying the sentinel as a type argument --
+            // `Step['T 'It['T]]`'s grounded shape: the dissolved App rides
+            // the second argument. `is_enum`/`idx`/`name` are preserved.
+            (
+                PolyType::Generic {
+                    is_enum: true,
+                    idx: 3,
+                    module: 2,
+                    args: vec![PolyType::Concrete(Type::I64), sentinel()],
+                    len_args: vec![],
+                    name: "Step",
+                },
+                PolyType::Generic {
+                    is_enum: true,
+                    idx: 3,
+                    module: 2,
+                    args: vec![PolyType::Concrete(Type::I64), erased()],
+                    len_args: vec![],
+                    name: "Step",
+                },
+            ),
+            // The variant twin (unconstructible in a member signature, R3.5,
+            // but the recursion mirrors `member_ty_mentions_app`'s shape over
+            // it): `vi` and the leaked display name survive.
+            (
+                PolyType::GenericVariant {
+                    idx: 3,
+                    module: 2,
+                    vi: 1,
+                    args: vec![sentinel()],
+                    len_args: vec![],
+                    name: "Opt.Some",
+                },
+                PolyType::GenericVariant {
+                    idx: 3,
+                    module: 2,
+                    vi: 1,
+                    args: vec![erased()],
+                    len_args: vec![],
+                    name: "Opt.Some",
+                },
+            ),
+            // Array element; the concrete length rides unchanged.
+            (
+                PolyType::Array(Box::new(sentinel()), Len::Concrete(4)),
+                PolyType::Array(Box::new(erased()), Len::Concrete(4)),
+            ),
+            // Reference referent; the mutability bit rides unchanged.
+            (
+                PolyType::Ref(Box::new(sentinel()), true),
+                PolyType::Ref(Box::new(erased()), true),
+            ),
+            // Owned-cell payload.
+            (
+                PolyType::OwnedCell(Box::new(sentinel())),
+                PolyType::OwnedCell(Box::new(erased())),
+            ),
+            // Quotation rows, both sides; the inline flag and row ids ride
+            // unchanged, and a sentinel nested under a ctor application
+            // *inside* a row is reached through the recursion.
+            (
+                PolyType::Quotation(
+                    vec![sentinel()],
+                    vec![PolyType::Generic {
+                        is_enum: false,
+                        idx: 3,
+                        module: 2,
+                        args: vec![sentinel()],
+                        len_args: vec![],
+                        name: "Box",
+                    }],
+                    true,
+                    Some(5),
+                    None,
+                ),
+                PolyType::Quotation(
+                    vec![erased()],
+                    vec![PolyType::Generic {
+                        is_enum: false,
+                        idx: 3,
+                        module: 2,
+                        args: vec![erased()],
+                        len_args: vec![],
+                        name: "Box",
+                    }],
+                    true,
+                    Some(5),
+                    None,
+                ),
+            ),
+            // An application's arguments (defensive walk: a grounding that
+            // still carries an App is not var-free and is discarded at the
+            // standing fences, but the rewrite erases anyway).
+            (
+                PolyType::App {
+                    head: 1,
+                    args: vec![sentinel()],
+                },
+                PolyType::App {
+                    head: 1,
+                    args: vec![erased()],
+                },
+            ),
+        ];
+        for (ty, expected) in cases {
+            assert_eq!(
+                rewrite_slice_sentinel(ty, id, false, "Slice[i64]"),
+                expected,
+                "the sentinel in this nesting position must erase to the slice"
+            );
+        }
+        // A sentinel-free type passes through untouched -- including a real
+        // ctor application that merely shares the sentinel's shape.
+        let clean = PolyType::Generic {
+            is_enum: false,
+            idx: 3,
+            module: 2,
+            args: vec![PolyType::Concrete(Type::I64)],
+            len_args: vec![Len::Concrete(1)],
+            name: "Box",
+        };
+        assert_eq!(
+            rewrite_slice_sentinel(clean.clone(), id, false, "Slice[i64]"),
+            clean,
+            "a real header is not a sentinel and must survive"
+        );
+    }
+
+    /// P7b.S6d (REQ-2): the sentinel's contract -- `slice_sentinel` builds
+    /// exactly the fake `Generic` the slice branch grounds against (element
+    /// as the single argument, the slice's own spelling as the diagnostics
+    /// name, no length arguments), the marker is `u32::MAX`, and the rewrite
+    /// recognizes the marker (erasing a bare sentinel) while a same-shaped
+    /// `Generic` at a real registry index is left alone: `u32::MAX` is
+    /// unreachable as a real `structs`/`enums` index, so recognition can
+    /// never mis-fire on a declared header.
+    #[test]
+    fn slice_sentinel_is_recognizable_and_never_a_real_registry_index() {
+        assert_eq!(SLICE_SENTINEL_IDX, u32::MAX);
+        match slice_sentinel(Type::I64, "Slice[i64]") {
+            PolyType::Generic {
+                is_enum: false,
+                idx,
+                module: 0,
+                args,
+                len_args,
+                name,
+            } => {
+                assert_eq!(idx, u32::MAX, "the marker is the unreachable index");
+                assert_eq!(args, vec![PolyType::Concrete(Type::I64)]);
+                assert!(len_args.is_empty(), "a slice carries no length");
+                assert_eq!(name, "Slice[i64]");
+            }
+            other => panic!("the sentinel is a Generic, got {other:?}"),
+        }
+        let id = SliceId::from_index(0);
+        // Recognizable: a bare sentinel round-trips to the slice it stands
+        // for (shared, here).
+        assert_eq!(
+            rewrite_slice_sentinel(
+                slice_sentinel(Type::I64, "Slice[i64]"),
+                id,
+                false,
+                "Slice[i64]"
+            ),
+            PolyType::Concrete(Type::Slice(id, false, "Slice[i64]"))
+        );
+        // Never a real registry index: a same-shaped Generic at a real idx
+        // is not rewritten, even carrying the same spelling.
+        let real = PolyType::Generic {
+            is_enum: false,
+            idx: 0,
+            module: 0,
+            args: vec![PolyType::Concrete(Type::I64)],
+            len_args: Vec::new(),
+            name: "Slice[i64]",
+        };
+        assert_eq!(
+            rewrite_slice_sentinel(real.clone(), id, false, "Slice[i64]"),
+            real,
+            "a real header (idx < u32::MAX) must survive the rewrite"
+        );
+    }
+
+    /// P7b.S6d (REQ-2): the slice branch of `parse_impl_member_body` grounds
+    /// an App-headed member row against the concrete slice target through
+    /// the sentinel, and mints the mono member word exactly as the
+    /// mono-ctor-app branch does: `poly: None`, the trait member's
+    /// `declares_inline` inherited, the dispatchable input grounded to the
+    /// shared `Slice[i64]` view (the sentinel erased -- a leftover sentinel
+    /// would panic `ground_var_free` on the bogus header) and the identified
+    /// local to the slice's element. The row is spelled ctor-free (`'S['T]
+    /// -- 'T`) because a bare `parse()` runs no generic-typedef pre-pass, so
+    /// a member signature cannot name a declared header here; the
+    /// Step-headed protocol row this branch exists for is G13's golden
+    /// (`tests/phase7b_slice6d.rs`), which runs under the driver's full
+    /// pre-pass chain.
+    #[test]
+    fn slice_impl_member_grounds_app_headed_row_against_concrete_slice_target() {
+        let module = parse_src(
+            "trait: Pop['S: * -> *] : pop inline ( 'S['T] -- 'T ) ; ;\n\
+             impl: Pop for Slice[i64]\n\
+               : pop 0 ;\n\
+             ;",
+        )
+        .unwrap();
+        let synth = module
+            .words
+            .iter()
+            .find(|w| w.name == "pop;Pop;0;Slice[i64]")
+            .expect("the slice member is spliced in as a mono top-level word");
+        assert!(
+            synth.poly.is_none(),
+            "the sentinel grounds the row var-free, so the member word is mono"
+        );
+        assert!(synth.is_trait_member);
+        assert!(
+            synth.declares_inline,
+            "the trait member's inline spelling is inherited (REQ-3)"
+        );
+        assert_eq!(synth.effect.inputs.len(), 1);
+        assert_eq!(synth.effect.outputs.len(), 1);
+        assert!(
+            matches!(synth.effect.inputs[0].ty, Type::Slice(..)),
+            "the dispatchable input grounds to the concrete slice view"
+        );
+        assert_eq!(
+            synth.effect.inputs[0].ty.name(),
+            "Slice[i64]",
+            "the shared (not mutable) view -- the sentinel erased to it"
+        );
+        assert_eq!(
+            synth.effect.outputs[0].ty.name(),
+            "i64",
+            "the member local identified with the sentinel's element slot"
+        );
+    }
+
+    /// P7b.S6d (REQ-2): a slice member whose grounding is NOT var-free (a
+    /// member local no dispatchable-input argument identifies) does not
+    /// mint: it falls through to the same two fences the mono-ctor-app
+    /// branch raises, scanning the raw signature, so the diagnostic is the
+    /// byte-identical standing fence (`member_app_concrete_target_error`,
+    /// the G11 family) -- not a new sentinel-specific message. Ctor-free sig
+    /// spelling for the same single-file-parse reason as the happy-path unit
+    /// above; the fence fires on the raw sig's `'S['T]` App either way.
+    #[test]
+    fn slice_impl_member_non_var_free_grounding_reaches_the_standing_fences() {
+        let err = parse_src(
+            "trait: Pop['S: * -> *] : pop inline ( 'S['T] -- 'T 'X ) ; ;\n\
+             impl: Pop for Slice[i64]\n\
+               : pop 0 ;\n\
+             ;",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains(
+                "applies the trait variable `'S`, but the impl target `Slice[i64]` is concrete"
+            ),
+            "the standing App fence fires byte-identically, got: {err}"
         );
     }
 

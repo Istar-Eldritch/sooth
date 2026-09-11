@@ -2715,6 +2715,22 @@ pub enum PolyType {
     /// for diagnostics -- mirroring `StructDecl::name_static` -- and carries
     /// no identity of its own: whether two `Generic`s name the same header
     /// is answered by `is_enum`/`idx`/`module` alone.
+    ///
+    /// P7b.S6d (REQ-2): the one sanctioned exception to the `idx` invariant
+    /// above -- the parser's slice sentinel (`SLICE_SENTINEL_IDX`,
+    /// `src/parser.rs`): `parse_impl_member_body`'s slice branch momentarily
+    /// re-clothes a `Concrete(Type::Slice(..))` impl target as a `Generic`
+    /// with `idx: u32::MAX` (unreachable as a real registry index, so no
+    /// collision with a declared header is possible) to reuse the
+    /// mono-ctor-app grounding machinery on the member's App-headed row,
+    /// and `rewrite_slice_sentinel` erases every sentinel before either
+    /// header-dereferencing path (`ground_var_free`/
+    /// `substitute_generic_field`) can see it. This doc is the exception's
+    /// invariant-side pointer; the construction site's
+    /// `SLICE_SENTINEL_IDX` doc carries the matching pointer back. A
+    /// dedicated `PolyType::SliceApp` variant is the recorded fallback if
+    /// the exception is ever ruled unacceptable (S6d-2's ledger), not the
+    /// plan.
     Generic {
         is_enum: bool,
         idx: u32,

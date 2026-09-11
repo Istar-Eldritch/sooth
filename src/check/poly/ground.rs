@@ -1315,7 +1315,28 @@ pub(in crate::check) fn resolve_mono_member_call(
         // a call site is checked against are then one object, which is
         // exactly what `ground_member_type`'s shared-grounding rule (S3r R2)
         // buys the concrete path.
+        //
+        // P7b.S6d (REQ-2, S6d-8.1 item 4): the slice guard arm. A slice
+        // target IS concrete (`Concrete(Type::Slice(..))`), so the arm below
+        // would re-derive the member's effect via `ground_member_type` -- but
+        // the slice member's row is App-headed (`'It['T] -- Step['T
+        // 'It['T]]`) and that re-derivation is exactly the unreachable
+        // backstop (`ast.rs`'s `ground_member_type` App arm; negative control
+        // (ii), G12's spike panic). The parser half grounded the row through
+        // the sentinel and minted the member word already, so this arm reads
+        // that already-grounded word's effect -- the same move, and the same
+        // stronger guarantee, as the lifted-mono route's `None` arm below.
+        // The guard matches the target pattern, not the grounded `Type`, so
+        // a non-slice concrete target keeps its re-derivation arm
+        // byte-identically (G11's unit-level twin below).
         let (input_types, output_types): (Vec<Type>, Vec<Type>) = match imp.target.concrete_ty() {
+            Some(_) if matches!(&imp.target.pattern, PolyType::Concrete(Type::Slice(..))) => {
+                let word = &poly.trait_resolve.words[*widx];
+                (
+                    word.effect.inputs.iter().map(|s| s.ty).collect(),
+                    word.effect.outputs.iter().map(|s| s.ty).collect(),
+                )
+            }
             Some(target_ty) => (
                 member_decl
                     .sig
@@ -1820,6 +1841,63 @@ mod tests {
              {extra}\n\
              : main ( -- ) ;\n"
         )
+    }
+
+    #[test]
+    fn slice_mono_member_call_reads_the_already_grounded_word_effect() {
+        // P7b.S6d (REQ-2): the dispatch half. The parser half (the sentinel
+        // branch of `parse_impl_member_body`) grounds the App-headed row
+        // `('S['T] -- 'T 'S['T])` against the concrete slice target and mints
+        // the mono member word; a bare `pop` over a `Slice[i64]` operand is a
+        // MONO member call (`imp.target.is_concrete()`), so
+        // `resolve_mono_member_call`'s slice guard arm reads that
+        // already-grounded word's effect instead of re-deriving via
+        // `ground_member_type` -- whose App arm is the unreachable backstop
+        // this arm exists to keep unreachable (negative control (ii): with
+        // this arm reverted, this exact program panics at `ast.rs`'s
+        // `ground_member_type` App arm -- G12's manual spike capture). The
+        // row is spelled ctor-free because a bare single-file parse runs no
+        // generic-typedef pre-pass (a member signature cannot name a declared
+        // header here); the Step-headed protocol row runs end-to-end in G13's
+        // golden (`tests/phase7b_slice6d.rs`) under the driver's full
+        // pre-pass chain. The member is inline (REQ-3): a non-inline one
+        // declaring the view output takes the member output ban first (G10).
+        check_src(
+            "import: intrinsics * ;\n\
+             trait: Pop['S: * -> *] : pop inline ( 'S['T] -- 'T 'S['T] ) ; ;\n\
+             impl: Pop for Slice[i64]\n\
+               : pop dup len >i64 swap ;\n\
+             ;\n\
+             : main ( -- )\n\
+               3 5 fill |buf|\n\
+               &buf slice\n\
+               pop\n\
+               drop drop\n\
+               buf drop\n\
+             ;",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn non_slice_concrete_member_call_still_rederives_via_ground_member_type() {
+        // P7b.S6d (REQ-2): the slice guard arm is guarded on the target
+        // PATTERN (`Concrete(Type::Slice(..))`), so a non-slice concrete
+        // target keeps the pre-existing re-derivation arm byte-identically:
+        // its member effect is grounded via `ground_member_type` (here the
+        // `&'T` input grounds to the interned `&Wrap`), and the mono call
+        // site checks against that -- G11's unit-level twin, the
+        // byte-stability pin on the untouched path.
+        check_src(
+            "import: intrinsics * ;\n\
+             type: Wrap n i64 ;\n\
+             trait: Poke['T] : poke ( &'T -- ) ; ;\n\
+             impl: Poke for Wrap\n\
+               : poke drop ;\n\
+             ;\n\
+             : main ( -- ) 5 Wrap |w| &w poke w drop ;",
+        )
+        .unwrap();
     }
 
     #[test]
