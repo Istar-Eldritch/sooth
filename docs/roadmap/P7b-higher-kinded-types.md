@@ -526,16 +526,25 @@ ctor-application targets (`Range[i64]`), and a built-in slice has no ctor header
 `is_mono_ctor_app` to recognize. The generic spelling `Slice['T]` fails earlier
 ("unknown type `'T`": no ctor header to bind the target variable).
 
-Landed scope: admit element-concrete slice targets (`Slice[i64]`, `!Slice[i64]`) to the
-P7b.S8 lifted-mono route — the member grounds mono exactly like Range's — then
-`impl: Iterator for Slice[i64]` is a library impl over existing words (`len`, `&!>`
-element read, O(1) `subslice` remainder, Step construction over plain fields — the S6
-wall is not in play). Whether the generic-element spelling (`Slice['T]`) is also worth
+Landed scope (corrected 260911 at implementation; the sketch this paragraph grew from
+was wrong on three points, superseded by the delivered slice: it admitted both targets,
+it named the P7b.S8 lifted-mono route as the mechanism, and it read the element via
+`&!>`): admit the shared `Slice[i64]` target only -- the mutable `!Slice[i64]` impl is
+closed by Ruling A's enum-payload sweep, which fires first at the `Step` declaration
+(SOO-45) -- via the **two-half sentinel patch**, not the S8 lift: a built-in slice has
+no ctor header for Range's route to recognize, so the parser grounds the App-headed
+member row through the sentinel-substitution path and the dispatch arm reads the
+already-grounded member word. Then `impl: Iterator for Slice[i64]` is a library impl
+over existing words (`len`, `&>` element read, O(1) `subslice` remainder, Step
+construction over plain fields -- the S6 wall is not in play), shipped in
+`core/iterator.sth`: both impls (List's and the slice's) drain through the one imported
+protocol. Whether the generic-element spelling (`Slice['T]`) is also worth
 admitting is a discovery measurement; the mono route may suffice for the stdlib's
 per-element impls. Discovery questions: shared vs exclusive iteration (`Slice` is
 multi-use, `!Slice` linear — which takes the impl, or both), the remainder's
-mutability, and the linear-discipline story for a view that owns nothing. Size: `S-M`
-(checker/target-grammar only; no `src/ir/` change; lib impl + goldens). See
+mutability, and the linear-discipline story for a view that owns nothing. Size: `M`
+(corrected at implementation from the sketch's `S-M` — the delivered slice is
+checker/target-grammar only; no `src/ir/` change; lib impl + goldens). See
 [slice6d-brief](./P7b/slice6d-brief.md) with its [probes](./P7b/slice6d-probes.md):
 the blocker is confirmed exactly as above (`member_app_concrete_target_error`,
 identical for `Slice[i64]`/`!Slice[i64]`; `Slice['T]` is unreachable as a target
