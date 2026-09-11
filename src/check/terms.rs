@@ -1022,6 +1022,34 @@ fn check_term(
                     // into the live `generics_cell` after `env` was built and
                     // so invisible to it -- re-derive it here, read-through,
                     // mutating nothing.
+                    //
+                    // 20d4add-follow-up note (doc-only): this all-mints shape
+                    // keeps today's dispatch (no pre-dispatch tie-break --
+                    // that gate is `env_hit_union`, the env-hit arm's flag
+                    // alone), but its pick can BE a check-time mint by any of
+                    // three measured shapes: 2+ same-header FOREIGN mints
+                    // (tier-1's caller-module find misses, so
+                    // `matching.first()` takes one of them); own-module mints
+                    // where S11 declines -- 2+ groundable own-module headers
+                    // claiming the ctor's surface name (two same-named
+                    // *headers* are rejected by the duplicate-type check
+                    // before any site is checked, so the reachable decline is
+                    // two differently-named headers sharing the variant ctor's
+                    // name) leave the multi-candidate dispatch to tier-1's
+                    // caller-module find, which is the first mint; and a
+                    // single mint, which the `[only]` arm takes. (S11
+                    // *succeeding* from a consumer pin picks its own grounded
+                    // candidate -- the second S11 route below -- leaving the
+                    // dispatch unexercised.) All reachable pre-20d4add (they
+                    // panic at b777cbb today). The push path's nullary-variant
+                    // read is hardened over exactly these shapes: it reads
+                    // through `with_extended_type_slices`, so a pick of a live
+                    // pending mint resolves instead of panicking. The
+                    // phase7b_slice6d units pin the measured outcomes per
+                    // route: the tie-break unit (env-hit arm's tie-break
+                    // pick), the two S11-grounding route units (grounding
+                    // onto a pre-existing mint / a fresh mint from an empty
+                    // cell), and the dispatch-over-mints route unit.
                     None => {
                         let mints = mint_fallback_candidates(name, ctx);
                         from_fallback = true;
@@ -1486,13 +1514,35 @@ fn check_term(
             // replicate). `chosen.symbol` is the variant's own `name` from
             // `enum_generated_sigs`, never mangled, so it matches the enum
             // declaration's `variant.name` directly.
+            //
+            // 20d4add-follow-up P0 fix: the chosen candidate can BE a
+            // check-time mint -- the pre-dispatch consumer-type tie-break's
+            // unique match (above) can select a live `generics_cell` mint
+            // whose `Type::Enum` id is past the frozen registry snapshot, and
+            // so can the env-miss all-mints arm's first-match pick and an
+            // own-module header's S11 grounding (both reachable pre-20d4add;
+            // the tie-break only added a route). Indexing `ctx.enums()`
+            // outright panicked with an index-out-of-bounds, exit 101, no
+            // diagnostic. Read the variant list through
+            // `with_extended_type_slices` (the frozen prefix ++ the live
+            // cell's pending tail -- the same convention
+            // `is_generated_enum_word`/`splice_enum_site` already follow),
+            // with a bounds-checked `.get` so a read past even the extended
+            // slice degrades to `None` (the seed gate's fail-closed shape:
+            // the nullary-variant seed is simply not admitted) instead of
+            // panicking the compiler.
             let nullary_variant_idx = if sig.inputs.is_empty() && sig.outputs.len() == 1 {
                 if let Type::Enum(id, _) = sig.outputs[0] {
-                    ctx.enums()[id.index()]
-                        .variants
-                        .iter()
-                        .position(|v| v.fields.is_empty() && v.name == chosen.symbol)
-                        .map(|vi| vi as u32)
+                    ctx.with_extended_type_slices(|_, enums| {
+                        enums
+                            .get(id.index())
+                            .and_then(|d| {
+                                d.variants
+                                    .iter()
+                                    .position(|v| v.fields.is_empty() && v.name == chosen.symbol)
+                            })
+                            .map(|vi| vi as u32)
+                    })
                 } else {
                     None
                 }

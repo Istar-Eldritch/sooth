@@ -1400,3 +1400,231 @@ import: core::list | List | ;
         "the no-unique-match fall-through keeps today's fallback first-match bytes, got: {stderr}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// P0 (the follow-up review of 20d4add itself): the pre-dispatch tie-break's
+// unique-consumer pick can BE a check-time mint -- its `Type::Enum` id is
+// past the frozen registry snapshot (`ctx.enums()`), so the push path's
+// nullary-variant read (`terms.rs`'s `nullary_variant_idx`, the
+// `ctx.enums()[id.index()]` indexing) panicked with an index-out-of-bounds,
+// exit 101, no diagnostic. Hardening: the read goes through
+// `with_extended_type_slices` (frozen prefix ++ the live cell's pending
+// tail), the same convention `is_generated_enum_word`/`splice_enum_site`
+// already follow -- so a pick of a live mint resolves the way the ratified
+// tie-break contract's success path says, and compiles + runs.
+// ---------------------------------------------------------------------------
+
+/// The P0 repro, end to end: `1 pack` (a mid-word poly call at `'R = i64`)
+/// mints the check-time `Step[u8 i64]` family monomorph into the live cell,
+/// so the `Done` site's env-hit union contains it; the consumer pin
+/// (`use[i64]` wants `Step[u8 i64]`) makes the tie-break's unique match that
+/// mint. PRE-FIX (captured on 20d4add): the build panicked
+/// ``thread 'main' panicked at src/check/terms.rs:1491:21:
+/// index out of bounds: the len is 3 but the index is 3``, exit 101, no
+/// diagnostic. POST-FIX the site resolves to the consumer's declared type
+/// and the program runs, printing `use`'s body output (`0`).
+#[test]
+fn tie_break_pick_of_a_check_time_mint_resolves_instead_of_panicking() {
+    let (_t, _binary, stdout) = build_run_keep(
+        "s6d_p0_tie_break_mint_push",
+        r#"import: core::iterator | Step Done More Iterator | ;
+
+: pack ['R] ( 'R -- Step[u8 'R] ) drop Done ;
+
+: use ['A] ( Step[u8 'A] -- i64 ) drop 0 ;
+
+: f ( -- i64 ) 1 pack drop Done use[i64] ;
+
+: main ( -- ) f . ;
+"#,
+    );
+    assert_eq!(stdout, "0\n");
+}
+
+/// The env-MISS arm's all-mints shape, honestly pinned: the arm IS entered
+/// with live mints, but the pick is S11 grounding, not the fallback dispatch.
+/// `sdone` is a bare ctor of the caller's OWN generic header with zero
+/// parse-time mints (nothing concrete names `S` in any signature), so `env`
+/// has no `sdone` entry; the two mid-word poly calls (`1 wr` at `'R = i64`,
+/// `True wr` at `'R = bool`) each mint a check-time `S[...]` monomorph into
+/// the live cell, so `mint_fallback_candidates` returns 2 live candidates and
+/// the all-mints arm hands them to the candidate ladder. Measured on an
+/// instrumented tree: `ground_bare_generic_ctor` runs over those candidates
+/// and GROUNDS from the consumer pin (`use2[i64]` wants `S[i64]`) onto the
+/// pre-existing check-time mint -- `select_overload_fallback_sourced` never
+/// runs for this shape. With a single own-module header, S11 either grounds
+/// or errors; it never declines to the dispatch (that route is the fourth
+/// unit below, which needs S11 to decline). So this pins the env-miss
+/// all-mints ARM ENTRY plus the S11-grounding pick onto a PRE-EXISTING mint
+/// -- distinct from the third unit, which grounds a FRESH mint from an empty
+/// cell. Fail-before (captured on the pre-fix 20d4add tree): the same
+/// ``index out of bounds: the len is 2 but the index is 2`` at
+/// `terms.rs:1491`, exit 101. POST-FIX it reads the pending decl through the
+/// extended slices and the site resolves (`use2[i64]`'s pin matches the
+/// grounded mint's output exactly), so the program runs and prints `0`.
+#[test]
+fn env_miss_all_mints_arm_s11_grounds_onto_a_pre_existing_check_time_mint_resolves() {
+    let (_t, _binary, stdout) = build_run_keep(
+        "s6d_p0_env_miss_all_mints",
+        r#"import: intrinsics * ;
+
+
+type: S['A]
+| sdone
+| smore 'A
+;
+
+: wr ['R] ( 'R -- S['R] ) drop sdone ;
+
+: use2 ['A] ( S['A] -- i64 ) drop 0 ;
+
+: f ( -- i64 )
+  1 wr drop
+  True wr drop
+  sdone use2[i64] ;
+
+: main ( -- ) f . ;
+"#,
+    );
+    assert_eq!(stdout, "0\n");
+}
+
+/// The second S11 route of the same P0 read, also reachable pre-20d4add (the
+/// review cites b777cbb for it too; the fail-before capture is on the
+/// pre-fix 20d4add tree, the same ``index out of bounds: the len is 2 but
+/// the index is 2``, exit 101): an own-module header whose S11 grounding
+/// succeeds from a consumer pin onto a check-time mint. `f` has no prior
+/// poly call, so at the bare `sdone` site the live cell is empty and the
+/// env-miss arm takes the S11 ladder; the consumer pin (`use2[i64]` wants
+/// `S[i64]`) fully determines theta, the grounding mints that instantiation
+/// check-time (its id lands past the frozen snapshot), and the grounded
+/// candidate's nullary output carries the mint's id straight into the push
+/// path's read. PRE-FIX that read panicked; POST-FIX it resolves through
+/// the extended slices and the program runs, printing `0`.
+#[test]
+fn s11_consumer_pin_grounding_onto_a_check_time_mint_resolves() {
+    let (_t, _binary, stdout) = build_run_keep(
+        "s6d_p0_s11_grounding_mint",
+        r#"import: intrinsics * ;
+
+
+type: S['A]
+| sdone
+| smore 'A
+;
+
+: use2 ['A] ( S['A] -- i64 ) drop 0 ;
+
+: f ( -- i64 ) sdone use2[i64] ;
+
+: main ( -- ) f . ;
+"#,
+    );
+    assert_eq!(stdout, "0\n");
+}
+
+/// The TRUE env-miss dispatch-over-mints route, now pinned. S11 must DECLINE
+/// at the bare ctor site so the multi-candidate fallback dispatch runs, and
+/// the measured way to decline is 2+ groundable own-module headers claiming
+/// the ctor's surface name: `ctor_grounding_header` counts claimants across
+/// every own-module generic header and returns `None` on 2+. (Two same-named
+/// *headers* are not the way -- `check_duplicate_type_names` rejects them
+/// before any body is checked, measured on 20d4add: `duplicate type 'S'` --
+/// so the reachable decline is two differently-named headers sharing the
+/// variant ctor's name, here `S`'s and `T`'s `sdone`.) Only the FIRST
+/// same-named claimant is ever minted (`poly_construction_header` is a
+/// first-match find), so the `T` header stays unminted: the two mid-word
+/// poly calls mint `S[i64]` and `S[bool]`, the bare `sdone` site enters the
+/// env-miss all-mints arm with those 2 live candidates, S11 declines, and
+/// `select_overload_fallback_sourced` runs -- tier-1's caller-module find
+/// matches both mints (both minted under the caller's module) and takes the
+/// FIRST, `sdone[i64]` (measured on an instrumented tree: candidates=2,
+/// caller_module=0, syms=["sdone[i64]", "sdone[Bool]"]). The env-miss arm
+/// sets no `env_hit_union`, so the round-1 consumer-type tie-break does not
+/// preempt the dispatch here. Fail-before (captured on the pre-fix 20d4add
+/// tree): ``thread 'main' panicked at src/check/terms.rs:1491:21: index out
+/// of bounds: the len is 2 but the index is 2``, exit 101, no diagnostic.
+/// POST-FIX the push path's nullary read resolves the first mint through the
+/// extended slices, `use2[i64]`'s pin matches its `S[i64]` output, and the
+/// program runs, printing `0`.
+#[test]
+fn env_miss_dispatch_over_mints_picks_the_first_check_time_mint_resolves() {
+    let (_t, _binary, stdout) = build_run_keep(
+        "s6d_p0_env_miss_dispatch_over_mints",
+        r#"import: intrinsics * ;
+
+
+type: S['A]
+| sdone
+| smore 'A
+;
+
+type: T['A]
+| sdone
+| tmore 'A
+;
+
+: wr ['R] ( 'R -- S['R] ) drop sdone ;
+
+: use2 ['A] ( S['A] -- i64 ) drop 0 ;
+
+: f ( -- i64 )
+  1 wr drop
+  True wr drop
+  sdone use2[i64] ;
+
+: main ( -- ) f . ;
+"#,
+    );
+    assert_eq!(stdout, "0\n");
+}
+
+/// The tag path's identical crash class, closed the same way -- pinned as the
+/// refusal it is, not a resolution. `sdone[i64]` grounds through S11's
+/// explicit-args route, minting the check-time `S[i64]` monomorph (frozen
+/// registry len 2 -- `Bool` plus `Ordering` (core's two concrete enums;
+/// `S` itself is a generic header, registered only in the live cell, not
+/// the frozen registry); the mint's `EnumId` is 2, past the
+/// snapshot) onto the stack, where `tag` reads it. Fail-before (captured on
+/// the P0-fixed, tag-unfixed tree -- on the bare pre-fix 20d4add the ctor's
+/// own push-path read panics first, at `terms.rs:1491`, so the tag read is
+/// never reached): ``thread 'main' panicked at src/check/word_families.rs:774:9:
+/// index out of bounds: the len is 2 but the index is 2``, exit 101, no
+/// diagnostic. POST-FIX the declaration read goes through
+/// `with_extended_type_slices` and finds the mint -- and then the
+/// pre-existing scalar-domain gate refuses, because a scalar generic enum
+/// CANNOT exist: the phantom-parameter rule rejects a header whose type
+/// variable appears in no field (``type: S['A] | sdone | salso ;`` is itself
+/// a located declaration error: "a phantom parameter cannot be disambiguated
+/// at a call site"), so every generic enum has a payload variant, so the
+/// all-payload-free predicate is false for every mint. tag-on-mint never
+/// worked (it panicked); the pin is the located refusal that replaces the
+/// ICE, with tag's frozen-id behavior byte-identical (frozen scalar enums
+/// read through the unchanged prefix).
+#[test]
+fn tag_on_an_s11_grounded_check_time_mint_refuses_located_instead_of_panicking() {
+    let stderr = build_error_located(
+        "s6d_p0_tag_on_s11_mint_refusal",
+        r#"import: intrinsics * ;
+
+
+type: S['A]
+| sdone
+| smore 'A
+;
+
+: f ( -- ) sdone[i64] tag . ;
+
+: main ( -- ) f ;
+"#,
+    );
+    assert!(
+        stderr.contains("error: type mismatch in `f` (line 11)"),
+        "the refusal must be located at the tag site, got: {stderr}"
+    );
+    assert!(
+        stderr
+            .contains("`tag` requires an enum whose variants all carry no payload, found `S[i64]`"),
+        "the refusal must be the pre-existing payload-enum message with the mint named, got: {stderr}"
+    );
+}

@@ -771,11 +771,27 @@ pub(super) fn check_tag_word(
     let Type::Enum(id, _) = top.ty else {
         return Err(tag_operand_error(ctx, span, top.ty));
     };
-    if !ctx.enums()[id.index()]
-        .variants
-        .iter()
-        .all(|v| v.fields.is_empty())
-    {
+    // 20d4add-follow-up (the same crash class the push path's nullary read
+    // just closed): the operand can be an S11-grounded check-time mint whose
+    // `Type::Enum` id is past the frozen registry snapshot, so
+    // `ctx.enums()[id.index()]` panicked with an index-out-of-bounds, exit
+    // 101, no diagnostic (``sdone[i64] tag``: frozen len 2, mint id 2).
+    // Read the declaration through `with_extended_type_slices` (frozen
+    // prefix ++ the live cell's pending tail -- the same convention the
+    // hardened nullary read follows), bounds-checked. A read past even the
+    // extended slice finds no declaration, so the all-variants-payload-free
+    // predicate cannot be established from the declaration -- and the
+    // predicate IS the admission gate (lowering's `tag` is a pure relabel
+    // with no declaration read of its own), so the operand is not admitted:
+    // the existing payload-enum refusal, the same fail-closed shape the
+    // nullary read's unadmitted seed takes, instead of panicking the
+    // compiler.
+    let all_variants_payload_free = ctx.with_extended_type_slices(|_, enums| {
+        enums
+            .get(id.index())
+            .is_some_and(|d| d.variants.iter().all(|v| v.fields.is_empty()))
+    });
+    if !all_variants_payload_free {
         return Err(tag_payload_enum_error(ctx, span, top.ty));
     }
     stack.pop();
