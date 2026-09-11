@@ -37,8 +37,9 @@ deferred (Ruling A's enum-payload sweep fires first — S6d-9; deferral points
 at SOO-45). **(2)** the fence lift is the two-half sentinel patch exactly as
 spiked in S6d-8.1 (parser half: `SLICE_SENTINEL_IDX` + `slice_sentinel` +
 `rewrite_slice_sentinel` at `src/parser.rs:855-964`, the slice branch at
-`:4629-4691` inside `parse_impl_member_body`, preempting the `is_concrete`
-branch; dispatch half: `src/check/poly/ground.rs:1319-1333`, the slice guard
+`:4629-4691` in the spiked tree (= immediately before the `is_mono_ctor_app`
+branch, `src/parser.rs:4519`, on the clean tree — preemption is of BOTH
+branches; see S6d-8.1 item 3); dispatch half: `src/check/poly/ground.rs:1319-1333`, the slice guard
 arm in `resolve_mono_member_call` reading the already-grounded member word);
 negative controls (i)/(ii)/(iii) are regression pins. **(3)** per-impl
 `inline` spelling; `declares_inline` = the impl's spelling when present, else
@@ -62,7 +63,7 @@ Amendments the desk-checks force (each argued in full in the verdicts):
   shape) still refuses.
 + **A-amend 2 — the union's condition is `owned_root: None` on the one-sided
   deriv**, the same predicate the back-edge guard uses for its accept-case
-  (`src/check.rs:1690-1700`) and `carried_borrow` uses for its no-contention
+  (`src/check.rs:1677-1692`) and `carried_borrow` uses for its no-contention
   case (`src/check.rs:3164`). Rooted one-sided asymmetries and two-root
   disagreements stay refused (goldens G4/G5 pin the bytes).
 + **C-amend — 5(b) alone suffices for the while-drain fixture**; the
@@ -86,11 +87,11 @@ Amendments the desk-checks force (each argued in full in the verdicts):
 + **D-amend — per-impl inline on the MONO member is confirmed safe at mono
   call sites** (the call site is a sig-check, not a body re-walk), with one
   documented caveat: a member call *inside a poly combinator splice* routes
-  onto `inline_combinator` (`src/check/poly/ground.rs:608-620`, S3-1.c) and
+  onto `inline_combinator` (`src/check/combinators.rs:313`, S3-1.c) and
   IS re-walked there, where the natural body's bare `Done` would hit the S11
   strict-grounding wall (`consumer_expected_type`'s spliced-body half
   declines for a mono member — `combinator_sig` is `None`,
-  `src/check/combinators.rs:549-556`). No golden in this set calls `next`
+  `src/check/terms.rs:2649`). No golden in this set calls `next`
   from inside a quotation; the times-hosted drain is closed regardless
   (S6d-10.4). Noted for the spec's non-goals.
 
@@ -117,7 +118,10 @@ scans a kept deriv feeds:
   `(d.owned_root.as_deref() == Some(rest) || d.place == rest) && (mutable ||
   d.mutable)`. A rootless **shared**-slice deriv (the only kind the protocol
   produces: `subslice`/`slice`/`&>` project the receiver's deriv,
-  `word_families.rs:918/951/62`, and the naming mint is shared-and-rootless)
+  `word_families.rs:918/951/62`, and the naming mint is rootless only when
+  the binding carries no held deriv — e.g. a parameter-seeded slot,
+  `Slot::computed` — while a local rooted in a frame place preserves its
+  root through the reborrow, `src/check/engine.rs:418`)
   matches neither arm effectively — `owned_root` is `None`, and
   `d.place == rest` requires mutability, which a shared view lacks. It
   conflicts with nothing. A rootless **mutable** deriv (a `!Slice` view of a
@@ -126,7 +130,7 @@ scans a kept deriv feeds:
 + The consume guard (`live_borrow_of`, gated on `is_linear` of the consumed
   type): a slice is `Copy`, so consuming the parameter root never fires; the
   rooted array case is carried by the rooted deriv, untouched by the union.
-+ The back-edge guard (`src/check.rs:1690-1700`): rejects only
++ The back-edge guard (`src/check.rs:1677-1692`): rejects only
   `owned_root: Some(non-static local)`; `None` is the documented accept-case.
   A rootless deriv kept at the join is consistent with the loop story (5b).
 
@@ -215,7 +219,8 @@ naming-mint fact calibrating every deriv.
 2. `s next` (line 37): naming `s` mints the rootless reborrow (`terms.rs:248`).
    The member call at a MONO site is a **sig-check, not a splice**
    (`resolve_mono_member_call`'s mono branch, `ground.rs:1273-1442`: slot
-   match, the span-keyed record at `:1407`, `push_dispatch_outputs`) — so
+   match, the span-keyed record at `ground.rs:1423`, `push_dispatch_outputs`
+   at `:1424`) — so
    the state slot's deriv is the forward of the operand's (site 4,
    `poly.rs:4630`): rootless. Strict grounding S11 amendment: not consulted
    here (no bare ctors at this level).
@@ -272,8 +277,8 @@ member path; ran nothing new (the fence blocks any live exercise today).
 
 **Evidence.** At a MONO call site (`main`/`drain` bodies),
 `resolve_mono_member_call`'s mono branch sig-checks the slots against the
-grounded member sig, records the span-keyed symbol (`ground.rs:1407`), and
-pushes dispatch outputs (`:1441`) — it never re-walks the member body. The
+grounded member sig, records the span-keyed symbol (`ground.rs:1423`), and
+pushes dispatch outputs (`:1424`) — it never re-walks the member body. The
 body (including the natural body's bare `Done`) is checked exactly ONCE, at
 the member word's declaration (`check_word` → `check_terms_word`,
 `word_entry.rs:181-240`), where the tail channel
@@ -287,9 +292,9 @@ never enters it at mono call sites. S6d-8.3's end-to-end drain (mono member,
 inline, real `Step?` dispatch and `More>` destructure at the call sites) ran
 green on the patched tree — consistent. **Caveat:** a member call inside a
 poly combinator splice routes onto `inline_combinator`
-(`ground.rs:608-620`) and re-walks the body with the splice's context, where
+(`combinators.rs:313`) and re-walks the body with the splice's context, where
 `consumer_expected_type`'s spliced-body half declines for a mono member
-(`combinator_sig` is `None`, `combinators.rs:549-556`) — a bare arm-tail
+(`combinator_sig` is `None`, `terms.rs:2649`) — a bare arm-tail
 ctor would hit the S11 wall there. No golden calls `next` from inside a
 quotation; `next`-inside-a-quotation shapes are separately closed for slices
 (S6d-10.4's abstract-row wall). The evidence therefore supports the frame
@@ -302,12 +307,18 @@ caller whose tail output differs — the probes behind G2/G4).
 
 ### E — the clobber fix's blast radius
 
-**Verdict:** no existing golden moves under a per-monomorph keying — no
-existing fixture in the suite has two monomorphs of one generated enum in one
-program (measured: no slice8 test imports both `core::list` and
-`core::range`; the prereq suite mints `Step[i64 Slice[i64]]` alone). The
-clobber is reachable only from NEW programs, which is why it is unpinned
-today and why G7/G8 must exist. Canaries: the 6 named below plus the suite.
+**Verdict (corrected):** two existing suite fixtures already hold two
+monomorphs of one generated enum in one program and are green at HEAD —
+`tests/phase6_slice3b.rs:208`
+(`two_asymmetric_instantiations_eliminate_independently_in_one_word`, bare
+`Ok>`/`Err>` destructures) and `tests/phase7_slice12.rs:681`
+(`a_two_parameter_generic_enum_is_eliminated_at_swapped_monomorphs`, bare
+`Ok`/`Err` constructor calls, no destructure — the arms `drop` the payload).
+The original "no slice8 test imports both `core::list` and `core::range`"
+measurement was too narrow: it only checked the slice8 suite for the S6d
+target pair, not the whole suite for the general shape. Both fixtures are
+named P3 canaries alongside G7/G8; the clobber fix must not move their
+bytes.
 
 **Method:** enumerate the resolution paths for generated enum words; measure
 the suite's exposure; reproduce the clobber byte-exact as a committed fixture.
@@ -319,9 +330,16 @@ every unflushed check-time monomorph's generated sig matching the name, so a
 second mint turns one candidate into two; (3) the fallback picker
 `select_overload_fallback_sourced` (`src/check/builtins.rs:180-199`:
 operand-filter, then a tier-1 same-module preference, then first-match) —
-the likely reason the entry-file-minted `Step[i64 Slice[i64]]` hijacks a
-List consumer's site (the repro's "expected" side is the Slice monomorph
-against a List operand); (4) the S11 strict-grounding ladder
+which is **exonerated** as the clobber's cause: it operand-filters first
+(`:185-190`), so a wrong-shaped monomorph cannot survive its match. The
+measured cause is candidate **visibility**: the bare-name candidate lookup's
+env-hit arm (`terms.rs:966-968`, the `Some(v) => v.as_slice()` arm of
+`env.get(name)`) returns only the single parse-time-minted monomorph and
+never consults `mint_fallback_candidates` (path 2 above, which only runs on
+the sibling env-miss arm) — so a second, check-time-minted monomorph is
+invisible to it. Repro: adding one parse-time mention of
+`Step[i64 List[i64]]` to `s6d_m_clobber_touch.sth` makes it build (exit 0);
+(4) the S11 strict-grounding ladder
 (`terms.rs:1000-1100`, `ground_bare_generic_ctor` at `:2843`); (5) the
 span-keyed records — the `[only]` arm's
 `splice_enum_words[(uid,span)]`/`builtin_overloads[span]`
@@ -342,9 +360,12 @@ error: type mismatch in `drain` (line 19)
   note: declared ( List[i64] -- )
 ```
 
-**Confidence:** verified (byte-exact repro; suite exposure measured; the
-tier-1 hijack is a code-shape reading — the mechanism design stays with the
-implementer per the frame).
+**Confidence:** verified (byte-exact repro; suite exposure measured — two
+existing suite tests already hold two monomorphs of one generated enum,
+`tests/phase6_slice3b.rs:208` and `tests/phase7_slice12.rs:681`, and are the
+named canaries; the fallback picker is exonerated by its operand filter,
+`builtins.rs:185-190`; the hijack cause is env-candidate visibility,
+`terms.rs:966-968`).
 
 ## The golden set
 
@@ -647,11 +668,12 @@ regression face; they must stay green with List/Range spellings unchanged):
 + `back_edge_outs` (`src/check/terms.rs` tests):
   `back_edge_outs_forwards_deriv_along_the_index_map` (beside the existing
   `back_edge_outs_forwards_surviving_set_along_index_map`, which stays).
-+ The clobber fix site (mechanism per the implementer; the S8b span-keyed
-  channel is the named surface):
++ The clobber fix site (mechanism per the implementer; the env-hit
+  candidate-visibility arm, `terms.rs:966-968`, is the named surface):
   `variant_word_resolution_survives_a_second_monomorph_of_the_same_enum` —
   two `Step` monomorphs, each site resolving to its own. Integration pins:
-  G7/G8.
+  G7/G8, plus the two existing suite canaries
+  (`tests/phase6_slice3b.rs:208`, `tests/phase7_slice12.rs:681`).
 
 Target ~14 units.
 
@@ -673,11 +695,16 @@ Target ~14 units.
   The `as-done` fallback covers the BODY shape only (see F5).
 + **F4 (the clobber fix).** The gate leaves no other home for the impl
   (`Slice` declares no module — G19), so if the fix stalls, the lib
-  placement stalls and the slice ships nothing user-visible. The fix surface
-  is the S8b span-keyed mechanism; the risk is the OTHER paths (the
-  fallback picker's tier-1 module preference, verdict E path 3) — the
-  implementer should key the resolution, not widen one arm. Integration
-  pins: G7, G8.
+  placement stalls and the slice ships nothing user-visible. The fix is the
+  env-hit candidate-visibility union at `terms.rs:966-968` (union it with
+  `mint_fallback_candidates`'s check-time mints, keyed per-monomorph); the
+  existing span-keyed records (`terms.rs:1124-1157`, `:1210`) are
+  bookkeeping precedent, not the clobber site, and
+  `select_overload_fallback_sourced` is exonerated (operand-filters first,
+  `builtins.rs:185-190`) — do not touch it. The standing risk is the
+  union's blast radius across the two named canary tests
+  (`tests/phase6_slice3b.rs:208`, `tests/phase7_slice12.rs:681`).
+  Integration pins: G7, G8.
 + **F5 (join union + back_edge_outs, together).** Probe-proven fallback if
   either stalls: the `as-done` poly-helper spelling
   (`probes/s6d_a_fence_baseline.sth`'s impl body) with join/back_edge

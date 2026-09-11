@@ -70,8 +70,8 @@ Exactly as evidenced in S6d-8.1. Two halves:
   `rewrite_slice_sentinel` at `src/parser.rs:855-964`; the slice branch inside
   `parse_impl_member_body`, inserted **immediately before the
   `is_mono_ctor_app` branch** (`src/parser.rs:4519` on this tree, right after
-  the `dg` construction at `:4485-4497`; on the clean tree this lands around
-  `:4513`), so it preempts **both** the `is_mono_ctor_app` arm (`:4519`) and
+  the `dg` construction at `:4485-4497`), so it preempts **both** the
+  `is_mono_ctor_app` arm (`:4519`) and
   the `is_concrete` arm (`:4558`). (The paper tests' probe coordinates,
   `:4629-4691`, are post-insertion/spike-tree line numbers from S6d-8.1 item
   3, which is explicit that the branch lands "BEFORE both" arms — that intent
@@ -162,9 +162,13 @@ place preserves the root through a reborrow, exactly as the spec's own **G4**
 fixture (`probes/s6d_j`, naming `va`) demonstrates: the refusal reads "a
 borrow of `a`" — a rooted result. Rootless derivs are common in slice
 consumer code (parameter-rooted remainders are the typical shape) but not
-universal, and **no laundering spelling exists**: a rooted deriv cannot be
-re-spelled to hit the union's rootless case, so G4/G5 stay reachable
-guardrails, not vestigial ones.
+universal, and **no laundering spelling is known**: a rooted deriv survives a
+reborrow, so a rooted one-sided asymmetry (G4) cannot be re-spelled into the
+union's rootless case by naming a local. The residual case — a rooted view
+passed into a helper, which re-mints rootless in the callee frame
+(`Slot::computed`) — is the already-accepted back-edge shape (G16), not a
+join-site channel, so it is not a laundering route either. G4/G5 stay
+reachable guardrails, not vestigial ones.
 
 **Fallback (F5), if either half stalls:** the as-done poly-helper spelling
 (`probes/s6d_a_fence_baseline.sth`'s impl body) with join/back_edge untouched —
@@ -197,7 +201,7 @@ desk-check C).
   `Ptr[T]` stays opaque; the two-word slice slot already lands (PREREQ REQ-1).
 - **NFR-3 (safety monotonicity).** Every intermediate commit is at least as safe
   as the base. The bans and refusals that exist today stay **byte-identical** in
-  every intermediate commit: **G4/G5/G9/G10/G11/G12/G17/G19/G20/G21** are the
+  every intermediate commit: **G4/G5/G9/G10/G11/G17/G19/G20/G21** are the
   regression pins, plus the 6 List/Range canaries and the PREREQ guard test.
   Nothing admits a slice-bearing value into an escaping position at any step.
 - **NFR-4 (no regression, PREREQ-restated).** Every PREREQ-shipped admission
@@ -299,11 +303,11 @@ Parser (REQ-2, REQ-3):
 
 - `src/parser.rs:855-964` — `SLICE_SENTINEL_IDX`, `slice_sentinel`,
   `rewrite_slice_sentinel` (new helpers).
-- `src/parser.rs:4513` (clean tree; `:4519` on this tree, just after the `dg`
-  construction at `:4485-4497`) — the slice branch's insertion point in
-  `parse_impl_member_body`, preempting **both** `is_mono_ctor_app` (`:4519`)
-  and `is_concrete` (`:4558`). (The paper tests' `:4629-4691` are spike-tree
-  coordinates; see REQ-2.)
+- `src/parser.rs:4519` — the slice branch's insertion point in
+  `parse_impl_member_body`, immediately before the `is_mono_ctor_app` branch
+  and just after the `dg` construction at `:4485-4497`; it preempts **both**
+  `is_mono_ctor_app` (`:4519`) and `is_concrete` (`:4558`). (The paper tests'
+  `:4629-4691` are spike-tree coordinates; see REQ-2.)
 - `src/parser.rs:4449-4453` — the current unconditional `declares_inline`
   inheritance (REQ-3 makes it impl-spelling-first).
 - `src/parser.rs:4242` — `impl_target_pattern_poly_type` (S8's Range route,
@@ -318,8 +322,8 @@ AST (REQ-2 invariant exception):
 - `src/ast.rs:2208` — `fence_member_app_against_concrete_target`.
 - `src/ast.rs:2569` — `ImplTarget::is_mono_ctor_app` (unchanged; slices never
   satisfy it — that is why the sentinel exists).
-- `src/ast.rs:2271` — the panic G12(a)'s revert control reaches if the dispatch
-  arm is reverted.
+- `src/ast.rs:2271` — the panic G12's manual revert spike (negative control
+  (ii)) reaches if the dispatch arm is reverted.
 
 Dispatch grounding (REQ-2 dispatch half, REQ-6 call sites):
 
@@ -370,8 +374,8 @@ Clobber fix (REQ-4):
 Builtins / word families (reference — already work, PREREQ-shipped):
 
 - `src/check/builtins.rs:536` — `Type::Slice(_, mutable, _) => !mutable` (Copy).
-- `src/check/word_families.rs:32-63` — `&>`/`&!>`; `:926` (`subslice`), `:819`
-  and `:1104` (`len`) — mutability-preserving.
+- `src/check/word_families.rs:32-63` — `&>`/`&!>`; `:926` (`subslice`), `:1104`
+  (`len`, the `Type::Slice` arm) — mutability-preserving.
 
 Library (REQ-6):
 
@@ -388,10 +392,11 @@ Library (REQ-6):
 - **F1 (shared only).** No risk: the mutable rejection is Ruling A's sweep,
   first-firing (G9); the `s6d_b3` twin catches a span/wording shift. SOO-45.
 - **F2 (sentinel patch).** Negative controls cover it: (i) G11 byte-stability for
-  non-slice targets, (ii) G12's revert control (the `ast.rs:2271` panic), (iii)
-  G10 the output ban. If the invariant exception is ruled unacceptable, the
-  fallback is `PolyType::SliceApp` — a bigger, unverified diff (S6d-2), not a
-  spelling fallback.
+  non-slice targets, (ii) G12, a **manual implementation-time spike** (not a
+  suite golden — captures the `ast.rs:2271` panic under a reverted dispatch
+  arm), (iii) G10 the output ban. If the invariant exception is ruled
+  unacceptable, the fallback is `PolyType::SliceApp` — a bigger, unverified
+  diff (S6d-2), not a spelling fallback.
 - **F3 (per-impl inline).** Hard requirement, no spelling fallback. Trait-level
   inline is NOT acceptable (breaks the 6 canaries, G22). If the desugar stalls,
   the slice stalls: escalate.
@@ -492,8 +497,8 @@ every commit (NFR-3).
 - **Goal.** `impl: Iterator for Slice[i64]` grounds its App-headed member row
   against the concrete slice target; the dispatch arm reads the grounded word.
 - **Scope.** `src/parser.rs:855-964` (sentinel helpers), the slice branch
-  inserted immediately before `is_mono_ctor_app` (`:4519` on this tree, `:4513`
-  clean-tree, preempting both `is_mono_ctor_app` and `is_concrete`),
+  inserted immediately before `is_mono_ctor_app` (`:4519`, preempting both
+  `is_mono_ctor_app` and `is_concrete`),
   `src/ast.rs:2711` (invariant-exception doc + mutual pointer),
   `src/check/poly/ground.rs:1319-1333` (dispatch arm).
   Units: `rewrite_slice_sentinel_erases_every_sentinel_occurrence`,
@@ -542,12 +547,14 @@ every commit (NFR-3).
 - **Entry.** Clean tree at HEAD (the bug is clean-tree reproducible, `s6d_m`).
 - **Exit.** **G7** builds (`1\n2\n3\n`); suite green, including the two
   existing suite fixtures that already hold two monomorphs of one generated
-  enum via bare `Ok>`/`Err>` destructures —
+  enum in one program —
   `tests/phase6_slice3b.rs:208`
-  (`two_asymmetric_instantiations_eliminate_independently_in_one_word`) and
+  (`two_asymmetric_instantiations_eliminate_independently_in_one_word`, bare
+  `Ok>`/`Err>` **destructures**) and
   `tests/phase7_slice12.rs:681`
-  (`a_two_parameter_generic_enum_is_eliminated_at_swapped_monomorphs`) — named
-  canaries, not just "nothing else moves".
+  (`a_two_parameter_generic_enum_is_eliminated_at_swapped_monomorphs`, bare
+  `Ok`/`Err` **constructor calls**, no destructure — the arms `drop` the
+  payload) — named canaries, not just "nothing else moves".
 - **Parallelism.** With P1/P2/P4. **Effort** M. **Difficulty** hard (resolution
   paths). **Blockers.** None.
 
@@ -588,10 +595,17 @@ every commit (NFR-3).
 - **Out of bounds.** No `for_each`/`fold` change (G20); no `!Slice` impl (G9);
   no `next`-in-quotation (G21).
 - **Entry.** P1–P4 landed and green.
-- **Exit.** **G8** (exit criterion, `1\n2\n3\n3\n3\n3\n`); **G2** natural body
-  (`3\n4\n`); **G6** while drain (`6\n6\n6\n`, if 5(b) landed); G15/G16/G18 mono
-  drains; G9/G17/G19/G20/G21 byte-exact refusals; **G22** 3480 + new / 0 with the
-  6 canaries green; the docs commit (roadmap correction + condensed reference).
+- **Exit.** **G8** (exit criterion, `1\n2\n3\n3\n3\n3\n`); **G1**
+  (`3\n4\n`, unconditional here — both P1 and P2 have landed) and **G2**
+  natural body (`3\n4\n`); **G6** while drain (`6\n6\n6\n`, if 5(b) landed);
+  G15/G16/G18 mono drains; G9/G17/G19/G20/G21 byte-exact refusals; **G22**
+  3480 + new / 0 with the 6 canaries green; the docs commit, enumerated: the
+  `docs/roadmap/P7b-higher-kinded-types.md:514-537` S6d entry correction
+  (the admissions line, the `&!>` read, and the `Size: S-M` line at `:537`
+  → `M`, plus the `:529-530` lifted-mono-route mechanism claim superseded by
+  the sentinel patch), `docs/roadmap/ROADMAP.md:56`'s matching correction,
+  the condensed-reference update, and the ticket notes (SOO-42/45/60/48/41/40
+  deferred pointers; SOO-1 closed as superseded now that G8 lands).
 - **Parallelism.** None (depends on all). **Effort** M. **Difficulty** hard.
   **Blockers.** All of P1–P4.
 
@@ -608,7 +622,7 @@ every commit (NFR-3).
     },
     {
       "phase": 2,
-      "focus": "The two-half sentinel fence lift (REQ-2): parser half SLICE_SENTINEL_IDX/slice_sentinel/rewrite_slice_sentinel at src/parser.rs:855-964 plus the slice branch inserted immediately before is_mono_ctor_app (src/parser.rs:4519 on this tree, ~:4513 on the clean tree), preempting both is_mono_ctor_app and is_concrete; the PolyType::Generic invariant-exception doc at src/ast.rs:2711 with mutual pointers; and the dispatch half slice guard arm in resolve_mono_member_call at src/check/poly/ground.rs:1319-1333. Six units. Exit: G13 builds now that the sentinel lifts the fence, G10/G11 hold (the P1-free core), G12 is a manual implementation-time spike (not a suite golden). G1 is conditional on P1's inline keyword and is evaluated once both phases have landed. SliceApp is the recorded fallback if the invariant exception is rejected.",
+      "focus": "The two-half sentinel fence lift (REQ-2): parser half SLICE_SENTINEL_IDX/slice_sentinel/rewrite_slice_sentinel at src/parser.rs:855-964 plus the slice branch inserted immediately before is_mono_ctor_app at src/parser.rs:4519, preempting both is_mono_ctor_app and is_concrete; the PolyType::Generic invariant-exception doc at src/ast.rs:2711 with mutual pointers; and the dispatch half slice guard arm in resolve_mono_member_call at src/check/poly/ground.rs:1319-1333. Six units. Exit: G13 builds now that the sentinel lifts the fence, G10/G11 hold (the P1-free core), G12 is a manual implementation-time spike (not a suite golden). G1 is conditional on P1's inline keyword and is evaluated once both phases have landed. SliceApp is the recorded fallback if the invariant exception is rejected.",
       "effort": "M",
       "difficulty": "hard"
     },
@@ -626,7 +640,7 @@ every commit (NFR-3).
     },
     {
       "phase": 5,
-      "focus": "The library impl + consumer goldens (REQ-6): ship impl: Iterator for Slice[i64] with : next inline over len/&>/subslice/More/Done (natural body) in lib/core/iterator.sth; for_each/fold untouched. Exit criterion G8 (both impls drain through one imported protocol, 1/2/3/3/3/3); plus G2/G6/G14/G15/G16/G18 build_run and G9/G10/G17/G19/G20/G21 byte-exact refusals; G22 suite green with the 6 canaries. Docs commit: roadmap S6d entry correction (mutable closed by Ruling A, shared reads via &>, size M) and the condensed reference. Depends on phases 1-4.",
+      "focus": "The library impl + consumer goldens (REQ-6): ship impl: Iterator for Slice[i64] with : next inline over len/&>/subslice/More/Done (natural body) in lib/core/iterator.sth; for_each/fold untouched. Exit criterion G8 (both impls drain through one imported protocol, 1/2/3/3/3/3); plus G1 (unconditional here, both P1 and P2 landed), G2/G6/G14/G15/G16/G18 build_run and G9/G10/G17/G19/G20/G21 byte-exact refusals; G22 suite green with the 6 canaries. Docs commit, enumerated: docs/roadmap/P7b-higher-kinded-types.md:514-537 (admissions line, &!> read, Size S-M->M at :537, and the :529-530 lifted-mono-route claim superseded by the sentinel patch), docs/roadmap/ROADMAP.md:56, the condensed-reference update, and the ticket notes (SOO-42/45/60/48/41/40 deferred, SOO-1 closed as superseded). Depends on phases 1-4.",
       "effort": "M",
       "difficulty": "hard"
     }
