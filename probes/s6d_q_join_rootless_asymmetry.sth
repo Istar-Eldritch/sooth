@@ -1,0 +1,24 @@
+\ S6d probe Q — the ROOTLESS one-sided join asymmetry: the exact shape the
+\ proposed union admits (frame item 5(a), pinned at the branch join WITHOUT
+\ any impl, so today's bytes are the baseline). One if-arm packs the word's
+\ seeded slice parameter directly (a parameter slot is `Slot::computed` —
+\ deriv-free, so the construction push forwards none); the other arm binds
+\ the parameter first, whose naming reborrows it into a deriv with no owned
+\ root (the name-read push, src/check/terms.rs:248). The join refuses the
+\ asymmetry today with S6d-8.2's exact wording shape; post-union (a rootless
+\ one-sided asymmetry carries the deriv) this word checks — build_ok — with
+\ no other change.
+import: intrinsics * ;
+import: core::prelude * ;
+import: hosted::show | . | ;
+
+type: Step['T 'Rest]
+| Done
+| More 'T 'Rest
+;
+
+: rootless-asym inline ( Slice[i64] -- Step[i64 Slice[i64]] )
+  True
+  ~[ 7 swap More ]
+  ~[ |x| x 7 swap More ]
+  if ;

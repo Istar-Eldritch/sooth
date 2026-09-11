@@ -1,0 +1,47 @@
+\ S6d probe N — the per-impl `inline` spelling (frame item 3). The trait
+\ member stays NON-inline (the HEAD spelling — trait-level inline breaks the
+\ 6 List/Range goldens, S6d-8.5); the IMPL member carries the keyword. The
+\ synthesized member word's declares_inline = the impl's spelling. Post-fix
+\ this builds and runs (stdout 3, then the remainder's length 4). Today the
+\ clean tree fences at the member (the S2-6 fence fires before the body is
+\ ever read, so the unknown-keyword body never gets a chance to fire).
+\ Body note: the as-done Done arm is frame item 5(a)'s territory; this
+\ fixture deliberately keeps it so it isolates the inline-spelling item.
+import: intrinsics * ;
+import: core::prelude * ;
+import: hosted::show | . | ;
+
+type: Step['T 'Rest]
+| Done
+| More 'T 'Rest
+;
+
+trait: Iterator['It: * -> *]
+  : next ( 'It['T] -- Step['T 'It['T]] ) ;
+;
+
+: as-done ['R] ( 'R -- Step[i64 'R] ) drop Done ;
+
+impl: Iterator for Slice[i64]
+  : next inline
+    | s |
+    s dup len |n|
+    n 0 >usize eq
+    ~[ as-done ]
+    ~[
+      dup 0 >usize &> @ |v|
+      1 >usize n 1 >usize sub subslice
+      v swap More
+    ]
+    if
+;
+;
+
+: main ( -- )
+  3 5 fill |buf|
+  &buf slice
+  next
+  ~[ ( Done ) drop ]
+  ~[ ( More ) More> |v r| v . r len >i64 . ]
+  Step?
+  buf drop ;

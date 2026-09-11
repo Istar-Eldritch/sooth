@@ -1,0 +1,28 @@
+\ S6d probe M — the clobber repro (S6d-10.5), committed as a fixture. A mere
+\ signature mention that mints `Step[i64 Slice[i64]]` at parse (`touch`),
+\ placed BEFORE the List-drain consumer, re-types the drain's bare `More>` to
+\ the wrong monomorph on the CLEAN tree — the S8b-class wrong-monomorph
+\ resolution defect, no slice code needed. This is frame item 4's baseline
+\ pin: today byte-exact stderr captured in the baseline run; post-fix the
+\ file builds and runs (stdout 1 2 3).
+import: intrinsics * ;
+import: core::prelude * ;
+import: core::list | List Nil Cons | ;
+import: core::iterator | Step Done More Iterator | ;
+import: hosted::show | . | ;
+
+: touch inline ( Step[i64 Slice[i64]] -- ) drop ;
+
+: drain ( List[i64] -- )
+  next
+  ~[ ( Done ) drop ]
+  ~[ ( More ) More> |v r| v . r drain ]
+  Step? ;
+
+: mkempty ( -- List[i64] ) Nil ;
+
+: main ( -- )
+  3 mkempty ^ Cons
+  2 swap ^ Cons
+  1 swap ^ Cons
+  drain ;

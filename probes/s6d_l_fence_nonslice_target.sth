@@ -1,0 +1,25 @@
+\ S6d probe L — the S2-6 fence's byte-stability for a NON-slice concrete
+\ target (negative control (i)'s permanent shadow). The sentinel patch's
+\ parser branch matches `PolyType::Concrete(Type::Slice(..))` only; a
+\ probe-local one-field struct target must keep raising the fence byte-
+\ identically, pre- and post-patch. Clean tree: the fence at the member.
+import: intrinsics * ;
+import: core::prelude * ;
+import: hosted::show | . | ;
+
+type: Step['T 'Rest]
+| Done
+| More 'T 'Rest
+;
+
+type: Unit ;
+
+trait: Iterator['It: * -> *]
+  : next ( 'It['T] -- Step['T 'It['T]] ) ;
+;
+
+impl: Iterator for Unit
+  : next drop Done ;
+;
+
+: main ( -- ) 1 drop ;

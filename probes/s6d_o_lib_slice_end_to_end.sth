@@ -1,0 +1,35 @@
+\ S6d probe O — the exit-criterion shape: ONE program consuming BOTH the
+\ lib's List impl and the lib's slice impl through bare `next`, two Step
+\ monomorphs coexisting (frame items 4+6 together with the sentinel lift).
+\ Today the clean tree has no slice impl in the library, so the slice drain's
+\ `next` call has nothing to dispatch on. Post-fix (slice impl shipped in
+\ core/iterator.sth, clobber fix in): this builds and runs, printing the List
+\ elements 1 2 3 then the slice elements 3 3 3.
+import: intrinsics * ;
+import: core::prelude * ;
+import: core::list | List Nil Cons | ;
+import: core::iterator | Step Done More Iterator | ;
+import: hosted::show | . | ;
+
+: drain-list ( List[i64] -- )
+  next
+  ~[ ( Done ) drop ]
+  ~[ ( More ) More> |v r| v . r drain-list ]
+  Step? ;
+
+: drain-slice ( Slice[i64] -- )
+  next
+  ~[ ( Done ) drop ]
+  ~[ ( More ) More> |v r| v . r drain-slice ]
+  Step? ;
+
+: mkempty ( -- List[i64] ) Nil ;
+
+: main ( -- )
+  3 mkempty ^ Cons
+  2 swap ^ Cons
+  1 swap ^ Cons
+  drain-list
+  3 3 fill |buf|
+  &buf slice drain-slice
+  buf drop ;

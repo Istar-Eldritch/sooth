@@ -1,0 +1,46 @@
+\ S6d probe P — the NATURAL next body (frame item 5(a), the join-union
+\ golden). Same shape as s6d_a but the Done arm is the protocol's own
+\ straight-line spelling (`drop Done`, no as-done helper): the More arm's
+\ Step carries the remainder view's deriv (rootless — the receiver is a
+\ parameter, so the reborrow chain has no owned root), the Done arm's
+\ nullary Step carries none. Today the clean tree fences at the member. On
+\ the sentinel-patched tree WITHOUT the join union this is S6d-8.2's
+\ borrow_join_disagreement_error; with 5(a) (union a rootless one-sided
+\ asymmetry) it checks, and main runs — prints the element 3 then the
+\ remainder's length 4.
+import: intrinsics * ;
+import: core::prelude * ;
+import: hosted::show | . | ;
+
+type: Step['T 'Rest]
+| Done
+| More 'T 'Rest
+;
+
+trait: Iterator['It: * -> *]
+  : next ( 'It['T] -- Step['T 'It['T]] ) ;
+;
+
+impl: Iterator for Slice[i64]
+  : next inline
+    | s |
+    s dup len |n|
+    n 0 >usize eq
+    ~[ drop Done ]
+    ~[
+      dup 0 >usize &> @ |v|
+      1 >usize n 1 >usize sub subslice
+      v swap More
+    ]
+    if
+;
+;
+
+: main ( -- )
+  3 5 fill |buf|
+  &buf slice
+  next
+  ~[ ( Done ) drop ]
+  ~[ ( More ) More> |v r| v . r len >i64 . ]
+  Step?
+  buf drop ;

@@ -1,0 +1,33 @@
+\ S6d probe J — the ROOTED join asymmetry must stay refused (desk-check A.ii).
+\ A Step? dispatch whose Done arm rebuilds the state deriv-free (the nullary
+\ helper's push carries no deriv) and whose More arm repacks the remainder
+\ (the rooted deriv — the view of the local `a` — rides REQ-4d site 1's
+\ construction push). The eliminator's arm merge refuses the asymmetry today;
+\ the proposed rootless-only union must NOT admit this shape — the union is
+\ conditioned on `owned_root: None`, and this deriv's root is the frame local
+\ `a`. The word is declared inline with a Step output so its arms' bare ctors
+\ ground via the tail channel, and it is deliberately never called, so the
+\ whole pin is the declaration-time check. Clean tree: no impl, no fence —
+\ the merge fires as-is, the pin.
+import: intrinsics * ;
+import: core::prelude * ;
+import: hosted::show | . | ;
+
+type: Step['T 'Rest]
+| Done
+| More 'T 'Rest
+;
+
+\ The deriv-free state: a nullary Done whose instantiation the tail channel
+\ grounds from the ENCLOSING word's declared output at the splice site (a
+\ caller with no declared Step output refuses this word — measured, which is
+\ why the asymmetry word below is never called).
+: done-empty inline ( -- Step[i64 Slice[i64]] ) Done ;
+
+: rooted-asym inline ( -- Step[i64 Slice[i64]] )
+  3 1 fill |a|
+  &a slice |va|
+  va 7 swap More
+  ~[ ( Done ) drop done-empty ]
+  ~[ ( More ) More> More ]
+  Step? ;

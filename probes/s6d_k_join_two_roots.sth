@@ -1,0 +1,24 @@
+\ S6d probe K — the (Some, Some) different-root join refusal must keep
+\ happening (desk-check A.iii; Ruling F / SOO-41 territory at the join). Two
+\ views of two DIFFERENT frame locals are bound before the branch; each arm
+\ packs its own view into the Step slot, so the join sees two rooted derivs
+\ with different `owned_root`s and refuses rather than picking one arm's
+\ root. Clean tree: no impl, no fence — the join rule fires as-is, the pin.
+import: intrinsics * ;
+import: core::prelude * ;
+import: hosted::show | . | ;
+
+type: Step['T 'Rest]
+| Done
+| More 'T 'Rest
+;
+
+: main ( -- )
+  3 1 fill |a| 4 1 fill |b|
+  &a slice |va| &b slice |vb|
+  True
+  ~[ vb 7 swap More ]
+  ~[ va 8 swap More ]
+  if
+  ~[ ( Done ) drop ] ~[ ( More ) More> drop drop ] Step?
+  a drop b drop ;
