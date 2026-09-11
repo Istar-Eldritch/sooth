@@ -18,6 +18,14 @@
 //! untouched` (REQ-4) -- the pre-existing S8b-class clobber, fixed by the
 //! env-hit candidate arm's union with the live check-time mints.
 //!
+//! P7b.S6d Phase 4 lands its goldens here too (REQ-5): G3
+//! `rootless_join_asymmetry_refused_today_carried_by_the_union` (the union
+//! carries the rootless deriv; build_ok), G4
+//! `rooted_join_asymmetry_stays_refused_byte_identically` and G5
+//! `two_root_join_asymmetry_stays_refused_byte_identically` (the refusals
+//! keep their clean-tree bytes; the union is conditioned on
+//! `owned_root.is_none()`). The join rule is generic -- no impl needed.
+//!
 //! G12 (negative control (ii), the reverted-dispatch-arm panic at
 //! `ast.rs`'s `ground_member_type` App arm) is a MANUAL implementation-time
 //! spike, deliberately NOT a suite golden: the panic it guards is unreachable
@@ -81,6 +89,22 @@ fn single_file_hosted(tag: &str, src: &str) -> (Tree, PathBuf) {
         &format!("import: intrinsics * ;\nimport: hosted::show | . | ;\n{src}"),
     );
     (t, entry)
+}
+
+/// Build `src`, assert it succeeds outright (the `build_ok` golden shape;
+/// `tests/phase7b_slice8.rs`'s helper, verbatim but for the doc line).
+fn build_ok(tag: &str, src: &str) {
+    let (_t, entry) = single_file_hosted(tag, src);
+    let build = Command::new(env!("CARGO_BIN_EXE_sooth"))
+        .arg("build")
+        .arg(&entry)
+        .output()
+        .expect("sooth build should spawn");
+    assert!(
+        build.status.success(),
+        "build should succeed; stderr: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
 }
 
 fn build_run_keep(tag: &str, src: &str) -> (Tree, PathBuf, String) {
@@ -323,4 +347,110 @@ fn clobber_touch_mint_leaves_list_drain_resolutions_untouched() {
          drain ;\n",
     );
     assert_eq!(stdout, "1\n2\n3\n");
+}
+
+/// G3 (`probes/s6d_q_join_rootless_asymmetry.sth`'s spelling, harness-adapted
+/// plus a trivial `main` so the golden links): the ROOTLESS one-sided join
+/// asymmetry is carried by the union (REQ-5, frame item 5(a)). One if-arm
+/// packs the word's seeded slice parameter directly (deriv-free -- parameters
+/// are `Slot::computed`), the other binds then names it (the naming mint is a
+/// reborrow with no `owned_root`). Clean tree: the refusal with S6d-8.2's
+/// exact wording (``the second arm leaves a borrow with no local root``).
+/// Post-fix: the union keeps that arm's deriv and the word checks --
+/// `build_ok` -- with no other change.
+#[test]
+fn rootless_join_asymmetry_refused_today_carried_by_the_union() {
+    build_ok(
+        "g3_rootless_join_asymmetry",
+        "import: core::prelude * ;\n\
+         \n\
+         type: Step['T 'Rest]\n\
+         | Done\n\
+         | More 'T 'Rest\n\
+         ;\n\
+         \n\
+         : rootless-asym inline ( Slice[i64] -- Step[i64 Slice[i64]] )\n\
+         \x20 True\n\
+         \x20 ~[ 7 swap More ]\n\
+         \x20 ~[ |x| x 7 swap More ]\n\
+         \x20 if ;\n\
+         \n\
+         : main ( -- ) ;\n",
+    );
+}
+
+/// G4 (`probes/s6d_j_join_rooted_asymmetry.sth`'s spelling, harness-adapted):
+/// the ROOTED one-sided asymmetry stays refused BYTE-IDENTICALLY (desk-check
+/// A.ii) -- the union is conditioned on `owned_root.is_none()`, and this
+/// deriv's root is the frame local `a`. A `Step?` dispatch in a never-called
+/// inline word with a declared `Step` output (the arms' bare ctors ground via
+/// the tail channel): the Done arm rebuilds the state deriv-free
+/// (`done-empty`), the More arm repacks the remainder of a view of `a`
+/// (rooted deriv). Also pins the eliminator merge site
+/// (`merge_arm_output_slot`) -- proof the second join site needs the same
+/// treatment and keeps its rooted refusal. `(line 17)` is measured in THIS
+/// harness context (the two prepended imports); the message body is the
+/// byte-stable part.
+#[test]
+fn rooted_join_asymmetry_stays_refused_byte_identically() {
+    let stderr = build_error_located(
+        "g4_rooted_join_asymmetry",
+        "import: core::prelude * ;\n\
+         \n\
+         type: Step['T 'Rest]\n\
+         | Done\n\
+         | More 'T 'Rest\n\
+         ;\n\
+         \n\
+         : done-empty inline ( -- Step[i64 Slice[i64]] ) Done ;\n\
+         \n\
+         : rooted-asym inline ( -- Step[i64 Slice[i64]] )\n\
+         \x20 3 1 fill |a|\n\
+         \x20 &a slice |va|\n\
+         \x20 va 7 swap More\n\
+         \x20 ~[ ( Done ) drop done-empty ]\n\
+         \x20 ~[ ( More ) More> More ]\n\
+         \x20 Step? ;\n",
+    );
+    assert!(
+        stderr.contains(
+            "error: borrow state disagrees at the branch join in `rooted-asym` (line 17)\n  the first arm leaves no live borrow, the second arm leaves a borrow of `a`: both arms must agree on which place, if any, stays borrowed past the join\n  note: declared ( -- Step[i64 Slice[i64]] )"
+        ),
+        "the rooted refusal stays byte-identical, got: {stderr}"
+    );
+}
+
+/// G5 (`probes/s6d_k_join_two_roots.sth`'s spelling, harness-adapted): the
+/// (Some, Some) different-root refusal keeps happening byte-identically
+/// (desk-check A.iii; Ruling F / SOO-41 territory at the join): two views of
+/// two DIFFERENT frame locals, each arm packing its own, refuse rather than
+/// pick one arm's root. `(line 14)` is measured in THIS harness context; the
+/// message body is the byte-stable part.
+#[test]
+fn two_root_join_asymmetry_stays_refused_byte_identically() {
+    let stderr = build_error_located(
+        "g5_two_root_join_asymmetry",
+        "import: core::prelude * ;\n\
+         \n\
+         type: Step['T 'Rest]\n\
+         | Done\n\
+         | More 'T 'Rest\n\
+         ;\n\
+         \n\
+         : main ( -- )\n\
+         \x20 3 1 fill |a| 4 1 fill |b|\n\
+         \x20 &a slice |va| &b slice |vb|\n\
+         \x20 True\n\
+         \x20 ~[ vb 7 swap More ]\n\
+         \x20 ~[ va 8 swap More ]\n\
+         \x20 if\n\
+         \x20 ~[ ( Done ) drop ] ~[ ( More ) More> drop drop ] Step?\n\
+         \x20 a drop b drop ;\n",
+    );
+    assert!(
+        stderr.contains(
+            "error: borrow state disagrees at the branch join in `main` (line 14)\n  the first arm leaves a borrow of `b`, the second arm leaves a borrow of `a`: both arms must agree on which place, if any, stays borrowed past the join\n  note: declared ( -- )"
+        ),
+        "the two-root refusal stays byte-identical, got: {stderr}"
+    );
 }

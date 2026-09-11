@@ -3652,6 +3652,17 @@ fn check_branch_join(
             (Some(a), Some(b)) if prov.deriv(a).suspension() == prov.deriv(b).suspension() => {
                 Some(a)
             }
+            // P7b.S6d (REQ-5, A-amend 1/2): a one-sided asymmetry whose live
+            // deriv is ROOTLESS is unioned, not refused. The kept deriv names
+            // no place of this frame (`owned_root` is `None` -- its referent
+            // lives in an ancestor frame), so keeping it is an
+            // over-approximation true of the arm that produced it and
+            // conflicting with nothing on the other path; dropping it instead
+            // would silently stop protecting a still-live borrow. Rooted
+            // one-sided asymmetries stay refused below: the disagreement
+            // there is real (one arm consumed the borrowed frame local), and
+            // picking one arm's answer reasons about the wrong runtime path.
+            (Some(d), None) | (None, Some(d)) if prov.deriv(d).owned_root.is_none() => Some(d),
             _ => {
                 return Err(borrow_join_disagreement_error(
                     ctx,
@@ -3810,9 +3821,15 @@ fn branch_needs_quotation_error(ctx: &Ctx, span: Span, found: Type) -> String {
 /// `index_map[i] == Some(j)`), so an aggregate carrying an erased quotation
 /// across the back-edge keeps its escape obligation (`d1b3f0a`/`bee407c`: a
 /// `Slot::computed` drops it, so a bare forward would leak the obligation).
+/// P7b.S6d (REQ-5): the `deriv` rides along with `surviving` for the same
+/// reason -- `Slot::computed` would drop it, and a rootless deriv (the only
+/// kind that reaches here: `check_reference_across_back_edge` rejects a
+/// rooted one at the call site, before this runs) must stay live into the
+/// next iteration rather than manufacture a one-sided asymmetry at the loop
+/// body's joins. `None -> None` for every deriv-free carried state.
 /// `carried_inputs` is itself filtered to non-quotation slots at the call
 /// site, so `quot` is always `None` there and never needs forwarding. An
-/// output with no source (`None`) is a fresh type-only slot.
+/// output with no source (`None`) is a fresh type-only slot, deriv included.
 fn back_edge_outs(
     ground_outputs: &[Type],
     index_map: &[Option<usize>],
@@ -3825,6 +3842,9 @@ fn back_edge_outs(
             let mut out = Slot::computed(ty);
             if let Some(src) = index_map.get(i).copied().flatten() {
                 out.surviving = carried_inputs[src].surviving;
+                // REQ-5: forward the deriv alongside `surviving` (see the
+                // doc above) -- `None -> None` for every existing golden.
+                out.deriv = carried_inputs[src].deriv;
             }
             out
         })
@@ -4419,6 +4439,91 @@ mod tests {
         );
     }
 
+    /// P7b.S6d (REQ-5, G3): a one-sided join asymmetry whose live deriv is
+    /// ROOTLESS unions instead of refusing. One arm packs the word's seeded
+    /// slice parameter directly (a parameter slot is `Slot::computed`, so the
+    /// construction push forwards no deriv); the other binds then names it
+    /// (the naming mint is a reborrow with no `owned_root`, its referent
+    /// living in an ancestor frame). The join keeps that arm's deriv: it
+    /// protects no place of this frame and conflicts with nothing on the
+    /// dropped-arm path. (`probes/s6d_q_join_rootless_asymmetry.sth`.)
+    #[test]
+    fn branch_join_unions_a_rootless_one_sided_asymmetry() {
+        check_src(
+            "type: Step['T 'Rest]\n\
+             | Done\n\
+             | More 'T 'Rest\n\
+             ;\n\
+             : rootless-asym inline ( Slice[i64] -- Step[i64 Slice[i64]] )\n\
+             \x20 True\n\
+             \x20 ~[ 7 swap More ]\n\
+             \x20 ~[ |x| x 7 swap More ]\n\
+             \x20 if ;\n",
+        )
+        .expect("a rootless one-sided asymmetry unions: the deriv survives the join");
+    }
+
+    /// P7b.S6d (REQ-5, A-amend 2): the union is conditioned on
+    /// `owned_root.is_none()`. One arm deriv-free, the other leaving a borrow
+    /// of the frame local `a` (a `&a slice` view riding the construction
+    /// push): the disagreement is real -- one path consumed the borrowed
+    /// local's protection -- so the rooted one-sided asymmetry stays refused,
+    /// naming `a` (the G4 message shape, at the `if` join; G4's own fixture
+    /// pins the eliminator twin).
+    #[test]
+    fn branch_join_still_refuses_a_rooted_one_sided_asymmetry() {
+        let err = check_src(
+            "type: Step['T 'Rest]\n\
+             | Done\n\
+             | More 'T 'Rest\n\
+             ;\n\
+             : rooted-asym inline ( Slice[i64] -- Step[i64 Slice[i64]] )\n\
+             \x20 3 1 fill |a|\n\
+             \x20 True\n\
+             \x20 ~[ 7 swap More ]\n\
+             \x20 ~[ drop 7 &a slice More ]\n\
+             \x20 if ;\n",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("borrow state disagrees at the branch join")
+                && err.contains("the first arm leaves no live borrow")
+                && err.contains("the second arm leaves a borrow of `a`"),
+            "the rooted one-sided refusal must name the frame local, byte-stable: {err}"
+        );
+    }
+
+    /// P7b.S6d (REQ-5, desk-check A.iii): two arms suspending two DIFFERENT
+    /// frame locals have no single deriv to keep -- picking one launders the
+    /// other (Ruling F / SOO-41 territory at the join) -- so the two-root
+    /// disagreement stays refused at the `if` join exactly as before
+    /// (`probes/s6d_k_join_two_roots.sth`).
+    #[test]
+    fn branch_join_still_refuses_two_different_roots() {
+        let err = check_src(
+            "type: Step['T 'Rest]\n\
+             | Done\n\
+             | More 'T 'Rest\n\
+             ;\n\
+             : main ( -- )\n\
+             \x20 3 1 fill |a| 4 1 fill |b|\n\
+             \x20 &a slice |va| &b slice |vb|\n\
+             \x20 True\n\
+             \x20 ~[ vb 7 swap More ]\n\
+             \x20 ~[ va 8 swap More ]\n\
+             \x20 if\n\
+             \x20 ~[ ( Done ) drop ] ~[ ( More ) More> drop drop ] Step?\n\
+             \x20 a drop b drop ;\n",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("borrow state disagrees at the branch join")
+                && err.contains("the first arm leaves a borrow of `b`")
+                && err.contains("the second arm leaves a borrow of `a`"),
+            "the two-root refusal must name both roots, byte-stable: {err}"
+        );
+    }
+
     /// Slice 10a (R14): white-box proof that `back_edge_outs` forwards the
     /// surviving capture set along the index map. The witness is an aggregate
     /// carrying an erased quotation (`ty` a struct, `surviving: Some(..)`,
@@ -4469,6 +4574,48 @@ mod tests {
             err.contains("a reference to a local cannot cross a loop")
                 && err.contains("a reference derived from `a`"),
             "{err}"
+        );
+    }
+
+    /// P7b.S6d (REQ-5): the deriv forwards alongside `surviving` along the
+    /// index map -- the twin of the surviving white-box above. A rootless
+    /// deriv (minted by naming a deriv-free binding: `held` is `None`, so the
+    /// reborrow has no `owned_root` -- the only kind that reaches here, since
+    /// `check_reference_across_back_edge` rejects a rooted one at the call
+    /// site first) must stay live into the next iteration; a `None`-carried
+    /// state and an unmapped output stay deriv-free (`None -> None`, every
+    /// existing golden's shape).
+    #[test]
+    fn back_edge_outs_forwards_deriv_along_the_index_map() {
+        let mut prov = Provenance::default();
+        let deriv = prov.reborrow("s", None, true, Span::default());
+        assert!(
+            prov.deriv(deriv).owned_root.is_none(),
+            "the mint must be the rootless kind REQ-5 forwards"
+        );
+        let agg = Type::Struct(crate::ast::StructId::from_index(0), "Agg");
+        let carried = vec![
+            Slot {
+                deriv: Some(deriv),
+                ..Slot::computed(agg)
+            },
+            Slot::computed(agg),
+        ];
+        let ground_outputs = vec![agg, agg, agg];
+        let index_map = vec![Some(0), Some(1), None];
+        let outs = back_edge_outs(&ground_outputs, &index_map, &carried);
+        assert_eq!(
+            outs[0].deriv,
+            Some(deriv),
+            "the carried deriv must ride across the back-edge, rootless included"
+        );
+        assert_eq!(
+            outs[1].deriv, None,
+            "a deriv-free carried state forwards None (every existing golden)"
+        );
+        assert_eq!(
+            outs[2].deriv, None,
+            "an output with no index-map source stays a fresh type-only slot"
         );
     }
 

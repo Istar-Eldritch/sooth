@@ -2725,6 +2725,13 @@ fn merge_arm_output_slot(
     let deriv = match (a.deriv, b.deriv) {
         (None, None) => None,
         (Some(x), Some(y)) if prov.deriv(x).suspension() == prov.deriv(y).suspension() => Some(x),
+        // P7b.S6d (REQ-5, A-amend 1/2): the same rootless one-sided union
+        // `check_branch_join` lands (both join sites patch together,
+        // identically conditioned, or a `Step?`-dispatch-shaped state merge
+        // -- the while drain's inner shape -- would still refuse while the
+        // `if` join admits). A ROOTED one-sided asymmetry still refuses
+        // below: one arm consumed the borrowed frame local.
+        (Some(x), None) | (None, Some(x)) if prov.deriv(x).owned_root.is_none() => Some(x),
         _ => {
             return Err(borrow_join_disagreement_error(
                 ctx,
@@ -5134,6 +5141,62 @@ mod tests {
         assert!(
             err.contains("borrow state disagrees at the branch join"),
             "unexpected message: {err}"
+        );
+    }
+
+    /// P7b.S6d (REQ-5, A-amend 1): the eliminator arm merge unions a ROOTLESS
+    /// one-sided asymmetry, the same rule `check_branch_join` lands (both
+    /// join sites patch together or a `Step?`-dispatch-shaped state merge --
+    /// the while drain's inner shape -- still refuses while the `if` join
+    /// admits). The scrutinee is built from a named slice parameter (a
+    /// deriv-free binding, so the naming mint has no `owned_root`); the Done
+    /// arm rebuilds the state deriv-free, the More arm repacks the remainder,
+    /// which inherits the scrutinee's rootless deriv: the merge keeps it.
+    #[test]
+    fn eliminator_arm_merge_unions_a_rootless_one_sided_asymmetry() {
+        check_src(
+            "type: Step['T 'Rest]\n\
+             | Done\n\
+             | More 'T 'Rest\n\
+             ;\n\
+             : rootless-asym inline ( Slice[i64] -- Step[i64 Slice[i64]] )\n\
+             \x20 |s| s 7 swap More\n\
+             \x20 ~[ ( Done ) drop Done ]\n\
+             \x20 ~[ ( More ) More> More ]\n\
+             \x20 Step? ;\n",
+        )
+        .expect("a rootless one-sided asymmetry unions at the arm merge too");
+    }
+
+    /// P7b.S6d (REQ-5, A-amend 2): the rooted one-sided asymmetry stays
+    /// refused at the arm merge, conditioned on `owned_root.is_none()`
+    /// (`probes/s6d_j_join_rooted_asymmetry.sth`'s shape): the Done arm
+    /// rebuilds deriv-free, the More arm repacks the remainder of a view of
+    /// the frame local `a`, whose rooted deriv rides the construction push --
+    /// the merge names `a` rather than picking one arm's answer.
+    #[test]
+    fn eliminator_arm_merge_still_refuses_a_rooted_asymmetry() {
+        let err = check_src(
+            "type: Step['T 'Rest]\n\
+             | Done\n\
+             | More 'T 'Rest\n\
+             ;\n\
+             : done-empty inline ( -- Step[i64 Slice[i64]] ) Done ;\n\
+             : rooted-asym inline ( -- Step[i64 Slice[i64]] )\n\
+             \x20 3 1 fill |a|\n\
+             \x20 &a slice |va|\n\
+             \x20 va 7 swap More\n\
+             \x20 ~[ ( Done ) drop done-empty ]\n\
+             \x20 ~[ ( More ) More> More ]\n\
+             \x20 Step? ;\n\
+             : main ( -- ) ;\n",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("borrow state disagrees at the branch join")
+                && err.contains("the first arm leaves no live borrow")
+                && err.contains("the second arm leaves a borrow of `a`"),
+            "the rooted refusal must name the frame local, byte-stable: {err}"
         );
     }
 
