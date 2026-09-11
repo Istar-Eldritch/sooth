@@ -964,7 +964,50 @@ fn check_term(
             let candidates = match &scoped_ops {
                 Some(v) => v.as_slice(),
                 None => match env.get(name) {
-                    Some(v) => v.as_slice(),
+                    Some(v) => {
+                        // P7b.S6d (REQ-4, the pre-existing S8b-class clobber,
+                        // G7): the env-hit arm used to return the flushed
+                        // parse-time candidates alone. A check-time monomorph
+                        // of the SAME generated enum -- minted into the live
+                        // cell after `env` was assembled (a bare trait
+                        // member's mono dispatch minting `Step[i64 List[i64]]`
+                        // beside a parse-time `Step[i64 Slice[i64]]`
+                        // signature mention, `probes/s6d_m_clobber_touch.sth`)
+                        // -- was invisible here, so the single flushed
+                        // candidate resolved every bare-name site and the
+                        // sig check re-typed the site to the wrong
+                        // monomorph. Union the flushed candidates with the
+                        // live check-time mints, keyed per-monomorph: each
+                        // candidate carries its own mangled symbol, and the
+                        // two sources are disjoint (the mint keys dedupe, so
+                        // one monomorph never registers twice, and the
+                        // pending tail is exactly the not-yet-flushed rest),
+                        // so the multi-candidate dispatch below
+                        // operand-filters and the span-keyed record pins
+                        // each bare-name site to its own. Provenance: the
+                        // mints' `.module` is unverified
+                        // (`select_overload_fallback_sourced`'s doc), so a
+                        // union containing any mint dispatches under the
+                        // fallback-sourced policy; with nothing pending this
+                        // arm is byte-identical to the plain env hit.
+                        let pending = ctx.generics().is_some_and(|g| {
+                            let g = g.borrow();
+                            !g.inst_structs.is_empty() || !g.inst_enums.is_empty()
+                        });
+                        if !pending {
+                            v.as_slice()
+                        } else {
+                            let mints = mint_fallback_candidates(name, ctx);
+                            if mints.is_empty() {
+                                v.as_slice()
+                            } else {
+                                from_fallback = true;
+                                fallback_storage =
+                                    v.iter().cloned().chain(mints).collect::<Vec<Overload>>();
+                                fallback_storage.as_slice()
+                            }
+                        }
+                    }
                     // P7.S11-follow (Part 4): an ordinary `env` miss may still
                     // name the generated constructor/accessor of a check-time
                     // monomorph, minted (by Part 1's splice-site grounding or
@@ -4570,6 +4613,48 @@ mod tests {
             candidates.len(),
             2,
             "expected both same-surface-name pending mints, not a last-write truncation"
+        );
+    }
+
+    /// P7b.S6d (REQ-4, the S8b-class clobber G7 pins, unit): a bare variant
+    /// word must resolve to its OWN monomorph when a second monomorph of the
+    /// same generated enum is live. `touch`'s signature mention mints
+    /// `Step[i64 cstr]` at parse (flushed into the ordinary registries by
+    /// `parse` itself, so `env` carries its `More>` candidate);
+    /// `1 pack` instantiates the poly helper at `i64` mid-`main`, minting
+    /// `Step[i64 i64]` into the live cell (pending, invisible to `env`).
+    /// The bare `More>` in the More arm sits on the pending monomorph's
+    /// narrowed variant; before the env-hit union it resolved to the only
+    /// env candidate (`Step[i64 cstr]`'s) and the sig check rejected the
+    /// site -- byte-for-byte the `s6d_m` repro's shape (`More>` expected
+    /// `Step[i64 Slice[i64]].More`, found `Step[i64 List[i64]].More`).
+    /// Post-fix the union offers both candidates, the operand filter picks
+    /// the mint, and the span-keyed record pins the site to the i64
+    /// monomorph's own symbol.
+    #[test]
+    fn variant_word_resolution_survives_a_second_monomorph_of_the_same_enum() {
+        let module = checked_module(
+            "type: Step['T 'Rest] | Done | More 'T 'Rest ;\n\
+             : touch ( Step[i64 cstr] -- ) drop ;\n\
+             : pack ['R] ( 'R -- Step[i64 'R] ) drop Done ;\n\
+             : main ( -- )\n\
+             1 pack\n\
+             ~[ ( Done ) drop ]\n\
+             ~[ ( More ) More> drop drop ]\n\
+             Step? ;\n",
+        );
+        assert_eq!(
+            module.builtin_overloads.len(),
+            1,
+            "the bare-name site records on exactly one span: {:?}",
+            module.builtin_overloads
+        );
+        assert_eq!(
+            module.builtin_overloads.values().next(),
+            Some(&"More[i64 i64]>".to_string()),
+            "the site records the check-time monomorph's own symbol, never \
+             the parse-time mint's: {:?}",
+            module.builtin_overloads
         );
     }
 

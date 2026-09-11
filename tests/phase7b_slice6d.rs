@@ -13,6 +13,11 @@
 //! raising the S2-6 fence byte-identically (negative control (i)'s permanent
 //! shadow).
 //!
+//! P7b.S6d Phase 3 also lands its golden here (this file is the slice6d
+//! golden successor): G7 `clobber_touch_mint_leaves_list_drain_resolutions_
+//! untouched` (REQ-4) -- the pre-existing S8b-class clobber, fixed by the
+//! env-hit candidate arm's union with the live check-time mints.
+//!
 //! G12 (negative control (ii), the reverted-dispatch-arm panic at
 //! `ast.rs`'s `ground_member_type` App arm) is a MANUAL implementation-time
 //! spike, deliberately NOT a suite golden: the panic it guards is unreachable
@@ -272,4 +277,50 @@ fn fence_byte_stability_for_a_non_slice_concrete_target() {
         ),
         "the non-slice concrete-target fence stays byte-identical, got: {stderr}"
     );
+}
+
+/// G7 (`probes/s6d_m_clobber_touch.sth`'s spelling, harness-adapted):
+/// `clobber_touch_mint_leaves_list_drain_resolutions_untouched` -- the
+/// pre-existing S8b-class clobber (REQ-4, frame item 4). A bare signature
+/// mention minting `Step[i64 Slice[i64]]` at parse (`touch`), placed before
+/// a List-drain consumer, used to re-type the drain's bare `More>` to the
+/// wrong monomorph: the env-hit candidate arm returned only the flushed
+/// parse-time candidate and never saw the check-time `Step[i64 List[i64]]`
+/// mint. Post-fix (the env-hit union with the live check-time mints,
+/// keyed per-monomorph) both monomorphs are visible at the bare-name
+/// lookup, the operand filter picks each site's own, and the drain runs.
+/// Expected stdout `1\n2\n3\n`; the clean-tree capture was the byte-exact
+/// `` `More>` expected `Step[i64 Slice[i64]].More`, found
+/// `Step[i64 List[i64]].More` `` at this drain's `More>` line.
+#[test]
+fn clobber_touch_mint_leaves_list_drain_resolutions_untouched() {
+    let (_t, _binary, stdout) = build_run_keep(
+        "g7_clobber_touch_mint",
+        // The fixture's own `import: hosted::show | . | ;` is dropped (the
+        // harness prepends it); the duplicate `import: intrinsics * ;` is
+        // harmless. The `\n\` continuation strips the fixture's two-space
+        // member indent; G7 pins no line/col (a build_run golden), so the
+        // strip is free here.
+        "import: intrinsics * ;\n\
+         import: core::prelude * ;\n\
+         import: core::list | List Nil Cons | ;\n\
+         import: core::iterator | Step Done More Iterator | ;\n\
+         \n\
+         : touch inline ( Step[i64 Slice[i64]] -- ) drop ;\n\
+         \n\
+         : drain ( List[i64] -- )\n\
+         next\n\
+         ~[ ( Done ) drop ]\n\
+         ~[ ( More ) More> |v r| v . r drain ]\n\
+         Step? ;\n\
+         \n\
+         : mkempty ( -- List[i64] ) Nil ;\n\
+         \n\
+         : main ( -- )\n\
+         3 mkempty ^ Cons\n\
+         2 swap ^ Cons\n\
+         1 swap ^ Cons\n\
+         drain ;\n",
+    );
+    assert_eq!(stdout, "1\n2\n3\n");
 }
