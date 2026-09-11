@@ -56,7 +56,7 @@ Amendments the desk-checks force (each argued in full in the verdicts):
 + **A-amend 1 — there are TWO join sites, and the union must land in both.**
   The `if`/`branch` join (`check_branch_join`, `src/check/terms.rs:3607`, error
   at `:3613`) and the eliminator arm merge (`merge_arm_output_slot`,
-  `src/check.rs:2718`, deriv match at `:2745`) carry the *same* refusal rule.
+  `src/check.rs:2718`, deriv match at `:2725-2736`) carry the *same* refusal rule.
   The frame says "the branch-join rule"; the spec must patch both, or a
   `Step?`-dispatch-shaped state merge (exactly the while drain's inner
   shape) still refuses.
@@ -70,14 +70,18 @@ Amendments the desk-checks force (each argued in full in the verdicts):
   become a silent channel), not by this fixture. Both halves alone make
   `probes/s6d_h_while_drain.sth` build at the traced joins; the spec must
   still land them together (see verdict C).
-+ **Load-bearing mechanism fact (new, measured): naming a slice local always
-  re-roots its deriv to a fresh ROOTLESS reborrow** — the name-read push's
-  reborrow arm (`src/check/terms.rs:248`) fires on every slice-local naming,
-  and a parameter-seeded slice slot is `Slot::computed` (deriv-free,
-  `src/check/word_entry.rs:219-221`), so `held` is `None` and the mint has
-  `owned_root: None`. Rootless derivs are therefore *ubiquitous* in slice
-  code (this is why S6d-8.2's prescribed body fails and why the while drain's
-  inner `Step?` merge passes today — both its arms' states pass through named
++ **Mechanism fact (corrected — naming does NOT always mint a rootless
+  reborrow):** the name-read push's reborrow arm (`src/check/terms.rs:248`,
+  `Provenance::reborrow`) *inherits* the held deriv's root when one exists
+  (`src/check/engine.rs:418`); it mints rootless only when the binding
+  carries no held deriv to begin with. A parameter-seeded slice slot is
+  `Slot::computed` (deriv-free, `src/check/word_entry.rs:219-221`), so
+  *that* naming is rootless — but a local rooted in a frame place preserves
+  the root through the reborrow (see `s6d_j`/G4, which names `va` and is
+  refused as "a borrow of `a`" — a rooted result). Rootless derivs are
+  therefore *common* in slice code via parameter-rooted remainders (this is
+  why S6d-8.2's prescribed body fails and why the while drain's inner
+  `Step?` merge passes today — both its arms' states pass through named
   locals). The union rule will fire often; G4/G5 are the guardrails.
 + **D-amend — per-impl inline on the MONO member is confirmed safe at mono
   call sites** (the call site is a sig-check, not a body re-walk), with one
@@ -106,7 +110,7 @@ rule is generic).
 **Evidence.** The rule today (`src/check/terms.rs:3607-3620`):
 `(None, None) => None`; `(Some(a), Some(b))` with equal `suspension()` =>
 `Some(a)`; everything else → `borrow_join_disagreement_error` (`:3797`). The
-eliminator twin: `src/check.rs:2745-2754`, same three arms, same error. The
+eliminator twin: `src/check.rs:2725-2736`, same three arms, same error. The
 scans a kept deriv feeds:
 
 + Exclusivity (`src/check/word_families.rs:252-256`): the predicate is

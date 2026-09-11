@@ -67,13 +67,19 @@ declaration span (S6d-9, pinned by **G9** and its always-true twin
 Exactly as evidenced in S6d-8.1. Two halves:
 
 - **Parser half.** `SLICE_SENTINEL_IDX` + `slice_sentinel` +
-  `rewrite_slice_sentinel` at `src/parser.rs:855-964`; the slice branch at
-  `src/parser.rs:4629-4691` inside `parse_impl_member_body`, **preempting the
-  `is_concrete` branch**. A fake `PolyType::Generic` carries the slice's element
-  and is rewritten back to `Concrete(Type::Slice(..))` before any code reads its
-  bogus header. This is a momentary, documented violation of
-  `PolyType::Generic`'s own invariant: document the exception with **mutual
-  pointers** at the construction site and at the invariant doc
+  `rewrite_slice_sentinel` at `src/parser.rs:855-964`; the slice branch inside
+  `parse_impl_member_body`, inserted **immediately before the
+  `is_mono_ctor_app` branch** (`src/parser.rs:4519` on this tree, right after
+  the `dg` construction at `:4485-4497`; on the clean tree this lands around
+  `:4513`), so it preempts **both** the `is_mono_ctor_app` arm (`:4519`) and
+  the `is_concrete` arm (`:4558`). (The paper tests' probe coordinates,
+  `:4629-4691`, are post-insertion/spike-tree line numbers from S6d-8.1 item
+  3, which is explicit that the branch lands "BEFORE both" arms — that intent
+  is binding, not the literal numbers.) A fake `PolyType::Generic` carries the
+  slice's element and is rewritten back to `Concrete(Type::Slice(..))` before
+  any code reads its bogus header. This is a momentary, documented violation
+  of `PolyType::Generic`'s own invariant: document the exception with
+  **mutual pointers** at the construction site and at the invariant doc
   (`src/ast.rs:2711`).
 - **Dispatch half.** The slice guard arm in `resolve_mono_member_call`,
   `src/check/poly/ground.rs:1319-1333`, reading the already-grounded member
@@ -104,24 +110,35 @@ co-declaration arm cannot apply and the range.sth beside-the-protocol
 convention is structurally unavailable for built-in-view targets), and
 co-location mints the `Step[i64 Slice[i64]]` monomorph for every importer.
 
-Fix surface: generated-enum-word bare-name resolution — the S8b span-keyed
-mechanism at `src/check/terms.rs:974-988`. The paper tests' verdict E
-enumerates the six resolution paths and names the canaries; the risk is the
-**other** paths (notably the fallback picker's tier-1 same-module preference,
-`select_overload_fallback_sourced`, `src/check/builtins.rs:180-199`, verdict E
-path 3). **Key the resolution per-monomorph; do not widen one arm.** Mechanism
-design belongs to the implementer; the spec pins the invariant plus **G7/G8**.
+Fix surface (re-diagnosed against measurement, not the paper tests' original
+guess): candidate **visibility**, not span-keying. The bare-name candidate
+lookup's env-hit arm (`src/check/terms.rs:966-968`, the `Some(v) =>
+v.as_slice()` arm of the `env.get(name)` match, reached when `scoped_ops` is
+`None`) returns only the single parse-time-minted monomorph and never
+consults `mint_fallback_candidates` (`terms.rs:2249-2289`, which only runs on
+the sibling `None =>` / env-miss arm) — so a second, check-time-minted
+monomorph of the same generated enum is invisible to it. Repro: `s6d_m`
+fails with the `More>` mismatch; adding one parse-time mention of
+`Step[i64 List[i64]]` to the same program (making both monomorphs
+env-visible) builds clean. **The fix is to union the env-hit candidates with
+the live check-time mints at that lookup**, keyed per-monomorph so each
+bare-name site still resolves to its own. `select_overload_fallback_sourced`
+(`src/check/builtins.rs:180-199`) is **exonerated**: it operand-filters
+first (`:185-190`), so a wrong-shaped monomorph cannot survive its match —
+do not touch it. The existing span-keyed bookkeeping arms
+(`src/check/terms.rs:1124-1157`, `:1210`) are candidate-recording precedent,
+not the clobber site. The spec pins the invariant plus **G7/G8**.
 
 ### REQ-5 — Borrow-join union + `back_edge_outs` deriv forwarding, TOGETHER
 
 - **Union at BOTH join sites** (A-amend 1): `check_branch_join`
   (`src/check/terms.rs:3607`, error at `:3613`) **and** `merge_arm_output_slot`
-  (`src/check.rs:2718`, deriv match at `:2745`). Both carry the same refusal
-  rule; patching only one leaves a `Step?`-dispatch-shaped state merge (the
-  while drain's inner shape) refusing.
+  (`src/check.rs:2718`, deriv match at `:2725-2736`). Both carry the same
+  refusal rule; patching only one leaves a `Step?`-dispatch-shaped state merge
+  (the while drain's inner shape) refusing.
 - **Condition: `owned_root.is_none()`** on the one-sided deriv (A-amend 2) — the
   same predicate the back-edge guard uses for its accept-case
-  (`src/check.rs:1690-1700`) and `carried_borrow` for its no-contention case
+  (`src/check.rs:1677-1692`) and `carried_borrow` for its no-contention case
   (`src/check.rs:3164`). Rooted one-sided asymmetries and two-root disagreements
   stay refused **byte-identically** (**G4/G5**).
 - **`back_edge_outs` forwards `deriv` alongside `surviving`**
@@ -134,12 +151,20 @@ design belongs to the implementer; the spec pins the invariant plus **G7/G8**.
 **Justification (why together):** the no-silent-mask soundness argument. The
 join-union alone would turn `while`'s loud back-edge error into a silent
 laundering channel for any shape that cannot recover the deriv from a sibling
-arm (verdict C). Landing both closes that hole. **Load-bearing mechanism fact:**
-naming a slice local always re-roots its deriv to a fresh **rootless** reborrow
-(`src/check/terms.rs:248`; a parameter-seeded slice slot is `Slot::computed`,
-`src/check/word_entry.rs:219-221`, so `held` is `None`), so rootless derivs are
-ubiquitous in slice code and the union fires often — **G4/G5** are the
-guardrails.
+arm (verdict C). Landing both closes that hole. **Mechanism fact (corrected):**
+naming does **not** always mint a rootless reborrow — `Provenance::reborrow`
+inherits the root when one exists (`src/check/engine.rs:418`, `let owned_root
+= held.and_then(|id| self.deriv(id).owned_root.clone())`). Naming is rootless
+only when the binding carries no held deriv in the first place — a
+parameter-seeded slice slot is `Slot::computed` (`src/check/word_entry.rs:
+219-221`, deriv-free), so *that* mint is rootless. A local rooted in a frame
+place preserves the root through a reborrow, exactly as the spec's own **G4**
+fixture (`probes/s6d_j`, naming `va`) demonstrates: the refusal reads "a
+borrow of `a`" — a rooted result. Rootless derivs are common in slice
+consumer code (parameter-rooted remainders are the typical shape) but not
+universal, and **no laundering spelling exists**: a rooted deriv cannot be
+re-spelled to hit the union's rootless case, so G4/G5 stay reachable
+guardrails, not vestigial ones.
 
 **Fallback (F5), if either half stalls:** the as-done poly-helper spelling
 (`probes/s6d_a_fence_baseline.sth`'s impl body) with join/back_edge untouched —
@@ -155,7 +180,8 @@ body over `len`/`&>`/`subslice`/`More`/`Done` (no as-done once REQ-5 lands; the
 exact spelling is in the paper tests G1/G2, with `s6d_a`'s body as the
 fallback). `for_each`/`fold` are **NOT** touched: bound-generic consumers stay
 closed at the `'It['T]` slot unification (no ctor head; **G20**; SOO-60
-territory, unreached this slice). Mono consumers only: self-tail recursive drain
+territory, unreached this slice; see also SOO-40's interface note below).
+Mono consumers only: self-tail recursive drain
 (**G16**, passes — parameter-rooted remainders have no `owned_root`), non-tail
 recursive drain (**G18**), unrolled bounded stepping; the while-threaded drain
 becomes expressible once REQ-5 lands (**G6**, predicted stdout `6\n6\n6\n` —
@@ -174,6 +200,10 @@ desk-check C).
   every intermediate commit: **G4/G5/G9/G10/G11/G12/G17/G19/G20/G21** are the
   regression pins, plus the 6 List/Range canaries and the PREREQ guard test.
   Nothing admits a slice-bearing value into an escaping position at any step.
+- **NFR-4 (no regression, PREREQ-restated).** Every PREREQ-shipped admission
+  (the `41\n5\n` **G14** capture, the shared two-word slice layout, the seven
+  propagation sites) stays exactly as admitted; this slice only widens
+  dispatch, never re-derives PREREQ's own rulings.
 
 ## Success criteria (observable, named goldens)
 
@@ -198,7 +228,7 @@ Full pin list (paper tests §"The golden set"; "today" = clean tree at HEAD
 | G9 | `mutable_slice_impl_first_firing_is_the_enum_payload_sweep` | fence | Ruling A sweep error |
 | G10 | `noninline_slice_member_output_ban_holds_post_fix` | fence | member output ban |
 | G11 | `fence_byte_stability_for_a_non_slice_concrete_target` | fence (`Unit`) | **byte-identical** |
-| G12 | negative control (ii): dispatch half | — | revert control + G8 call-site |
+| G12 | negative control (ii): dispatch half | — | **manual spike** (not a suite golden) |
 | G13 | `trait_level_inline_spelling_still_builds_for_a_probe_local_slice_impl` | fence | `3\n4\n` |
 | G14 | `prereq_admissions_stay_byte_green` | `41\n5\n` | `41\n5\n` |
 | G15 | `monomorphic_consumer_drains_two_views_end_to_end` | fence | `3\n3\n3\n3\n3\n9\n` |
@@ -216,7 +246,10 @@ S6d-8.4(iii), S6d-9, S6d-8.6).
 
 ## Scope and boundaries
 
-**In scope:** REQ-1..REQ-6 above and their goldens/units.
+**In scope:** REQ-1..REQ-6 above and their goldens/units. **REQ-1 is
+scope-only** (a target-shape decision, not a code change): it has no phase of
+its own, because "shared only" falls out of the existing Ruling A sweep
+firing first (G9) — the phase plan below implements REQ-2..REQ-6.
 
 **Out of scope / non-goals (each with its note):**
 
@@ -226,14 +259,14 @@ S6d-8.4(iii), S6d-9, S6d-8.6).
   work; see below).
 - **`!Slice[i64]` mutable target** — Ruling A's sweep fires first (G9). SOO-45.
 - **`Slice['T]` generic-element targets** — unreachable spelling (S6d-3), not a
-  deferral.
+  deferral. Ticketed anyway: **SOO-48**.
 - **`for_each`/`fold` and any bound-generic consumer** — closed at the `'It['T]`
   slot unification (G20). SOO-60 (the probes narrowed its scope to the poly-body
   App-dispatch output loss; worth noting on the ticket at implementation time).
 - **The D-caveat:** a member call *inside a poly combinator splice* re-walks onto
   the S11 strict-grounding wall (`inline_combinator`,
-  `src/check/poly/ground.rs:608-620`; `consumer_expected_type`'s spliced-body
-  half declines for a mono member, `src/check/combinators.rs:549-556`). No golden
+  `src/check/combinators.rs:313`; `consumer_expected_type`'s spliced-body
+  half declines for a mono member, `src/check/terms.rs:2649`). No golden
   uses that shape; `next`-inside-a-quotation is separately closed for slices
   (S6d-10.4 / G21). Non-goal with a note.
 - **The diagnostic cosmetic:** `mono_member_no_dispatch_error` renders an
@@ -246,16 +279,19 @@ S6d-8.4(iii), S6d-9, S6d-8.6).
 
 ## Advisory solution approach
 
-The five code changes are mutually independent except the lib impl, which
-depends on all four. Recommended order mirrors the phase plan: land the parser
-desugar (REQ-3) and the two-half sentinel (REQ-2) first (they unblock any live
-exercise), the clobber fix (REQ-4) and the join/back-edge pair (REQ-5) in
-parallel, then the lib impl + consumer goldens (REQ-6) last. Every changed site
-gets the paper tests' named units (§Units, target ~14). Re-run the growth
-signals (CLAUDE.md) at phase exit against every file this slice grew —
-especially `src/check/terms.rs` (join sites + back_edge + clobber channel) and
-`src/parser.rs` (sentinel helpers + desugar); split only if 2+ signals fire
-together.
+The five code changes are code-independent except the lib impl, which depends
+on all four; their **automated goldens interlock pairwise** (see P1/P2 below)
+even though the code does not. Recommended order mirrors the phase plan: land
+the parser desugar (REQ-3) and the two-half sentinel (REQ-2) first (they
+unblock any live exercise), the clobber fix (REQ-4) and the join/back-edge
+pair (REQ-5) in parallel, then the lib impl + consumer goldens (REQ-6) last.
+Every changed site gets the paper tests' named units (§Units; 15 named, see
+the unit count note under Housekeeping). Re-run the growth signals (CLAUDE.md)
+at phase exit against every file this slice grew — especially
+`src/check/terms.rs` (join sites + back_edge + clobber channel, 5809 lines,
+taking P3+P4) and `src/parser.rs` (sentinel helpers + desugar, 15944 lines,
+taking P1+P2); split only if 2+ signals fire together. P2's and P4's phase
+Exits repeat this check explicitly.
 
 ## Codebase map (path:line anchors verified against this tree)
 
@@ -263,8 +299,11 @@ Parser (REQ-2, REQ-3):
 
 - `src/parser.rs:855-964` — `SLICE_SENTINEL_IDX`, `slice_sentinel`,
   `rewrite_slice_sentinel` (new helpers).
-- `src/parser.rs:4629-4691` — the slice branch in `parse_impl_member_body`,
-  preempting `is_concrete`.
+- `src/parser.rs:4513` (clean tree; `:4519` on this tree, just after the `dg`
+  construction at `:4485-4497`) — the slice branch's insertion point in
+  `parse_impl_member_body`, preempting **both** `is_mono_ctor_app` (`:4519`)
+  and `is_concrete` (`:4558`). (The paper tests' `:4629-4691` are spike-tree
+  coordinates; see REQ-2.)
 - `src/parser.rs:4449-4453` — the current unconditional `declares_inline`
   inheritance (REQ-3 makes it impl-spelling-first).
 - `src/parser.rs:4242` — `impl_target_pattern_poly_type` (S8's Range route,
@@ -287,51 +326,62 @@ Dispatch grounding (REQ-2 dispatch half, REQ-6 call sites):
 - `src/check/poly/ground.rs:1319-1333` — the slice guard arm in
   `resolve_mono_member_call` (reads the already-grounded member word).
 - `src/check/poly/ground.rs:1273-1442` — the mono member-call branch
-  (sig-check, span-keyed record at `:1407`, `push_dispatch_outputs` at `:1441`);
+  (sig-check, span-keyed record at `:1423`, `push_dispatch_outputs` at `:1424`);
   a mono call is a sig-check, not a body re-walk (verdict D).
-- `src/check/poly/ground.rs:608-620` — `inline_combinator` (the D-caveat splice
+- `src/check/combinators.rs:313` — `inline_combinator` (the D-caveat splice
   path; non-goal).
 
 Join / back-edge (REQ-5):
 
 - `src/check/terms.rs:3607-3620` — `check_branch_join`, error at `:3613`,
   `borrow_join_disagreement_error` at `:3797`. Union site 1.
-- `src/check.rs:2718-2754` — `merge_arm_output_slot`, deriv match at `:2745`.
-  Union site 2 (A-amend 1).
-- `src/check.rs:1690-1700` — the back-edge guard's `owned_root: None` accept-case
-  (the union's condition predicate).
+- `src/check.rs:2718-2754` — `merge_arm_output_slot`, deriv match at
+  `:2725-2736`. Union site 2 (A-amend 1).
+- `src/check.rs:1677-1692` — the back-edge guard body, whose `owned_root: None`
+  arm is the union's condition predicate (`check_reference_across_back_edge`).
 - `src/check.rs:3164` — `carried_borrow`'s no-contention case (same predicate).
 - `src/check/terms.rs:3773-3790` — `back_edge_outs`; copy `deriv` alongside
   `surviving` at `:3784`.
 - `src/check/terms.rs:820-827` — the self-tail back-edge caller arm.
 - `src/check.rs:1670` — `check_reference_across_back_edge` (the argument-scan
   guard; untouched, G16/G17 pin it).
-- `src/check/terms.rs:248` — the name-read push reborrow arm (rootless mint).
+- `src/check/terms.rs:248` — the name-read push reborrow arm; rootless only
+  when the naming's `held` deriv is itself absent (see the REQ-5 mechanism
+  correction).
 - `src/check/word_entry.rs:219-221` — `Slot::computed` seeds a deriv-free
-  parameter slot.
+  parameter slot (the source of rootlessness for parameter-rooted remainders).
+- `src/check/engine.rs:418` — `Provenance::reborrow`'s `owned_root` line: a
+  held deriv's root is inherited, not erased.
 - `src/check/word_families.rs:252-256` — the exclusivity-scan predicate a kept
   deriv feeds.
 
 Clobber fix (REQ-4):
 
-- `src/check/terms.rs:974-988` — the S8b span-keyed generated-enum-word
-  resolution (the named fix surface).
-- `src/check/terms.rs:2249-2289` — `mint_fallback_candidates` (path 2).
-- `src/check/builtins.rs:180-199` — `select_overload_fallback_sourced` (path 3,
-  the tier-1 same-module preference; the risk).
-- `src/check/terms.rs:1124-1157`, `:1210` — the span-keyed record arms.
+- `src/check/terms.rs:966-968` — the env-hit candidate arm (the actual fix
+  site: union with live check-time mints here, per-monomorph).
+- `src/check/terms.rs:2249-2289` — `mint_fallback_candidates` (the env-miss
+  arm's existing supplier; the fix brings its candidates into the env-hit arm
+  too).
+- `src/check/builtins.rs:180-199` — `select_overload_fallback_sourced`
+  (exonerated: operand-filters first at `:185-190`; do not touch).
+- `src/check/terms.rs:1124-1157`, `:1210` — the existing span-keyed
+  bookkeeping arms (recording precedent, not the clobber site).
 
 Builtins / word families (reference — already work, PREREQ-shipped):
 
-- `src/check/builtins.rs:520` — `Type::Slice(_, mutable, _) => !mutable` (Copy).
-- `src/check/word_families.rs:32-63` — `&>`/`&!>`; `:842-861`, `:1020-1038` —
-  `subslice`/`len` (mutability-preserving).
+- `src/check/builtins.rs:536` — `Type::Slice(_, mutable, _) => !mutable` (Copy).
+- `src/check/word_families.rs:32-63` — `&>`/`&!>`; `:926` (`subslice`), `:819`
+  and `:1104` (`len`) — mutability-preserving.
 
 Library (REQ-6):
 
 - `lib/core/iterator.sth` — add `impl: Iterator for Slice[i64]` with
-  `: next inline ... ;` (natural body). `core::iterator` deliberately does not
-  export bare `next`.
+  `: next inline ... ;` (natural body). Current imports are only
+  `import: intrinsics | drop | ;` and `import: self::list | List Nil Cons | ;`
+  (lines 13-14); the natural body needs widening — `len subslice &> @ >usize
+  sub dup swap` from `intrinsics`, `if`/`eq` from `self::prelude` (cf.
+  `lib/core/range.sth:6-8`'s import pattern). `core::iterator` deliberately
+  does not export bare `next`.
 
 ## Open questions and risks (adapted from paper tests §Risks and fallbacks)
 
@@ -346,8 +396,11 @@ Library (REQ-6):
   inline is NOT acceptable (breaks the 6 canaries, G22). If the desugar stalls,
   the slice stalls: escalate.
 - **F4 (clobber fix).** The gate leaves no other home for the impl (G19), so a
-  stall ships nothing user-visible. Risk is the non-span-keyed paths (verdict E
-  path 3); key the resolution, don't widen an arm. Pins: G7, G8.
+  stall ships nothing user-visible. Fix surface is the env-hit candidate arm's
+  visibility (`terms.rs:966-968`), not span-keying (see REQ-4's correction);
+  union, don't widen the fallback picker. Pins: G7, G8, plus the two existing
+  suite canaries at `tests/phase6_slice3b.rs:208` and
+  `tests/phase7_slice12.rs:681`.
 - **F5 (join + back_edge, together).** Probe-proven fallback: the `s6d_a` as-done
   body with join/back_edge untouched (S6d-8.2/8.3). If 5(a) stalls: G2/G3 change
   to the as-done body, G4/G5 stay frozen. If 5(b) stalls: G6 is withdrawn (not
@@ -359,33 +412,63 @@ Library (REQ-6):
 ## Housekeeping
 
 - Probe fixtures are already committed (`40aacce`, `e1fa5c8`) — implementation
-  reuses them as-is, does not re-derive.
+  reuses them as-is, does not re-derive. Note: `probes/s6d_baseline.md` itself
+  covers only the 13 round-1 fixtures (landed in `40aacce`, not amended by
+  `e1fa5c8`); the 8 round-2 fixtures' (`s6d_j`..`s6d_q`) byte-exact captures
+  live only in `slice6d-paper-tests.md`.
 - Goldens land in the `tests/phase7b_slice8.rs` successor convention (look at how
   slice goldens are organized there; keep `single_file_hosted` /
   `build_ok` / `build_run_keep` / `build_error_located`). Harness note: the
-  harness prepends `import: intrinsics * ;` + `import: hosted::show | . | ;`, so a
-  golden's inline source must NOT re-import `hosted::show` (a duplicate collides
-  in the seen-map); the standalone probe fixture keeps its own import. Import
+  harness prepends `import: intrinsics * ;` + `import: hosted::show | . | ;`
+  (`tests/phase7b_slice8.rs:65-68`), so a golden's inline source must NOT
+  re-import `hosted::show` (a hard duplicate-qualifier error); a duplicate
+  `import: intrinsics * ;` is harmless. This also means **every `(line N, col
+  M)` in a paper-tests verbatim capture shifts by one line under the
+  harness** — re-measure error goldens from the harness context; never
+  transcribe the docs' standalone-fixture coordinates directly. Import
   spells for `core` consumers:
   `import: core::list | List Nil Cons | ;` +
   `import: core::iterator | Step Done More Iterator | ;`.
 - Roadmap entry correction + a condensed-reference update land as a **docs
-  commit at implementation time**: the roadmap's S6d entry (~line 514) still
-  claims both `Slice[i64]`/`!Slice[i64]` get admitted and that the impl reads via
-  `&!>` — both superseded (mutable closed by Ruling A; shared reads via `&>`),
-  and its `S-M` line should read `M`.
+  commit at implementation time**, enumerated:
+  - `docs/roadmap/P7b-higher-kinded-types.md:514-537` — the S6d entry still
+    claims both `Slice[i64]`/`!Slice[i64]` get admitted and that the impl
+    reads via `&!>` (both superseded: mutable closed by Ruling A, shared
+    reads via `&>`); its `Size: S-M` line (`:537`) should read `M`; and its
+    `:529-530` "admit … to the P7b.S8 lifted-mono route" mechanism claim is
+    superseded by the sentinel patch (REQ-2), not the lift.
+  - `docs/roadmap/ROADMAP.md:56` — the P7b row's "S6d — slices as Iterator
+    targets, deferred behind those residuals" needs the same correction once
+    this slice lands.
 - Deferred register pointers to note on the tickets at implementation time:
   **SOO-60** (bound consumers; narrowed to the poly-body App-dispatch output
   loss), **SOO-45** (mutable target), **SOO-42** (narrowed by the probes to
-  root-visible/inline consumers).
+  root-visible/inline consumers), **SOO-48** (generic-element targets,
+  unreachable spelling), **SOO-41** (Ruling F multi-root `Deriv`, the paper
+  tests' pointer for lifting the two-root refusal), **SOO-40** ("Poly
+  signature audit: per-instantiation check for slice-bearing types (bundle
+  exempt path)" — the instantiation-audit interface note above), **SOO-1**
+  (close as superseded once G8 lands).
+- Unit count: the phases below name **15** units (2+6+1+6), not the paper
+  tests' rough "~14" — no unit was renamed or dropped, the estimate was just
+  short by one.
 
 ## Phased delivery plan
 
-P1–P4 are mutually independent (parallelizable). P5 depends on all four.
-Every phase: exit criteria are named G-goldens plus existing-suite-green
-(3480/0, byte-identical bans, the 6 canaries and the PREREQ guard test); every
-changed site gets its paper-test named units. Safety monotonicity holds at every
-commit (NFR-3).
+P1–P4 are code-independent (parallelizable): none needs another's *code* to
+land. Their automated exit goldens interlock pairwise, though — G13 (P1's
+original exit golden) needs P2's sentinel to build, and G1 (P2's exit golden)
+needs P1's per-impl inline keyword. Verified: `probes/s6d_a_fence_baseline.sth`
+(G13) still fences at HEAD, and `probes/s6d_n_perimpl_inline_member.sth` (G1)
+spells per-impl `: next inline`, needing REQ-3. P1's exit is therefore its
+units plus the 6 canaries (P1-only, code-independent); P2's exit carries G13
+as its build golden (the sentinel is what actually lifts the fence), plus the
+P2-only pair G10/G11; G1 is evaluated once both have landed (whichever of
+P1/P2 lands second, at latest by P5). P5 depends on all four. Every phase:
+exit criteria are named G-goldens plus existing-suite-green (3480/0,
+byte-identical bans, the 6 canaries and the PREREQ guard test); every changed
+site gets its paper-test named units (15 total). Safety monotonicity holds at
+every commit (NFR-3).
 
 ### P1 — Per-impl `inline` desugar (REQ-3)
 
@@ -395,20 +478,24 @@ commit (NFR-3).
   `impl_member_inline_keyword_sets_the_member_words_declares_inline`,
   `impl_member_without_inline_keyword_inherits_the_trait_member_flag`.
 - **Out of bounds.** No trait-level change; the trait member's flag stays
-  inherited when the impl is silent (G13 pins the old spelling still builds).
+  inherited when the impl is silent.
 - **Entry.** Clean tree at HEAD.
-- **Exit.** **G13** builds (`3\n4\n`); the 6 G22 canaries green with List/Range
-  unchanged; units pass.
-- **Parallelism.** With P2/P3/P4. **Effort** S. **Difficulty** standard.
-  **Blockers.** None.
+- **Exit.** Both units pass; the 6 G22 List/Range canaries stay green
+  (trait-level `inline` unchanged); suite green. **G13** itself cannot build
+  from P1 alone — its fixture (`probes/s6d_a_fence_baseline.sth`) still hits
+  the S2-6 fence until P2's sentinel lands, so G13 moves to P2's exit (below).
+- **Parallelism.** Code-independent of P2/P3/P4. **Effort** S. **Difficulty**
+  standard. **Blockers.** None (goldens G13/G1 are cross-phase; code is not).
 
 ### P2 — The two-half sentinel patch (REQ-2)
 
 - **Goal.** `impl: Iterator for Slice[i64]` grounds its App-headed member row
   against the concrete slice target; the dispatch arm reads the grounded word.
-- **Scope.** `src/parser.rs:855-964` (sentinel helpers), `:4629-4691` (the
-  slice branch preempting `is_concrete`), `src/ast.rs:2711` (invariant-exception
-  doc + mutual pointer), `src/check/poly/ground.rs:1319-1333` (dispatch arm).
+- **Scope.** `src/parser.rs:855-964` (sentinel helpers), the slice branch
+  inserted immediately before `is_mono_ctor_app` (`:4519` on this tree, `:4513`
+  clean-tree, preempting both `is_mono_ctor_app` and `is_concrete`),
+  `src/ast.rs:2711` (invariant-exception doc + mutual pointer),
+  `src/check/poly/ground.rs:1319-1333` (dispatch arm).
   Units: `rewrite_slice_sentinel_erases_every_sentinel_occurrence`,
   `slice_sentinel_is_recognizable_and_never_a_real_registry_index`,
   `slice_impl_member_grounds_app_headed_row_against_concrete_slice_target`,
@@ -419,31 +506,48 @@ commit (NFR-3).
   `is_mono_ctor_app` change; the fence text stays byte-stable for non-slice
   targets.
 - **Entry.** Clean tree at HEAD.
-- **Exit.** **G1** builds (`3\n4\n`, as-done body isolating the sentinel+inline
-  from REQ-5); **G11** byte-identical (non-slice `Unit` target still fences);
-  **G10** the output ban holds; **G12** revert control (dispatch arm reverted →
-  the `ast.rs:2271` panic, guarded by `build_error_located`'s no-`panic`
-  discipline); suite green.
-- **Parallelism.** With P1/P3/P4 (P2 needs P1 only for the *inline* golden G1;
-  sequence P1→P2 if run serially, else the shared branch merges cleanly).
-  **Effort** M. **Difficulty** hard (the invariant exception). **Blockers.**
-  None; SliceApp fallback if the exception is rejected.
+- **Exit.** **G13** builds (`3\n4\n`, now that the sentinel lifts the fence —
+  P2's own build proof); **G10/G11** (the P1-free core: output ban holds,
+  non-slice `Unit` target byte-identical); **G12** as a manual
+  implementation-time spike (not a suite golden — see the success-criteria
+  table): apply the dispatch arm alone (parser half only), run G8's fixture,
+  capture the `ast.rs:2271` unreachable panic as evidence, then restore
+  (`build_error_located`'s no-`panic` assertion, `tests/phase7b_slice8.rs:
+  128-132`, would FAIL under a reverted arm, so it cannot be the golden that
+  guards this — the spike is evidence collection, not a suite test); **G1**
+  is conditional on P1 (needs the per-impl inline keyword) — if P2 lands
+  first, defer G1's evaluation to whichever of P1/P2 lands second, at latest
+  P5; suite green.
+- **Parallelism.** Code-independent of P1/P3/P4 (see the phase-plan preamble
+  for the golden-level interlock with P1: G13 needs P2, G1 needs P1). Re-run
+  the growth-signal check (CLAUDE.md) against `src/parser.rs` at this exit —
+  it now carries both P1's and P2's edits. **Effort** M. **Difficulty** hard
+  (the invariant exception). **Blockers.** None on code; SliceApp fallback if
+  the exception is rejected.
 
 ### P3 — The Step-monomorph clobber fix (REQ-4)
 
 - **Goal.** Two monomorphs of one generated enum coexist in one program, each
   bare-name site resolving to its own.
-- **Scope.** The S8b span-keyed channel at `src/check/terms.rs:974-988` (key the
-  resolution per-monomorph; mechanism is the implementer's). Beware paths 2/3
-  (`mint_fallback_candidates` `terms.rs:2249-2289`,
-  `select_overload_fallback_sourced` `builtins.rs:180-199`). Unit:
+- **Scope.** The env-hit candidate lookup at `src/check/terms.rs:966-968`:
+  union it with `mint_fallback_candidates`'s check-time mints
+  (`terms.rs:2249-2289`), keyed per-monomorph so each bare-name site still
+  resolves to its own. `select_overload_fallback_sourced`
+  (`builtins.rs:180-199`) is exonerated (operand-filters first, `:185-190`) —
+  leave it alone. Unit:
   `variant_word_resolution_survives_a_second_monomorph_of_the_same_enum`.
-- **Out of bounds.** Do not widen a single fallback arm; do not touch lowering's
-  bare-key map (`src/ir/func_builder/calls.rs:480` reads span-keyed first — no
-  `src/ir/` change).
+- **Out of bounds.** Do not widen `select_overload_fallback_sourced`'s tier-1
+  arm; do not touch lowering's bare-key map (`src/ir/func_builder/calls.rs:
+  480` reads span-keyed first — no `src/ir/` change).
 - **Entry.** Clean tree at HEAD (the bug is clean-tree reproducible, `s6d_m`).
-- **Exit.** **G7** builds (`1\n2\n3\n`); suite green (no existing fixture has two
-  monomorphs of one generated enum, verdict E, so nothing else moves).
+- **Exit.** **G7** builds (`1\n2\n3\n`); suite green, including the two
+  existing suite fixtures that already hold two monomorphs of one generated
+  enum via bare `Ok>`/`Err>` destructures —
+  `tests/phase6_slice3b.rs:208`
+  (`two_asymmetric_instantiations_eliminate_independently_in_one_word`) and
+  `tests/phase7_slice12.rs:681`
+  (`a_two_parameter_generic_enum_is_eliminated_at_swapped_monomorphs`) — named
+  canaries, not just "nothing else moves".
 - **Parallelism.** With P1/P2/P4. **Effort** M. **Difficulty** hard (resolution
   paths). **Blockers.** None.
 
@@ -467,7 +571,9 @@ commit (NFR-3).
 - **Entry.** Clean tree at HEAD (the join rule is generic, no impl needed for
   G3/G4/G5).
 - **Exit.** **G3** `build_ok`; **G4/G5** byte-identical refusals; the PREREQ
-  guard test untouched; suite green.
+  guard test untouched; suite green. Re-run the growth-signal check
+  (CLAUDE.md) against `src/check/terms.rs` at this exit — it now carries P3's
+  clobber-fix edit plus P4's join/back-edge edits.
 - **Parallelism.** With P1/P2/P3. **Effort** M. **Difficulty** hard (soundness
   argument). **Blockers.** None; F5 as-done fallback if a half stalls.
 
@@ -496,19 +602,19 @@ commit (NFR-3).
   "phases": [
     {
       "phase": 1,
-      "focus": "Per-impl inline desugar (REQ-3): impl members accept an optional inline keyword at src/parser.rs:4449-4453; declares_inline = impl spelling when present else the trait member's inherited flag. Two units. Exit G13 builds and the 6 G22 List/Range canaries stay green with trait-level behaviour unchanged.",
+      "focus": "Per-impl inline desugar (REQ-3): impl members accept an optional inline keyword at src/parser.rs:4449-4453; declares_inline = impl spelling when present else the trait member's inherited flag. Two units. Exit: both units pass and the 6 G22 List/Range canaries stay green with trait-level behaviour unchanged; suite green. G13 itself needs P2's sentinel to build, so it is evaluated as part of P2's exit, not P1's.",
       "effort": "S",
       "difficulty": "standard"
     },
     {
       "phase": 2,
-      "focus": "The two-half sentinel fence lift (REQ-2): parser half SLICE_SENTINEL_IDX/slice_sentinel/rewrite_slice_sentinel at src/parser.rs:855-964 plus the slice branch at :4629-4691 preempting is_concrete, the PolyType::Generic invariant-exception doc at src/ast.rs:2711 with mutual pointers, and the dispatch half slice guard arm in resolve_mono_member_call at src/check/poly/ground.rs:1319-1333. Six units. Exit G1 builds, G11 byte-identical for a non-slice concrete target, G10 output ban holds, G12 revert control. SliceApp is the recorded fallback if the invariant exception is rejected.",
+      "focus": "The two-half sentinel fence lift (REQ-2): parser half SLICE_SENTINEL_IDX/slice_sentinel/rewrite_slice_sentinel at src/parser.rs:855-964 plus the slice branch inserted immediately before is_mono_ctor_app (src/parser.rs:4519 on this tree, ~:4513 on the clean tree), preempting both is_mono_ctor_app and is_concrete; the PolyType::Generic invariant-exception doc at src/ast.rs:2711 with mutual pointers; and the dispatch half slice guard arm in resolve_mono_member_call at src/check/poly/ground.rs:1319-1333. Six units. Exit: G13 builds now that the sentinel lifts the fence, G10/G11 hold (the P1-free core), G12 is a manual implementation-time spike (not a suite golden). G1 is conditional on P1's inline keyword and is evaluated once both phases have landed. SliceApp is the recorded fallback if the invariant exception is rejected.",
       "effort": "M",
       "difficulty": "hard"
     },
     {
       "phase": 3,
-      "focus": "The pre-existing Step-monomorph clobber fix (REQ-4): key the S8b span-keyed generated-enum-word resolution at src/check/terms.rs:974-988 per-monomorph so two monomorphs of one enum coexist, watching mint_fallback_candidates (terms.rs:2249-2289) and select_overload_fallback_sourced's tier-1 preference (builtins.rs:180-199); do not widen a single arm and do not touch src/ir. One unit. Exit G7 builds and the suite stays green.",
+      "focus": "The pre-existing Step-monomorph clobber fix (REQ-4): union the env-hit candidate arm at src/check/terms.rs:966-968 with mint_fallback_candidates's check-time mints (terms.rs:2249-2289), keyed per-monomorph, so two monomorphs of one generated enum coexist; select_overload_fallback_sourced (builtins.rs:180-199) is exonerated (operand-filters first) and must not be touched. One unit. Exit: G7 builds and the suite stays green, including the two pre-existing suite canaries that already carry two monomorphs of one generated enum -- tests/phase6_slice3b.rs:208 and tests/phase7_slice12.rs:681.",
       "effort": "M",
       "difficulty": "hard"
     },
