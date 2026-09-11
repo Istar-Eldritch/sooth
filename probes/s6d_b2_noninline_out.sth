@@ -1,0 +1,14 @@
+\ S6d probe B2 — the non-inline twin of probe B (S6d-7.2b): the SAME payload
+\ packing with `inline` removed. Ruling B keeps the word-entry ban: a
+\ non-inline word may not declare a reference-bearing output. Clean tree:
+\ `check_reference_free_signature` rejects at the declared signature.
+import: intrinsics * ;
+
+type: Step['T 'Rest]
+| Done
+| More 'T 'Rest
+;
+
+: mk ( i64 Slice[i64] -- Step[i64 Slice[i64]] ) More ;
+
+: main ( -- ) 1 drop ;

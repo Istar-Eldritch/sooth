@@ -1,0 +1,59 @@
+\ S6d probe A — DQ4 fence baseline, shared target (S6d-7.1). `next`'s row is
+\ the S8-shaped App-headed protocol row; the impl target grounds as a bare
+\ `Concrete(Type::Slice(..))`, so the S2-6 concrete-target fence fires at
+\ desugar on the clean tree (`member_app_concrete_target_error`). The S6d-8
+\ sentinel patch admits this exact spelling; on that tree the file builds and
+\ the main below runs — one mono `next` step over a 5-element view prints the
+\ element 3 and the remainder's length 4.
+\
+\ Body note (S6d-8.2): the prescribed Done arm (`drop Done`) is REJECTED by
+\ the branch-join borrow rule — the More arm's Step carries the remainder
+\ view's deriv, the Done arm's carries none, and the join refuses the
+\ asymmetry. `as-done` (a poly word whose call-site output push, REQ-4d site
+\ 4, forwards the dropped view's deriv onto the Step slot) gives both arms'
+\ Step slots the same suspension, which is what lets the protocol shape
+\ check at all. See the round report — this is a load-bearing workaround.
+import: intrinsics * ;
+import: core::prelude * ;
+import: hosted::show | . | ;
+
+type: Step['T 'Rest]
+| Done
+| More 'T 'Rest
+;
+
+trait: Iterator['It: * -> *]
+: next ( 'It['T] -- Step['T 'It['T]] ) ;
+;
+
+\ Poly on purpose: a mono non-inline twin is banned at the word entry
+\ (Ruling B), and an inline twin splices to `drop Done`, whose push carries
+\ no deriv — the join disagreement again. The poly output slot is a declared
+\ `Var`, which the signature audit treats as reference-free (the deferred
+\ per-instantiation audit is the gap site 4's forward closes).
+: as-done ['R] ( 'R -- Step[i64 'R] ) drop Done ;
+
+impl: Iterator for Slice[i64]
+: next
+| s |
+s dup len |n|
+n 0 >usize eq
+~[ as-done ]
+~[
+dup 0 >usize &> @ |v|
+1 >usize n 1 >usize sub subslice
+v swap More
+]
+if
+;
+;
+
+: main ( -- )
+3 5 fill |buf|
+&buf slice
+next
+~[ ( Done ) drop ]
+~[ ( More ) More> |v r| v . r len >i64 . ]
+Step?
+buf drop
+;

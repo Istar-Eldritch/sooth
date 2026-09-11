@@ -1,0 +1,15 @@
+\ S6d probe B3 — the !Slice payload twin (S6d-7.2c): the Step-row protocol
+\ shape over a MUTABLE slice payload. Ruling A hard-bans `!Slice[T]` as a
+\ declared-aggregate payload, so `Step[i64 !Slice[i64]]` is unadmittable.
+\ Clean tree: the enum-payload sweep of `check_no_stored_references`
+\ rejects the parse-time-minted monomorph.
+import: intrinsics * ;
+
+type: Step['T 'Rest]
+| Done
+| More 'T 'Rest
+;
+
+: mk inline ( i64 !Slice[i64] -- Step[i64 !Slice[i64]] ) More ;
+
+: main ( -- ) 1 drop ;

@@ -1,0 +1,31 @@
+import: intrinsics * ;
+import: core::prelude * ;
+import: hosted::show | . | ;
+
+type: Step['T 'Rest]
+| Done
+| More 'T 'Rest
+;
+
+trait: Iterator['It: * -> *]
+  : next inline ( 'It['T] -- Step['T 'It['T]] ) ;
+;
+
+: as-done ['R] ( 'R -- Step[i64 'R] ) drop Done ;
+
+impl: Iterator for !Slice[i64]
+  : next
+    | s |
+    s len |n|
+    n 0 >usize eq
+    ~[ s as-done ]
+    ~[
+      s 0 >usize &!> @ |v|
+      s 1 >usize n 1 >usize sub subslice
+      v swap More
+    ]
+    if
+;
+;
+
+: main ( -- ) 1 drop ;

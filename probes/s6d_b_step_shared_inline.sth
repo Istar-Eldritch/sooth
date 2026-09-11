@@ -1,0 +1,29 @@
+\ S6d probe B — PREREQ admissions isolated from the fence (S6d-7.2a + 7.2d).
+\ A plain inline word packs a shared slice into the declared Step payload
+\ (REQ-5 admit-and-taint), a mono consumer destructures it, and the packed
+\ container is dup'd (REQ-5: a shared-slice container stays Copy). No trait,
+\ no impl: — this must pass on the CLEAN tree. Expected stdout: 41, then 5.
+import: intrinsics * ;
+import: hosted::show | . | ;
+
+type: Step['T 'Rest]
+| Done
+| More 'T 'Rest
+;
+
+: mk inline ( i64 Slice[i64] -- Step[i64 Slice[i64]] ) More ;
+
+\ REQ-5 copy check: the packed container dups and double-drops clean.
+: dup-check ( i64 Slice[i64] -- ) More dup drop drop ;
+
+: main ( -- )
+  3 5 fill |buf|
+  &buf slice |s|
+  41 s mk
+  ~[ ( Done ) drop ]
+  ~[ ( More ) More> |v r| v . r len >i64 . ]
+  Step?
+  42 s dup-check
+  s drop
+  buf drop
+;

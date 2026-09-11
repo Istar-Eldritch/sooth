@@ -1,0 +1,49 @@
+import: intrinsics * ;
+import: core::prelude * ;
+import: core::combinators c | while | ;
+import: hosted::show | . | ;
+
+type: Step['T 'Rest]
+| Done
+| More 'T 'Rest
+;
+
+trait: Iterator['It: * -> *]
+  : next inline ( 'It['T] -- Step['T 'It['T]] ) ;
+;
+
+: as-done ['R] ( 'R -- Step[i64 'R] ) drop Done ;
+
+impl: Iterator for Slice[i64]
+  : next
+    | s |
+    s dup len |n|
+    n 0 >usize eq
+    ~[ as-done ]
+    ~[
+      dup 0 >usize &> @ |v|
+      1 >usize n 1 >usize sub subslice
+      v swap More
+    ]
+    if
+;
+;
+
+\ The while-threaded drain (S6d-10.3): the threaded state 'a is the STEP
+\ value itself, the row pinned by the quotation annotation so the inner
+\ arms' reconstructions have a concrete consumer.
+: drain ( Slice[i64] -- )
+  |s|
+  s next
+  ~[ ( Step[i64 Slice[i64]] -- Step[i64 Slice[i64]] Bool )
+     ~[ ( Done ) drop s 0 >usize 0 >usize subslice as-done False ]
+     ~[ ( More ) More> |v r| v v . r More True ]
+     Step? ]
+  while
+  drop ;
+
+: main ( -- )
+  6 3 fill |buf|
+  &buf slice drain
+  buf drop
+;

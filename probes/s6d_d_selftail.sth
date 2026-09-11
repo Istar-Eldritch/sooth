@@ -1,0 +1,44 @@
+import: intrinsics * ;
+import: core::prelude * ;
+import: hosted::show | . | ;
+
+type: Step['T 'Rest]
+| Done
+| More 'T 'Rest
+;
+
+trait: Iterator['It: * -> *]
+  : next inline ( 'It['T] -- Step['T 'It['T]] ) ;
+;
+
+: as-done ['R] ( 'R -- Step[i64 'R] ) drop Done ;
+
+impl: Iterator for Slice[i64]
+  : next
+    | s |
+    s dup len |n|
+    n 0 >usize eq
+    ~[ as-done ]
+    ~[
+      dup 0 >usize &> @ |v|
+      1 >usize n 1 >usize sub subslice
+      v swap More
+    ]
+    if
+;
+;
+
+\ The self-TAIL drain: `r drain` is the arm's last term, so the P7.S3g
+\ transform lowers the recursion to a loop back-edge and the remainder
+\ (a tainted view) would cross it.
+: drain ( Slice[i64] -- )
+  next
+  ~[ ( Done ) drop ]
+  ~[ ( More ) More> |v r| v . r drain ]
+  Step? ;
+
+: main ( -- )
+  3 5 fill |buf|
+  &buf slice drain
+  buf drop
+;

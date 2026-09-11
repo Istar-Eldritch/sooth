@@ -385,3 +385,616 @@ reference-bearing aggregates (a taint/storage-class design, since
 aggregate exactly as to the bare slice). Option (iii) — defer slices out of
 Iterator until such a capability slice exists — is the only route needing
 no IR work.
+
+## Round S6d-7 (clean-HEAD re-verification post-PREREQ, no patch, run 260911)
+
+One `prober` worker. Scratch discipline: a pristine `git archive HEAD`
+extract at `/tmp/s6d-clean` supplied the clean-tree binary; all compiler
+patching happened in a separate extract at `/tmp/s6d-scratch`; this worktree
+kept `src/` and `lib/` untouched throughout. Probe fixtures live under
+`probes/` (`s6d_*.sth`); their clean-tree behavior is captured verbatim in
+[`probes/s6d_baseline.md`](../../probes/s6d_baseline.md), and compiled
+binaries were removed from `probes/` after each accepted build. Probes run
+with `--manifest tests/fixtures/sooth.pkg`.
+
+### S6d-7.1 — the fence, byte-for-byte, both targets
+
+`probes/s6d_a_fence_baseline.sth` (full hosted program: local
+`Step`/`Iterator`, `impl: Iterator for Slice[i64]` with a real `next` body,
+a mono `next` call in `main`):
+
+```text
+error: trait member `next` of `Iterator` (line 37, col 3) applies the trait variable `'It`, but the impl target `Slice[i64]` is concrete
+  an application-headed member has no monomorphic representation (its applied arguments are member locals); implement the trait for a constructor target with a type variable instead
+```
+
+exit=1. The mutable twin (one word different — `impl: Iterator for
+!Slice[i64]`, run from a /tmp copy of the same file):
+
+```text
+error: trait member `next` of `Iterator` (line 37, col 3) applies the trait variable `'It`, but the impl target `!Slice[i64]` is concrete
+  an application-headed member has no monomorphic representation ...
+```
+
+Identical shape to the pre-PREREQ S6d-1/S6d-2 captures — the PREREQ changed
+nothing about the fence (`member_app_concrete_target_error`, `src/ast.rs:
+2135`, raised from `parse_impl_member_body`, now `src/parser.rs:4440`).
+
+### S6d-7.2 — PREREQ admissions, isolated from the fence (plain words, no trait)
+
+- **(a) inline packing word** — `probes/s6d_b_step_shared_inline.sth`:
+  `: mk inline ( i64 Slice[i64] -- Step[i64 Slice[i64]] ) More ;` builds and
+  runs on the CLEAN tree; the mono consumer destructures via `Step?`/`More>`
+  and prints `41` then `5` (the remainder's `len`). exit=0 both. REQ-5's
+  admit-and-taint works end-to-end for the shared slice in a declared enum
+  payload.
+- **(b) non-inline twin** — `probes/s6d_b2_noninline_out.sth`: the output ban
+  fires at the declared signature, exactly as S6d-4 observed for a bare
+  slice output:
+
+```text
+error: a reference cannot be stored: `mk` declares the output `Step[i64 Slice[i64]]`
+  a `&T`/`&!T` borrows a local of the callee's own frame, which is gone by the time the caller reads it; take the reference as an input instead
+```
+
+- **(c) `!Slice` payload twin** — `probes/s6d_b3_mut_payload.sth`:
+  `Step[i64 !Slice[i64]]` is rejected by the enum-payload sweep of
+  `check_no_stored_references` (`src/check/declarations.rs:1108`), naming the
+  parse-time-minted monomorph — the same sweep/wording shape as the old S6d-2
+  rejection, naming `!Slice`, as predicted:
+
+```text
+error: a reference cannot be stored: payload field 1 of variant `More[i64 !Slice[i64]]` of type `Step[i64 !Slice[i64]]` has type `!Slice[i64]` (line 10, col 3)
+  a `&T`/`&!T` borrows a local and may not outlive it, so it cannot be put anywhere that survives the borrow
+```
+
+- **(d) copy-ness** — the same s6d_b file's `: dup-check ( i64 Slice[i64] -- )
+  More dup drop drop ;` compiles: the packed container `dup`s clean (REQ-5's
+  "a shared-slice container stays Copy").
+
+### S6d-7.3 — cheap sanity
+
+`sooth build examples/slices.sth` (manifest discovery via
+`examples/sooth.pkg`), clean HEAD: build exit=0, run prints `15`, `6`, `6`,
+exit=0. Bare-slice input to non-inline words is still admissible
+post-PREREQ; `sum`/`double` unchanged.
+
+### Round-level verdict
+
+The PREREQ unlocked exactly the payload layer (S6d-7.2a/d) and kept every ban
+sharp (7.2b/c); the S2-6 member-app fence is byte-identical to the pre-PREREQ
+tree and is the only remaining declaration-time blocker for both targets.
+
+## Round S6d-8 (the two-half sentinel patch, scratch copy, run 260911)
+
+All compiler edits in `/tmp/s6d-scratch` (a `git archive HEAD` extract);
+this worktree untouched. Both halves were written from the S6d-2/S6d-4
+ledger and verified independently by the negative controls below.
+
+### S6d-8.1 — the exact diff shape on the current tree
+
+Two files, three hunks, no deletions (except one rewritten import line):
+
+1. **`src/parser.rs`**, line 25: `SliceId` added to the `crate::ast` import.
+2. **`src/parser.rs:855-964`** (inserted after `build_member_var_union`):
+   `const SLICE_SENTINEL_IDX: u32 = u32::MAX;`, `fn slice_sentinel(element,
+   name)` (~10 lines), and `fn rewrite_slice_sentinel(ty, id, mutable, name)`
+   (~75 lines, recursion mirroring `member_ty_mentions_app`'s shape over
+   Generic/GenericVariant/Array/Ref/OwnedCell/Quotation). ~110 lines with
+   comments.
+3. **`src/parser.rs` inserted at 4629-4691** (inside
+   `parse_impl_member_body`, after the member lookup and `dg` construction,
+   BEFORE both the `is_mono_ctor_app` and `is_concrete` branches — a slice
+   target is `Concrete`, so it must preempt the concrete path): the ~63-line
+   slice branch. It matches
+   `PolyType::Concrete(Type::Slice(..))`, builds the sentinel (a fake
+   `PolyType::Generic { is_enum: false, idx: u32::MAX, module: 0, args:
+   vec![Concrete(element)], len_args: [], name }` carrying the slice's
+   element from `self.slices[id.index()]`), clones the target with the
+   sentinel pattern, runs the **unmodified** `build_member_var_union` +
+   `ground_member_poly`, rewrites every sentinel back to
+   `Concrete(Type::Slice(..))`, and on `poly_type_is_var_free` mints the mono
+   member word exactly as the mono-ctor-app branch does (`poly: None`,
+   `declares_inline` inherited from the trait member). A non-var-free
+   grounding falls through to the same two fences the mono-ctor-app branch
+   raises.
+4. **`src/check/poly/ground.rs:1319-1333`** (inside
+   `resolve_mono_member_call`'s mono branch, which a slice target enters
+   because `imp.target.is_concrete()` is true): one new guarded arm in the
+   effect-derivation match — `Some(_) if matches!(&imp.target.pattern,
+   PolyType::Concrete(Type::Slice(..)))` reads the already-grounded member
+   word's effect (`trait_resolve.words[*widx].effect`) instead of re-deriving
+   via `ground_member_type`. 15 lines.
+
+Total ~190 lines added, zero changed behavior for non-slice targets (the
+branch falls through on any non-slice pattern; the ground.rs guard only
+fires for slice targets).
+
+**Invariant-exception comments (the spike's caveat (i), mutual pointers):**
+`SLICE_SENTINEL_IDX`'s doc states the exception and points at the
+`PolyType::Generic` invariant ("`idx` indexes `GenericTypes::structs`/
+`enums`", `src/ast.rs:~2711`); the sentinel is recognizable by construction
+(`u32::MAX` is unreachable as a real registry index) and is erased by
+`rewrite_slice_sentinel` before `ground_var_free`/`substitute_generic_field`
+— the two header-dereferencing paths — ever see it.
+
+**Clippy/fmt note for the implementer:** `cargo clippy -- -D warnings` is
+clean as written. The rewrite function binds the `&'static str` field under
+a RENAME (`name: header`) in the `Generic` arm, which sidesteps clippy 1.96
+`explicit_auto_deref`'s field-shorthand demand; a match arm that binds that
+field AS `name` and reconstructs with shorthand may trip it. `cargo fmt`
+wanted two cosmetic reformats (the ground.rs `match` header join; the
+`PolyType::Array` arm layout) — applied.
+
+### S6d-8.2 — the exact spelling that builds (and a NEW wall the brief did not know)
+
+The prescribed body shape (`len` zero-test with `dup` before `len`; `More`
+packing element deepest, remainder on top; Done arm dropping the exhausted
+slice) does **not** check even with both halves in place:
+
+```text
+error: borrow state disagrees at the branch join in `next` (member of trait `Iterator` for `Slice[i64]`) (line 26)
+  the first arm leaves no live borrow, the second arm leaves a borrow with no local root: both arms must agree on which place, if any, stays borrowed past the join
+  note: declared ( Slice[i64] -- Step[i64 Slice[i64]] )
+```
+
+This is `borrow_join_disagreement_error` (`src/check/terms.rs:3797`, raised
+at `:3613`): the `More` arm's `Step` slot carries the remainder view's deriv
+(forwarded by REQ-4d site 1's construction push, `src/check/terms.rs:1352`
+— every reference-bearing ctor output forwards its first slice-bearing
+operand's deriv), while the `Done` arm's `Done` (nullary, no operands)
+carries none. The join refuses the `(None, Some(_))` asymmetry instead of
+unioning. The Step-row protocol's Done/More asymmetry over a **borrow-flavored**
+payload is exactly this shape: **a fifth wall, beyond the brief's four and
+beyond the PREREQ's storage scope — the branch-join borrow rule.**
+
+The spelling that builds routes the Done arm through a poly helper whose
+call-site output push (REQ-4d site 4, the fixed mono/poly dispatch pushes)
+forwards the dropped view's deriv onto the Step slot, giving both arms' Step
+slots the same suspension. `probes/s6d_a_fence_baseline.sth`, verbatim:
+
+```forth
+: as-done ['R] ( 'R -- Step[i64 'R] ) drop Done ;
+
+impl: Iterator for Slice[i64]
+  : next
+    | s |
+    s dup len |n|
+    n 0 >usize eq
+    ~[ as-done ]
+    ~[
+      dup 0 >usize &> @ |v|
+      1 >usize n 1 >usize sub subslice
+      v swap More
+    ]
+    if
+;
+;
+```
+
+with the trait member spelled `: next inline ( 'It['T] -- Step['T 'It['T]] ) ;`
+— the member MUST be inline (S6d-7.2b's ban; see 8.4(iii)). `as-done` is poly
+on purpose: a mono non-inline twin is banned at the word entry, and an inline
+twin splices to `drop Done`, whose push carries no deriv (the join
+disagreement again). The poly output slot is a declared `Var`, which the
+signature audit treats as reference-free — the deferred per-instantiation
+audit is the gap site 4's forward exists to close. This workaround is
+load-bearing and slightly over-conservative (the Done-path Step claims a
+borrow it does not have); the checker-generalization alternative (union
+derivs at the join like aliases already are) is a design decision for the
+implementer, not a probe.
+
+The sentinel grounding itself works exactly as the S6d-2 spike predicted:
+the grounded signature renders in the join error's own note — `note:
+declared ( Slice[i64] -- Step[i64 Slice[i64]] )` — and `main`'s single
+`next` step over a 5-element view prints `3` then `4` (element, remainder
+length).
+
+### S6d-8.3 — the monomorphic consumer
+
+`probes/s6d_c_impl_consumer.sth`: `main` fills a 5-array and a 1-array,
+takes views, and a NON-tail recursive `drain` walks them with bare `next`
+(a mono member call — the `resolve_mono_member_call` slice arm exercised for
+real), `Step?` dispatch arms and `More>` destructure, printing each element:
+
+```text
+3
+3
+3
+3
+3
+9
+```
+
+build exit=0, run exit=0 — the second drain proves the `Done` path runs at
+runtime (a 1-element view hits `More` once, then `Done`).
+
+### S6d-8.4 — negative controls (each reverted independently)
+
+- **(i) parser half reverted** (ground.rs half in place): the fence returns
+  byte-identical to S6d-7.1 (`member_app_concrete_target_error`, line 37,
+  col 3). exit=1.
+- **(ii) ground.rs half reverted** (parser half in place): the impl parses
+  and mints, and the consumer's `next` call site panics at exactly the
+  predicted backstop:
+
+```text
+thread 'main' (2987092) panicked at src/ast.rs:2271:33:
+internal error: entered unreachable code: an App-headed member signature reaches ground_member_type only through the concrete desugar, which fences it first (S2-6: no mono representation for member locals)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+```
+
+  exit=101. (`imp.target.is_concrete()` is true for `Concrete(Type::Slice(..))`,
+  so the mono branch re-derives and hits `ground_member_type`'s App arm.)
+
+- **(iii) member re-spelled non-inline** (both halves in place;
+  `probes/s6d_next_noninline.sth`): the member word's own output ban —
+  the inherited `declares_inline: false` sends the synthesized member word
+  through `check_reference_free_signature`:
+
+```text
+error: a reference cannot be stored: `next` (member of trait `Iterator` for `Slice[i64]`) declares the output `Step[i64 Slice[i64]]`
+  a `&T`/`&!T` borrows a local of the callee's own frame, which is gone by the time the caller reads it; take the reference as an input instead
+```
+
+### S6d-8.5 — regression, and a second regression the patch EXPOSED
+
+With the two-half patch and `lib/` at HEAD: `cargo test --no-fail-fast` is
+**3480 passed, 0 failed** across 92 test binaries; `cargo clippy -- -D
+warnings` clean; `cargo fmt --check` clean (after the two cosmetic
+reformats).
+
+But the slice member must be `inline`, and `declares_inline` is inherited
+from the **trait** member (`src/parser.rs:4452`) — there is no per-impl
+inline spelling (impl members take no effect and no keyword slot). Spelling
+`: next inline ( ... ) ;` on the shared `Iterator` trait (the only way to
+make the slice member inline) breaks **6 of 39** `phase7b_slice8` goldens —
+the List/Range impls' own bodies:
+
+```text
+emitting the fixture should succeed: error: the quotations passed to `List?` leave different stack shapes: an earlier one leaves `Step[i64 Range[i64]]`, this one leaves `Step[i64 List[i64]]` in `next` (member of trait `Iterator` for `List['T0]`) (line 51)
+build should succeed; stderr: error: unknown word `Done` in `next` (member of trait `Iterator` for `List['T0]`) (line 50)
+```
+
+failures: `consuming_loop_over_range_is_one_frame_with_a_back_edge_and_next_
+is_a_real_frame`, `core_iterator_module_drains_a_list_through_its_cross_
+module_impl`, `fold_sums_a_list_through_the_iterator_bound`,
+`for_each_and_fold_drain_a_range_through_the_iterator_bound`,
+`for_each_drains_a_list_through_the_iterator_bound`,
+`range_next_dispatches_at_a_mono_call_site`. Toggling ONLY the lib edit
+(patches in place, no slice impl anywhere) reproduces it; reverting the lib
+edit restores 39/39 — the trigger is the member's inline-ness, not the
+sentinel patch and not any mint. Mechanism (observed, not chased to root):
+an inline poly member is checked/spliced through the poly-combinator path,
+where the nullary variant ctor `Done` either resolves against a WRONG
+existing `Step` monomorph (`Step[i64 Range[i64]]` inside the List impl) or
+fails to resolve at all (`unknown word Done`) — the S8b wrong-monomorph
+disease ("variant words clobber the bare-name map") reached through a second
+door. **Consequence for the spec: S6d cannot ship `next inline` at the trait
+level. It needs a per-impl inline spelling (desugar change) or a fix to the
+inline-poly-member check path, and either way the 6 goldens are the
+regression pin to keep green.**
+
+### S6d-8.6 — bound-generic consumers (for_each/fold) over the slice impl
+
+Three gates fire in sequence, none of them the predicted ones:
+
+1. **Placement gate (tree-independent).** A slice impl over the IMPORTED
+   `core::iterator` trait in an entry file
+   (`probes/s6d_f0_libiter_gate.sth`):
+
+```text
+error: `impl: Iterator for Slice[i64]` at line 8, col 1 must live in the module declaring `Iterator` (`Slice[i64]` declares no module of its own)
+```
+
+   The gate's co-declaration arm (an impl may live where its TARGET is
+   declared) is unavailable — `Slice` declares no module — so the only
+   admitted home is `core/iterator.sth` itself.
+2. **Member-output ban.** Inside the lib, with the trait member non-inline
+   (HEAD spelling), the impl parses (sentinel) and the member word dies at
+   the S6d-8.4(iii) ban. With the trait member inline, S6d-8.5's 6-golden
+   regression fires instead. The lib route is therefore blocked at both
+   spellings on this tree.
+3. **Bound-slot unification (the actual 8.6 answer).** With a probe-local
+   Iterator (inline member) + the lib's `for_each`/`fold` bodies verbatim,
+   both consumers die at the CALL SITE, before any App fence or back-edge
+   check (`probes/s6d_f_for_each_slice.sth`, `probes/s6d_f2_fold_slice.sth`):
+
+```text
+error: type mismatch in `main` (line 41)
+  `for_each` expected `'It['T]`, found `Slice[i64]`
+  note: declared ( -- )
+```
+
+```text
+error: type mismatch in `main` (line 49)
+  `fold` expected `'It['T]`, found `Slice[i64]`
+  note: declared ( -- )
+```
+
+   The check is `unify_poly_input` (`src/check/poly/unify.rs:127`, raising
+   `poly_rendered_type_mismatch_error`): the bound slot `'It['T]` is
+   App-headed and decomposes only against a ctor application — `'It` binds
+   to the application's HEAD. A slice is a bare `Concrete` view with no ctor
+   head, so `'It` has nothing to bind to. **SOO-60 (cross-call App fence)
+   and SOO-42 (back-edge gate) are both unreached for slices: the
+   bound-generic consumer channel is closed earlier, at the same structural
+   point that made the S8 Range lift need `is_mono_ctor_app` — dispatch
+   identity. A slice has no header to dispatch on.**
+
+### Round-level verdict
+
+Both halves of the sentinel patch work exactly as the S6d-2/S6d-4 ledger
+predicted (negative controls (i)/(ii) confirm each half is load-bearing).
+The Step-row protocol then checks and runs end-to-end for `Slice[i64]` — but
+only via the `as-done` join workaround (a NEW fifth wall: the branch-join
+borrow rule rejects the Done/More deriv asymmetry), and only with the member
+inline, which today cannot be spelled per-impl and breaks 6 List/Range
+goldens at the trait level. Bound-generic consumers are closed earlier than
+predicted: the `'It['T]` slot cannot unify a bare slice. The mutable target
+is separately closed by Ruling A (Round S6d-9).
+
+## Round S6d-9 (the mutable target, scratch copy, patch in place, run 260911)
+
+`probes/s6d_g_mut_impl.sth`: `impl: Iterator for !Slice[i64]` with the
+analogous body — linear binder mentions instead of `dup` (`!Slice` is not
+`Copy`, S6d-4), `&!>` element read, `&!buf slice` receiver shape in the
+consumer. **Prediction confirmed**: the sentinel grounds and the impl parses
+(the parse-time mint of `Step[i64 !Slice[i64]]` succeeds), and the
+first-firing check is the Ruling A enum-payload sweep — nothing fires
+earlier (the member is inline, so no word-entry ban; the sweep runs at the
+`Step` type's own variant span):
+
+```text
+error: a reference cannot be stored: payload field 1 of variant `More[i64 !Slice[i64]]` of type `Step[i64 !Slice[i64]]` has type `!Slice[i64]` (line 7, col 3)
+  a `&T`/`&!T` borrows a local and may not outlive it, so it cannot be put anywhere that survives the borrow
+```
+
+exit=1. (line 7 col 3 = the `| More 'T 'Rest` row of the file's own `Step`
+declaration — the sweep names the monomorph's variant.) No lowering or
+consumer probe was needed: the prediction held, so per the round plan
+nothing further applies.
+
+### Round-level verdict
+
+`!Slice[i64]` is closed under the Step-row protocol exactly as Ruling A
+says: the declared-aggregate payload ban fires before any impl-specific
+check. The spec's deferred note should record that the FIRST firing is the
+enum-payload sweep at the `Step` declaration, not anything at the impl.
+
+## Round S6d-10 (consumer shapes and placement, scratch copy, patch in place, run 260911)
+
+### S6d-10.1 — self-tail recursive drain: prediction FALSIFIED (then re-pinned where it does hold)
+
+`probes/s6d_d_selftail.sth` — `rest drain` in tail position — **builds and
+runs**, printing `3 3 3 3 3` (exit=0 both). `check_reference_across_back_edge`
+(`src/check.rs:1670`) does NOT fire: the guard rejects only a crossing slot
+whose deriv has a non-static `owned_root` — a local of the current frame —
+and a non-inline word's parameter-derived remainder has none (the function's
+own doc names this the accept-case: "A reference *parameter*, or one derived
+from it by projection, has no owned root (`owned_root` is `None`, the
+accept-case) and may cross freely"). The PREREQ's deferred note ("a tainted
+Window can never cross a self-tail back edge") holds only where the root is
+VISIBLE at check time — its own golden uses an INLINE consumer spliced into
+main. The sharper twin proves the guard still bites there:
+`probes/s6d_d2_selftail_inline.sth` (the same drain declared `inline`) is
+rejected:
+
+```text
+error: a reference to a local cannot cross a loop in `main` (line 37)
+  a reference derived from `buf`, a local of this frame, crosses the self-tail-call back-edge to `drain`: that local's storage does not survive to the next iteration
+  note: declared ( -- )
+```
+
+exit=1. **SOO-42's gate is pinned for slices exactly at the root-visibility
+boundary: non-inline recursive drains pass, spliced/inline ones cannot.**
+
+### S6d-10.2 — non-tail recursive drain: admissible, as predicted
+
+`probes/s6d_e_nontail_drain.sth` — the self-call NOT in tail position
+(`r drain v .`, the element prints after the recursion returns) — builds and
+runs, printing `4 4 4 4` (exit=0 both). A bare `Slice[i64]` input to a
+non-inline word is admissible (the `examples/slices.sth` `sum` precedent);
+a real call frame cannot outlive its caller. O(n) stack, one frame per
+element — fine at probe scale, the same cost `double` already pays.
+
+### S6d-10.3 — while-threaded drain: REJECTED, and the rejection is a PREREQ-mask finding
+
+Three checks had to be navigated just to spell the shape (each captured on
+the way): (a) a bare `Done` reconstructed inside the while quotation is
+refused by strict use-determined grounding — the S11 amendment —
+
+```text
+error: `Done` in `drain` (line 39) cannot be grounded here: `Step['T 'Rest]`'s type parameter `'T` (parameter 1 of 2) is determined by neither this call site's operands nor its consumer
+  note: pass the value to a consumer whose declared parameter names a concrete `Step[...]`, or name that instantiation in a signature so this call has one to ground at
+```
+
+(b) keeping the exhausted shell as the next state trips the variant-escape
+rule —
+
+```text
+error: an arm of `Step?` leaves `Step[i64 Slice[i64]].Done` on the stack in `drain` (line 39)
+  a variant-typed value is reachable only inside the arm that bound it; consume it there, or leave its fields instead
+```
+
+— and (c) with every spelling that survives (a) and (b) (state = the `Step`
+value, Done arm deriving an empty view from the parameter and routing it
+through `as-done`, concrete quotation annotation), the build dies at
+**while's OWN internal join** (`lib/core/combinators.sth:80`,
+`~[ p while ] ~[ ] if`; the error's line 80 is the spliced combinator's
+body):
+
+```text
+error: borrow state disagrees at the branch join in `drain` (line 80)
+  the first arm leaves no live borrow, the second arm leaves a borrow with no local root: both arms must agree on which place, if any, stays borrowed past the join
+  note: declared ( Slice[i64] -- )
+```
+
+The mechanism is the PREREQ's own documented latent mask, now REACHABLE:
+`back_edge_outs` (`src/check/terms.rs:3773`) "forwards `surviving` alone and
+drops `deriv`" across while's self-tail back edge, so the recursion arm's
+state arrives deriv-free while the base arm `~[ ]` keeps the state's deriv —
+a manufactured join disagreement. The PREREQ's guard test pinned this as
+"unreachable only because the guard rejects first"
+(`back_edge_rejects_a_deriv_carrying_aggregate_argument`); a slice-threaded
+state with a parameter-rooted (rootless) deriv passes that guard, so the
+mask fires. **A while-threaded slice drain is impossible on this tree, and
+the fix belongs to the checker (`back_edge_outs` must forward deriv), not to
+any user-level spelling.** No workaround was found or expected: the state
+inherently carries a view deriv, and every construction forwards it.
+
+### S6d-10.4 — times-bounded drain: times refuses; unrolled bounded stepping works
+
+The natural `times` spelling (state threaded through the row,
+`probes/s6d_i_times_drain.sth`) is rejected at the times quotation's
+standalone check — the row is abstract there, so `next`'s member dispatch
+has no concrete operand:
+
+```text
+error: `next` in `drain3` (line 43, col 7) is a trait member of Iterator, but no `impl:` in this program dispatches on these operands
+  the operand types here are ``; declare an impl of one of those traits for the operand's type, or import a word that claims this name
+```
+
+(`mono_member_no_dispatch_error`, with an EMPTY operand-type list — the row
+renders as nothing.) The escape hatch of annotating the quotation concretely
+is refused too — a times quotation's declared row renders `~[ i64 -- ]`, the
+`..s` row is not annotation-comparable:
+
+```text
+error: the quotation passed to `times` is annotated `~[ Slice[i64] i64 -- Slice[i64] ]` but `times` declares it `~[ i64 -- ]` in `drain3` (line 38)
+```
+
+**Prediction ("works") falsified for `times` as such.** The unrolled
+equivalent — N literal `next`/`Step?` steps in sequence, Done arm deriving
+the row-satisfying empty view from the binder — builds and runs (fixed
+3 steps over a 5-element view: prints `3 3 3` then the remainder's length
+`2`), so bounded stepping itself is fine; only the combinator-hosted loop
+shape is closed (by 10.3's mask for `while`, by the abstract-row standalone
+check for `times`).
+
+### S6d-10.5 — placement: the gate forces co-location, and co-location wakes a PRE-EXISTING bug
+
+- The placement gate (captured in S6d-8.6) leaves `core/iterator.sth` as the
+  only home for the slice impl: `Slice` declares no module, so the gate's
+  co-declaration arm cannot apply. **The `range.sth` "beside-the-protocol"
+  convention is structurally unavailable for slices** — it was a choice for
+  `Range` (whose target IS co-declared with its impl), and it is not one for
+  builtin-view targets.
+- With the slice impl placed inside `lib/core/iterator.sth` in the scratch
+  copy (lib member non-inline, HEAD spelling) and a List-drain consumer
+  built against it, the build dies at the CONSUMER, not the impl:
+
+```text
+error: type mismatch in `drain` (line 9)
+  `More>` expected `Step[i64 Slice[i64]].More`, found `Step[i64 List[i64]].More`
+  note: declared ( List[i64] -- )
+```
+
+  **Reproduced on the CLEAN tree (no patch, no impl, no slice code) by a
+  mere signature mention that mints the instantiation at parse:**
+
+```forth
+: touch inline ( Step[i64 Slice[i64]] -- ) drop ;
+```
+
+  in a file that also drains a `List[i64]` produces the byte-identical
+  `More>` error. This is a **pre-existing wrong-monomorph resolution bug**
+  (the S8b disease class: a newly minted `Step` instantiation re-types the
+  bare generated variant words — `More>`/`Done`/`More` — of every OTHER
+  `Step` monomorph in the program). S6d did not create it; S6d's lib
+  placement would hit it immediately, which is exactly what the
+  `range.sth` header comment feared ("which a consumer of the protocol's own
+  List impl must not have to see"). **That concern is not stale — it is
+  acute, and today it is not even a choice for slices.** Reported, not
+  fixed (Notes).
+
+- The lib placement with the member left non-inline also shows the impl's
+  own ban on a trivial importer (`import: core::iterator ... ;` + `: main
+  ( -- ) 1 drop ;`): `error: a reference cannot be stored:`next` (member of
+  trait `Iterator` for `Slice[i64]`) declares the output ...` — the lib
+  cannot ship the impl without the inline problem of S6d-8.5 being solved
+  first.
+- Consumer import spells (established, from `tests/phase7b_slice8.rs`'s
+  goldens): `import: core::list | List Nil Cons | ;` +
+  `import: core::iterator | Step Done More Iterator | ;` for a hand-written
+  dispatch drain; `import: core::iterator | for_each | ;` (or `| fold |`,
+  or `| for_each fold |`) + `import: core::range | Range | ;` for the
+  bound-generic consumers. `core::iterator` deliberately does not export
+  bare `next` (the mangled member name is the only spelling; bare `next`
+  resolves through trait dispatch at the call site).
+
+### Round-level verdict
+
+Admissible consumer shapes on the patched tree: **non-tail recursive drain
+(runs, O(n) stack), self-tail recursive drain (runs — the back-edge guard
+accepts parameter-rooted remainders; it fires only for spliced/inline
+consumers), single-step and unrolled bounded stepping (runs).** Closed
+shapes: **while-threaded (the PREREQ mask, `back_edge_outs` deriv-drop,
+becomes reachable), times-hosted (abstract-row standalone check), and every
+bound-generic consumer (`'It['T]` unification — SOO-60/SOO-42 unreached).**
+Placement: co-location in `core/iterator.sth` is forced by the gate, and the
+parse-time `Step[i64 Slice[i64]]` mint wakes a pre-existing
+wrong-monomorph bug in List/Range consumers (clean-tree reproducible without
+any S6d code).
+
+## Round-level summary (S6d-7..S6d-10, run 260911)
+
+- **What the PREREQ already unlocked (S6d-7):** shared-`Slice[T]` payloads in
+  declared enums (REQ-5, inline pack + mono destructure + `dup` all clean on
+  unpatched HEAD), with every ban sharp and byte-stable (the non-inline
+  output ban; the `!Slice` payload sweep). The fence itself is unchanged.
+- **The exact current-tree diff shape (S6d-8):** parser half =
+  `src/parser.rs` three hunks (import at :25; `SLICE_SENTINEL_IDX` +
+  `slice_sentinel` + `rewrite_slice_sentinel` at :855-964; the slice branch
+  at :4629-4691 inside `parse_impl_member_body`, preempting `is_concrete`);
+  dispatch half = `src/check/poly/ground.rs:1319-1333`, the slice guard arm
+  reading the already-grounded member word in `resolve_mono_member_call`'s
+  effect match. ~190 lines, no registry threading, clippy/fmt clean, 3480/0
+  tests. Negative controls confirm each half is load-bearing ((i) fence
+  returns; (ii) `ast.rs:2271` unreachable panic at the call site; (iii) the
+  member output ban).
+- **The mutable-target verdict (S6d-9):** closed by Ruling A's enum-payload
+  sweep, first-firing, at the `Step` declaration's span; the impl-side
+  grounding itself works.
+- **Admissible consumer shapes (S6d-10):** non-tail and self-tail
+  (parameter-rooted) recursion; single-step and unrolled bounded stepping.
+  Closed: while-threaded (the `back_edge_outs` deriv-drop mask, reachable
+  for the first time), times-hosted (abstract-row standalone check), and all
+  bound-generic consumers (`'It['T]` slot unification — a slice has no ctor
+  head to bind, so SOO-60/SOO-42 are unreached). **for_each/fold over
+  slices: not reachable on this tree, for the dispatch-identity reason, not
+  the predicted fences.**
+- **Two pre-existing bugs the round exposed (not created by it):** (1) the
+  trait-level `next inline` breaks 6 List/Range goldens (the inline
+  poly-member check path mis-resolves the nullary variant ctor);
+  (2) any new `Step` instantiation minted anywhere re-types other Step
+  monomorphs' bare variant words for List/Range consumers (clean-tree
+  reproducible with a signature mention alone). Both are S8b-class
+  wrong-monomorph resolution defects and are S6d blockers of the same rank
+  as the fence.
+- **The new S6d-specific wall (S6d-8.2):** the branch-join borrow rule
+  (`borrow_join_disagreement_error`) rejects the Step-row Done/More deriv
+  asymmetry for a borrow-flavored payload; the `as-done` poly-helper is the
+  minimal working spelling, at the cost of a conservative over-approximated
+  deriv on the Done path.
+
+## Notes
+
+- Unchased mechanism: WHY the inline poly member mis-resolves `Done` (two
+  failure shapes: wrong-monomorph `Step[i64 Range[i64]]` at the arm join;
+  bare `unknown word Done`). The S8b ledger's "wrong θ seeding + variant-map
+  clobber" note is the closest prior art; a future slice should read
+  `check_poly_combinator_standalone`'s concrete stand-in path first.
+- The `back_edge_outs` deriv-drop mask (PREREQ deferred note) is now
+  REACHABLE from user programs via a slice-threaded `while` state whose deriv
+  has no owned root at the guard. The guard test pins the aggregate case;
+  the rootless case slips past it. Worth a pin of its own.
+- `mono_member_no_dispatch_error`'s rendering of an abstract-row operand
+  list as EMPTY (`the operand types here are ```) reads as a diagnostic bug
+  (an empty list where the row should render as`..s` or the abstraction).
+  Cosmetic; noted for whoever touches that message.
+- The `s6d_a` family's `as-done` workaround exploits the deferred
+  per-instantiation signature audit exactly the way the PREREQ's own
+  deferred note predicted a blanket audit must NOT strand ("it must leave an
+  exempt path for synthesized multi-output bundles" — and, as now
+  demonstrated, for poly ctor-shaped outputs too).

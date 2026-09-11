@@ -1,0 +1,55 @@
+\ S6d probe C — the monomorphic consumer (S6d-8.3). main builds an array,
+\ takes a view, and `drain` walks it with bare `next` (a mono member call —
+\ the resolve_mono_member_call slice arm), `Step?` dispatch arms and a
+\ `More>` destructure, printing each element. The self-call is NOT in tail
+\ position (`r drain v .` — the element prints after the recursion returns),
+\ which is the S6d-10.2 shape: a bare `Slice[i64]` input to a non-inline
+\ word is admissible (examples/slices.sth's `sum` precedent), and a real
+\ call frame per element is fine at this scale. Expected stdout: 3 4 5 6 7
+\ then 9 — the second drain proves the `Done` path runs (a 1-element view
+\ hits `More` once, then `Done`).
+import: intrinsics * ;
+import: core::prelude * ;
+import: hosted::show | . | ;
+
+type: Step['T 'Rest]
+| Done
+| More 'T 'Rest
+;
+
+trait: Iterator['It: * -> *]
+  : next inline ( 'It['T] -- Step['T 'It['T]] ) ;
+;
+
+: as-done ['R] ( 'R -- Step[i64 'R] ) drop Done ;
+
+impl: Iterator for Slice[i64]
+  : next
+    | s |
+    s dup len |n|
+    n 0 >usize eq
+    ~[ as-done ]
+    ~[
+      dup 0 >usize &> @ |v|
+      1 >usize n 1 >usize sub subslice
+      v swap More
+    ]
+    if
+;
+;
+
+: drain ( Slice[i64] -- )
+  next
+  ~[ ( Done ) drop ]
+  ~[ ( More ) More> |v r| r drain v . ]
+  Step? ;
+
+: main ( -- )
+  3 5 fill |buf|
+  &buf slice drain
+
+  9 1 fill |one|
+  &one slice drain
+
+  buf drop one drop
+;

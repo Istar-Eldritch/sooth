@@ -1,0 +1,23 @@
+import: intrinsics * ;
+import: core::prelude * ;
+import: core::iterator | Step Done More Iterator | ;
+import: hosted::show | . | ;
+
+: as-done ['R] ( 'R -- Step[i64 'R] ) drop Done ;
+
+impl: Iterator for Slice[i64]
+  : next
+    | s |
+    s dup len |n|
+    n 0 >usize eq
+    ~[ as-done ]
+    ~[
+      dup 0 >usize &> @ |v|
+      1 >usize n 1 >usize sub subslice
+      v swap More
+    ]
+    if
+;
+;
+
+: main ( -- ) 1 drop ;

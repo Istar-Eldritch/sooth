@@ -1,0 +1,45 @@
+import: intrinsics * ;
+import: core::prelude * ;
+import: hosted::show | . | ;
+
+type: Step['T 'Rest]
+| Done
+| More 'T 'Rest
+;
+
+trait: Iterator['It: * -> *]
+  : next inline ( 'It['T] -- Step['T 'It['T]] ) ;
+;
+
+: as-done ['R] ( 'R -- Step[i64 'R] ) drop Done ;
+
+impl: Iterator for Slice[i64]
+  : next
+    | s |
+    s dup len |n|
+    n 0 >usize eq
+    ~[ as-done ]
+    ~[
+      dup 0 >usize &> @ |v|
+      1 >usize n 1 >usize sub subslice
+      v swap More
+    ]
+    if
+;
+;
+
+\ The NON-tail drain: the self-call is NOT the arm's last term — the element
+\ prints after the recursion returns. A bare Slice[i64] input to a non-inline
+\ word is admissible (the examples/slices.sth `sum` precedent): a real call
+\ frame cannot outlive its caller. Runs in O(n) stack (one frame per element).
+: drain ( Slice[i64] -- )
+  next
+  ~[ ( Done ) drop ]
+  ~[ ( More ) More> |v r| r drain v . ]
+  Step? ;
+
+: main ( -- )
+  4 4 fill |buf|
+  &buf slice drain
+  buf drop
+;
