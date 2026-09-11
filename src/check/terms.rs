@@ -961,6 +961,12 @@ fn check_term(
             // overloads; every other name still resolves through `env`.
             let fallback_storage;
             let mut from_fallback = false;
+            // Round-1 review fix (P1): true only for the env-hit union arm
+            // below (flushed candidates + live mints). The env-miss arm's
+            // all-mints shape also sets `from_fallback`, but keeps today's
+            // dispatch -- the gate for the pre-dispatch tie-break in the
+            // multi-candidate arm is this flag, not `from_fallback` alone.
+            let mut env_hit_union = false;
             let candidates = match &scoped_ops {
                 Some(v) => v.as_slice(),
                 None => match env.get(name) {
@@ -1002,6 +1008,7 @@ fn check_term(
                                 v.as_slice()
                             } else {
                                 from_fallback = true;
+                                env_hit_union = true;
                                 fallback_storage =
                                     v.iter().cloned().chain(mints).collect::<Vec<Overload>>();
                                 fallback_storage.as_slice()
@@ -1210,14 +1217,51 @@ fn check_term(
                     // module and reintroduce the silent cross-pick this
                     // policy exists to kill.
                     let caller_module = span.module;
-                    // P7b.S5 (R4/Fix D): `mint_fallback_candidates`'s
-                    // `Overload.module` is not reliably the declaring module
-                    // (see `select_overload_fallback_sourced`'s doc comment),
-                    // so that provenance gets tier 1 only, never tiers 2/3.
-                    let pick = if from_fallback {
-                        select_overload_fallback_sourced(candidates, &operands, caller_module)
+                    // Round-1 review fix (P1): the env-hit union arm sets
+                    // `from_fallback`, routing the dispatch below through
+                    // `select_overload_fallback_sourced`, whose tier-1 miss
+                    // ends in `matching.first()` -- parse order. That
+                    // preempted the `Ambiguous` arm's consumer-type
+                    // tie-break: with a pending same-family mint live, a
+                    // nullary generated-enum ctor site with a UNIQUE
+                    // `consumer_expected_type` match resolved by parse-order
+                    // luck or refused with a misleading type-mismatch (the
+                    // round-1 repro: the control `f` prints 44; the same
+                    // word plus one unrelated mid-word poly instantiation
+                    // refused with `body leaves `Step[str i64]``). Run the
+                    // same tie-break here, before the fallback dispatch,
+                    // over this union'd set. It operand-filters internally
+                    // (its step 1 is verbatim `select_overload`'s filter),
+                    // so a decline leaves the dispatch below
+                    // byte-identically alone (`env_hit_union_fall_through_
+                    // no_unique_consumer_keeps_fallback_first_match_bytes`
+                    // pins those bytes), and a hit becomes the pick -- the
+                    // same `OverloadPick::Pick` the tiered selectors return,
+                    // so it rides the very span-keyed record the Ambiguous
+                    // arm's pick rides (the shared record after `chosen`,
+                    // `splice_enum_words`/`builtin_overloads`; lowering reads
+                    // per-(uid, span) first, `src/ir/func_builder/calls.rs`).
+                    // Gated on the union arm's own flag: the env-miss arm's
+                    // all-mints candidates keep today's dispatch.
+                    let tie_break = if env_hit_union {
+                        generated_enum_consumer_type_pick(
+                            name, candidates, &operands, siblings, at, tail, ctx, env, scope, poly,
+                            arrays, cells, refs,
+                        )
                     } else {
-                        match ctx.modules() {
+                        None
+                    };
+                    let pick = match tie_break {
+                        Some(hit) => OverloadPick::Pick(hit),
+                        None if from_fallback => {
+                            // P7b.S5 (R4/Fix D): `mint_fallback_candidates`'s
+                            // `Overload.module` is not reliably the declaring
+                            // module (see `select_overload_fallback_sourced`'s
+                            // doc comment), so that provenance gets tier 1
+                            // only, never tiers 2/3.
+                            select_overload_fallback_sourced(candidates, &operands, caller_module)
+                        }
+                        None => match ctx.modules() {
                             Some(modules) => {
                                 // R3.5's `caller_visible` predicate reads
                                 // `modules[caller].selective`, which is keyed
@@ -1236,7 +1280,7 @@ fn check_term(
                             // R3.7: no import-closure data to consult, so
                             // tier 2 degenerates to "exactly one in matching".
                             None => select_overload(candidates, &operands, caller_module, |_| true),
-                        }
+                        },
                     };
                     let chosen = match pick {
                         OverloadPick::Pick(hit) => hit,
@@ -3146,8 +3190,8 @@ fn is_generated_enum_word(name: &str, chosen: &Overload, ctx: &Ctx) -> bool {
 /// output.
 ///
 /// Strictly narrowing (NFR-3, structural byte-neutrality): this runs only
-/// on the Ambiguous path, only over the operand-filtered matching set
-/// (2+), only when every matching candidate is a generated word of this
+/// over the operand-filtered matching set (2+), only when every matching
+/// candidate is a generated word of this
 /// name whose single output names the same enum family, and only when
 /// exactly ONE matching candidate's output equals the consumer type. Every
 /// other shape -- no consumer type, a consumer of another family, zero or
@@ -3189,7 +3233,10 @@ fn generated_enum_consumer_type_pick<'a>(
     // ONE generated-enum family only: every matching candidate is a
     // generated word of this name whose single output names the same enum
     // header (the pre-bracket spelling of the leaked instantiation name;
-    // two headers cannot share it, and a conservative miss here only keeps
+    // that spelling is not unique to one header -- two modules can each
+    // declare a same-named generic header -- so what makes the pick safe is
+    // that it requires full `Type` equality, and `Type::Enum` equality is
+    // `EnumId`-exact (`src/ast.rs`); a conservative miss here only keeps
     // today's refusal).
     let family = match matching[0].sig.outputs.first() {
         Some(Type::Enum(_, display)) => display.split('[').next()?.to_string(),

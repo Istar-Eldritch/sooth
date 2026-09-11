@@ -1310,3 +1310,93 @@ impl: Iterator for Slice[i64]
         "the abstract-row no-dispatch stays byte-identical, got: {stderr}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Round-1 review fixes (the P3 env-hit union vs the P5 consumer-type
+// tie-break). The union arm sets `from_fallback`, which routes the
+// multi-candidate dispatch through `select_overload_fallback_sourced` --
+// whose tier-1 miss ends in `matching.first()`, i.e. parse order -- and that
+// preempts the `OverloadPick::Ambiguous` arm's
+// `generated_enum_consumer_type_pick`: with a pending same-family mint live,
+// a nullary generated-enum ctor site with a UNIQUE consumer_expected_type
+// match resolved by parse-order luck or refused with a misleading
+// type-mismatch instead of resolving from its consumer. The fix runs the
+// same tie-break over the union'd set before the fallback dispatch; a
+// decline falls through byte-identically (pinned by the second unit below).
+// ---------------------------------------------------------------------------
+
+/// The P1 repro shape, end to end: `f` pins a bare nullary `Done` to
+/// `Step[i64 i64]` via its own declared output, `g`'s signature mention
+/// flushes a *different* monomorph (`Step[str i64]`) into the word env ahead
+/// of it (parse order), and one unrelated mid-word poly instantiation
+/// (`1 pack`, at `'R = i64`, minting the same-family `Step[u8 i64]`) makes
+/// the pending-mint check true, so the env-hit arm unions flushed candidates
+/// with live mints and dispatches fallback-sourced. Before the fix the
+/// tier-1-miss first-match picked `g`'s earlier-flushed monomorph and `f`
+/// refused (`body leaves `Step[str i64]` where the declaration requires
+/// `Step[i64 i64]``); the control without the pack line printed 44. After
+/// the fix the tie-break fires over the union'd set -- the consumer's
+/// `Step[i64 i64]` matches exactly one candidate -- and the program resolves
+/// to the consumer's mint and prints the control's output.
+#[test]
+fn env_hit_union_with_pending_mint_and_unique_consumer_resolves_to_consumer_type() {
+    let (_t, _binary, stdout) = build_run_keep(
+        "s6d_p1_env_hit_union_consumer_pick",
+        r#"import: core::iterator | Step Done More Iterator | ;
+
+: g ( Step[str i64] -- ) drop ;
+
+: pack ['R] ( 'R -- Step[u8 'R] ) drop Done ;
+
+: f ( -- Step[i64 i64] )
+  1 pack drop
+  Done ;
+
+: main ( -- )
+  f
+  ~[ ( Done ) drop 44 . ]
+  ~[ ( More ) More> drop drop ]
+  Step? ;
+"#,
+    );
+    assert_eq!(stdout, "44\n");
+}
+
+/// The fix's decline path, pinned: the same union'd set (one flushed
+/// candidate plus one pending same-family mint), but the site's consumer
+/// (`h`) expects a type from another family entirely, so
+/// `generated_enum_consumer_type_pick` finds no unique match, declines, and
+/// the pre-existing fallback-sourced dispatch decides -- today, tier-1 miss
+/// then `matching.first()`, which is the first env candidate (parse order:
+/// the union chains env candidates ahead of the mints, so the pick is
+/// deterministic on this tree). This unit DISCLOSES that it pins the current
+/// fallback-sourced first-match behaviour, wrong monomorph and all: the
+/// `h`-site mismatch names `g`'s earlier-flushed `Step[str i64]`. A later
+/// slice that re-works the parse-order pick must retire this pin
+/// deliberately, as the slice8b fence golden was.
+#[test]
+fn env_hit_union_fall_through_no_unique_consumer_keeps_fallback_first_match_bytes() {
+    let stderr = build_error_located(
+        "s6d_p1_fallthrough_bytes",
+        r#"import: core::iterator | Step Done More Iterator | ;
+import: core::list | List | ;
+
+: g ( Step[str i64] -- ) drop ;
+
+: h ( List[i64] -- ) drop ;
+
+: pack ['R] ( 'R -- Step[u8 'R] ) drop Done ;
+
+: f ( -- )
+  1 pack drop
+  Done
+  h ;
+"#,
+    );
+    assert!(
+        stderr.contains(
+            "error: type mismatch in `f` (line 15)\n  `h` expected `List[i64]`, found `Step[str i64]`"
+        ),
+        "the no-unique-match fall-through keeps today's fallback first-match bytes, got: {stderr}"
+    );
+}

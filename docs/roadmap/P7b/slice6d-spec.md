@@ -41,7 +41,18 @@ Key decisions, as shipped:
   invariant doc. The dispatch half reads the already-grounded member word in
   `resolve_mono_member_call`. The recorded (unbuilt) fallback if the invariant
   exception were rejected was a dedicated `PolyType::SliceApp` variant —
-  bigger and touching every exhaustive match; not taken.
+  bigger and touching every exhaustive match; not taken. For Slice targets
+  this shifts one diagnostic class earlier, deliberately: an over-applied
+  member-sig row now reports the sharp union/ground-stage error before the
+  S2-6 fences, exactly as the sanctioned mono-ctor-app (`Range`) route
+  produces for the same sig (a pinned HKT argument that disagrees with the
+  element does not error at all — it falls in the lenience class recorded
+  below); G11's byte-stability pin covers non-slice targets only.
+  One known lenience, recorded: a pinned HKT argument in an impl member sig
+  (the `'S[i64]` spelling) is silently grounded to the slice target's own
+  element type, where the mono-ctor-app (`Range`) route honors the pin and
+  refuses loudly — internally consistent, a degenerate spelling, no
+  unsoundness.
 
 - **Per-impl `inline` keyword.** Impl members gained an optional `inline`
   spelling; `declares_inline` is the impl's when present, else inherited from
@@ -118,7 +129,7 @@ fence golden per that fence's own doc prescription, renamed
 
 - **Two-half sentinel fence lift (REQ-2)**: `a43f160` —
   `SLICE_SENTINEL_IDX`/`slice_sentinel`/`rewrite_slice_sentinel`
-  (`src/parser.rs:880-930`) plus the slice branch in `parse_impl_member_body`
+  (`src/parser.rs:880-993`) plus the slice branch in `parse_impl_member_body`
   preempting both the `is_mono_ctor_app` and `is_concrete` arms; the
   `PolyType::Generic` invariant-exception doc (`src/ast.rs`); the dispatch arm
   in `resolve_mono_member_call` (`src/check/poly/ground.rs`).
@@ -145,8 +156,10 @@ fence golden per that fence's own doc prescription, renamed
 
 ### Tests
 
-The golden set lives in `tests/phase7b_slice6d.rs` (27 tests, added across
-`a43f160`/`d4e55a2`/`08382e6`/`6c3f7ba`), including the exit criterion
+The golden set lives in `tests/phase7b_slice6d.rs` (22 tests — 20 goldens
+added across
+`a43f160`/`d4e55a2`/`08382e6`/`6c3f7ba`, plus 2 units from the round-1
+review fix pinning the env-hit-union tie-break), including the exit criterion
 `list_and_slice_impls_drain_through_one_imported_protocol` (`:694`) and the
 while-drain `while_threaded_slice_drain_runs_once_back_edge_outs_forward_deriv`
 (`:628`). Two pre-existing suite canaries pin the clobber fix:
@@ -157,3 +170,10 @@ while-drain `while_threaded_slice_drain_runs_once_back_edge_outs_forward_deriv`
 control) was a manual implementation-time spike, not a suite golden. The
 slice8b fence golden was retired to the consumer-type tie-break test named
 above.
+
+### Growth-signal re-check (phase exit)
+
+At the S6d phase exits the growth signals were re-run for
+`src/check/terms.rs` (~6.3k lines) and `src/parser.rs` (~16.6k lines): no
+split warranted (`terms.rs` shows 1 of 5 signals, contested; `parser.rs` 0
+of 5), and both files are recorded as watch-items for the next phase exit.
