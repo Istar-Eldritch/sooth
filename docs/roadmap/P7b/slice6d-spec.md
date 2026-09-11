@@ -382,9 +382,11 @@ Library (REQ-6):
 - `lib/core/iterator.sth` — add `impl: Iterator for Slice[i64]` with
   `: next inline ... ;` (natural body). Current imports are only
   `import: intrinsics | drop | ;` and `import: self::list | List Nil Cons | ;`
-  (lines 13-14); the natural body needs widening — `len subslice &> @ >usize
+  (lines 13-14); the natural body needs widening — `len sub >usize
   sub dup swap` from `intrinsics`, `if`/`eq` from `self::prelude` (cf.
-  `lib/core/range.sth:6-8`'s import pattern). `core::iterator` deliberately
+  `lib/core/range.sth:6-8`'s import pattern; `subslice`/`&>`/`@` are not
+  import-gated — they are always-dispatched builtins, `parser.rs:4065-4070`).
+  `core::iterator` deliberately
   does not export bare `next`.
 
 ## Open questions and risks (adapted from paper tests §Risks and fallbacks)
@@ -608,6 +610,22 @@ every commit (NFR-3).
   deferred pointers; SOO-1 closed as superseded now that G8 lands).
 - **Parallelism.** None (depends on all). **Effort** M. **Difficulty** hard.
   **Blockers.** All of P1–P4.
+
+Implementation-time discovery at the P5 exit: shipping the library impl made
+two parse-time mints of one generated-enum header a permanent library fact
+(the slice impl's `Step[i64 Slice[i64]]` beside the Range impl's), making
+nullary ctor sites with two same-header candidates reachable — the one shape
+the operand filter cannot discriminate. The shipped answer is a
+strictly-narrowing consumer-type tie-break
+(`generated_enum_consumer_type_pick`, `src/check/terms.rs`, the
+`nullary_ctor_*` units), firing only where the operand-filtered set still
+holds 2+ candidates of one generated-enum header AND a unique
+`consumer_expected_type` match exists; no unique match keeps today's exact
+Ambiguous bytes (unit-pinned). This deliberately retires the slice8b fence
+golden per that fence's own doc prescription ("a later slice that grounds
+nullary construction from its consuming context has to retire this
+expectation deliberately"), renaming it
+`two_instantiations_ground_a_bare_nullary_variant_from_its_consumer_type`.
 
 ## Phases (JSON)
 

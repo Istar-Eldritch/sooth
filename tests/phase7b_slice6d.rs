@@ -35,9 +35,28 @@
 //! `slice_mono_member_call_reads_the_already_grounded_word_effect`
 //! (`src/check/poly/ground.rs`).
 //!
+//! P7b.S6d Phase 5 (REQ-6, the library impl + consumer goldens) lands here
+//! too. The shipped impl lives in `lib/core/iterator.sth` (the placement
+//! gate's only legal home for a built-in-view target); these goldens run the
+//! full pin list that phase's exit names. The build_run row: G1, G2, G6,
+//! G8 (the phase's exit criterion: both lib impls drain through ONE
+//! imported protocol), G14, G15, G16, G18. The byte-exact refusal row: G9,
+//! G17, G19, G20, G21 (G10 landed with Phase 2 above). G22 is the whole
+//! suite staying green with the six List/Range canaries of
+//! `tests/phase7b_slice8.rs`.
+//!
 //! Harness style from `tests/phase7b_slice8.rs` (the slice-golden successor
 //! convention; `single_file_hosted` / `build_run_keep` /
 //! `build_error_located`), self-contained like `tests/phase7b_slice6d_prereq.rs`.
+//! Phase 5's fixtures are written as verbatim multi-line strings (the
+//! `phase7b_slice6d_prereq.rs` spelling) rather than `\n\` continuations:
+//! the refusal goldens pin line/col measured in THIS harness context from
+//! the composed file, and a verbatim string makes the composed bytes exactly
+//! what the doc-comments measured. Every fixture drops its own
+//! `import: hosted::show | . | ;` (the harness prepends it; a duplicate
+//! collides) and keeps its `import: intrinsics * ;` (a duplicate wildcard is
+//! harmless), so each composed file is the standalone fixture shifted by one
+//! line — re-measured here, never transcribed from the probes doc.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -452,5 +471,842 @@ fn two_root_join_asymmetry_stays_refused_byte_identically() {
             "error: borrow state disagrees at the branch join in `main` (line 14)\n  the first arm leaves a borrow of `b`, the second arm leaves a borrow of `a`: both arms must agree on which place, if any, stays borrowed past the join\n  note: declared ( -- )"
         ),
         "the two-root refusal stays byte-identical, got: {stderr}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// P7b.S6d Phase 5 (REQ-6): the library impl + consumer goldens. The shipped
+// impl lives in `lib/core/iterator.sth`; the fixtures below are the paper
+// tests' G-set, written verbatim (real newlines, original indentation) so the
+// pinned line/col are exactly the composed file's. Each drops the fixture's
+// own `import: hosted::show | . | ;` (the harness prepends it) and keeps its
+// `import: intrinsics * ;` (a duplicate wildcard is harmless) -- the composed
+// file is the standalone fixture shifted by one line, re-measured here.
+// ---------------------------------------------------------------------------
+
+/// G1 (`probes/s6d_n_perimpl_inline_member.sth`'s spelling, harness-adapted):
+/// `slice_impl_member_per_impl_inline_builds_and_runs` -- the per-impl
+/// `inline` keyword (REQ-3) with the sentinel lift (REQ-2). The trait member
+/// stays NON-inline (the HEAD spelling everywhere in `lib/`); the impl member
+/// carries `: next inline`, so the synthesized member word's
+/// `declares_inline` is the impl's spelling. The body keeps the `as-done`
+/// Done arm so this golden isolates the inline-spelling item from 5(a) (the
+/// natural body is G2's). Expected stdout `3\n4\n` (element, remainder
+/// length): one `next` step over a 5-element view.
+#[test]
+fn slice_impl_member_per_impl_inline_builds_and_runs() {
+    let (_t, _binary, stdout) = build_run_keep(
+        "g1_perimpl_inline",
+        r#"import: intrinsics * ;
+import: core::prelude * ;
+
+type: Step['T 'Rest]
+| Done
+| More 'T 'Rest
+;
+
+trait: Iterator['It: * -> *]
+  : next ( 'It['T] -- Step['T 'It['T]] ) ;
+;
+
+: as-done ['R] ( 'R -- Step[i64 'R] ) drop Done ;
+
+impl: Iterator for Slice[i64]
+  : next inline
+    | s |
+    s dup len |n|
+    n 0 >usize eq
+    ~[ as-done ]
+    ~[
+      dup 0 >usize &> @ |v|
+      1 >usize n 1 >usize sub subslice
+      v swap More
+    ]
+    if
+;
+;
+
+: main ( -- )
+  3 5 fill |buf|
+  &buf slice
+  next
+  ~[ ( Done ) drop ]
+  ~[ ( More ) More> |v r| v . r len >i64 . ]
+  Step?
+  buf drop ;
+"#,
+    );
+    assert_eq!(stdout, "3\n4\n");
+}
+
+/// G2 (`probes/s6d_p_natural_next_join.sth`'s spelling, harness-adapted):
+/// `natural_next_body_checks_with_the_rootless_join_union` -- the NATURAL
+/// next body (REQ-6): the Done arm is the protocol's own straight-line
+/// spelling (`~[ drop Done ]`, no helper). The More arm's Step carries the
+/// remainder view's deriv -- rootless, the receiver being a parameter, so
+/// the naming mint has no owned root -- while the Done arm's nullary Step
+/// carries none; the borrow join (REQ-5, P4) unions that rootless one-sided
+/// asymmetry instead of refusing, and the member body checks once at
+/// declaration (the tail channel grounds the arm-tail `Done` against the
+/// member's declared output; verdict D). Expected stdout `3\n4\n`.
+#[test]
+fn natural_next_body_checks_with_the_rootless_join_union() {
+    let (_t, _binary, stdout) = build_run_keep(
+        "g2_natural_next",
+        r#"import: intrinsics * ;
+import: core::prelude * ;
+
+type: Step['T 'Rest]
+| Done
+| More 'T 'Rest
+;
+
+trait: Iterator['It: * -> *]
+  : next ( 'It['T] -- Step['T 'It['T]] ) ;
+;
+
+impl: Iterator for Slice[i64]
+  : next inline
+    | s |
+    s dup len |n|
+    n 0 >usize eq
+    ~[ drop Done ]
+    ~[
+      dup 0 >usize &> @ |v|
+      1 >usize n 1 >usize sub subslice
+      v swap More
+    ]
+    if
+;
+;
+
+: main ( -- )
+  3 5 fill |buf|
+  &buf slice
+  next
+  ~[ ( Done ) drop ]
+  ~[ ( More ) More> |v r| v . r len >i64 . ]
+  Step?
+  buf drop ;
+"#,
+    );
+    assert_eq!(stdout, "3\n4\n");
+}
+
+/// G6 (`probes/s6d_h_while_drain.sth`, harness-adapted with ONE measured
+/// semantic correction -- see below):
+/// `while_threaded_slice_drain_runs_once_back_edge_outs_forward_deriv`.
+/// The while-threaded drain: the threaded state is the `Step` value itself,
+/// the row pinned by the quotation annotation. 5(b)'s `back_edge_outs`
+/// deriv forwarding is what lets the while-internal join
+/// (`lib/core/combinators.sth`'s `~[ p while ] ~[ ] if`) accept the
+/// deriv-carrying state crossing the self-tail back edge; without it the
+/// build dies at that join (S6d-10.3's capture, the PREREQ-mask finding).
+///
+/// SEMANTIC ADAPTATION (the first in this slice -- every earlier harness
+/// adaptation was spelling-only). The frozen fixture's More arm is
+/// `~[ ( More ) More> |v r| v v . r More True ]`: it repacks the SAME
+/// remainder into `More` without calling `next`, so the while state is a
+/// non-advancing fixed point and the drain never terminates -- measured:
+/// unbounded `6` lines, killed at timeout. The paper tests' post-fix stdout
+/// `6\n6\n6\n` was an unmeasured desk-prediction (verdict C: "the post-fix
+/// run is a prediction from the traced mechanics (no patched tree was built
+/// this round)"), and the fixture could never have been run end to end
+/// before this slice because on the clean tree it dies at while's internal
+/// join. The corrected arm,
+/// `~[ ( More ) More> |v r| v . r next True ]`, advances the state (one
+/// `next` step per iteration; the duplicate `v` existed only to feed the
+/// same-arm repack) and produces exactly the predicted stdout. The property
+/// under test is unchanged: the state crossing while's back edge is still
+/// the `Step` whose payload carries the rootless view deriv, so the join
+/// still requires 5(b)'s forward. F5's stall clause ("if 5(b) stalls, G6 is
+/// withdrawn") was considered and does not apply: 5(b) landed; the frozen
+/// fixture's own text was what could not produce the pinned stdout.
+/// Expected stdout `6\n6\n6\n`, exit 0 (3 elements of 6, one print per
+/// `More`).
+#[test]
+fn while_threaded_slice_drain_runs_once_back_edge_outs_forward_deriv() {
+    let (_t, _binary, stdout) = build_run_keep(
+        "g6_while_drain",
+        r#"import: intrinsics * ;
+import: core::prelude * ;
+import: core::combinators c | while | ;
+
+type: Step['T 'Rest]
+| Done
+| More 'T 'Rest
+;
+
+trait: Iterator['It: * -> *]
+  : next inline ( 'It['T] -- Step['T 'It['T]] ) ;
+;
+
+: as-done ['R] ( 'R -- Step[i64 'R] ) drop Done ;
+
+impl: Iterator for Slice[i64]
+  : next
+    | s |
+    s dup len |n|
+    n 0 >usize eq
+    ~[ as-done ]
+    ~[
+      dup 0 >usize &> @ |v|
+      1 >usize n 1 >usize sub subslice
+      v swap More
+    ]
+    if
+;
+;
+
+\ The while-threaded drain (S6d-10.3): the threaded state 'a is the STEP
+\ value itself, the row pinned by the quotation annotation so the inner
+\ arms' reconstructions have a concrete consumer.
+: drain ( Slice[i64] -- )
+  |s|
+  s next
+  ~[ ( Step[i64 Slice[i64]] -- Step[i64 Slice[i64]] Bool )
+     ~[ ( Done ) drop s 0 >usize 0 >usize subslice as-done False ]
+     ~[ ( More ) More> |v r| v . r next True ]
+     Step? ]
+  while
+  drop ;
+
+: main ( -- )
+  6 3 fill |buf|
+  &buf slice drain
+  buf drop
+;
+"#,
+    );
+    assert_eq!(stdout, "6\n6\n6\n");
+}
+
+/// G8 (`probes/s6d_o_lib_slice_end_to_end.sth`'s spelling, harness-adapted)
+/// -- THE PHASE'S EXIT CRITERION:
+/// `list_and_slice_impls_drain_through_one_imported_protocol`. One program,
+/// both lib impls, bare `next` dispatching to each: a List drain (1 2 3)
+/// and a slice drain (3 3 3), two `Step` monomorphs coexisting -- the
+/// clobber fix (REQ-4) proven by coexistence through the exported surface.
+/// Before the slice impl shipped, the slice drain's `next` call had nothing
+/// to dispatch on (`mono_member_no_dispatch_error` naming `Slice[i64]`).
+/// Expected stdout `1\n2\n3\n3\n3\n3\n`, exit 0.
+#[test]
+fn list_and_slice_impls_drain_through_one_imported_protocol() {
+    let (_t, _binary, stdout) = build_run_keep(
+        "g8_one_protocol",
+        r#"import: intrinsics * ;
+import: core::prelude * ;
+import: core::list | List Nil Cons | ;
+import: core::iterator | Step Done More Iterator | ;
+
+: drain-list ( List[i64] -- )
+  next
+  ~[ ( Done ) drop ]
+  ~[ ( More ) More> |v r| v . r drain-list ]
+  Step? ;
+
+: drain-slice ( Slice[i64] -- )
+  next
+  ~[ ( Done ) drop ]
+  ~[ ( More ) More> |v r| v . r drain-slice ]
+  Step? ;
+
+: mkempty ( -- List[i64] ) Nil ;
+
+: main ( -- )
+  3 mkempty ^ Cons
+  2 swap ^ Cons
+  1 swap ^ Cons
+  drain-list
+  3 3 fill |buf|
+  &buf slice drain-slice
+  buf drop ;
+"#,
+    );
+    assert_eq!(stdout, "1\n2\n3\n3\n3\n3\n");
+}
+
+/// G14 (`probes/s6d_b_step_shared_inline.sth`, harness-adapted):
+/// `prereq_admissions_stay_byte_green` -- the PREREQ admissions isolated
+/// from the fence: a plain inline word packs a shared slice into the
+/// declared `Step` payload (REQ-5 admit-and-taint), a mono consumer
+/// destructures it, and the packed container is `dup`'d and double-dropped
+/// clean (a shared-slice container stays Copy, Ruling A). No trait, no
+/// impl. Today AND post-fix: stdout `41\n5\n`; the golden fails if any
+/// frame item disturbed the PREREQ admissions.
+#[test]
+fn prereq_admissions_stay_byte_green() {
+    let (_t, _binary, stdout) = build_run_keep(
+        "g14_prereq_admissions",
+        r#"import: intrinsics * ;
+
+type: Step['T 'Rest]
+| Done
+| More 'T 'Rest
+;
+
+: mk inline ( i64 Slice[i64] -- Step[i64 Slice[i64]] ) More ;
+
+\ REQ-5 copy check: the packed container dups and double-drops clean.
+: dup-check ( i64 Slice[i64] -- ) More dup drop drop ;
+
+: main ( -- )
+  3 5 fill |buf|
+  &buf slice |s|
+  41 s mk
+  ~[ ( Done ) drop ]
+  ~[ ( More ) More> |v r| v . r len >i64 . ]
+  Step?
+  42 s dup-check
+  s drop
+  buf drop
+;
+"#,
+    );
+    assert_eq!(stdout, "41\n5\n");
+}
+
+/// G15 (`probes/s6d_c_impl_consumer.sth`, harness-adapted):
+/// `monomorphic_consumer_drains_two_views_end_to_end` -- the monomorphic
+/// consumer (S6d-8.3): `drain` walks a view with bare `next` (the
+/// `resolve_mono_member_call` slice arm), `Step?` dispatch arms and a
+/// `More>` destructure. The self-call is NOT in tail position (`r drain v .`
+/// -- the element prints after the recursion returns), the S6d-10.2 shape:
+/// a bare `Slice[i64]` input to a non-inline word is admissible. The second
+/// drain (a 1-element view) proves the `Done` path runs at runtime. Expected
+/// stdout `3\n3\n3\n3\n3\n9\n`.
+#[test]
+fn monomorphic_consumer_drains_two_views_end_to_end() {
+    let (_t, _binary, stdout) = build_run_keep(
+        "g15_mono_consumer",
+        r#"import: intrinsics * ;
+import: core::prelude * ;
+
+type: Step['T 'Rest]
+| Done
+| More 'T 'Rest
+;
+
+trait: Iterator['It: * -> *]
+  : next inline ( 'It['T] -- Step['T 'It['T]] ) ;
+;
+
+: as-done ['R] ( 'R -- Step[i64 'R] ) drop Done ;
+
+impl: Iterator for Slice[i64]
+  : next
+    | s |
+    s dup len |n|
+    n 0 >usize eq
+    ~[ as-done ]
+    ~[
+      dup 0 >usize &> @ |v|
+      1 >usize n 1 >usize sub subslice
+      v swap More
+    ]
+    if
+;
+;
+
+: drain ( Slice[i64] -- )
+  next
+  ~[ ( Done ) drop ]
+  ~[ ( More ) More> |v r| r drain v . ]
+  Step? ;
+
+: main ( -- )
+  3 5 fill |buf|
+  &buf slice drain
+
+  9 1 fill |one|
+  &one slice drain
+
+  buf drop one drop
+;
+"#,
+    );
+    assert_eq!(stdout, "3\n3\n3\n3\n3\n9\n");
+}
+
+/// G16 (`probes/s6d_d_selftail.sth`, harness-adapted):
+/// `selftail_drain_passes_the_back_edge_guard_with_a_parameter_rooted_remainder`
+/// -- the self-TAIL drain: `r drain` is the arm's last term, so the P7.S3g
+/// transform lowers the recursion to a loop back-edge and the remainder (a
+/// tainted view) crosses it. Parameter-rooted remainders have no
+/// `owned_root`, so `check_reference_across_back_edge`'s accept-case admits
+/// them (S6d-10.1: the prediction was falsified -- this is the measured
+/// accept). Expected stdout `3\n3\n3\n3\n3\n`.
+#[test]
+fn selftail_drain_passes_the_back_edge_guard_with_a_parameter_rooted_remainder() {
+    let (_t, _binary, stdout) = build_run_keep(
+        "g16_selftail",
+        r#"import: intrinsics * ;
+import: core::prelude * ;
+
+type: Step['T 'Rest]
+| Done
+| More 'T 'Rest
+;
+
+trait: Iterator['It: * -> *]
+  : next inline ( 'It['T] -- Step['T 'It['T]] ) ;
+;
+
+: as-done ['R] ( 'R -- Step[i64 'R] ) drop Done ;
+
+impl: Iterator for Slice[i64]
+  : next
+    | s |
+    s dup len |n|
+    n 0 >usize eq
+    ~[ as-done ]
+    ~[
+      dup 0 >usize &> @ |v|
+      1 >usize n 1 >usize sub subslice
+      v swap More
+    ]
+    if
+;
+;
+
+\ The self-TAIL drain: `r drain` is the arm's last term, so the P7.S3g
+\ transform lowers the recursion to a loop back-edge and the remainder
+\ (a tainted view) would cross it.
+: drain ( Slice[i64] -- )
+  next
+  ~[ ( Done ) drop ]
+  ~[ ( More ) More> |v r| v . r drain ]
+  Step? ;
+
+: main ( -- )
+  3 5 fill |buf|
+  &buf slice drain
+  buf drop
+;
+"#,
+    );
+    assert_eq!(stdout, "3\n3\n3\n3\n3\n");
+}
+
+/// G18 (`probes/s6d_e_nontail_drain.sth`, harness-adapted):
+/// `nontail_drain_runs_with_one_frame_per_element` -- the NON-tail drain:
+/// the self-call is not the arm's last term, the element prints after the
+/// recursion returns, and the drain runs in O(n) stack (one real frame per
+/// element) -- the admissible non-tail consumer shape (S6d-10.2; a bare
+/// `Slice[i64]` input to a non-inline word stays admissible, the
+/// `examples/slices.sth` `sum` precedent). Expected stdout `4\n4\n4\n4\n`.
+#[test]
+fn nontail_drain_runs_with_one_frame_per_element() {
+    let (_t, _binary, stdout) = build_run_keep(
+        "g18_nontail",
+        r#"import: intrinsics * ;
+import: core::prelude * ;
+
+type: Step['T 'Rest]
+| Done
+| More 'T 'Rest
+;
+
+trait: Iterator['It: * -> *]
+  : next inline ( 'It['T] -- Step['T 'It['T]] ) ;
+;
+
+: as-done ['R] ( 'R -- Step[i64 'R] ) drop Done ;
+
+impl: Iterator for Slice[i64]
+  : next
+    | s |
+    s dup len |n|
+    n 0 >usize eq
+    ~[ as-done ]
+    ~[
+      dup 0 >usize &> @ |v|
+      1 >usize n 1 >usize sub subslice
+      v swap More
+    ]
+    if
+;
+;
+
+\ The NON-tail drain: the self-call is NOT the arm's last term — the element
+\ prints after the recursion returns. A bare Slice[i64] input to a non-inline
+\ word is admissible (the examples/slices.sth `sum` precedent): a real call
+\ frame cannot outlive its caller. Runs in O(n) stack (one frame per element).
+: drain ( Slice[i64] -- )
+  next
+  ~[ ( Done ) drop ]
+  ~[ ( More ) More> |v r| r drain v . ]
+  Step? ;
+
+: main ( -- )
+  4 4 fill |buf|
+  &buf slice drain
+  buf drop
+;
+"#,
+    );
+    assert_eq!(stdout, "4\n4\n4\n4\n");
+}
+
+/// G9 (`probes/s6d_g_mut_impl.sth`, harness-adapted):
+/// `mutable_slice_impl_first_firing_is_the_enum_payload_sweep` -- the
+/// mutable `!Slice[i64]` target's deferral (REQ-1, SOO-45): Ruling A's
+/// enum-payload sweep fires FIRST, at the fixture's own `Step` type's
+/// `| More 'T 'Rest` variant span, before any member check (the member is
+/// inline, so no word-entry ban). Byte-exact per S6d-9, re-measured in THIS
+/// harness context: the standalone capture's `(line 7, col 3)` is `(line 8,
+/// col 3)` here (the two prepended imports minus the dropped
+/// `hosted::show` import).
+#[test]
+fn mutable_slice_impl_first_firing_is_the_enum_payload_sweep() {
+    let stderr = build_error_located(
+        "g9_mut_sweep",
+        r#"import: intrinsics * ;
+import: core::prelude * ;
+
+type: Step['T 'Rest]
+| Done
+| More 'T 'Rest
+;
+
+trait: Iterator['It: * -> *]
+  : next inline ( 'It['T] -- Step['T 'It['T]] ) ;
+;
+
+: as-done ['R] ( 'R -- Step[i64 'R] ) drop Done ;
+
+impl: Iterator for !Slice[i64]
+  : next
+    | s |
+    s len |n|
+    n 0 >usize eq
+    ~[ s as-done ]
+    ~[
+      s 0 >usize &!> @ |v|
+      s 1 >usize n 1 >usize sub subslice
+      v swap More
+    ]
+    if
+;
+;
+
+: main ( -- ) 1 drop ;
+"#,
+    );
+    assert!(
+        stderr.contains(
+            "error: a reference cannot be stored: payload field 1 of variant `More[i64 !Slice[i64]]` of type `Step[i64 !Slice[i64]]` has type `!Slice[i64]` (line 8, col 3)\n  a `&T`/`&!T` borrows a local and may not outlive it, so it cannot be put anywhere that survives the borrow"
+        ),
+        "the Ruling A sweep fires first, byte-exact, got: {stderr}"
+    );
+}
+
+/// G17 (`probes/s6d_d2_selftail_inline.sth`, harness-adapted):
+/// `selftail_inline_drain_still_rejected_at_the_back_edge_guard` -- G16's
+/// sharper twin: the drain word itself spelled `inline` splices into `main`,
+/// so the remainder crossing the lowered back edge derives from `buf`, a
+/// local of the caller's frame -- and `check_reference_across_back_edge`
+/// (untouched by this slice, the SOO-42 gate) rejects it at the
+/// root-visibility boundary. Byte-exact per S6d-10.1, re-measured in THIS
+/// harness context: the standalone capture's `(line 37)` is `(line 38)`
+/// here.
+#[test]
+fn selftail_inline_drain_still_rejected_at_the_back_edge_guard() {
+    let stderr = build_error_located(
+        "g17_selftail_inline",
+        r#"import: intrinsics * ;
+import: core::prelude * ;
+
+type: Step['T 'Rest]
+| Done
+| More 'T 'Rest
+;
+
+trait: Iterator['It: * -> *]
+  : next inline ( 'It['T] -- Step['T 'It['T]] ) ;
+;
+
+: as-done ['R] ( 'R -- Step[i64 'R] ) drop Done ;
+
+impl: Iterator for Slice[i64]
+  : next
+    | s |
+    s dup len |n|
+    n 0 >usize eq
+    ~[ as-done ]
+    ~[
+      dup 0 >usize &> @ |v|
+      1 >usize n 1 >usize sub subslice
+      v swap More
+    ]
+    if
+;
+;
+
+\ The self-TAIL drain: `r drain` is the arm's last term, so the P7.S3g
+\ transform lowers the recursion to a loop back-edge and the remainder
+\ (a tainted view) would cross it.
+: drain inline ( Slice[i64] -- )
+  next
+  ~[ ( Done ) drop ]
+  ~[ ( More ) More> |v r| v . r drain ]
+  Step? ;
+
+: main ( -- )
+  3 5 fill |buf|
+  &buf slice drain
+  buf drop
+;
+"#,
+    );
+    assert!(
+        stderr.contains(
+            "error: a reference to a local cannot cross a loop in `main` (line 38)\n  a reference derived from `buf`, a local of this frame, crosses the self-tail-call back-edge to `drain`: that local's storage does not survive to the next iteration\n  note: declared ( -- )"
+        ),
+        "the back-edge guard reject-case stays byte-identical, got: {stderr}"
+    );
+}
+
+/// G19: `slice_impl_over_an_imported_trait_still_must_live_in_the_declaring_module`
+/// -- the placement gate (S6d-8.6 gate 1), byte-exact in THIS harness
+/// context. TRAIT SUBSTITUTION, measured: the frozen fixture
+/// (`probes/s6d_f0_libiter_gate.sth`) spells the imported trait as
+/// `Iterator`, but Phase 5's own lib impl now lawfully occupies the
+/// `(Iterator, Slice[i64])` slot, and the duplicate-impl scan
+/// (`check_impl_decls`'s first loop, which precedes the orphan rule)
+/// fires first for that exact spelling -- measured here:
+/// ``duplicate `impl:` for `Slice[i64]` (line 80, col 1); first declared at
+/// line 9, col 1`` (the first span is the lib impl's own in
+/// `lib/core/iterator.sth`; the lib-internal line is deliberately not
+/// pinned). The gate itself is unchanged and still fires for a slice
+/// target over any other imported trait, so this golden pins it via
+/// `Ord` from `core::cmp` -- same target, same None-target-module clause,
+/// byte-exact: the co-declaration arm is structurally unavailable for a
+/// built-in view (`Slice` declares no module of its own), so
+/// `core/iterator.sth` stays the only home for the `Iterator` impl.
+#[test]
+fn slice_impl_over_an_imported_trait_still_must_live_in_the_declaring_module() {
+    let stderr = build_error_located(
+        "g19_placement_gate",
+        r#"import: intrinsics * ;
+import: core::cmp | Ord | ;
+
+impl: Ord for Slice[i64]
+  : cmp drop 0 ;
+;
+
+: main ( -- ) 1 drop ;
+"#,
+    );
+    assert!(
+        stderr.contains(
+            "error: `impl: Ord for Slice[i64]` at line 6, col 1 must live in the module declaring `Ord` (`Slice[i64]` declares no module of its own)"
+        ),
+        "the placement gate fires byte-exact for a slice target, got: {stderr}"
+    );
+}
+
+/// G20: `bound_generic_consumers_stay_closed_at_the_slot_unification` --
+/// the SOO-60 boundary (S6d-8.6 gate 3): for_each/fold are NOT touched by
+/// this slice. Both twins (the lib consumers' bodies verbatim over a
+/// probe-local Iterator with an inline member, per the frozen fixtures
+/// `probes/s6d_f_for_each_slice.sth` and `probes/s6d_f2_fold_slice.sth`)
+/// die at the CALL SITE, before any App fence or back-edge check: the
+/// bound slot `'It['T]` is App-headed and decomposes only against a ctor
+/// application -- a slice is a bare `Concrete` view with no ctor head, so
+/// `'It` has nothing to bind to (`unify_poly_input`). Byte-exact per
+/// S6d-8.6, re-measured in THIS harness context: the standalone captures'
+/// `(line 41)`/`(line 49)` are `(line 42)`/`(line 50)` here. The golden
+/// guards against accidentally admitting a slice to the bound slot.
+#[test]
+fn bound_generic_consumers_stay_closed_at_the_slot_unification() {
+    let for_each_stderr = build_error_located(
+        "g20_bound_for_each",
+        r#"import: intrinsics * ;
+import: core::prelude * ;
+
+type: Step['T 'Rest]
+| Done
+| More 'T 'Rest
+;
+
+trait: Iterator['It: * -> *]
+  : next inline ( 'It['T] -- Step['T 'It['T]] ) ;
+;
+
+: as-done ['R] ( 'R -- Step[i64 'R] ) drop Done ;
+
+impl: Iterator for Slice[i64]
+  : next
+    | s |
+    s dup len |n|
+    n 0 >usize eq
+    ~[ as-done ]
+    ~[
+      dup 0 >usize &> @ |v|
+      1 >usize n 1 >usize sub subslice
+      v swap More
+    ]
+    if
+;
+;
+
+\ The lib's for_each, verbatim, over the probe-local trait.
+: for_each ['It: Iterator 'T] ( 'It['T] [ 'T -- ] -- )
+  | f |
+  next
+  ~[ ( Done ) drop ]
+  ~[ ( More ) More> | v rest | v f call rest f for_each ]
+  Step? ;
+
+: main ( -- )
+  3 5 fill |buf|
+  &buf slice [ . ] for_each
+  buf drop
+;
+"#,
+    );
+    assert!(
+        for_each_stderr.contains(
+            "error: type mismatch in `main` (line 42)\n  `for_each` expected `'It['T]`, found `Slice[i64]`\n  note: declared ( -- )"
+        ),
+        "the for_each twin stays closed at the slot unification, byte-exact, got: {for_each_stderr}"
+    );
+    let fold_stderr = build_error_located(
+        "g20_bound_fold",
+        r#"import: intrinsics * ;
+import: core::prelude * ;
+
+type: Step['T 'Rest]
+| Done
+| More 'T 'Rest
+;
+
+trait: Iterator['It: * -> *]
+  : next inline ( 'It['T] -- Step['T 'It['T]] ) ;
+;
+
+: as-done ['R] ( 'R -- Step[i64 'R] ) drop Done ;
+
+impl: Iterator for Slice[i64]
+  : next
+    | s |
+    s dup len |n|
+    n 0 >usize eq
+    ~[ as-done ]
+    ~[
+      dup 0 >usize &> @ |v|
+      1 >usize n 1 >usize sub subslice
+      v swap More
+    ]
+    if
+;
+;
+
+\ The lib's for_each, verbatim, over the probe-local trait.
+: for_each ['It: Iterator 'T] ( 'It['T] [ 'T -- ] -- )
+  | f |
+  next
+  ~[ ( Done ) drop ]
+  ~[ ( More ) More> | v rest | v f call rest f for_each ]
+  Step? ;
+
+
+: fold ['It: Iterator 'T 'A] ( 'It['T] 'A [ 'A 'T -- 'A ] -- 'A )
+  | f | | acc |
+  next
+  ~[ ( Done ) drop acc ]
+  ~[ ( More ) More> | v rest | rest acc v f call f fold ]
+  Step? ;
+
+: main ( -- )
+  3 5 fill |buf|
+  &buf slice 0 [ add ] fold .
+  buf drop
+;
+"#,
+    );
+    assert!(
+        fold_stderr.contains(
+            "error: type mismatch in `main` (line 50)\n  `fold` expected `'It['T]`, found `Slice[i64]`\n  note: declared ( -- )"
+        ),
+        "the fold twin stays closed at the slot unification, byte-exact, got: {fold_stderr}"
+    );
+}
+
+/// G21 (`probes/s6d_i_times_drain.sth`, harness-adapted):
+/// `times_hosted_slice_drain_stays_closed_at_the_abstract_row` -- the
+/// times-bounded drain (S6d-10.4): the times quotation is checked
+/// standalone against the abstract row, so `next`'s member dispatch has no
+/// concrete operand -- `mono_member_no_dispatch_error` with an EMPTY
+/// operand-type list (the row renders as nothing; the cosmetic is noted,
+/// not fixed, in this slice). The wall is the standalone check, not the
+/// member spelling -- unchanged by the frame. Byte-exact re-measured in
+/// THIS harness context: the standalone capture's `(line 43, col 7)` is
+/// `(line 44, col 7)` here.
+#[test]
+fn times_hosted_slice_drain_stays_closed_at_the_abstract_row() {
+    let stderr = build_error_located(
+        "g21_times_abstract_row",
+        r#"import: intrinsics * ;
+import: core::prelude * ;
+import: core::combinators c | times | ;
+
+type: Step['T 'Rest]
+| Done
+| More 'T 'Rest
+;
+
+trait: Iterator['It: * -> *]
+  : next inline ( 'It['T] -- Step['T 'It['T]] ) ;
+;
+
+: as-done ['R] ( 'R -- Step[i64 'R] ) drop Done ;
+
+impl: Iterator for Slice[i64]
+  : next
+    | s |
+    s dup len |n|
+    n 0 >usize eq
+    ~[ as-done ]
+    ~[
+      dup 0 >usize &> @ |v|
+      1 >usize n 1 >usize sub subslice
+      v swap More
+    ]
+    if
+;
+;
+
+\ The times-bounded drain (S6d-10.4): exactly 3 next-steps over a 5-element
+\ view, the row-threaded state the view. REJECTED on this tree: the times
+\ quotation is checked standalone against the abstract row, so `next`'s
+\ member dispatch has no concrete operand (mono_member_no_dispatch_error,
+\ empty operand list); annotating the quotation concretely is refused too
+\ (times' declared row renders `~[ i64 -- ]`, the ..s row is not
+\ annotation-comparable). Bounded stepping works unrolled (see the report).
+: drain3 ( Slice[i64] -- )
+  |s|
+  3 ~[
+      drop
+      next
+      ~[ ( Done ) drop s 0 >usize 0 >usize subslice ]
+      ~[ ( More ) More> |v r| v . r ]
+      Step?
+    ] times
+  len >i64 . ;
+
+: main ( -- )
+  3 5 fill |buf|
+  &buf slice drain3
+  buf drop
+;
+"#,
+    );
+    assert!(
+        stderr.contains(
+            "error: `next` in `drain3` (line 44, col 7) is a trait member of Iterator, but no `impl:` in this program dispatches on these operands\n  the operand types here are ``; declare an impl of one of those traits for the operand's type, or import a word that claims this name"
+        ),
+        "the abstract-row no-dispatch stays byte-identical, got: {stderr}"
     );
 }

@@ -311,19 +311,36 @@ impl: Monoid for Opt
     );
 }
 
-/// The pre-existing fence this slice records rather than fixes (spec Open
-/// Questions): a **bare nullary** variant constructor of a generic header, in
-/// a mono body, once two instantiations of that header exist. Both candidates
-/// take no operands, so operand-directed overload selection cannot separate
-/// them and the site is a located error. Byte-identical at base `a1b1276`
-/// (measured by stashing this phase's diff), so Phase 1 neither causes nor
-/// closes it; pinned here so a later slice that grounds nullary construction
-/// from its consuming context has to retire this expectation deliberately.
+/// (Retired deliberately -- this fence's own prescription, come due.) What
+/// this golden pinned was the pre-existing fence the S8b spec's Open
+/// Questions recorded rather than fixed: a **bare nullary** variant
+/// constructor of a generic header, in a mono body, once two instantiations
+/// of that header exist. Both candidates take no operands, so
+/// operand-directed overload selection cannot separate them, and the refusal
+/// was pinned byte-exact at base `a1b1276`:
+///
+/// ```text
+/// error: no overload of `Nil` in `mkempty` (line 12) accepts these operands
+///   candidate: no operands
+///   candidate: no operands
+/// ```
+///
+/// The retired golden's own doc pre-scribed the exit: "pinned here so a later
+/// slice that grounds nullary construction from its consuming context has to
+/// retire this expectation deliberately." P7b.S6d Phase 5 is that slice: its
+/// strictly-narrowing consumer-type tie-break
+/// (`generated_enum_consumer_type_pick` in `src/check/terms.rs`, the
+/// `nullary_ctor_*` units beside it) resolves such a site exactly when the
+/// operand-filtered set still holds 2+ candidates of one generated-enum
+/// header AND the R-2 consumer channel names one of them uniquely -- here
+/// the tail channel, `mkempty`'s declared output `List[i64]`, against the
+/// second candidate the `empty[List[List[i64]]]` call minted -- and keeps
+/// the refusal above byte-identical wherever no unique consumer match
+/// exists. The same program therefore now grounds and runs; `main` drops
+/// both lists, so the pinned stdout is empty.
 #[test]
-fn two_instantiations_make_a_bare_nullary_variant_a_located_overload_error() {
-    let stderr = build_error_located(
-        "nullary-fence",
-        "\
+fn two_instantiations_ground_a_bare_nullary_variant_from_its_consumer_type() {
+    let src = "\
 import: core::list * ;
 trait: Monoid['T] :
   empty ( -- 'T ) ;
@@ -337,12 +354,8 @@ impl: Monoid for List
 : main ( -- )
   mkempty drop
   empty[List[List[i64]]] drop ;
-",
-    );
-    assert_eq!(
-        stderr.trim_end(),
-        "error: no overload of `Nil` in `mkempty` (line 12) accepts these operands\n  candidate: no operands\n  candidate: no operands"
-    );
+";
+    assert_eq!(build_and_run("nullary-consumer-ground", src), "");
 }
 
 /// The fence above's verified substitute (the spec's Phase 3 spelling

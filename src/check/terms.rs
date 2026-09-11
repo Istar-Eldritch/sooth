@@ -1241,7 +1241,43 @@ fn check_term(
                     let chosen = match pick {
                         OverloadPick::Pick(hit) => hit,
                         OverloadPick::Ambiguous => {
-                            return Err(no_overload_matches_error(ctx, span, name, candidates))
+                            // P7b.S6d phase 5 (the nullary-ctor class): among
+                            // operand-indistinguishable candidates of ONE
+                            // generated-enum family, the consumer's declared
+                            // type picks the instantiation. P3's coexistence
+                            // property (REQ-4) made two parse-time mono mints
+                            // of one family a permanent library fact (the
+                            // slice impl's parse-time mint beside the Range
+                            // impl's in the shipped lib), and a nullary ctor
+                            // site is the one shape the operand filter cannot
+                            // discriminate: every nullary candidate matches
+                            // empty operands, tier 1 matches no caller module
+                            // (both carry the header's declaring module), and
+                            // tier 2 sees both visible. The R-2 consumer
+                            // channel is exactly the pin a nullary variant
+                            // constructor has (its own doc: "the only pin a
+                            // zero-field variant constructor can have, since
+                            // it has no operands to infer from"), so the site
+                            // resolves the way its single-candidate
+                            // predecessor always did -- from the consumer's
+                            // declared output. Strictly narrowing (NFR-3): the
+                            // helper fires only here, only over a 2+
+                            // one-family generated-enum matching set, and only
+                            // on a unique output match; every other shape
+                            // returns None and today's exact refusal bytes
+                            // stand. The pick rides the same span-keyed record
+                            // the two existing arms use.
+                            match generated_enum_consumer_type_pick(
+                                name, candidates, &operands, siblings, at, tail, ctx, env, scope,
+                                poly, arrays, cells, refs,
+                            ) {
+                                Some(hit) => hit,
+                                None => {
+                                    return Err(no_overload_matches_error(
+                                        ctx, span, name, candidates,
+                                    ))
+                                }
+                            }
                         }
                     };
                     // S3-1.e: the same redirect as the single-candidate arm.
@@ -3090,6 +3126,100 @@ fn is_generated_enum_word(name: &str, chosen: &Overload, ctx: &Ctx) -> bool {
     })
 }
 
+/// P7b.S6d phase 5 (the nullary-ctor class, the implementation-time
+/// discovery): among operand-indistinguishable candidates of ONE
+/// generated-enum family, the consumer's declared type picks the
+/// instantiation. REQ-4's coexistence property made two parse-time mono
+/// mints of one family a permanent library fact (the slice impl's
+/// `Step[i64 Slice[i64]]` beside the Range impl's, both minted at parse
+/// into the one global word env), and a nullary ctor site is the one shape
+/// the multi-candidate arm's operand filter cannot discriminate: every
+/// nullary candidate matches empty operands, S11 declines (the header is
+/// not the caller module's own), tier 1 matches no caller module (both
+/// candidates carry the header's declaring module), and tier 2 sees both
+/// visible -- so the site refused Ambiguous the moment the second mono
+/// impl shipped, breaking the Range canaries. The R-2 consumer channel is
+/// exactly the pin a nullary variant constructor has (its own doc: "the
+/// only pin a zero-field variant constructor (`None`) can have, since it
+/// has no operands to infer from"), so the site resolves the way its
+/// single-candidate predecessor always did -- from the consumer's declared
+/// output.
+///
+/// Strictly narrowing (NFR-3, structural byte-neutrality): this runs only
+/// on the Ambiguous path, only over the operand-filtered matching set
+/// (2+), only when every matching candidate is a generated word of this
+/// name whose single output names the same enum family, and only when
+/// exactly ONE matching candidate's output equals the consumer type. Every
+/// other shape -- no consumer type, a consumer of another family, zero or
+/// 2+ output matches, a mixed or non-generated matching set, an
+/// empty/1-candidate matching set -- returns `None` and the caller raises
+/// today's exact refusal bytes. The pick rides the same span-keyed record
+/// the two existing arms use (the caller records after `chosen` either
+/// way), so lowering pins the instantiation the checker actually chose.
+#[allow(clippy::too_many_arguments)]
+fn generated_enum_consumer_type_pick<'a>(
+    name: &str,
+    candidates: &'a [Overload],
+    operands: &[Type],
+    siblings: &[Term],
+    at: usize,
+    tail: bool,
+    ctx: &Ctx,
+    env: &HashMap<String, Vec<Overload>>,
+    scope: &Scope,
+    poly: &PolyCtx,
+    arrays: &mut Vec<ArrayDecl>,
+    cells: &mut Vec<OwnedCellDecl>,
+    refs: &mut Vec<RefDecl>,
+) -> Option<&'a Overload> {
+    // The operand filter, verbatim from `select_overload`'s step 1: the
+    // tie-break may only fire among candidates the filter could not
+    // discriminate (2+; a 0- or 1-candidate matching set is today's
+    // Ambiguous/Pick behavior and must not move).
+    let matching: Vec<&Overload> = candidates
+        .iter()
+        .filter(|o| {
+            operands.len() >= o.sig.inputs.len()
+                && operands[operands.len() - o.sig.inputs.len()..] == o.sig.inputs[..]
+        })
+        .collect();
+    if matching.len() < 2 {
+        return None;
+    }
+    // ONE generated-enum family only: every matching candidate is a
+    // generated word of this name whose single output names the same enum
+    // header (the pre-bracket spelling of the leaked instantiation name;
+    // two headers cannot share it, and a conservative miss here only keeps
+    // today's refusal).
+    let family = match matching[0].sig.outputs.first() {
+        Some(Type::Enum(_, display)) => display.split('[').next()?.to_string(),
+        _ => return None,
+    };
+    for &c in &matching {
+        if !is_generated_enum_word(name, c, ctx) || c.sig.outputs.len() != 1 {
+            return None;
+        }
+        match c.sig.outputs.first() {
+            Some(Type::Enum(_, display)) if display.split('[').next() == Some(family.as_str()) => {}
+            _ => return None,
+        }
+    }
+    // The R-2 consumer channel: the concrete type the value this call is
+    // about to push is required to have by its first real consumer (in tail
+    // position, the enclosing word's own declared output).
+    let expected = consumer_expected_type(
+        siblings, at, tail, ctx, env, scope, poly, arrays, cells, refs,
+    )?;
+    let hits: Vec<&Overload> = matching
+        .into_iter()
+        .filter(|c| c.sig.outputs.first() == Some(&expected))
+        .collect();
+    match hits.as_slice() {
+        [hit] => Some(hit),
+        _ => None,
+    }
+}
+
 /// P7b.S3 (S3-1.e): inside a combinator splice (`prov.splice_uid` is `Some`),
 /// the operative `EnumId` of a chosen candidate that is a *generated enum
 /// word* -- `(name, symbol)` membership in `enum_generated_sigs` (ctors) or
@@ -4550,13 +4680,18 @@ mod tests {
         );
     }
 
-    /// P7b.S6d-PREREQ (Deferred, the back-edge note): `back_edge_outs` above
-    /// forwards `surviving` alone and drops `deriv`, a latent twin of the
-    /// dispatch-push laundering -- unreachable only because
+    /// P7b.S6d-PREREQ (the back-edge note; corrected at P7b.S6d phase 5):
+    /// the note's original premise -- `back_edge_outs` above "forwards
+    /// `surviving` alone and drops `deriv`, a latent twin of the
+    /// dispatch-push laundering, unreachable only because
     /// `check_reference_across_back_edge` rejects a deriv-carrying argument
-    /// first. Now that REQ-4d propagates a deriv onto a slice-bearing
-    /// aggregate, this test asserts the *rejection*, not the forward: if that
-    /// guard is ever narrowed, the hole opens with nothing else watching.
+    /// first" -- is outdated: P7b.S6d REQ-5 (phase 4) made `back_edge_outs`
+    /// forward `deriv` alongside `surviving`, so the latent mask this note
+    /// watched for is closed. The guard remains the only thing watching a
+    /// deriv-carrying argument at the call site -- the scan runs before
+    /// `back_edge_outs` is ever reached -- and this test still asserts that
+    /// *rejection*, not a forward: if that guard is ever narrowed, the hole
+    /// opens with nothing else watching.
     ///
     /// It is also the stated capability boundary: a tainted `Window` can never
     /// cross a self-tail back edge, which S6d's loop-shaped consumers will
@@ -6037,5 +6172,108 @@ mod tests {
              : main ( -- ) 0 Box | b | &!b set b drop ;\n",
         )
         .expect("storing an `i64` through a reference input is unaffected");
+    }
+
+    /// P7b.S6d phase 5 (the nullary-ctor class): a scratch directory of
+    /// `.sth` files for the two multi-module units below, removed on drop.
+    /// The class is unreachable from `check_src`: it needs a generic enum
+    /// header declared in a module the calling word's module does not own
+    /// (S11's own-module fence) plus two parse-time mints of that header in
+    /// the one global word env, so the fixture spans two files.
+    struct Sandbox(std::path::PathBuf);
+
+    impl Sandbox {
+        fn new(tag: &str) -> Sandbox {
+            static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let seq = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let dir = std::env::temp_dir()
+                .join(format!("sooth-terms-{}-{tag}-{seq}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            Sandbox(dir)
+        }
+
+        fn write(&self, name: &str, contents: &str) -> std::path::PathBuf {
+            let path = self.0.join(name);
+            std::fs::write(&path, contents).unwrap();
+            path
+        }
+    }
+
+    impl Drop for Sandbox {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// The happy direction: with two parse-time mints of one generated enum
+    /// family in the env (`touch-a`/`touch-b` in the header's own module), a
+    /// nullary ctor site in a foreign module -- where S11's own-module fence
+    /// declines and the operand filter cannot discriminate two nullary
+    /// candidates -- resolves to the mint the word's declared output names,
+    /// and the pick is recorded span-keyed like both existing arms'
+    /// recordings. Before the tie-break this exact fixture refused Ambiguous
+    /// (the regression that broke the three Range canaries when the slice
+    /// impl shipped beside the Range impl in the shipped lib).
+    #[test]
+    fn nullary_ctor_of_two_parse_time_mints_resolves_to_the_consumer_declared_output() {
+        let s = Sandbox::new("nullary-tiebreak");
+        s.write(
+            "lib.sth",
+            "type: Step['T 'Rest]\n| Done\n| More 'T 'Rest\n;\n\
+             : touch-a ( -- Step[i64 i64] ) Done ;\n\
+             : touch-b ( -- Step[str i64] ) Done ;\n\
+             export: Step Done ;\n",
+        );
+        let entry = s.write(
+            "main.sth",
+            "import: \"lib.sth\" l | Step Done | ;\n\
+             : mk ( -- Step[str i64] ) Done ;\n\
+             : main ( -- ) ;\n",
+        );
+        let closure = crate::driver::discover_closure(&entry).expect("closure resolves");
+        let mut module = crate::driver::assemble_module(&closure, true).expect("assembles");
+        crate::check::check(&mut module)
+            .expect("the consumer-declared output picks the right nullary mint");
+        // The pick is recorded span-keyed (requirement: same channel as both
+        // existing arms), naming the instantiation the consumer declared.
+        let recorded: Vec<&String> = module.builtin_overloads.values().collect();
+        assert!(
+            recorded.iter().any(|s| s.contains("Done[str i64]")),
+            "the tie-break pick must be recorded span-keyed: {recorded:?}"
+        );
+    }
+
+    /// The no-match direction, byte-exact: the same two-mint nullary site,
+    /// but the consumer's declared output names a DIFFERENT family (`Res`),
+    /// so no candidate's output matches and the tie-break declines -- the
+    /// caller raises today's exact Ambiguous bytes (full candidate list,
+    /// same line). Pins that the tie-break can only turn an undecidable
+    /// refusal into the resolution the type context determines, never
+    /// into a different diagnostic.
+    #[test]
+    fn nullary_ctor_with_a_consumer_of_another_family_keeps_the_ambiguous_bytes() {
+        let s = Sandbox::new("nullary-tiebreak-nomatch");
+        s.write(
+            "lib.sth",
+            "type: Step['T 'Rest]\n| Done\n| More 'T 'Rest\n;\n\
+             type: Res['T 'E] | Ok 'T | Err 'E ;\n\
+             : touch-a ( -- Step[i64 i64] ) Done ;\n\
+             : touch-b ( -- Step[str i64] ) Done ;\n\
+             export: Step Done Res ;\n",
+        );
+        let entry = s.write(
+            "main.sth",
+            "import: \"lib.sth\" l | Step Done Res | ;\n\
+             : mk ( -- Res[i64 str] ) Done ;\n\
+             : main ( -- ) ;\n",
+        );
+        let closure = crate::driver::discover_closure(&entry).expect("closure resolves");
+        let mut module = crate::driver::assemble_module(&closure, true).expect("assembles");
+        let err = crate::check::check(&mut module)
+            .expect_err("no candidate's output names the consumer's family");
+        assert_eq!(
+            err,
+            "error: no overload of `Done` in `mk` (line 2) accepts these operands\n  candidate: no operands\n  candidate: no operands"
+        );
     }
 }

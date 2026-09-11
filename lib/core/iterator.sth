@@ -10,7 +10,8 @@
 \ (`next ( 'It['T] -- Option['T] 'It['T] )`) was considered and rejected: arm
 \ parity would force the dead iterator out to every caller and the final drop
 \ to every `None` path instead of living in one place.
-import: intrinsics | drop | ;
+import: intrinsics | drop dup swap len sub >usize | ;
+import: self::prelude | if eq | ;
 import: self::list | List Nil Cons | ;
 
 \ `next` is deliberately absent from this list: a trait member's own
@@ -50,6 +51,44 @@ impl: Iterator for List
     ~[ ( Nil ) drop Done ]
     ~[ ( Cons ) Cons> | v rest | v rest ^> More ]
     List? ;
+;
+
+\ The built-in-view impl (P7b.S6d REQ-6). It lives here rather than beside a
+\ `Slice` declaration because `Slice` is a built-in type declaring no module,
+\ so the impl-placement gate's co-declaration arm is structurally
+\ unavailable and `Iterator`'s own module is the only legal home (the gate
+\ itself stays: a foreign-module impl of the imported trait still refuses,
+\ P7b.S6d G19). The target is the shared `Slice[i64]` only -- the mutable
+\ `!Slice[i64]` impl is closed by Ruling A's enum-payload sweep, which fires
+\ first at the `Step` declaration (SOO-45). The body is the natural one over
+\ `len`/`&>`/`subslice`: read the element through a shared borrow, advance
+\ with an O(1) sub-view. The member spells `inline` per-impl (REQ-3): the
+\ member-output ban forces the inline spelling (a `Step` carrying a view
+\ may not cross a non-inline member's return boundary), and trait-level
+\ inline is not an option -- it would re-route the List/Range members through
+\ the poly-combinator path, where the nullary ctors mis-resolve (S6d-8.5),
+\ so the keyword lives on this impl's member alone. The straight-line Done
+\ arm (`~[ drop Done ]`, no helper) is the natural body: the More arm's Step
+\ carries the remainder view's deriv -- rootless, the receiver being a
+\ parameter, so the naming mint has no owned root -- while the Done arm's
+\ nullary Step carries none, and the borrow join unions that rootless
+\ one-sided asymmetry (P7b.S6d REQ-5) instead of refusing. Co-locating the
+\ impl mints the `Step[i64 Slice[i64]]` monomorph for every importer -- the
+\ second monomorph of the family List consumers already see -- and the
+\ bare-name candidate lookup unions the live check-time mints so each site
+\ resolves to its own (REQ-4; the G7/G8 goldens pin it).
+impl: Iterator for Slice[i64]
+  : next inline
+    | s |
+    s dup len |n|
+    n 0 >usize eq
+    ~[ drop Done ]
+    ~[
+      dup 0 >usize &> @ |v|
+      1 >usize n 1 >usize sub subslice
+      v swap More
+    ]
+    if ;
 ;
 
 \ The consumers (P7b.S8 R4). Written once against the `Iterator` bound: they
