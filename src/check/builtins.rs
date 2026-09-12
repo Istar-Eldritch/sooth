@@ -148,27 +148,36 @@ pub(super) fn tier_pick<'a>(
 /// silently win the wrong one, since it is still compared for exact
 /// equality against `caller_module` -- but tiers 2/3's visibility narrowing
 /// does not: filtering or erroring a fallback-sourced candidate on an
-/// unverified module id would invent a stricter rule than the pre-existing
-/// first-match dispatch `mint_fallback_candidates`'s own doc comment
-/// forbids. On a tier-1 miss, this falls back to the original
-/// first-input-match semantics (the first `matching` candidate, arbitrary
-/// among ties) rather than tiering further.
+/// unverified module id would invent a stricter rule than tier 1 itself
+/// already respects.
 ///
-/// P7b.S11 Phase 1 (R-4, retired 260910) once narrowed what that
-/// arbitrary-among-ties tail could still reach; the strict-grounding
-/// amendment (260910) removed that tail's reach into bare-ctor calls
-/// entirely. The rationale above is unchanged and this selector's behavior
-/// is byte-identical -- an unverified module id still buys no tier-2/3
-/// narrowing -- but the one shape whose ties were *observably* decided by
-/// declaration order, a bare generic constructor's competing monomorphs, no
-/// longer arrives here undecided: `ground_bare_generic_ctor`
-/// (`check/terms.rs`) either grounds that site from its own θ or reports
-/// the located unbound-parameter error -- strict grounding never consults
-/// scope, so there is no tie to report -- upstream of both selectors. The
-/// ladder is placed there rather than in here because the fence it needs --
-/// own-module instantiations of one own header, which S5's tier 1 must keep
-/// resolving in a *mixed* tie (NFR-2) -- is a fact about the call site's
-/// header, which an `Overload` alone cannot express.
+/// P7b.S11 Phase 1 (R-4, retired 260910) narrowed what an arbitrary-among-
+/// ties tail could still reach; the strict-grounding amendment (260910)
+/// removed that tail's reach into bare-ctor calls entirely --
+/// `ground_bare_generic_ctor` (`check/terms.rs`) either grounds a bare
+/// generic constructor site from its own θ or reports the located
+/// unbound-parameter error, upstream of both selectors, so a bare-ctor call
+/// never arrives here undecided.
+///
+/// SOO-63 item 3 (post-implementation review, measured by probe): a tier-1
+/// miss no longer falls back to `matching.first()` unconditionally. When
+/// `operand_matching` has already narrowed to exactly one candidate, module
+/// attribution simply doesn't apply (that one candidate is not "first among
+/// a tie", it is the only match) and is still picked. But when 2+ candidates
+/// survive the operand filter -- the shape a nullary/near-nullary generated-
+/// enum constructor produces when 2+ monomorphs of one family are both live
+/// (a bare `Done`/`More` from `core::iterator`'s `Step` with no unique
+/// consumer to pin it) -- picking `first()` is a genuine, silent,
+/// arbitrary-by-parse-order guess: probing this measured a case where the
+/// guess still built and ran clean while binding a monomorph the source
+/// never named (`Step::Done` carries no payload, so two monomorphs' `Done`
+/// values are bit-identical and a wrong guess has no runtime signal at
+/// all). A genuine tie is now `Ambiguous`, which routes to the same
+/// consumer-pin-hinting overload-miss diagnostic a single-candidate
+/// nullary-ctor site already gets (`no_overload_matches_error`) rather than
+/// silently binding one arbitrary candidate or (when the pick's type later
+/// disagrees with a downstream use) reporting a mismatch against a
+/// monomorph the caller never wrote.
 pub(super) fn select_overload_fallback_sourced<'a>(
     candidates: &'a [Overload],
     operands: &[Type],
@@ -177,10 +186,8 @@ pub(super) fn select_overload_fallback_sourced<'a>(
     let matching = super::operand_matching(candidates, operands);
     match matching.iter().find(|o| o.module == caller_module) {
         Some(own) => OverloadPick::Pick(own),
-        None => match matching.first() {
-            Some(first) => OverloadPick::Pick(first),
-            None => OverloadPick::Ambiguous,
-        },
+        None if matching.len() == 1 => OverloadPick::Pick(matching[0]),
+        None => OverloadPick::Ambiguous,
     }
 }
 
@@ -304,18 +311,34 @@ mod select_overload_tests {
     }
 
     #[test]
-    fn select_overload_fallback_sourced_tier_1_miss_falls_back_to_first_match() {
+    fn select_overload_fallback_sourced_tier_1_miss_on_a_genuine_tie_is_ambiguous() {
         let candidates = vec![
             overload_in(vec![Type::I64], vec![Type::I64], "a_widget", 1),
             overload_in(vec![Type::I64], vec![Type::I64], "b_widget", 2),
         ];
-        // Neither candidate is the caller's own module: unlike the reliable
-        // `select_overload` path, this does NOT become `Ambiguous` -- it
-        // preserves the pre-existing permissive first-match dispatch, since
-        // the module id here is not verified reliable (R4).
+        // SOO-63 item 3: neither candidate is the caller's own module AND
+        // both survive the operand filter (a genuine 2-way tie) -- this is
+        // now `Ambiguous` rather than an arbitrary first-match guess.
+        match select_overload_fallback_sourced(&candidates, &[Type::I64], 9) {
+            OverloadPick::Ambiguous => {}
+            OverloadPick::Pick(hit) => {
+                panic!("expected Ambiguous on a genuine tie, got {}", hit.symbol)
+            }
+        }
+    }
+
+    #[test]
+    fn select_overload_fallback_sourced_tier_1_miss_with_a_lone_survivor_still_picks() {
+        let candidates = vec![
+            overload_in(vec![Type::I64], vec![Type::I64], "a_widget", 1),
+            overload_in(vec![Type::U32], vec![Type::U32], "b_widget", 2),
+        ];
+        // Neither candidate is the caller's own module, but only one survives
+        // the operand filter -- module attribution simply doesn't apply here,
+        // so this is not a tie and still picks the sole match.
         match select_overload_fallback_sourced(&candidates, &[Type::I64], 9) {
             OverloadPick::Pick(hit) => assert_eq!(hit.symbol, "a_widget"),
-            OverloadPick::Ambiguous => panic!("expected the permissive first-match fallback"),
+            OverloadPick::Ambiguous => panic!("a lone operand-filter survivor is not a tie"),
         }
     }
 }

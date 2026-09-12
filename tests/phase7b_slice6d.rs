@@ -1362,20 +1362,59 @@ fn env_hit_union_with_pending_mint_and_unique_consumer_resolves_to_consumer_type
     assert_eq!(stdout, "44\n");
 }
 
-/// The fix's decline path, pinned: the same union'd set (one flushed
-/// candidate plus one pending same-family mint), but the site's consumer
-/// (`h`) expects a type from another family entirely, so
-/// `generated_enum_consumer_type_pick` finds no unique match, declines, and
-/// the pre-existing fallback-sourced dispatch decides -- today, tier-1 miss
-/// then `matching.first()`, which is the first env candidate (parse order:
-/// the union chains env candidates ahead of the mints, so the pick is
-/// deterministic on this tree). This unit DISCLOSES that it pins the current
-/// fallback-sourced first-match behaviour, wrong monomorph and all: the
-/// `h`-site mismatch names `g`'s earlier-flushed `Step[str i64]`. A later
-/// slice that re-works the parse-order pick must retire this pin
-/// deliberately, as the slice8b fence golden was.
+/// SOO-63 item 3 follow-up: the silent-wrong-pick shape the probe actually
+/// found (worse than the misleading-message shape below) -- a bare `Done`
+/// with 2+ same-family monomorphs live and NO downstream site that cares
+/// which one it is at all. Before the fix this built and ran clean,
+/// silently binding whichever monomorph parse order flushed first (here,
+/// `g`'s `Step[str i64]`) even though nothing in the source names that
+/// family member at this call site. Now it must decline as Ambiguous: there
+/// is genuinely no information at this call site (nor its consumer, a
+/// same-family `Step?` dispatch that only touches the `Done` tag) to pick
+/// one monomorph over the other.
 #[test]
-fn env_hit_union_fall_through_no_unique_consumer_keeps_fallback_first_match_bytes() {
+fn done_with_no_disambiguating_consumer_declines_rather_than_silently_binding_one() {
+    let stderr = build_error_located(
+        "s6d_p3_silent_pick",
+        r#"import: core::iterator | Step Done More | ;
+
+: g ( Step[str i64] -- ) drop ;
+
+: pack ['R] ( 'R -- Step[u8 'R] ) drop Done ;
+
+: f ( -- )
+  1 pack drop
+  Done
+  ~[ ( Done ) drop 99 . ]
+  ~[ ( More ) More> drop drop 0 . ]
+  Step? ;
+"#,
+    );
+    assert!(
+        stderr.contains("error: no overload of `Done`")
+            && stderr.contains("candidate: no operands -> `Step[str i64]`")
+            && stderr.contains("candidate: no operands -> `Step[u8 i64]`"),
+        "a genuinely undecidable Done site must decline, not silently bind one monomorph: {stderr}"
+    );
+}
+
+/// SOO-63 item 3 (post-implementation review round, measured by probe):
+/// this decline path used to silently pick `matching.first()` -- parse
+/// order among the union'd set (one flushed candidate plus one pending
+/// same-family mint plus the lib's own `Step[i64 Slice[i64]]`), reporting a
+/// downstream mismatch that named a monomorph (`g`'s `Step[str i64]`) the
+/// user never wrote at this site at all. Probing it found worse than a
+/// misleading message: because `Done` carries no payload, two monomorphs'
+/// `Done` values are bit-identical, so the wrong guess can build and run
+/// clean with zero observable signal whenever nothing downstream cares
+/// which monomorph it is. `select_overload_fallback_sourced` now declines
+/// (`Ambiguous`) on a genuine 2+-candidate tie instead of guessing, which
+/// routes here through the same consumer-pin-hinting overload-miss
+/// diagnostic a single-candidate nullary-ctor site already gets
+/// (`no_overload_matches_error`, SOO-63 item 2) -- named candidates, sorted,
+/// plus the hint to name a concrete instantiation at the consumer.
+#[test]
+fn env_hit_union_fall_through_no_unique_consumer_is_ambiguous_not_a_silent_guess() {
     let stderr = build_error_located(
         "s6d_p1_fallthrough_bytes",
         r#"import: core::iterator | Step Done More Iterator | ;
@@ -1393,11 +1432,10 @@ import: core::list | List | ;
   h ;
 "#,
     );
-    assert!(
-        stderr.contains(
-            "error: type mismatch in `f` (line 15)\n  `h` expected `List[i64]`, found `Step[str i64]`"
-        ),
-        "the no-unique-match fall-through keeps today's fallback first-match bytes, got: {stderr}"
+    assert_eq!(
+        stderr,
+        "error: no overload of `Done` in `f` (line 14) accepts these operands\n  candidate: no operands -> `Step[i64 Slice[i64]]`\n  candidate: no operands -> `Step[str i64]`\n  candidate: no operands -> `Step[u8 i64]`\n  note: every candidate takes no operands, so only the consumer's declared type picks one; name a concrete instantiation at the consumer to resolve it\n",
+        "the no-unique-match fall-through must now decline as Ambiguous rather than guess, got: {stderr}"
     );
 }
 
