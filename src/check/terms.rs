@@ -6365,7 +6365,7 @@ mod tests {
             .expect_err("no candidate's output names the consumer's family");
         assert_eq!(
             err,
-            "error: no overload of `Done` in `mk` (line 2) accepts these operands\n  candidate: no operands\n  candidate: no operands"
+            "error: no overload of `Done` in `mk` (line 2) accepts these operands\n  candidate: no operands -> `Step[i64 i64]`\n  candidate: no operands -> `Step[str i64]`\n  note: every candidate takes no operands, so only the consumer's declared type picks one; name a concrete instantiation at the consumer to resolve it"
         );
     }
 }

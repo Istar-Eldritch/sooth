@@ -1504,23 +1504,45 @@ fn type_arguments_in_poly_body_error(
 /// R3: no candidate of an overloaded name accepts the operands on the stack.
 /// Names every candidate's inputs, since the useful question at this call site
 /// is which shapes the name does accept.
+///
+/// SOO-63 item 2: input-only shapes collapse every nullary candidate to the
+/// same "no operands" text -- a `Done` with two differently-instantiated
+/// monomorphs (say `Step[i64 i64]` vs `Step[str i64]`) is byte-identical
+/// noise here even though the candidates are not the same type. Naming each
+/// candidate's *output* too (the only place a nullary candidate's identity
+/// shows up at all) makes them distinguishable, and the note points at the
+/// actual remedy: a call's consumer pins which candidate's output ties the
+/// site, so naming a concrete instantiation at the consumer resolves it.
 fn no_overload_matches_error(ctx: &Ctx, span: Span, name: &str, candidates: &[Overload]) -> String {
     let name = crate::resolve::demangle_call(name);
     let mut shapes: Vec<String> = candidates
         .iter()
         .map(|o| {
             let inputs: Vec<String> = o.sig.inputs.iter().map(|t| format!("`{t}`")).collect();
-            match inputs.is_empty() {
+            if !inputs.is_empty() {
+                return inputs.join(" ");
+            }
+            // A nullary candidate's input list can never distinguish it from
+            // another nullary candidate; its output is the only place its
+            // identity shows up at all (SOO-63 item 2).
+            let outputs: Vec<String> = o.sig.outputs.iter().map(|t| format!("`{t}`")).collect();
+            match outputs.is_empty() {
                 true => "no operands".to_string(),
-                false => inputs.join(" "),
+                false => format!("no operands -> {}", outputs.join(" ")),
             }
         })
         .collect();
     shapes.sort();
-    let listed = shapes
+    let all_nullary_input = candidates.iter().all(|o| o.sig.inputs.is_empty());
+    let mut listed = shapes
         .iter()
         .map(|s| format!("\n  candidate: {s}"))
         .collect::<String>();
+    if all_nullary_input && candidates.len() > 1 {
+        listed.push_str(
+            "\n  note: every candidate takes no operands, so only the consumer's declared type picks one; name a concrete instantiation at the consumer to resolve it",
+        );
+    }
     format!(
         "error: no overload of `{name}` in {wname} (line {}) accepts these operands{listed}",
         span.line,
