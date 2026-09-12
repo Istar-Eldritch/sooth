@@ -1024,12 +1024,18 @@ fn check_term(
                     // mutating nothing.
                     //
                     // 20d4add-follow-up note (doc-only): this all-mints shape
-                    // keeps today's dispatch (no pre-dispatch tie-break --
-                    // that gate is `env_hit_union`, the env-hit arm's flag
-                    // alone), but its pick can BE a check-time mint by any of
-                    // three measured shapes: 2+ same-header FOREIGN mints
-                    // (tier-1's caller-module find misses, so
-                    // `matching.first()` takes one of them); own-module mints
+                    // has no PRE-dispatch tie-break (that gate is
+                    // `env_hit_union`, the env-hit arm's flag alone), but its
+                    // pick can BE a check-time mint by any of three measured
+                    // shapes: 2+ same-header FOREIGN mints (tier-1's
+                    // caller-module find misses; post SOO-63 item 3, a
+                    // genuine 2+ tie here now falls through to the shared
+                    // `OverloadPick::Ambiguous` arm below, which runs the
+                    // POST-dispatch consumer-type tie-break -- a unique
+                    // consumer match resolves it, a decline gets the named-
+                    // candidate overload-miss diagnostic; only a
+                    // tier-1-miss-but-operand-filter-narrowed-to-one site
+                    // still just picks that lone survivor); own-module mints
                     // where S11 declines -- 2+ groundable own-module headers
                     // claiming the ctor's surface name (two same-named
                     // *headers* are rejected by the duplicate-type check
@@ -1247,26 +1253,28 @@ fn check_term(
                     let caller_module = span.module;
                     // Round-1 review fix (P1): the env-hit union arm sets
                     // `from_fallback`, routing the dispatch below through
-                    // `select_overload_fallback_sourced`, whose tier-1 miss
-                    // ends in `matching.first()` -- parse order. That
-                    // preempted the `Ambiguous` arm's consumer-type
-                    // tie-break: with a pending same-family mint live, a
-                    // nullary generated-enum ctor site with a UNIQUE
-                    // `consumer_expected_type` match resolved by parse-order
-                    // luck or refused with a misleading type-mismatch (the
-                    // round-1 repro: the control `f` prints 44; the same
-                    // word plus one unrelated mid-word poly instantiation
-                    // refused with `body leaves `Step[str i64]``). Run the
-                    // same tie-break here, before the fallback dispatch,
-                    // over this union'd set. It operand-filters internally
-                    // (its step 1 calls the shared `operand_matching`),
-                    // so a decline leaves the dispatch below
-                    // byte-identically alone (`env_hit_union_fall_through_
-                    // no_unique_consumer_keeps_fallback_first_match_bytes`
-                    // pins those bytes), and a hit becomes the pick -- the
-                    // same `OverloadPick::Pick` the tiered selectors return,
-                    // so it rides the very span-keyed record the Ambiguous
-                    // arm's pick rides (the shared record after `chosen`,
+                    // `select_overload_fallback_sourced`. Before SOO-63 item
+                    // 3, that selector's tier-1 miss ended in
+                    // `matching.first()` -- parse order -- which preempted
+                    // the `Ambiguous` arm's consumer-type tie-break: with a
+                    // pending same-family mint live, a nullary generated-enum
+                    // ctor site with a UNIQUE `consumer_expected_type` match
+                    // resolved by parse-order luck or refused with a
+                    // misleading type-mismatch (the round-1 repro: the
+                    // control `f` prints 44; the same word plus one
+                    // unrelated mid-word poly instantiation refused with
+                    // `body leaves `Step[str i64]``). Run the same tie-break
+                    // here, before the fallback dispatch, over this union'd
+                    // set. It operand-filters internally (its step 1 calls
+                    // the shared `operand_matching`), so a decline leaves the
+                    // dispatch below alone (post item-3, a genuine 2+ tie now
+                    // declines as `Ambiguous` rather than guessing --
+                    // `env_hit_union_fall_through_no_unique_consumer_is_
+                    // ambiguous_not_a_silent_guess` pins those bytes), and a
+                    // hit becomes the pick -- the same `OverloadPick::Pick`
+                    // the tiered selectors return, so it rides the very
+                    // span-keyed record the Ambiguous arm's pick rides (the
+                    // shared record after `chosen`,
                     // `splice_enum_words`/`builtin_overloads`; lowering reads
                     // per-(uid, span) first, `src/ir/func_builder/calls.rs`).
                     // Gated on the union arm's own flag: the env-miss arm's
@@ -2417,8 +2425,11 @@ fn plural_s(n: usize) -> &'static str {
 /// therefore treats every fallback-sourced candidate as unverified
 /// (`select_overload_fallback_sourced`, `builtins.rs`): tier 1 still runs
 /// (safe regardless, since a wrong module id can only fail to match, never
-/// falsely match another module's id), but tiers 2/3 are excluded in favour
-/// of the pre-existing permissive first-match dispatch.
+/// falsely match another module's id), but tiers 2/3 are excluded -- a tier-1
+/// miss with exactly one operand-filter survivor still picks it (module
+/// attribution simply doesn't apply to a lone match), and post SOO-63 item 3
+/// a genuine 2+ tie declines as `Ambiguous` rather than guessing via
+/// first-match.
 fn mint_fallback_candidates(name: &str, ctx: &Ctx) -> Vec<Overload> {
     ctx.with_extended_type_slices(|structs, enums| {
         let mut out = Vec::new();

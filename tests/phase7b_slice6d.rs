@@ -1314,15 +1314,17 @@ impl: Iterator for Slice[i64]
 // ---------------------------------------------------------------------------
 // Round-1 review fixes (the P3 env-hit union vs the P5 consumer-type
 // tie-break). The union arm sets `from_fallback`, which routes the
-// multi-candidate dispatch through `select_overload_fallback_sourced` --
-// whose tier-1 miss ends in `matching.first()`, i.e. parse order -- and that
-// preempts the `OverloadPick::Ambiguous` arm's
-// `generated_enum_consumer_type_pick`: with a pending same-family mint live,
-// a nullary generated-enum ctor site with a UNIQUE consumer_expected_type
-// match resolved by parse-order luck or refused with a misleading
-// type-mismatch instead of resolving from its consumer. The fix runs the
-// same tie-break over the union'd set before the fallback dispatch; a
-// decline falls through byte-identically (pinned by the second unit below).
+// multi-candidate dispatch through `select_overload_fallback_sourced`.
+// Before SOO-63 item 3, that selector's tier-1 miss ended in
+// `matching.first()`, i.e. parse order -- which preempted the
+// `OverloadPick::Ambiguous` arm's `generated_enum_consumer_type_pick`: with a
+// pending same-family mint live, a nullary generated-enum ctor site with a
+// UNIQUE consumer_expected_type match resolved by parse-order luck or
+// refused with a misleading type-mismatch instead of resolving from its
+// consumer. The fix runs the same tie-break over the union'd set before the
+// fallback dispatch; a decline now falls through to a genuine `Ambiguous`
+// (pinned by the second unit below, post item-3: it declines rather than
+// guessing).
 // ---------------------------------------------------------------------------
 
 /// The P1 repro shape, end to end: `f` pins a bare nullary `Done` to
