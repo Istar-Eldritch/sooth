@@ -643,13 +643,27 @@ pub fn check_impl_decls(module: &mut Module) -> Result<(), String> {
 }
 
 fn duplicate_impl_error(imp: &ImplDecl, first: Span) -> String {
+    // SOO-63 item 1: with no filename available at check time (`check`
+    // takes only a `Module`, never the driver's `Closure`/file table), a
+    // bare "first declared at line N, col C" reads as same-file even when
+    // `first` sits in a different module -- misleadingly so when `first` is
+    // a library impl and `imp` is the user's own. Naming the module id (the
+    // one cross-module signal `Span` actually carries here) at least marks
+    // the two spans as not necessarily the same file, without fabricating a
+    // path this layer doesn't have.
+    let first_desc = if first.module == imp.span.module {
+        format!("first declared at line {}, col {}", first.line, first.col)
+    } else {
+        format!(
+            "first declared in module {} at line {}, col {}",
+            first.module, first.line, first.col
+        )
+    };
     format!(
-        "error: duplicate `impl:` for `{}` (line {}, col {}); first declared at line {}, col {}",
+        "error: duplicate `impl:` for `{}` (line {}, col {}); {first_desc}",
         impl_target_str(&imp.target),
         imp.span.line,
         imp.span.col,
-        first.line,
-        first.col
     )
 }
 
@@ -4109,6 +4123,29 @@ mod tests {
         check_trait_decls(&module).unwrap();
         let err = check_impl_decls(&mut module).unwrap_err();
         assert!(err.contains("duplicate `impl:` for `'T`"), "{err}");
+    }
+
+    /// SOO-63 item 1: a cross-module duplicate names the *first* impl's
+    /// module id instead of the plain "first declared at line N, col C"
+    /// wording, which reads as same-file even when it isn't.
+    #[test]
+    fn check_impl_decls_cross_module_duplicate_names_the_first_impls_module() {
+        let src = "trait: Sized['T] : size ( 'T -- i64 ) ; ;\n\
+             impl: Sized for 'T\n\
+               : size drop 1 ;\n\
+             ;\n\
+             impl: Sized for 'T\n\
+               : size drop 2 ;\n\
+             ;\n";
+        let tokens = lex(src).unwrap();
+        let mut module = crate::parser::parse(&tokens).unwrap();
+        module.impls[0].span.module = 7;
+        check_trait_decls(&module).unwrap();
+        let err = check_impl_decls(&mut module).unwrap_err();
+        assert!(
+            err.contains("first declared in module 7 at"),
+            "missing cross-module anchor: {err}"
+        );
     }
 
     // P7.S4 (R7): duplicate check compares `target.pattern` (the `PolyType`),

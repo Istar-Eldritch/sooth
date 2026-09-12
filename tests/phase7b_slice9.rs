@@ -545,7 +545,7 @@ fn duplicate_blanket_impl_across_modules_is_a_declared_error() {
     );
     assert_eq!(
         build_error(&entry),
-        "error: duplicate `impl:` for `'T` (line 3, col 1); first declared at line 3, col 1\n",
+        "error: duplicate `impl:` for `'T` (line 3, col 1); first declared in module 3 at line 3, col 1\n",
         "the declaration-time check must still catch the cross-module blanket-impl duplicate, module-blind"
     );
 }
