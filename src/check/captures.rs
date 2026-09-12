@@ -563,6 +563,7 @@ fn check_quotation_reference_free_effect(
                 eff.name_static,
                 *ty,
                 &location,
+                false,
             ));
         }
     }

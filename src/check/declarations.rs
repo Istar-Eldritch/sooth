@@ -50,7 +50,15 @@ pub(super) fn check_extern_decls(
         if decl.effect.outputs.len() > 1 {
             return Err(extern_multi_output_error(decl));
         }
-        check_reference_free_signature(&decl.name, &decl.effect, structs, enums, arrays)?;
+        check_reference_free_signature(
+            &decl.name,
+            &decl.effect,
+            structs,
+            enums,
+            arrays,
+            decl.span,
+            false,
+        )?;
         check_extern_boundary_types(decl, enums)?;
     }
     Ok(())

@@ -612,9 +612,26 @@ pub(super) fn contains_reference(
 /// word-level check (unlocated, matching its sibling calls) and an
 /// `in_word(ctx)` + `(line N)` suffix for the quotation-effect check, which
 /// has no name of its own to cite.
-pub(super) fn stored_reference_output_error(name: &str, ty: Type, location: &str) -> String {
+///
+/// SOO-63 item 4: `trait_member` is true only for a synthesized `impl:`
+/// member word (`WordDef::is_trait_member`). For those, "take the reference
+/// as an input instead" is impossible advice -- the trait fixes the member's
+/// signature, so the caller can't add a parameter. The real fix is spelling
+/// that specific impl member `inline`, so it splices at the call site instead
+/// of returning an escaping reference.
+pub(super) fn stored_reference_output_error(
+    name: &str,
+    ty: Type,
+    location: &str,
+    trait_member: bool,
+) -> String {
+    let advice = if trait_member {
+        "a trait-mandated signature can't take the reference as an input instead; mark this `impl:` member `inline` so it splices at the call site rather than returning the escaping reference"
+    } else {
+        "take the reference as an input instead"
+    };
     format!(
-        "error: a reference cannot be stored: {} declares the output `{ty}`{location}\n  a `&T`/`&!T` borrows a local of the callee's own frame, which is gone by the time the caller reads it; take the reference as an input instead",
+        "error: a reference cannot be stored: {} declares the output `{ty}`{location}\n  a `&T`/`&!T` borrows a local of the callee's own frame, which is gone by the time the caller reads it; {advice}",
         crate::resolve::render_word(name)
     )
 }

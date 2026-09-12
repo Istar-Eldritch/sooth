@@ -51,7 +51,15 @@ pub(super) fn check_word(
     // capture/escape guards, the loop back-edge reference guard); a real
     // (non-combinator) word declaring a reference output is still rejected.
     if !is_combinator(word) {
-        check_reference_free_signature(&word.name, &word.effect, structs, enums, arrays)?;
+        check_reference_free_signature(
+            &word.name,
+            &word.effect,
+            structs,
+            enums,
+            arrays,
+            word.span,
+            word.is_trait_member,
+        )?;
     }
     let terms = &word.body;
     check_terms_word(
@@ -163,10 +171,18 @@ pub(super) fn check_reference_free_signature(
     structs: &[StructDecl],
     enums: &[EnumDecl],
     arrays: &[ArrayDecl],
+    span: Span,
+    trait_member: bool,
 ) -> Result<(), String> {
     for slot in &effect.outputs {
         if contains_reference(slot.ty, structs, enums, arrays) {
-            return Err(stored_reference_output_error(name, slot.ty, ""));
+            let location = format!(" (line {})", span.line);
+            return Err(stored_reference_output_error(
+                name,
+                slot.ty,
+                &location,
+                trait_member,
+            ));
         }
     }
     for slot in &effect.inputs {
@@ -337,17 +353,49 @@ mod tests {
                 ty: slice,
             }],
         };
-        let err = check_reference_free_signature("mk", &out, &[], &[], &[]).unwrap_err();
+        let err = check_reference_free_signature("mk", &out, &[], &[], &[], Span::default(), false)
+            .unwrap_err();
         // `resolve` mangles declared names in place; the diagnostic names the
         // spelling the user wrote, never `mk__m0`.
-        let mangled = check_reference_free_signature("mk__m0", &out, &[], &[], &[]).unwrap_err();
+        let mangled =
+            check_reference_free_signature("mk__m0", &out, &[], &[], &[], Span::default(), false)
+                .unwrap_err();
         assert!(
             mangled.contains("`mk`") && !mangled.contains("__m0"),
             "unexpected message: {mangled}"
         );
         assert_eq!(
             err,
-            "error: a reference cannot be stored: `mk` declares the output `Slice[i64]`\n  a `&T`/`&!T` borrows a local of the callee's own frame, which is gone by the time the caller reads it; take the reference as an input instead"
+            "error: a reference cannot be stored: `mk` declares the output `Slice[i64]` (line 0)\n  a `&T`/`&!T` borrows a local of the callee's own frame, which is gone by the time the caller reads it; take the reference as an input instead"
+        );
+    }
+
+    /// SOO-63 item 4: a trait-mandated member (`trait_member = true`) can't
+    /// take the reference as an input, since the trait fixes its signature.
+    /// The message names the real remedy -- marking the impl member `inline`
+    /// -- instead of the ordinary (impossible, here) advice.
+    #[test]
+    fn trait_member_output_error_names_the_inline_remedy() {
+        let mut slices = Vec::new();
+        let slice = crate::ast::intern_slice_type(&mut slices, Type::I64, false);
+        let out = StackEffect {
+            inputs: Vec::new(),
+            outputs: vec![TypedSlot {
+                name: None,
+                ty: slice,
+            }],
+        };
+        let span = Span {
+            line: 7,
+            col: 1,
+            module: 0,
+        };
+        let err =
+            check_reference_free_signature("next", &out, &[], &[], &[], span, true).unwrap_err();
+        assert!(err.contains("(line 7)"), "missing span: {err}");
+        assert!(
+            err.contains("mark this `impl:` member `inline`"),
+            "missing inline remedy: {err}"
         );
         let inp = StackEffect {
             inputs: vec![TypedSlot {
@@ -359,7 +407,7 @@ mod tests {
                 ty: Type::I64,
             }],
         };
-        check_reference_free_signature("sum", &inp, &[], &[], &[])
+        check_reference_free_signature("sum", &inp, &[], &[], &[], Span::default(), false)
             .expect("a slice *input* is legal: it borrows the caller's storage");
     }
 
@@ -489,7 +537,7 @@ mod tests {
             check_src("type: P n u32 ;\n: pick ( &!P -- &!u32 ) | p | p &!n ;\n").unwrap_err();
         assert_eq!(
             err,
-            "error: a reference cannot be stored: `pick` declares the output `&!u32`\n  a `&T`/`&!T` borrows a local of the callee's own frame, which is gone by the time the caller reads it; take the reference as an input instead"
+            "error: a reference cannot be stored: `pick` declares the output `&!u32` (line 2)\n  a `&T`/`&!T` borrows a local of the callee's own frame, which is gone by the time the caller reads it; take the reference as an input instead"
         );
     }
 

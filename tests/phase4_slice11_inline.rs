@@ -382,7 +382,7 @@ fn inline_reference_output_pair() {
     let err = check_error(&src.replace("pick inline", "pick"));
     assert_eq!(
         err,
-        "error: a reference cannot be stored: `pick` declares the output `&!u32`\n  a `&T`/`&!T` borrows a local of the callee's own frame, which is gone by the time the caller reads it; take the reference as an input instead"
+        "error: a reference cannot be stored: `pick` declares the output `&!u32` (line 2)\n  a `&T`/`&!T` borrows a local of the callee's own frame, which is gone by the time the caller reads it; take the reference as an input instead"
     );
 }
 

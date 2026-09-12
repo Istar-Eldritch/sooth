@@ -262,7 +262,7 @@ type: Window view Slice[i64] lo usize ;
     );
     assert!(
         err.contains(&format!(
-            "{STORED} `mk` declares the output `Window`\n  a `&T`/`&!T` borrows a local of the callee's own frame, which is gone by the time the caller reads it; take the reference as an input instead"
+            "{STORED} `mk` declares the output `Window` (line 5)\n  a `&T`/`&!T` borrows a local of the callee's own frame, which is gone by the time the caller reads it; take the reference as an input instead"
         )),
         "{err}"
     );
@@ -1182,7 +1182,7 @@ import: core::prelude * ;
     );
     assert!(
         err.contains(&format!(
-            "{STORED} `two-out` declares the output `Slice[i64]`\n  a `&T`/`&!T` borrows a local of the callee's own frame, which is gone by the time the caller reads it; take the reference as an input instead"
+            "{STORED} `two-out` declares the output `Slice[i64]` (line 5)\n  a `&T`/`&!T` borrows a local of the callee's own frame, which is gone by the time the caller reads it; take the reference as an input instead"
         )),
         "{err}"
     );
