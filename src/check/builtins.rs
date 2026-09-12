@@ -99,13 +99,7 @@ pub(super) fn select_overload<'a>(
     caller_module: u32,
     caller_visible: impl Fn(u32) -> bool,
 ) -> OverloadPick<'a> {
-    let matching: Vec<&Overload> = candidates
-        .iter()
-        .filter(|o| {
-            operands.len() >= o.sig.inputs.len()
-                && operands[operands.len() - o.sig.inputs.len()..] == o.sig.inputs[..]
-        })
-        .collect();
+    let matching = crate::check::operand_matching(candidates, operands);
     tier_pick(&matching, caller_module, caller_visible)
 }
 
@@ -182,13 +176,7 @@ pub(super) fn select_overload_fallback_sourced<'a>(
     operands: &[Type],
     caller_module: u32,
 ) -> OverloadPick<'a> {
-    let matching: Vec<&Overload> = candidates
-        .iter()
-        .filter(|o| {
-            operands.len() >= o.sig.inputs.len()
-                && operands[operands.len() - o.sig.inputs.len()..] == o.sig.inputs[..]
-        })
-        .collect();
+    let matching = crate::check::operand_matching(candidates, operands);
     match matching.iter().find(|o| o.module == caller_module) {
         Some(own) => OverloadPick::Pick(own),
         None => match matching.first() {

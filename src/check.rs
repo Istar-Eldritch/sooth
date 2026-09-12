@@ -39,6 +39,23 @@ use crate::ast::{
     VariantTag, VariantTagMode, WordDef, RESERVED_TRAIT_MODULE,
 };
 
+/// LCA of `select_overload`, `select_overload_fallback_sourced`, and
+/// `generated_enum_consumer_type_pick`'s own step 1: all three need the
+/// same "does this candidate's input suffix match the current operands"
+/// filter (SOO-62), so it lives here rather than in three verbatim copies.
+pub(crate) fn operand_matching<'a>(
+    candidates: &'a [Overload],
+    operands: &[Type],
+) -> Vec<&'a Overload> {
+    candidates
+        .iter()
+        .filter(|o| {
+            operands.len() >= o.sig.inputs.len()
+                && operands[operands.len() - o.sig.inputs.len()..] == o.sig.inputs[..]
+        })
+        .collect()
+}
+
 mod audits;
 mod builtins;
 mod captures;

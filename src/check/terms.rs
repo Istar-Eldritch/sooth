@@ -3266,17 +3266,12 @@ fn generated_enum_consumer_type_pick<'a>(
     cells: &mut Vec<OwnedCellDecl>,
     refs: &mut Vec<RefDecl>,
 ) -> Option<&'a Overload> {
-    // The operand filter, verbatim from `select_overload`'s step 1: the
-    // tie-break may only fire among candidates the filter could not
-    // discriminate (2+; a 0- or 1-candidate matching set is today's
-    // Ambiguous/Pick behavior and must not move).
-    let matching: Vec<&Overload> = candidates
-        .iter()
-        .filter(|o| {
-            operands.len() >= o.sig.inputs.len()
-                && operands[operands.len() - o.sig.inputs.len()..] == o.sig.inputs[..]
-        })
-        .collect();
+    // The operand filter, shared with `select_overload`'s step 1 via
+    // `crate::check::operand_matching` (SOO-62): the tie-break may only fire
+    // among candidates the filter could not discriminate (2+; a 0- or
+    // 1-candidate matching set is today's Ambiguous/Pick behavior and must
+    // not move).
+    let matching = crate::check::operand_matching(candidates, operands);
     if matching.len() < 2 {
         return None;
     }
