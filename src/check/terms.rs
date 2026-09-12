@@ -1259,7 +1259,7 @@ fn check_term(
                     // refused with `body leaves `Step[str i64]``). Run the
                     // same tie-break here, before the fallback dispatch,
                     // over this union'd set. It operand-filters internally
-                    // (its step 1 is verbatim `select_overload`'s filter),
+                    // (its step 1 calls the shared `operand_matching`),
                     // so a decline leaves the dispatch below
                     // byte-identically alone (`env_hit_union_fall_through_
                     // no_unique_consumer_keeps_fallback_first_match_bytes`
@@ -3267,11 +3267,11 @@ fn generated_enum_consumer_type_pick<'a>(
     refs: &mut Vec<RefDecl>,
 ) -> Option<&'a Overload> {
     // The operand filter, shared with `select_overload`'s step 1 via
-    // `crate::check::operand_matching` (SOO-62): the tie-break may only fire
+    // `super::operand_matching` (SOO-62): the tie-break may only fire
     // among candidates the filter could not discriminate (2+; a 0- or
     // 1-candidate matching set is today's Ambiguous/Pick behavior and must
     // not move).
-    let matching = crate::check::operand_matching(candidates, operands);
+    let matching = super::operand_matching(candidates, operands);
     if matching.len() < 2 {
         return None;
     }

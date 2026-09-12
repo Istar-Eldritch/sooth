@@ -55,10 +55,8 @@ pub(super) enum OverloadPick<'a> {
 }
 
 /// P7b.S5 (R3.5-R3.8, Fix A-F, Phase 2b): the two-step selector. Step 1
-/// narrows `candidates` to `matching` -- those whose declared inputs match
-/// `operands` -- exactly the predicate `terms.rs`'s inline `.find` used
-/// before Phase 2a's extraction. Step 2 tiers `matching`, never the raw
-/// `candidates`:
+/// narrows `candidates` to `matching` via the shared `operand_matching`
+/// (SOO-62). Step 2 tiers `matching`, never the raw `candidates`:
 ///
 /// 1. a `matching` candidate whose `.module == caller_module` wins (own
 ///    module, the caller's lexically-declaring one -- `span.module` at the
@@ -99,14 +97,14 @@ pub(super) fn select_overload<'a>(
     caller_module: u32,
     caller_visible: impl Fn(u32) -> bool,
 ) -> OverloadPick<'a> {
-    let matching = crate::check::operand_matching(candidates, operands);
+    let matching = super::operand_matching(candidates, operands);
     tier_pick(&matching, caller_module, caller_visible)
 }
 
 /// P7b.S5 (Fix D follow-up): Step 2 of `select_overload`, factored out so a
 /// caller that must build `matching` itself -- `poly.rs:3260`'s window is
 /// sized per-candidate against `PolyType::Concrete` slots, not a single
-/// uniform `Type` operand vector `select_overload`'s own Step 1 assumes --
+/// uniform `Type` operand vector the shared `operand_matching` assumes --
 /// can still share the tier policy verbatim rather than reimplementing it.
 pub(super) fn tier_pick<'a>(
     matching: &[&'a Overload],
@@ -176,7 +174,7 @@ pub(super) fn select_overload_fallback_sourced<'a>(
     operands: &[Type],
     caller_module: u32,
 ) -> OverloadPick<'a> {
-    let matching = crate::check::operand_matching(candidates, operands);
+    let matching = super::operand_matching(candidates, operands);
     match matching.iter().find(|o| o.module == caller_module) {
         Some(own) => OverloadPick::Pick(own),
         None => match matching.first() {

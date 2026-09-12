@@ -39,23 +39,6 @@ use crate::ast::{
     VariantTag, VariantTagMode, WordDef, RESERVED_TRAIT_MODULE,
 };
 
-/// LCA of `select_overload`, `select_overload_fallback_sourced`, and
-/// `generated_enum_consumer_type_pick`'s own step 1: all three need the
-/// same "does this candidate's input suffix match the current operands"
-/// filter (SOO-62), so it lives here rather than in three verbatim copies.
-pub(crate) fn operand_matching<'a>(
-    candidates: &'a [Overload],
-    operands: &[Type],
-) -> Vec<&'a Overload> {
-    candidates
-        .iter()
-        .filter(|o| {
-            operands.len() >= o.sig.inputs.len()
-                && operands[operands.len() - o.sig.inputs.len()..] == o.sig.inputs[..]
-        })
-        .collect()
-}
-
 mod audits;
 mod builtins;
 mod captures;
@@ -105,6 +88,21 @@ use self::terms::borrow_join_disagreement_error;
 use self::terms::check_terms;
 use self::terms::check_terms_relaxed;
 use self::terms::eliminator_arm_names_no_eliminator_error;
+
+/// A candidate matches when its declared inputs are a suffix of `operands`
+/// (the stack top, since the caller consumes the top `n` slots). Shared by
+/// `builtins::select_overload`, `builtins::select_overload_fallback_sourced`,
+/// and `terms::generated_enum_consumer_type_pick`'s own step 1 -- previously
+/// three verbatim copies of this predicate (SOO-62).
+fn operand_matching<'a>(candidates: &'a [Overload], operands: &[Type]) -> Vec<&'a Overload> {
+    candidates
+        .iter()
+        .filter(|o| {
+            operands.len() >= o.sig.inputs.len()
+                && operands[operands.len() - o.sig.inputs.len()..] == o.sig.inputs[..]
+        })
+        .collect()
+}
 use self::terms::eliminator_arm_outside_call_error;
 use self::terms::tagged_literal_reaches_an_eliminator_call;
 use self::terms::EliminatorArmDest;

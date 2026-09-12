@@ -1846,7 +1846,7 @@ pub(super) fn poly_call_term(
     // into a type-mismatch error (`tests/phase7b_slice5.rs`,
     // `poly_body_tier_arm_resolves_same_shaped_ctor_to_callers_own_module`).
     // Routed through the shared tier policy (`tier_pick`, not
-    // `select_overload` directly): `select_overload`'s own Step 1 assumes
+    // `select_overload` directly): the shared `operand_matching` assumes
     // one uniform-length `Type` operand vector, but this call site's
     // per-candidate window is checked for concreteness against each
     // candidate's OWN arity, matching the original per-slot `matches!`
