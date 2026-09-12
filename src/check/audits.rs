@@ -314,9 +314,12 @@ fn audit_poly_reference_free_signature(
     }
     for pt in &sig.outputs {
         if contains_poly_reference(pt, structs, enums, arrays) {
-            return Err(format!(
-                "error: a reference cannot be stored: `{word}` declares the output `{}`\n  a `&T`/`&!T` borrows a local of the callee's own frame, which is gone by the time the caller reads it; take the reference as an input instead",
-                poly_type_str(pt, sig)
+            let location = format!(" (line {})", w.span.line);
+            return Err(stored_reference_output_error(
+                word,
+                &poly_type_str(pt, sig),
+                &location,
+                w.is_trait_member,
             ));
         }
     }
@@ -645,7 +648,7 @@ mod tests {
         .unwrap_err();
         assert_eq!(
             err,
-            "error: a reference cannot be stored: `peek` declares the output `&array['T 4]`\n  a `&T`/`&!T` borrows a local of the callee's own frame, which is gone by the time the caller reads it; take the reference as an input instead"
+            "error: a reference cannot be stored: `peek` declares the output `&array['T 4]` (line 1)\n  a `&T`/`&!T` borrows a local of the callee's own frame, which is gone by the time the caller reads it; take the reference as an input instead"
         );
     }
 
@@ -686,7 +689,7 @@ mod tests {
             .unwrap_err();
         assert_eq!(
             err,
-            "error: a reference cannot be stored: `f` declares the output `Box[&'T]`\n  a `&T`/`&!T` borrows a local of the callee's own frame, which is gone by the time the caller reads it; take the reference as an input instead"
+            "error: a reference cannot be stored: `f` declares the output `Box[&'T]` (line 2)\n  a `&T`/`&!T` borrows a local of the callee's own frame, which is gone by the time the caller reads it; take the reference as an input instead"
         );
     }
 
@@ -777,7 +780,26 @@ mod tests {
         let err = audit_poly_reference_free_signature(&out, "w", &[], &[], &[]).unwrap_err();
         assert_eq!(
             err,
-            "error: a reference cannot be stored: `w` declares the output `Slice[i64]`\n  a `&T`/`&!T` borrows a local of the callee's own frame, which is gone by the time the caller reads it; take the reference as an input instead"
+            "error: a reference cannot be stored: `w` declares the output `Slice[i64]` (line 0)\n  a `&T`/`&!T` borrows a local of the callee's own frame, which is gone by the time the caller reads it; take the reference as an input instead"
+        );
+        // Review round 1 (SOO-63): the poly path must match the mono path
+        // (`word_entry.rs`) for a generic `impl:` member -- span present,
+        // and the `inline` remedy rather than the impossible "take the
+        // reference as an input" advice a trait-mandated signature can't
+        // act on.
+        let mut trait_member_out = mk(
+            vec![PolyType::Var(0)],
+            vec![PolyType::Concrete(slice), PolyType::Var(0)],
+        );
+        trait_member_out.is_trait_member = true;
+        trait_member_out.span.line = 9;
+        let trait_err =
+            audit_poly_reference_free_signature(&trait_member_out, "w;Iter;0;'T0", &[], &[], &[])
+                .unwrap_err();
+        assert!(trait_err.contains("(line 9)"), "missing span: {trait_err}");
+        assert!(
+            trait_err.contains("mark this `impl:` member `inline`"),
+            "missing inline remedy: {trait_err}"
         );
         let inp = mk(
             vec![PolyType::Concrete(slice), PolyType::Var(0)],

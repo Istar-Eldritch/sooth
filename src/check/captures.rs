@@ -561,7 +561,7 @@ fn check_quotation_reference_free_effect(
             let location = format!("{} (line {})", in_word(ctx), span.line);
             return Err(stored_reference_output_error(
                 eff.name_static,
-                *ty,
+                &ty.to_string(),
                 &location,
                 false,
             ));

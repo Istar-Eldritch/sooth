@@ -277,7 +277,7 @@ fn noninline_slice_member_output_ban_holds_post_fix() {
     );
     assert!(
         stderr.contains(
-            "error: a reference cannot be stored: `next` (member of trait `Iterator` for `Slice[i64]`) declares the output `Step[i64 Slice[i64]]` (line 17)\n  a `&T`/`&!T` borrows a local of the callee's own frame, which is gone by the time the caller reads it; a trait-mandated signature can't take the reference as an input instead; mark this `impl:` member `inline` so it splices at the call site rather than returning the escaping reference"
+            "error: a reference cannot be stored: `next` (member of trait `Iterator` for `Slice[i64]`) declares the output `Step[i64 Slice[i64]]` (line 17)\n  a `&T`/`&!T` borrows a local of the callee's own frame, which is gone by the time the caller reads it; a trait-mandated signature can't take the reference as an input; mark this `impl:` member `inline` so it splices at the call site rather than returning the escaping reference"
         ),
         "the member output ban fires byte-exact, got: {stderr}"
     );

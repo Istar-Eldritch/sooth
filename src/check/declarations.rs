@@ -4090,6 +4090,13 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("duplicate `impl:` for `i64`"), "{err}");
+        // The same-module branch of `duplicate_impl_error` keeps the plain
+        // "first declared at line N, col C" wording (no module id); only
+        // the cross-module branch names a module.
+        assert!(
+            err.contains("first declared at line") && !err.contains("in module"),
+            "same-module wording regressed: {err}"
+        );
     }
 
     /// G3 (P7b.S9 Phase 4, R4/R5): a single cross-module blanket

@@ -621,12 +621,12 @@ pub(super) fn contains_reference(
 /// of returning an escaping reference.
 pub(super) fn stored_reference_output_error(
     name: &str,
-    ty: Type,
+    ty: &str,
     location: &str,
     trait_member: bool,
 ) -> String {
     let advice = if trait_member {
-        "a trait-mandated signature can't take the reference as an input instead; mark this `impl:` member `inline` so it splices at the call site rather than returning the escaping reference"
+        "a trait-mandated signature can't take the reference as an input; mark this `impl:` member `inline` so it splices at the call site rather than returning the escaping reference"
     } else {
         "take the reference as an input instead"
     };

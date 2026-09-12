@@ -179,7 +179,7 @@ pub(super) fn check_reference_free_signature(
             let location = format!(" (line {})", span.line);
             return Err(stored_reference_output_error(
                 name,
-                slot.ty,
+                &slot.ty.to_string(),
                 &location,
                 trait_member,
             ));
