@@ -377,13 +377,23 @@ that error can't fire here).
   whenever 2+ same-named headers exist, which is this shape's own precondition,
   so that path always falls through to the pre-existing
   `no_type_arguments_error` regardless of this slice.
-- **G-S14.4** — destructure face: the same unreachable-minter shape as
-  G-S14.2, but via the destructure spelling (`Widget>`, which traverses the
-  identical pre-guard code path via `name.strip_suffix('>')`, `terms.rs:1891`) —
-  proves the gate is not constructor-only.
+- **G-S14.4 (unit-level, not a golden)** — destructure face: the slot the
+  pre-guard reads is chosen by `name.strip_suffix('>')` before the gate ever
+  runs (`terms.rs:1891`), so the gate itself does not distinguish the two
+  faces. Not constructible end-to-end as a golden, though: any program that
+  reaches a `Widget>` destructure of an unreachable minter's instantiation
+  must first *construct* one, and that constructor call hits this same gate
+  first — either the minter is reachable (gate passes, both faces) or the
+  caller mints its own header locally (a second `env` candidate, the
+  `[only]`-candidate pre-guard never entered). Coverage is instead a unit,
+  `own_header_gate_unreachable_destructure_face_is_located_error`
+  (`terms.rs`), built the same way as the constructor-face units above.
 - The six rewritten `phase7b_slice9.rs` fixtures (G1, G1a, G1b, G1e, G1f, G2r)
   stay green with their imports added — each is a pinned "behavior preserved
-  where the rule permits it" witness (R-4). G1c/G1d stay green unmodified.
+  where the rule permits it" witness (R-4). G1c/G1d stay green unmodified. The
+  two `phase7b_slice10.rs` fixtures (`z.sth`, `b.sth`) named in the O-2
+  amendment likewise stay green with their imports added, assertions
+  unchanged.
 
 No golden is needed for `ambiguous_generic_headers_error` on the own-header
 face — per the Ruling, the narrowed gate cannot produce it there.
@@ -395,8 +405,9 @@ face — per the Ruling, the narrowed gate cannot produce it there.
   helper extraction, the new gate, and units), `tests/phase7b_slice9.rs` (the 6
   fixture import-adds), `tests/phase7b_slice10.rs` (the 2 import-adds to
   `z.sth`/`b.sth`, per the O-2 amendment above — fixture bodies and
-  assertions otherwise untouched), `tests/phase7b_slice14.rs` (new file, the 4
-  new goldens), and roadmap docs (`slice11-spec.md`,
+  assertions otherwise untouched), `tests/phase7b_slice14.rs` (new file, the 3 new goldens — the destructure
+  face of the old fourth is covered by the unit named in the G-S14.4 bullet
+  below), and roadmap docs (`slice11-spec.md`,
   `P7b-higher-kinded-types.md`, `ROADMAP.md`). This list is closed, not
   conditional — O-2 (above) audits the full scope, amendment included.
 - **NFR-2 — S10 behaviorally unchanged.** `foreign_single_candidate_grounding`'s
@@ -419,7 +430,10 @@ face — per the Ruling, the narrowed gate cannot produce it there.
 
 - Any change to `foreign_single_candidate_grounding`'s own external behavior
   beyond the extraction needed to share `reachable_modules_for_header` (R-1).
-- The S10 headerless-caller goldens (`tests/phase7b_slice10.rs`).
+- The S10 headerless-caller goldens' (`tests/phase7b_slice10.rs`) own
+  assertions and behavior, which stay unchanged; two of that file's fixtures
+  do gain an in-scope import-add per the O-2 amendment (Blast radius), which
+  is a fixture-compilability fix, not a change to what those goldens pin.
 - The `dp_g`/`dp_g2`/`dp_g3` declaration-order-first ambiguity gap
   (slice11-probes) — a separate, still-undecided finding.
 
@@ -428,9 +442,10 @@ face — per the Ruling, the narrowed gate cannot produce it there.
 None remaining that require a user decision. All open questions from the first
 spec draft (O-1, O-2, O-3, plus the three review rounds' findings) were closed
 by reading the code during this revision, per the evidence cited throughout:
-G2's non-participation (verified above), the absence of other affected test
-files (O-2, verified above), the own header's harmlessness in `declarers` under
-the narrowed gate (verified under Mechanism above — and now more clearly true
-than the retracted verbatim design's O-3 claim, since there is no ambiguity
-arithmetic for it to perturb at all), and the G1/G2r import directions
-(verified empirically above).
+G2's non-participation (verified above), the full scope of affected test
+files — `phase7b_slice9.rs`'s six fixtures plus, per the O-2 amendment found
+during implementation, `phase7b_slice10.rs`'s two — the own header's
+harmlessness in `declarers` under the narrowed gate (verified under Mechanism
+above — and now more clearly true than the retracted verbatim design's O-3
+claim, since there is no ambiguity arithmetic for it to perturb at all), and
+the G1/G2r import directions (verified empirically above).

@@ -2176,20 +2176,6 @@ fn foreign_single_candidate_grounding(
     }
 }
 
-/// P7b.S10 (R2): the generic-header twin of `driver.rs`'s
-/// `walk_type_export_origin` -- the same chase (follow an unqualified
-/// selective re-export, else the declaring import target whose qualifier
-/// key sorts lexicographically smallest -- keys are source text (the same
-/// strings the diagnostic renderer uses as display names), while module
-/// ids follow import-discovery order, so keying the single origin on ids
-/// would flip it with the hub's source import order; `None` on a cycle or
-/// a dead end), but over the generic header registry rather than the concrete
-/// `StructDecl`/`EnumDecl` scan, which never sees a generic `type:` header
-/// (`parser.rs` excludes it from that scan, and it lives in the generic
-/// registry instead). Structurally the same walk, not a call into that one
-/// -- and not the precomputed `type_origin` table either: both are
-/// concrete-type-only, so neither can resolve a generic header through a hub
-/// at all (GL/GN would fail if built on either).
 /// P7b.S14 (R-1): the caller's fully-resolved reachable-module set for a
 /// given header name, extracted from `foreign_single_candidate_grounding`'s
 /// own construction so the S9 pre-guard's provenance gate can share it
@@ -2237,6 +2223,20 @@ fn reachable_modules_for_header(
     (declarers, reachable)
 }
 
+/// P7b.S10 (R2): the generic-header twin of `driver.rs`'s
+/// `walk_type_export_origin` -- the same chase (follow an unqualified
+/// selective re-export, else the declaring import target whose qualifier
+/// key sorts lexicographically smallest -- keys are source text (the same
+/// strings the diagnostic renderer uses as display names), while module
+/// ids follow import-discovery order, so keying the single origin on ids
+/// would flip it with the hub's source import order; `None` on a cycle or
+/// a dead end), but over the generic header registry rather than the concrete
+/// `StructDecl`/`EnumDecl` scan, which never sees a generic `type:` header
+/// (`parser.rs` excludes it from that scan, and it lives in the generic
+/// registry instead). Structurally the same walk, not a call into that one
+/// -- and not the precomputed `type_origin` table either: both are
+/// concrete-type-only, so neither can resolve a generic header through a hub
+/// at all (GL/GN would fail if built on either).
 fn walk_generic_header_origin(
     start: u32,
     name: &str,
@@ -5953,6 +5953,55 @@ mod tests {
         let only = widget_ctor_candidate(borrowed, 4);
         let modules = module_views(module_view(&[], &[], &[]), 5);
         let err = ground_in_module_3_view(&only, "Widget", &cell, &[], Some(&modules))
+            .expect_err("the borrowed candidate's declaring module is unreachable, so the borrow must be refused");
+        assert!(
+            err.contains(
+                "the only `Widget` instantiation in scope is declared in a module this module does not import"
+            ),
+            "unexpected message: {err}"
+        );
+    }
+
+    /// P7b.S14 (R-1/R-2): the gate's destructure face. The slot the pre-guard
+    /// reads is chosen by `name.strip_suffix('>')` before the gate ever runs
+    /// (`only.sig.inputs.first()` here, versus `outputs.first()` for a ctor),
+    /// so the gate itself is unchanged by which face is calling it -- this
+    /// unit is the only place that shape is exercised, because it is not
+    /// constructible end-to-end as a golden: any program that reaches a
+    /// `Widget>` destructure of an unreachable-minter's instantiation must
+    /// first *construct* one, and the constructor call hits this same gate
+    /// first (either the minter is reachable -- gate passes on both faces --
+    /// or the caller mints its own header locally, which is a second `env`
+    /// candidate and the `[only]`-candidate pre-guard is never entered at
+    /// all). See `tests/phase7b_slice14.rs`'s G-S14.4 note.
+    #[test]
+    fn own_header_gate_unreachable_destructure_face_is_located_error() {
+        let mut generics = GenericTypes::with_bases(0, 0);
+        generics.structs.push(generic_struct_decl(
+            "Widget",
+            3,
+            &["'T"],
+            &[("v", PolyType::Var(0))],
+        ));
+        generics.structs.push(generic_struct_decl(
+            "Widget",
+            4,
+            &["'T"],
+            &[("v", PolyType::Var(0))],
+        ));
+        let mut scratch = ScratchRegs::default();
+        let borrowed = generics.instantiate_struct(1, &[Type::I64], &[], 4, scratch.regs());
+        let cell = RefCell::new(generics);
+        let only = Overload {
+            sig: Sig {
+                inputs: vec![borrowed],
+                outputs: vec![Type::I64],
+            },
+            symbol: "Widget[i64]>".to_string(),
+            module: 4,
+        };
+        let modules = module_views(module_view(&[], &[], &[]), 5);
+        let err = ground_in_module_3_view(&only, "Widget>", &cell, &[], Some(&modules))
             .expect_err("the borrowed candidate's declaring module is unreachable, so the borrow must be refused");
         assert!(
             err.contains(

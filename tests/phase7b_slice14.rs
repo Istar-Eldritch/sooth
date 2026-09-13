@@ -177,30 +177,3 @@ fn own_header_grounds_via_a_local_explicit_instantiation_with_no_import() {
         "a local explicit instantiation of the caller's own header is a working, import-free escape hatch"
     );
 }
-
-/// G-S14.4: G-S14.2's destructure-face twin (`Widget>`, which traverses the
-/// identical pre-guard code path via `name.strip_suffix('>')`) -- proves the
-/// gate is not constructor-only.
-#[test]
-fn own_header_cannot_ground_when_the_foreign_minter_is_unreachable_destructure() {
-    let t = Tree::new("g-s14-4-unreachable-destructure");
-    write_manifest(&t);
-    write_eager_minter(&t);
-    t.write(
-        "a.sth",
-        "import: intrinsics * ;\n\
-         type: Widget['T] v 'T ;\n\
-         : mk3 ( i64 -- i64 ) Widget Widget> ;\n\
-         export: mk3 ;\n",
-    );
-    let entry = t.write(
-        "main.sth",
-        "import: intrinsics * ; import: hosted::show | . | ;\n\
-         import: self::a ; import: self::b ;\n\
-         : main ( -- ) 5 a::mk3 . b::use2 . ;\n",
-    );
-    assert_eq!(
-        build_error(&entry),
-        "error: `Widget` in `mk3` (line 3) cannot ground at this module's own header: the only `Widget` instantiation in scope is declared in a module this module does not import\n  note: name an instantiation of this module's own `Widget` explicitly (in a signature or an annotation) so it is minted here, rather than borrowing another module's\n"
-    );
-}

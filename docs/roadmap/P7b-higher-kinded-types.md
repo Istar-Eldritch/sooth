@@ -863,9 +863,9 @@ the 2+ rule says record, not refactor, so no refactor is made.
 Implemented in `1f73e1b` + `0aa162f` (spec
 [slice14-spec](./P7b/slice14-spec.md)). Closes SOO-58 (a P7b.S11 open ruling
 question): `bare_generated_word_own_module_grounding`'s own-header path
-(`terms.rs`) no longer borrows a foreign sole candidate's ctor arguments
-unconditionally on the same-named-foreign-header collision shape. A shared
-`reachable_modules_for_header` helper, extracted from
+(`terms.rs`) grounds the foreign sole candidate's ctor-argument borrow behind
+a reachability check, on the same-named-foreign-header collision shape. A
+shared `reachable_modules_for_header` helper, extracted from
 `foreign_single_candidate_grounding`'s existing reachability walk, backs a
 narrowed gate at the own-header call site: the borrowed argument list's
 declaring module must be reachable through the caller's own import set, or
@@ -879,10 +879,20 @@ caller with no import of the minter but an explicit local instantiation of its
 own header (e.g. `: mkown ( i64 -- Widget[i64] ) Widget ;`) is the working
 escape hatch — the second `env` candidate this mints means the single-candidate
 arm, and this gate, is never entered. Goldens in `tests/phase7b_slice14.rs`
-(G-S14.1–G-S14.4); the six `phase7b_slice9.rs` fixtures the gate now reaches
+(G-S14.1–G-S14.3); the destructure face (G-S14.4) is not constructible
+end-to-end (any path to it first hits the same gate through the constructor
+face) so its coverage is a unit,
+`own_header_gate_unreachable_destructure_face_is_located_error`
+(`src/check/terms.rs`). The six `phase7b_slice9.rs` fixtures the gate reaches
 (G1, G1a, G1b, G1e, G1f, G2r) carry the added import that keeps them grounded
 under the narrowed rule, and `tests/phase7b_slice10.rs`'s `z.sth`/`b.sth`
 fixtures likewise.
+Growth-structure re-check (CLAUDE.md, at this phase's exit) over
+`src/check/terms.rs`: 0 new signals fire beyond the one this phase itself
+answered (two call sites needing the same reachable-module-set computation),
+which the `reachable_modules_for_header` extraction (R-1) already resolves by
+sharing only that computation, not the whole gate; no further split is
+warranted.
 
 **Dogfood:** S6 — a program that `map`s and folds over `Option`, `Result`, and `List` through
 shared bounds, with the impls declared against the real lib types and output matching
