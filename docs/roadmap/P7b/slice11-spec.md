@@ -177,12 +177,14 @@ all checked at the amendment:
   if`) — row-based `if` has no poly sig, so the spliced-output channel is
   inert there; consistent with the ruling, previously silently grounded by
   the retired scope borrow.
-- **The S9 pre-guard exemption stands.**
+- **The S9 pre-guard is provenance-gated (P7b.S14).**
   `bare_generated_word_own_module_grounding` still derives ctor parameters
   from a foreign sole candidate's argument list in the
-  same-named-foreign-header collision shape — a deliberate S9/S10-domain
-  exemption preserved byte-identical by the slice's NFR; strictifying it is a
-  separate future ruling, not part of this one.
+  same-named-foreign-header collision shape, but only when that candidate's
+  declaring module is reachable through the caller's own import set; an
+  unreachable declaring module is a located `own_header_cannot_ground_error`
+  instead of a silent borrow. See
+  [slice14-spec](./slice14-spec.md) for the gate and its ruling.
 
 ### Explicit-args category (R-6)
 

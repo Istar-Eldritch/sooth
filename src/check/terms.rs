@@ -2094,7 +2094,12 @@ fn bare_generated_word_own_module_grounding(
 ///
 /// The exemptions (R1, in the spec's order):
 /// 1. own header -- unreachable here (the caller is headerless; the own-header
-///    path branched off above);
+///    path branched off above). That own-header path is not exemption-free,
+///    though: it has its own, differently-gated caller (P7b.S14's narrowed
+///    provenance check in `bare_generated_word_own_module_grounding`, which
+///    reuses `reachable_modules_for_header` but omits this function's
+///    ambiguity-count clause), so this list is this function's own story,
+///    not the own-header caller's;
 /// 2. at most one same-named header reachable **and** the sole candidate's
 ///    declaring module itself reachable, over the fully-resolved reachable set
 ///    (raw `imports` ∪ `selective` targets, name-independent -- GO -- plus the
