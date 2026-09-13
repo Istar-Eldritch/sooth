@@ -1508,11 +1508,14 @@ fn generic_args_of(pattern: &PolyType, ty_args: &[Type]) -> Vec<PolyType> {
     match pattern {
         PolyType::Generic { args, .. } => args.clone(),
         PolyType::Concrete(_) => ty_args.iter().map(|t| PolyType::Concrete(*t)).collect(),
-        // S1-16: an `App`-shaped candidate never reaches specificity
-        // comparison -- `poly_cross_match` rejects an `App` slot as
-        // unsupported before ordering ever compares two candidates (S1-17.i).
+        // S1-16: the patterns here are `impl:` target patterns, and an
+        // impl target can never carry an `App` -- `parse_impl_target`'s
+        // fence rejects one anywhere in the target's structure at parse
+        // time (see `match_impl_target_rec`'s own `App` arm) -- so an
+        // App-shaped candidate pattern never reaches specificity
+        // comparison.
         PolyType::App { .. } => unreachable!(
-            "an App-shaped candidate pattern never reaches specificity comparison (S1-17.i)"
+            "an impl-target pattern never carries an App (parse_impl_target's fence rejects one at parse time)"
         ),
         _ => unreachable!("ty is generic-shaped, so a matching pattern is Generic or Concrete"),
     }
@@ -1528,7 +1531,7 @@ pub(super) fn generic_len_args_of(pattern: &PolyType, len_args: &[Len]) -> Vec<L
         PolyType::Concrete(_) => len_args.to_vec(),
         // S1-16: see `generic_args_of`'s own `App` arm.
         PolyType::App { .. } => unreachable!(
-            "an App-shaped candidate pattern never reaches specificity comparison (S1-17.i)"
+            "an impl-target pattern never carries an App (parse_impl_target's fence rejects one at parse time)"
         ),
         _ => unreachable!("ty is generic-shaped, so a matching pattern is Generic or Concrete"),
     }
@@ -1541,11 +1544,11 @@ fn quotation_parts(pattern: &PolyType, eff: &QuotEffect) -> (Vec<PolyType>, Vec<
             eff.inputs.iter().map(|t| PolyType::Concrete(*t)).collect(),
             eff.outputs.iter().map(|t| PolyType::Concrete(*t)).collect(),
         ),
-        // S1-16: an `App` never has a quotation shape, so a candidate
-        // reaching a quotation-typed slot as an `App` is unreachable for
-        // the same reason `generic_args_of`'s own `App` arm is.
+        // S1-16: an `App` never has a quotation shape, and an impl-target
+        // pattern can never carry an `App` at all (see `generic_args_of`'s
+        // own `App` arm).
         PolyType::App { .. } => unreachable!(
-            "an App-shaped candidate pattern never reaches specificity comparison (S1-17.i)"
+            "an impl-target pattern never carries an App (parse_impl_target's fence rejects one at parse time)"
         ),
         _ => unreachable!("ty is quotation-shaped, so a matching pattern is Quotation or Concrete"),
     }

@@ -34,7 +34,7 @@
 //! resolves a `Bound::User` over `ty = CtorImage` end to end (ruling
 //! R-13.3). G10's four retargets live where the pins live:
 //! `src/check/poly/tests.rs` (:610, :1774; the :4537 sub-fixture-2 retarget
-//! landed with phase 2) and `tests/phase7b_slice12.rs` (:450, retargeted in
+//! landed with phase 2) and `tests/phase7b_slice12.rs` (:435, retargeted in
 //! phase 1).
 //!
 //! Harness style from `tests/phase7b_slice8.rs` / `tests/phase7b_slice12.rs`.
@@ -440,4 +440,90 @@ fn cursor_bounded_app_pass_through_grounds_end_to_end() {
          : main ( -- ) 42 43 Some outer drop ;\n",
     );
     assert_eq!(stdout, "", "the program prints nothing");
+}
+
+/// (R2-1, round-2 review pin) R-13.4's first-match-wins trial now admits
+/// App-declared candidates. Before the lift, the S1-17.i input fence made
+/// `poly_cross_relate` reject any App-declared candidate inside
+/// `poly_cross_call`'s trial (`crosscall.rs:29`), so a call to an
+/// overloaded name always skipped one; the lift admits the candidate and
+/// leaves the trial's first-match-wins rule alone (no ground type to rank
+/// by — the spec's R-13.4). This golden pins that dispatch-order change:
+/// the FIRST declared `pick` is App-declared (`'F['U]`) and compatible
+/// with the call site — supplied `Wrap['T]`, it relates through the
+/// `(App, Generic)` arm, R-13.1's ctor-image head bind — and a second
+/// non-App candidate (`Wrap['U]`) is compatible too. The two are
+/// observably different — the first consumes the App and yields `i64`,
+/// the second passes the `Wrap` through — and the caller `g` declares an
+/// `i64` output, so only the first candidate's selection checks clean.
+/// The trial's choice is the whole story because `g` is deliberately
+/// never instantiated: a grounded cross-call to a two-candidate name is
+/// the overload canary's located rejection
+/// (`tests/phase7_slice3k.rs:326`, R4/N1), which cannot route either
+/// candidate. Verified against the live binary before pinning: this
+/// fixture builds green, while the non-App candidate alone (or declared
+/// first) fails `g`'s own stack check with "stack effect mismatch in `g`
+/// / body leaves `Wrap['T]`, but the declared outputs are `i64`" — the
+/// verdict the baseline's fence forced here by skipping the App-declared
+/// candidate.
+#[test]
+fn app_declared_overload_candidate_wins_first_match() {
+    build_ok(
+        "r2-1-app-declared-first-match",
+        "\\ S13 review pin R2-1 — R-13.4's first-match-wins trial with an\n\
+         \\ App-declared first candidate: pick #1 declares 'F['U] and is\n\
+         \\ compatible with the call site, and so is pick #2 (Wrap['U]).\n\
+         \\ Predicted: the FIRST (App-declared) candidate wins the trial.\n\
+         \n\
+         type: Wrap['X] | Wrap 'X ;\n\
+         \n\
+         : pick ['F 'U] ( 'F['U] -- i64 ) drop 1 ;\n\
+         : pick ['U] ( Wrap['U] -- Wrap['U] ) ;\n\
+         : g ['T] ( Wrap['T] -- i64 ) pick ;\n\
+         : main ( -- ) ;\n",
+    );
+}
+
+/// (R2-2, round-2 review pin) G12's negative twin, sibling to
+/// `cursor_bounded_app_pass_through_grounds_end_to_end` above: the same
+/// type/trait/step/outer/main with the `impl: Cursor for Opt` block
+/// removed, so nothing discharges the `Cursor` bound. This turns the
+/// R-13.3 verification evidence — at implementation a live-probe claim
+/// recorded in commit e3c7799 ("dropping the impl makes the mono site
+/// reject") — into a durable pinned golden. The rejection fires at the
+/// mono site's own bound discharge (`check_poly_call`'s
+/// `resolve_user_bound` loop — the shared path G12 exercises positively
+/// through compose), never in compose itself: `main` is monomorphic, so
+/// the call grounds `It` → `CtorImage(Opt)` and the loop runs with
+/// `ty = CtorImage` right there. Built the way the baseline was captured
+/// — byte-verbatim, bare temp dir, no manifest — through
+/// `build_error_bare` like G2; bytes pinned from the live binary.
+#[test]
+fn cursor_bounded_app_pass_through_without_impl_is_a_bound_discharge_rejection() {
+    let stderr = build_error_bare(
+        "r2-2-cursor-without-impl",
+        "\\ S13 review pin R2-2 — G12's twin: the same type/trait/step/outer/main\n\
+         \\ with the `impl: Cursor for Opt` block removed, so nothing discharges\n\
+         \\ the `Cursor` bound. Predicted: the mono site rejects the bound\n\
+         \\ discharge.\n\
+         import: intrinsics * ;\n\
+         \n\
+         type: Opt['X] | Some 'X | None ;\n\
+         \n\
+         trait: Cursor['It: * -> *]\n\
+         \x20 : next ( 'It['T] -- 'It['T] ) ;\n\
+         ;\n\
+         \n\
+         : step ['It: Cursor] ( i64 'It[i64] -- i64 )\n\
+         \x20 drop ;\n\
+         \n\
+         : outer ['It: Cursor] ( i64 'It[i64] -- i64 )\n\
+         \x20 step ;\n\
+         \n\
+         : main ( -- ) 42 43 Some outer drop ;\n",
+    );
+    assert_eq!(
+        stderr,
+        "error: cannot instantiate `'It` of `outer` with `Opt` in `main` (line 19, col 26)\n  `Opt` does not satisfy `Cursor`: no `( 'It['T] -- 'It['T] )` found\n"
+    );
 }

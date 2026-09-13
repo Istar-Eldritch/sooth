@@ -74,7 +74,10 @@ Key decisions, as shipped:
   no ground type to key on, so declaration order decides exactly as before
   the lift. The non-App ambiguity canary
   (`a_cross_call_through_an_overloaded_generic_word_is_a_located_rejection`,
-  `tests/phase7_slice3k.rs:326`) is the only related pin and stays green.
+  `tests/phase7_slice3k.rs:326`) stays green; the dispatch-order change
+  itself (App-declared candidates now entering the trial) is pinned by
+  `app_declared_overload_candidate_wins_first_match`
+  (`tests/phase7b_slice13.rs:470`).
 - **Output arms render structurally through the mapping.** `poly_cross_output`
   gains `Generic`, `Array`, and `App` arms before the wildcard, every nested
   variable through one shared lookup — `poly_cross_output_image`, split out
@@ -100,7 +103,8 @@ Key decisions, as shipped:
 - **The `ast.rs` change is comment-only.** The `Image` doc comment ("no type
   constructor ever needs representing here") went stale with the lift; it
   now records `Type::CtorImage` as the one constructor an image can carry.
-  `ctor_image_type` remains the sole constructor; no behavior change.
+  `ctor_image_type` is the sole mint of record for real ctor names
+  (construction.rs's no-generics placeholder aside); no behavior change.
 
 One accepted limitation, recorded: `poly_image_str` renders a concrete image
 through `Type::name`, which returns the bare ctor name — two same-named
@@ -131,9 +135,10 @@ App-head-CtorImage invariant assert (`src/ir/driver.rs:708-711`).
 
 Re-run on `crosscall.rs` as it now stands (780 lines): 0/5 house signals —
 no split. Recorded non-signal observations: the head-bind
-consistency/conflict block appears three times (Var arm inline, the two
-input arms as its verbatim twins, by design), and the output render arms
-mirror the match dispatch.
+consistency/conflict block appears three times (same logic in each: the
+Var arm keeps it inline as an expression, and the two input arms' blocks
+are byte-verbatim twins of each other, by design), and the output render
+arms mirror the match dispatch.
 
 ## Implementation
 
@@ -146,9 +151,10 @@ mirror the match dispatch.
   (G5); `tests/phase7b_slice12.rs` :435
   `cross_call_app_slot_checks_clean_after_the_hkt_lift` (S12's byte-pin →
   green Ok, `build_error_bare` moved out). Nine input-arm units
-  (`src/check/poly/tests.rs:1842-2120`: head+arg bind, concrete-arg bind,
-  ctor-image bind, not-yet-groundable, len-domain rejection, arity
-  mismatch, head conflict, the R-13.2 face, the G5 twin).
+  (`src/check/poly/tests.rs`: the G5 twin at :1774, the other eight at
+  :1842-2120: head+arg bind, concrete-arg bind, ctor-image bind,
+  not-yet-groundable, len-domain rejection, arity mismatch, head conflict,
+  the R-13.2 face).
   `tests/phase7b_slice13.rs` created with the `build_error_bare` copy
   (:163) — G2 (:190) and G5 (:218) its first goldens. Suite 3538/0 per the
   commit message.

@@ -3004,8 +3004,8 @@ pub struct CallInst {
 /// located rejection at the call site. Since P7b.S13, the one type
 /// constructor an image can carry is `Type::CtorImage` (R-13.1): a concrete
 /// ctor supplied as an App head binds through it, riding `Concrete` so the
-/// enum grows no variant of its own -- it exists only to be resolved as an
-/// `App` head, never as a value type.
+/// enum grows no variant of its own -- it is resolved as an `App` head or
+/// read for bound discharge, never as a value type.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Image {
     Concrete(Type),

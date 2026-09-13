@@ -356,8 +356,8 @@ pub(super) fn poly_cross_match(
         {
             // The caller applied one of its own variables, so the callee's
             // head variable images to that caller variable -- the same
-            // consistency/conflict block the Var arm uses above (kept inline
-            // there; this is its verbatim twin).
+            // consistency/conflict block the Var arm uses above, its twin
+            // in logic (the Var arm keeps it inline as an expression).
             let image = Image::CallerVar(*sh);
             match mapping.iter().find(|(id, _)| id == dh) {
                 Some((_, prev)) if *prev != image => {
