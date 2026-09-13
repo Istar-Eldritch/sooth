@@ -16,12 +16,22 @@
 //!   binary (the only moving verdicts of the slice; the `note: declared`
 //!   tail renders the caller's effect via `effect_str`).
 //!
-//! Goldens G1/G3/G4/G6–G9 (the output arms and the end-to-end grounding
-//! chain) land with the slice's phase 2; G12 (the Cursor-bounded grounding
-//! twin) with phase 3. G10's four retargets live where the pins live:
-//! `src/check/poly/tests.rs` (:608, :1782) and `tests/phase7b_slice12.rs`
-//! (:450, retargeted in phase 1), plus `tests.rs:3935` sub-fixture 2 in
-//! phase 2.
+//! - G1/G3/G4/G6/G7/G8 (phase 2, the output arms): the lifted
+//!   `poly_cross_output` renders Generic/Array/App outputs through the
+//!   mapping, and the grounding chain (compose → apply_subst → lowering)
+//!   carries them end to end. G1 doubles as G9 — the mechanism walkthrough
+//!   (input arm binds head+arg, output arm renders `'It['T]`, compose folds
+//!   θ_h, apply_subst's App arm grounds, lowering asserts the
+//!   App-head-CtorImage invariant) — and is the golden that drives the whole
+//!   chain, so it rides `build_run_keep`; G8 rides `build_ok` only (no array
+//!   constructor exists intrinsics-only, so no grounding main is spellable
+//!   and the claim is the walk-time render). All the green goldens' stdout
+//!   is pinned empty (nothing prints).
+//!
+//! G12 (the Cursor-bounded grounding twin) lands with phase 3. G10's four
+//! retargets live where the pins live: `src/check/poly/tests.rs` (:608,
+//! :1782; the :3935 sub-fixture-2 retarget landed with phase 2) and
+//! `tests/phase7b_slice12.rs` (:450, retargeted in phase 1).
 //!
 //! Harness style from `tests/phase7b_slice8.rs` / `tests/phase7b_slice12.rs`.
 //! Golden sources are embedded strings, not reads of `probes/` (those files
@@ -215,5 +225,163 @@ fn bare_var_supplied_where_app_declared_is_a_rendered_mismatch() {
     assert_eq!(
         stderr,
         "error: type mismatch in `outer` (line 9)\n  `step` expected `'F['T]`, found `'F`\n  note: declared ( -- )\n"
+    );
+}
+
+/// (G1, phase 2) Probe E (`probes/s13_e_post_lift_green.sth`, verbatim but
+/// for its own `import:` line — the harness prelude supplies it): the
+/// end-to-end App pass-through cross-call — a mono `main` grounding
+/// `Wrap`/i64, a poly caller whose own body walk hits the cross-call, and a
+/// poly callee with an App-typed pass-through signature. Grounding is the
+/// point (it drives the whole chain: mono App grounding → compose →
+/// apply_subst's App arm → lowering's CtorImage expect), so this rides
+/// `build_run_keep`: exit 0, stdout empty (the program is `42 Wrap outer
+/// drop`; nothing prints).
+///
+/// This golden doubles as G9, the mechanism walkthrough: the input arm binds
+/// the callee's head and argument to caller images (`F→CallerVar(It)`,
+/// `T→CallerVar(T)`), the output App arm renders `'It['T]` back in the
+/// caller's variable space (matching outer's declared output), compose folds
+/// the mapping into θ_h = {F→CtorImage(Wrap), T→i64}, apply_subst resolves
+/// step's `'F['T]` → `Wrap[i64]`, and lowering asserts the
+/// App-head-CtorImage invariant (`src/ir/driver.rs:708-711`).
+#[test]
+fn app_pass_through_cross_call_builds_and_runs_clean() {
+    let (_t, _binary, stdout) = build_run_keep(
+        "g1-app-pass-through",
+        "\\ S13 probe E — the end-to-end program the cross-call App lift should make pass.\n\
+         \\ Helper with an App-typed pass-through signature, a poly caller doing the\n\
+         \\ cross-call, and a concrete grounding in main (Wrap over i64, intrinsics only).\n\
+         \\ Today: the S1-17.i fence must fire (captured here as the pre-lift golden);\n\
+         \\ post-lift this is the primary green golden candidate.\n\
+         \n\
+         type: Wrap['X] | Wrap 'X ;\n\
+         \n\
+         : step ['F 'T] ( 'F['T] -- 'F['T] ) ;\n\
+         : outer ['It 'T] ( 'It['T] -- 'It['T] ) step ;\n\
+         : main ( -- ) 42 Wrap outer drop ;\n",
+    );
+    assert_eq!(stdout, "", "the program prints nothing");
+}
+
+/// (G3, phase 2) Edited D1 (`probes/s13_d_arg_var_mismatch.sth`): App-vs-App
+/// with the argument variables differing — callee `'F['T]`, caller
+/// `'It['U]`. The edits are forced: the callee declares pass-through (an
+/// empty body fails its own stack check), outer declares its output (without
+/// it the caller's own stack check fails — the body leaves `'It['U]` against
+/// declared outputs empty), and a grounding `main` is spelled out (the link
+/// step fails by design without one). Mechanism: the input arm binds head
+/// `F→CallerVar(It)` and arg `T→CallerVar(U)`; the output App arm renders
+/// `'It['U]` through the same lookup, matching outer's declared output;
+/// main's grounding composes θ_h = {F→CtorImage(Wrap), U→i64}. Exit 0,
+/// stdout empty.
+#[test]
+fn app_vs_app_head_and_arg_vars_both_bind() {
+    let (_t, _binary, stdout) = build_run_keep(
+        "g3-app-vs-app",
+        "\\ S13 golden G3 — D1 post-lift green: App-vs-App, arg vars differ ('T callee, 'U caller).\n\
+         \n\
+         type: Wrap['X] | Wrap 'X ;\n\
+         \n\
+         : step ['F 'T] ( 'F['T] -- 'F['T] ) ;\n\
+         : outer ['It 'U] ( 'It['U] -- 'It['U] ) step ;\n\
+         : main ( -- ) 42 Wrap outer drop ;\n",
+    );
+    assert_eq!(stdout, "", "the program prints nothing");
+}
+
+/// (G4, phase 2) Edited D2 (`probes/s13_d_arg_concrete.sth`), same edit
+/// shape as G3: a concrete argument grounds the element — `'It[i64]`
+/// supplied where `'F['T]` is declared binds `T→Image::Concrete(i64)`
+/// directly (the Var arm's Concrete case), so the element's concreteness
+/// travels through the mapping, not around it; main grounds `It→`
+/// `CtorImage(Wrap)` and compose builds θ_h = {F→CtorImage(Wrap), T→i64}.
+/// Exit 0, stdout empty.
+#[test]
+fn app_vs_app_concrete_arg_grounds_the_element() {
+    let (_t, _binary, stdout) = build_run_keep(
+        "g4-concrete-arg",
+        "\\ S13 golden G4 — D2 post-lift green: App-vs-App, concrete arg ('It[i64] vs 'F['T]).\n\
+         \n\
+         type: Wrap['X] | Wrap 'X ;\n\
+         \n\
+         : step ['F 'T] ( 'F['T] -- 'F['T] ) ;\n\
+         : outer ['It] ( 'It[i64] -- 'It[i64] ) step ;\n\
+         : main ( -- ) 42 Wrap outer drop ;\n",
+    );
+    assert_eq!(stdout, "", "the program prints nothing");
+}
+
+/// (G6, phase 2) Edited D4 (`probes/s13_d_generic_supplied.sth`): ruling
+/// R-13.1 end to end — a concrete ctor supplied as an App head binds the
+/// callee's head variable to a ctor-valued image (`Image::Concrete(`
+/// `Type::CtorImage)`); the output App arm renders that head image back to
+/// `PolyType::Generic{Wrap, [Var(T)]}`, matching outer's declared
+/// `Wrap['T]`; main grounds `T→i64`; compose builds
+/// θ_h = {F→CtorImage(Wrap), T→i64}; apply_subst's App arm resolves step's
+/// `'F['T]` → `Wrap[i64]`. This is the golden that exercises R-13.1's
+/// load-bearing claim (the head-image grounding, not just the walk-time
+/// match). Exit 0, stdout empty.
+#[test]
+fn concrete_ctor_supplied_as_head_binds_the_ctor_image() {
+    let (_t, _binary, stdout) = build_run_keep(
+        "g6-ctor-image",
+        "\\ S13 golden G6 — D4 post-lift green (ruling R-13.1: ctor-image head bind).\n\
+         \n\
+         type: Wrap['X] | Wrap 'X ;\n\
+         \n\
+         : step ['F 'T] ( 'F['T] -- 'F['T] ) ;\n\
+         : outer ['T] ( Wrap['T] -- Wrap['T] ) step ;\n\
+         : main ( -- ) 42 Wrap outer drop ;\n",
+    );
+    assert_eq!(stdout, "", "the program prints nothing");
+}
+
+/// (G7, phase 2) Edited C2 (`probes/s13_c_generic_output.sth`), aligned
+/// spelling: the callee returns a concrete-ctor output and the poly caller
+/// cross-calls it asking for the same variable it passes. The committed C2
+/// caller asks for a DIFFERENT var than it passes (`['T 'U] ( 'T --
+/// Wrap['U] ) mk ;`); post-lift that dies in the caller's own body check,
+/// because the render is faithful to the mapping — it returns
+/// `Wrap[caller's 'T]`, not the asked-for `Wrap['U]` — so the golden pins
+/// the aligned spelling (the callee is the sub-fixture-2 pattern with the
+/// caller aligned to what the mapping can carry). Mechanism: input
+/// `T→CallerVar(U)` (Var arm, clean); the output Generic arm recurses
+/// Wrap's argument through the Var-arm lookup → `PolyType::Generic{Wrap,
+/// [Var(U)]}`, matching caller's declared output; main grounds `U→i64`;
+/// compose grounds mk's `Wrap['T]` → `Wrap[i64]`. Exit 0, stdout empty.
+#[test]
+fn generic_output_renders_through_the_mapping() {
+    let (_t, _binary, stdout) = build_run_keep(
+        "g7-generic-output",
+        "\\ S13 golden G7 — C2 post-lift green: Generic output rendered through the mapping.\n\
+         \n\
+         type: Wrap['X] | Wrap 'X ;\n\
+         \n\
+         : mk ['T] ( 'T -- Wrap['T] ) Wrap ;\n\
+         : caller ['U] ( 'U -- Wrap['U] ) mk ;\n\
+         : main ( -- ) 42 Wrap caller drop ;\n",
+    );
+    assert_eq!(stdout, "", "the program prints nothing");
+}
+
+/// (G8, phase 2) Edited C4 (`probes/s13_c_array_output.sth`), whose only
+/// edit is appending the empty main: an Array output rendered through the
+/// mapping — the element var maps `U→T` on the input side (clean), so the
+/// output Array arm recurses the element through the Var-arm lookup →
+/// `array['U 4]`, matching caller's declared output, the length riding
+/// through concrete. `build_ok` ONLY: no array constructor exists
+/// intrinsics-only, so no grounding main is spellable and compose's array
+/// interning (`intern_array_type`) is not exercised by a golden — the claim
+/// is the walk-time render.
+#[test]
+fn array_output_renders_through_the_mapping() {
+    build_ok(
+        "g8-array-output",
+        "\\ S13 golden G8 — C4 post-lift green: Array output rendered through the mapping.\n\
+         \n\
+         : mk ['T] ( array['T 4] -- array['T 4] ) ;\n\
+         : caller ['U] ( array['U 4] -- array['U 4] ) mk ;\n\
+         : main ( -- ) ;\n",
     );
 }

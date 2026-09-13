@@ -2147,6 +2147,255 @@ fn poly_cross_match_supplied_app_against_declared_non_app_is_a_mismatch() {
     );
 }
 
+// -- P7b.S13: the lifted output arms (`poly_cross_output`) --------------
+
+/// P7b.S13 (C2, G7's unit): a Generic output renders through the mapping --
+/// the header `(is_enum, idx, module, name)` passes through unchanged (it is
+/// the header's identity, not something the mapping substitutes) and each
+/// argument variable renders through the Var-arm lookup, so the caller's
+/// stack carries exactly the callee's shape with the caller's own variables
+/// substituted in.
+#[test]
+fn poly_cross_output_generic_renders_through_the_mapping() {
+    let callee_sig = app_sig();
+    let probe = probe_word();
+    let ctx = probe_ctx(&probe);
+    let out = poly_cross_output(
+        &PolyType::Generic {
+            is_enum: false,
+            idx: 0,
+            module: 0,
+            args: vec![PolyType::Var(1)],
+            len_args: Vec::new(),
+            name: "Wrap",
+        },
+        &[(1, Image::CallerVar(0))],
+        &callee_sig,
+        "f",
+        Span::default(),
+        &ctx,
+    )
+    .expect("a Generic output whose argument variable is mapped renders");
+    assert_eq!(
+        out,
+        PolyType::Generic {
+            is_enum: false,
+            idx: 0,
+            module: 0,
+            args: vec![PolyType::Var(0)],
+            len_args: Vec::new(),
+            name: "Wrap",
+        },
+        "the argument renders in the caller's variable space, the header untouched"
+    );
+}
+
+/// P7b.S13 (C4, G8's unit): an Array output renders element-wise through the
+/// mapping, the length passing through untouched -- concrete only, since a
+/// length variable in the callee's signature is fenced upstream by
+/// `poly_cross_signature_supported`.
+#[test]
+fn poly_cross_output_array_renders_through_the_mapping() {
+    let callee_sig = app_sig();
+    let probe = probe_word();
+    let ctx = probe_ctx(&probe);
+    let out = poly_cross_output(
+        &PolyType::Array(Box::new(PolyType::Var(1)), Len::Concrete(4)),
+        &[(1, Image::CallerVar(0))],
+        &callee_sig,
+        "f",
+        Span::default(),
+        &ctx,
+    )
+    .expect("an Array output whose element variable is mapped renders");
+    assert_eq!(
+        out,
+        PolyType::Array(Box::new(PolyType::Var(0)), Len::Concrete(4)),
+        "the element renders in the caller's variable space, the length rides along"
+    );
+}
+
+/// P7b.S13 (D1/E's unit): an App output whose head image is a caller
+/// variable renders as that caller variable's own application -- the head
+/// becomes the caller variable's index and the argument recurses through the
+/// same lookup, so the callee's `'F['T]` reads back as `'T['F]` in the
+/// caller's variable space (swapped here so the two positions cannot
+/// silently agree).
+#[test]
+fn poly_cross_output_app_head_caller_var_renders_the_caller_application() {
+    let callee_sig = app_sig();
+    let probe = probe_word();
+    let ctx = probe_ctx(&probe);
+    let out = poly_cross_output(
+        &PolyType::App {
+            head: 0,
+            args: vec![PolyType::Var(1)],
+        },
+        &[(0, Image::CallerVar(1)), (1, Image::CallerVar(0))],
+        &callee_sig,
+        "f",
+        Span::default(),
+        &ctx,
+    )
+    .expect("an App output over caller-var images renders in the caller's space");
+    assert_eq!(
+        out,
+        PolyType::App {
+            head: 1,
+            args: vec![PolyType::Var(0)],
+        },
+        "head and argument each land on their own caller variable"
+    );
+}
+
+/// P7b.S13 (D4's unit): an App output whose head image is a ctor image (the
+/// input arm's R-13.1 bind) renders as that constructor applied to the
+/// mapped arguments -- the rebuilt `Generic` carries the ctor's own header
+/// and `len_args: vec![]` (an App head supplies type arguments only),
+/// symbolically, with no registry interning at walk time.
+#[test]
+fn poly_cross_output_app_head_ctor_image_renders_the_generic() {
+    let callee_sig = app_sig();
+    let generics = std::cell::RefCell::new(wrap_generics());
+    let probe = probe_word();
+    let ctx = probe_ctx(&probe);
+    let ctor = crate::ast::ctor_image_type(
+        &generics.borrow(),
+        GenericId {
+            is_enum: false,
+            idx: 0,
+            module: 0,
+        },
+    );
+    let out = poly_cross_output(
+        &PolyType::App {
+            head: 0,
+            args: vec![PolyType::Var(1)],
+        },
+        &[(0, Image::Concrete(ctor)), (1, Image::CallerVar(0))],
+        &callee_sig,
+        "f",
+        Span::default(),
+        &ctx,
+    )
+    .expect("an App output over a ctor-image head renders the constructor");
+    assert_eq!(
+        out,
+        PolyType::Generic {
+            is_enum: false,
+            idx: 0,
+            module: 0,
+            args: vec![PolyType::Var(0)],
+            len_args: Vec::new(),
+            name: "Wrap",
+        },
+        "the ctor's header with the mapped argument, no lengths"
+    );
+}
+
+/// P7b.S13 (round F's unreachable head): a Concrete head that is not a
+/// `CtorImage` guards to the rendered mismatch rather than rendering -- a
+/// head slot only ever receives a caller var or a concrete ctor (the kind
+/// checker rejects every other declaration), so this arm is defense, and it
+/// degrades to the same honest diagnostic `apply_subst`'s own App arm uses.
+#[test]
+fn poly_cross_output_app_non_ctor_concrete_head_is_a_mismatch() {
+    let callee_sig = app_sig();
+    let probe = probe_word();
+    let ctx = probe_ctx(&probe);
+    let err = poly_cross_output(
+        &PolyType::App {
+            head: 0,
+            args: vec![PolyType::Var(1)],
+        },
+        &[(0, Image::Concrete(Type::I64)), (1, Image::CallerVar(0))],
+        &callee_sig,
+        "f",
+        Span::default(),
+        &ctx,
+    )
+    .expect_err("a non-ctor head image is no application");
+    assert!(err.contains("type mismatch"), "{err}");
+    assert!(
+        err.contains("expected `'F['T]`"),
+        "the declared App renders in the callee's spelling: {err}"
+    );
+}
+
+/// P7b.S13: lengths pass through concrete. The mapping is a type-variable
+/// id space with no length entries, so a declared `Generic`'s own
+/// `len_args` and an `Array`'s own length ride the render unchanged --
+/// sound because the signature gate fences every length variable out of
+/// the callee's declared shapes before any output renders.
+#[test]
+fn poly_cross_output_lengths_pass_through_concrete() {
+    let callee_sig = app_sig();
+    let probe = probe_word();
+    let ctx = probe_ctx(&probe);
+    let generic_out = poly_cross_output(
+        &PolyType::Generic {
+            is_enum: false,
+            idx: 0,
+            module: 0,
+            args: vec![PolyType::Var(1)],
+            len_args: vec![Len::Concrete(8)],
+            name: "Buffer",
+        },
+        &[(1, Image::CallerVar(0))],
+        &callee_sig,
+        "f",
+        Span::default(),
+        &ctx,
+    )
+    .expect("a Generic output carrying a concrete length renders");
+    assert_eq!(
+        generic_out,
+        PolyType::Generic {
+            is_enum: false,
+            idx: 0,
+            module: 0,
+            args: vec![PolyType::Var(0)],
+            len_args: vec![Len::Concrete(8)],
+            name: "Buffer",
+        },
+        "the declared len_args survive the render unchanged"
+    );
+    let array_out = poly_cross_output(
+        &PolyType::Array(
+            Box::new(PolyType::Generic {
+                is_enum: false,
+                idx: 0,
+                module: 0,
+                args: vec![PolyType::Var(1)],
+                len_args: Vec::new(),
+                name: "Wrap",
+            }),
+            Len::Concrete(4),
+        ),
+        &[(1, Image::CallerVar(0))],
+        &callee_sig,
+        "f",
+        Span::default(),
+        &ctx,
+    )
+    .expect("a compound-nested Array output renders");
+    assert_eq!(
+        array_out,
+        PolyType::Array(
+            Box::new(PolyType::Generic {
+                is_enum: false,
+                idx: 0,
+                module: 0,
+                args: vec![PolyType::Var(0)],
+                len_args: Vec::new(),
+                name: "Wrap",
+            }),
+            Len::Concrete(4),
+        ),
+        "the array's length and the nested header both ride along unchanged"
+    );
+}
+
 /// S1-12 (R5): two call sites binding `'F` to *distinct* constructors
 /// mint distinct mangled symbols -- the last-write-wins hazard
 /// `CtorImage` resolves one abstraction level up from S12's own defect
@@ -4276,32 +4525,51 @@ fn check_cross_call_rejects_a_mismatched_concrete_length_in_a_generic_header() {
 /// `check_generic_cross_call_concrete_image_with_no_impl_is_a_located_error`
 /// pin the resolution it replaces), so it is no longer a member of this
 /// table.
+///
+/// P7b.S13 (G10.3, retargeted in place): the middle row's compound-OUTPUT
+/// face is lifted -- `box`'s `Box['U]` output renders `Box[g's 'T]` through
+/// the mapping and `drop` consumes it, so the same source that used to
+/// catch the wildcard now checks clean and the row pins the green (the
+/// poly-body-drop twin of slice13's golden G7). The rows around it are
+/// input/signature fences the lift does not touch, so each row carries
+/// its own verdict.
 #[test]
 fn check_cross_call_unsupported_callee_shapes_name_themselves() {
-    for (fixture, what) in [
+    for (fixture, what, lifted_green) in [
         (
             ": alen ( array['E 'N] -- array['E 'N] usize ) len ;\n\
                  : g ( array['T 4] -- array['T 4] ) alen drop ;\n: main ( -- ) ;\n",
             "a length variable in the callee's signature",
+            false,
         ),
+        // P7b.S13: was the compound-output wildcard ("returning the compound
+        // type `Box['U]` from a polymorphic word is not yet supported from a
+        // polymorphic body"); the lifted Generic output arm renders through
+        // the mapping and `drop` consumes the result, so the row is green.
         (
             "type: Box['T] | Box 'T ;\n\
                  : box ( 'U -- Box['U] ) Box ;\n\
                  : g ( 'T -- ) box drop ;\n: main ( -- ) ;\n",
             "returning the compound type `Box['U]` from a polymorphic word",
+            true,
         ),
         (
             ": dup2 ['a: Copy 'b: Copy] ( ..s 'a 'b -- ..s 'a 'b 'a 'b ) over over ;\n\
                  : g ['T: Copy] ( 'T -- 'T 'T 'T 'T ) dup2 ;\n: main ( -- ) ;\n",
             "calling a row-polymorphic word",
+            false,
         ),
     ] {
         let src = format!("{SHOW}{fixture}");
-        let err = check_src(&src).unwrap_err();
-        assert!(
-            err.contains(what) && err.contains("is not yet supported from a polymorphic body"),
-            "expected `{what}`, got: {err}"
-        );
+        if lifted_green {
+            check_src(&src).expect("the lifted Generic output renders through the mapping, green");
+        } else {
+            let err = check_src(&src).unwrap_err();
+            assert!(
+                err.contains(what) && err.contains("is not yet supported from a polymorphic body"),
+                "expected `{what}`, got: {err}"
+            );
+        }
     }
 }
 

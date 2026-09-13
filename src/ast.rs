@@ -3001,8 +3001,11 @@ pub struct CallInst {
 /// of the caller's own rigid variables, to be grounded later against the
 /// caller's own θ. R6's growth rule is what keeps the set this small -- a
 /// compound image mentioning a caller variable (`Box['T]`, `array['T 4]`) is a
-/// located rejection at the call site, so no type constructor ever needs
-/// representing here.
+/// located rejection at the call site. Since P7b.S13, the one type
+/// constructor an image can carry is `Type::CtorImage` (R-13.1): a concrete
+/// ctor supplied as an App head binds through it, riding `Concrete` so the
+/// enum grows no variant of its own -- it exists only to be resolved as an
+/// `App` head, never as a value type.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Image {
     Concrete(Type),

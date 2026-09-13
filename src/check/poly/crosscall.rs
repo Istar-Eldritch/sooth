@@ -454,13 +454,20 @@ pub(super) fn poly_cross_match(
 }
 
 /// P7.S3k: one declared callee *output*, read back into the caller's variable
-/// space. A compound output is rejected for the mirror of R6's reason plus one
-/// of its own: a declared compound always mentions a variable (a fully
-/// concrete one folds to `Concrete` at parse), so substituting the mapping
-/// into it either grows a type over a caller variable or needs the registry
-/// interning `apply_subst` does for a *ground* θ and nothing here can do
-/// symbolically.
-fn poly_cross_output(
+/// space (the symbolic twin of `apply_subst`). P7b.S13 lifts the compound
+/// rejection for the three shapes a cross-call can carry: a `Generic`,
+/// `Array`, or `App` output renders structurally, every variable inside it
+/// through the same mapping lookup the bare-Var arm uses
+/// (`poly_cross_output_image`) -- so what lands on the caller's stack is
+/// exactly the shape the callee declared, with the caller's own variables
+/// substituted in. Lengths pass through concrete: a length variable in the
+/// callee's signature is fenced before any of this runs
+/// (`poly_cross_signature_supported`), so only `Len::Concrete` can be
+/// carried and the mapping has no length entries to consult. A `Ref` output
+/// gains no arm (banned at declaration -- "a reference cannot be stored",
+/// both spellings), and the wildcard below stays the deliberate catch-all
+/// for the rest.
+pub(super) fn poly_cross_output(
     declared: &PolyType,
     mapping: &[(u32, Image)],
     callee_sig: &PolySig,
@@ -470,22 +477,97 @@ fn poly_cross_output(
 ) -> Result<PolyType, String> {
     match declared {
         PolyType::Concrete(t) => Ok(PolyType::Concrete(*t)),
-        PolyType::Var(v) => match mapping.iter().find(|(id, _)| id == v) {
-            Some((_, Image::Concrete(t))) => Ok(PolyType::Concrete(*t)),
-            Some((_, Image::CallerVar(w))) => Ok(PolyType::Var(*w)),
-            // An output variable no declared input pins. The callee's own body
-            // check rejects a signature it cannot produce, so this is a
-            // backstop rather than a shape source can reach.
-            None => Err(poly_cross_call_unsupported_error(
-                ctx,
-                span,
-                callee,
-                &format!(
-                    "an output type variable (`{}`) that the callee's inputs do not determine",
-                    callee_sig.ty_var_names[*v as usize]
-                ),
-            )),
-        },
+        PolyType::Var(v) => Ok(
+            match poly_cross_output_image(*v, mapping, callee_sig, callee, span, ctx)? {
+                Image::Concrete(t) => PolyType::Concrete(t),
+                Image::CallerVar(w) => PolyType::Var(w),
+            },
+        ),
+        // P7b.S13 (C4): an array output renders element-wise; the length
+        // passes through concrete (see the doc above).
+        PolyType::Array(elem, len) => Ok(PolyType::Array(
+            Box::new(poly_cross_output(
+                elem, mapping, callee_sig, callee, span, ctx,
+            )?),
+            len.clone(),
+        )),
+        // P7b.S13 (C2): a concrete-ctor output renders argument-wise. The
+        // header `(is_enum, idx, module, name)` is the callee's own and
+        // passes through unchanged -- it is the header's identity, not
+        // something the mapping substitutes; only the arguments carry
+        // variables.
+        PolyType::Generic {
+            is_enum,
+            idx,
+            module,
+            args,
+            len_args,
+            name,
+        } => {
+            let mut mapped = Vec::with_capacity(args.len());
+            for arg in args {
+                mapped.push(poly_cross_output(
+                    arg, mapping, callee_sig, callee, span, ctx,
+                )?);
+            }
+            Ok(PolyType::Generic {
+                is_enum: *is_enum,
+                idx: *idx,
+                module: *module,
+                args: mapped,
+                len_args: len_args.clone(),
+                name,
+            })
+        }
+        // P7b.S13 (D1/E/D4): an applied output renders its arguments
+        // recursively, then its head by image kind -- the mirror of the
+        // lifted input arm's two supplied-head shapes.
+        PolyType::App { head, args } => {
+            let mut mapped = Vec::with_capacity(args.len());
+            for arg in args {
+                mapped.push(poly_cross_output(
+                    arg, mapping, callee_sig, callee, span, ctx,
+                )?);
+            }
+            match poly_cross_output_image(*head, mapping, callee_sig, callee, span, ctx)? {
+                // The caller applied one of its own variables (D1/E): the
+                // head renders as that caller variable, so the application
+                // reads `'It['T]` in the caller's own variable space and the
+                // caller's own θ grounds it later.
+                Image::CallerVar(w) => Ok(PolyType::App {
+                    head: w,
+                    args: mapped,
+                }),
+                // A concrete ctor supplied as the head (R-13.1's input bind,
+                // D4): the application renders as that constructor applied to
+                // the mapped arguments -- symbolic, no registry interning at
+                // walk time (the interning happens at grounding). The rebuilt
+                // header carries `len_args: vec![]` for the reason the mono
+                // route's App arm mints with `&[]`: an App head supplies type
+                // arguments only (S1-7 fences a length-parameterized header
+                // upstream, at the input bind).
+                Image::Concrete(t) => match t {
+                    Type::CtorImage(gid, ctor_name) => Ok(PolyType::Generic {
+                        is_enum: gid.is_enum,
+                        idx: gid.idx,
+                        module: gid.module,
+                        args: mapped,
+                        len_args: Vec::new(),
+                        name: ctor_name,
+                    }),
+                    // Unreachable (round F): a head slot only ever receives a
+                    // caller var or a concrete ctor -- the kind checker
+                    // rejects every other declaration. Guarded, not assumed.
+                    _ => Err(poly_rendered_type_mismatch_error(
+                        ctx,
+                        span,
+                        callee,
+                        &poly_type_str(declared, callee_sig),
+                        &t.to_string(),
+                    )),
+                },
+            }
+        }
         // P7.S12 phase 2 (R3.4): a `GenericVariant` reaches this arm too
         // (declared output R3.5 never spells one, but a body-mint could in
         // principle be cross-called against), and it is already rejected
@@ -500,6 +582,35 @@ fn poly_cross_output(
             &format!(
                 "returning the compound type `{}` from a polymorphic word",
                 poly_type_str(declared, callee_sig)
+            ),
+        )),
+    }
+}
+
+/// P7b.S13: the Var-arm mapping lookup every output arm recurses through --
+/// one callee output variable's image, or the backstop for an output variable
+/// no declared input pins (the callee's own body check rejects a signature it
+/// cannot produce, so the backstop is a shape source cannot reach). Split out
+/// of the bare-Var arm so the lifted compound arms (`poly_cross_output`)
+/// render each nested variable through the same lookup instead of
+/// re-deriving it.
+fn poly_cross_output_image(
+    v: u32,
+    mapping: &[(u32, Image)],
+    callee_sig: &PolySig,
+    callee: &str,
+    span: Span,
+    ctx: &Ctx,
+) -> Result<Image, String> {
+    match mapping.iter().find(|(id, _)| *id == v) {
+        Some((_, image)) => Ok(image.clone()),
+        None => Err(poly_cross_call_unsupported_error(
+            ctx,
+            span,
+            callee,
+            &format!(
+                "an output type variable (`{}`) that the callee's inputs do not determine",
+                callee_sig.ty_var_names[v as usize]
             ),
         )),
     }
