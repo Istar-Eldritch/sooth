@@ -797,6 +797,68 @@ band stays cohesive, signals not tripped — single `use super::*`, no
 import divergence, no high/low mixing, no forced circularity — so no split
 is warranted.
 
+**P7b.S13 — The poly→poly cross-call App lift.**
+Implemented on branch `soo-60` (spec
+[slice13-spec](./P7b/slice13-spec.md) with its frozen
+[paper tests](./P7b/slice13-paper-tests.md) and
+[probes](./P7b/slice13-probes.md); phases 1–2 in `242e547` + `8ff4065`):
+the two located fences in `poly_cross_match`/`poly_cross_output`
+(`src/check/poly/crosscall.rs`) — the S1-17.i input fence and the
+compound-output wildcard — are lifted, so a poly body can cross-call a poly
+word over higher-kinded (App-headed) shapes and the call checks, grounds,
+and lowers through the same machinery the mono route already uses. Input
+face: two guarded declared-App arms — `(App, App)` binds the callee's head
+variable to the caller's applied variable through the Var arm's
+consistency/conflict block and recurses on the args pairwise; `(App,
+Generic)` is ruling R-13.1, the head binding to a ctor-valued image
+(`Image::Concrete(Type::CtorImage)` minted via `ctor_image_type`) — the
+same `CtorImage` bind the mono route inserts, so the cross-call route is
+exactly as strong as the mono route for the shape; each arm's arity test is
+a match guard, so a mismatching shape reaches the unchanged catch-all
+mismatch. The second fence pattern is deleted (R-13.2): a supplied App
+against a declared non-App slot is the rendered mismatch, and the growth
+ban is untouched — an App operand facing a bare-var declared input stays
+the growth error byte-identically (G2 pins the frozen baseline; the Var arm
+precedes everything). Output face: `Generic`/`Array`/`App` arms render
+through the mapping (the symbolic twin of `apply_subst`; the rebuilt
+App-head `Generic` carries `len_args: vec![]`, sound because S1-7 fences
+length-domain headers upstream); `Ref` gains no arm (banned at declaration)
+and `GenericVariant` stays in the wildcard. No new grounding/lowering
+machinery: compose folds the mapping into θ_h, `apply_subst` grounds the
+callee's outputs, and the ctor-image head rides
+`Image::Concrete(Type::CtorImage)` — no new `Image` or `PolyType` variant.
+Ruling R-13.3: a `Bound::User` on a ctor-image head defers to compose's
+`resolve_user_bound` loop with `ty = CtorImage`, verified end to end by the
+required golden G12 — the Cursor-bounded pass-through pair plus a spelled
+grounding main instantiating the bounded consumer (verified live at
+implementation: without the impl the mono site rejects with "does not
+satisfy `Cursor`"; with it, both the mono site and compose's loop resolve).
+Goldens G1–G12 in `tests/phase7b_slice13.rs` (G2 byte-pins the growth
+baseline; G5 pins the moved mismatch verdict from the live binary; G12 is
+the grounding twin); the four moved pins retargeted in place
+(`src/check/poly/tests.rs`'s
+`non_member_app_cross_call_checks_clean_after_the_lift`,
+`poly_cross_match_app_slot_vs_bare_var_is_a_rendered_mismatch`, and the
+`check_cross_call_unsupported_callee_shapes_name_themselves` table's
+compound-output row; `tests/phase7b_slice12.rs`'s
+`cross_call_app_slot_checks_clean_after_the_hkt_lift`).
+Growth-structure re-check (CLAUDE.md, at this phase's exit) over the file
+both implementation phases grew — `src/check/poly/crosscall.rs` (780
+lines): none of the five signals fires. Single `use super::*` (no import
+divergence); the file is one compiler-stage responsibility — the poly→poly
+cross-call relation: callee selection, structural input match, bound
+discharge, output render, and its own diagnostics — with grounding and
+unification living in `instantiate.rs`/`unify.rs` (no X+Y+Z); uniformly
+walk-level symbolic code (no high/low mixing); the call graph is connected
+through `poly_cross_call` (no functions that never call each other); no
+split is forced by a would-be circular dependency. The two recorded
+candidates — the triplicated head-bind consistency block (the phase-1
+reviewer's `bind_head_image` helper candidate: the Var arm's inline block
+and its two lifted-arm twins) and the `poly_cross_output` render arms
+mirroring the `poly_cross_match` dispatch — are duplication/
+parallel-structure observations, not house signals; with 0 signals firing,
+the 2+ rule says record, not refactor, so no refactor is made.
+
 **Dogfood:** S6 — a program that `map`s and folds over `Option`, `Result`, and `List` through
 shared bounds, with the impls declared against the real lib types and output matching
 hand-written inline equivalents. S7 — `bind` dispatching per constructor over `Option`/`Result`

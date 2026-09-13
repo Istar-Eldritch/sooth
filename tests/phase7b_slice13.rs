@@ -28,10 +28,14 @@
 //!   and the claim is the walk-time render). All the green goldens' stdout
 //!   is pinned empty (nothing prints).
 //!
-//! G12 (the Cursor-bounded grounding twin) lands with phase 3. G10's four
-//! retargets live where the pins live: `src/check/poly/tests.rs` (:608,
-//! :1782; the :3935 sub-fixture-2 retarget landed with phase 2) and
-//! `tests/phase7b_slice12.rs` (:450, retargeted in phase 1).
+//! G12 (phase 3, required by user ruling): the Cursor-bounded grounding
+//! twin — the G10.4 source plus a spelled grounding main instantiating the
+//! bounded consumer, pinning that compose's `resolve_user_bound` loop
+//! resolves a `Bound::User` over `ty = CtorImage` end to end (ruling
+//! R-13.3). G10's four retargets live where the pins live:
+//! `src/check/poly/tests.rs` (:610, :1774; the :4537 sub-fixture-2 retarget
+//! landed with phase 2) and `tests/phase7b_slice12.rs` (:450, retargeted in
+//! phase 1).
 //!
 //! Harness style from `tests/phase7b_slice8.rs` / `tests/phase7b_slice12.rs`.
 //! Golden sources are embedded strings, not reads of `probes/` (those files
@@ -384,4 +388,56 @@ fn array_output_renders_through_the_mapping() {
          : caller ['U] ( array['U 4] -- array['U 4] ) mk ;\n\
          : main ( -- ) ;\n",
     );
+}
+
+/// (G12, phase 3 — required by user ruling) The G10.4 source — the
+/// Cursor-bounded App pass-through pair, retargeted green in
+/// `tests/phase7b_slice12.rs` as
+/// `cross_call_app_slot_checks_clean_after_the_hkt_lift` — plus a spelled
+/// grounding main instantiating the bounded consumer end to end: a concrete
+/// generic ctor (`Opt`), a load-bearing `Cursor` impl for it (dropping the
+/// impl is how the fixture was verified to ride the bound-discharge path:
+/// the mono site then rejects with "`Opt` does not satisfy `Cursor`"), and
+/// a `main` that builds `Opt[i64]` over a live `i64`. The mono call site
+/// grounds `It` → `CtorImage(Opt)`; `outer`'s body walk records the `step`
+/// cross-call symbolically (the input App arm binds `It` → `CallerVar(It)`,
+/// so the walk-time discharge is symbolic — the `CallerVar` arm, satisfied
+/// against `outer`'s own declared bound) and compose — instantiating
+/// `outer` — folds the mapping into θ_h and runs its own
+/// `resolve_user_bound` loop over `step`'s bounds with
+/// `ty = CtorImage(Opt)`: R-13.3's path, verified end to end. Fixture text
+/// and bytes pinned from the live binary at implementation (the grounding
+/// main's typing was unverified at design time); the harness choice held —
+/// `build_run_keep`, exit 0, stdout empty (the program prints nothing).
+#[test]
+fn cursor_bounded_app_pass_through_grounds_end_to_end() {
+    let (_t, _binary, stdout) = build_run_keep(
+        "g12-cursor-bounded-grounding",
+        "\\ S13 golden G12 — the Cursor-bounded App pass-through pair (G10.4's\n\
+         \\ source) plus a spelled grounding main instantiating the bounded\n\
+         \\ consumer end to end (ruling R-13.3: compose's resolve_user_bound\n\
+         \\ runs with ty = CtorImage).\n\
+         \n\
+         type: Opt['X] | Some 'X | None ;\n\
+         \n\
+         trait: Cursor['It: * -> *]\n\
+         \x20 : next ( 'It['T] -- 'It['T] ) ;\n\
+         ;\n\
+         \n\
+         impl: Cursor for Opt\n\
+         \x20 : next\n\
+         \x20   ~[ ( None ) drop None ]\n\
+         \x20   ~[ ( Some ) Some> Some ]\n\
+         \x20   Opt? ;\n\
+         ;\n\
+         \n\
+         : step ['It: Cursor] ( i64 'It[i64] -- i64 )\n\
+         \x20 drop ;\n\
+         \n\
+         : outer ['It: Cursor] ( i64 'It[i64] -- i64 )\n\
+         \x20 step ;\n\
+         \n\
+         : main ( -- ) 42 43 Some outer drop ;\n",
+    );
+    assert_eq!(stdout, "", "the program prints nothing");
 }
