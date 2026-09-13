@@ -1,0 +1,9 @@
+\ S13 probe C3 — callee returns a Ref output; poly caller cross-calls it.
+\ As first written (: mk ['T] ( 'T -- &'T ) ; ) the declaration itself is
+\ rejected ("a reference cannot be stored"). Adjusted per that error's own
+\ advice: take the reference as an input and pass it through.
+import: intrinsics * ;
+
+: mk ['T] ( &'T -- &'T ) ;
+: caller ['U] ( &'U -- &'U ) mk ;
+: main ( -- ) ;

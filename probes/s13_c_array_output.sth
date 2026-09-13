@@ -1,0 +1,10 @@
+\ S13 probe C4 — callee returns a fixed-length array output; poly caller
+\ cross-calls it. As first written (: mk ['T] ( 'T -- array['T 4] ) ; empty
+\ body) the callee's own stack check fires first: the body cannot conjure an
+\ array (no array ctor intrinsics-only). Adjusted: pass-through — the element
+\ var maps 'U -> 'T on the input side (clean), so only the output arm can fire.
+import: intrinsics * ;
+
+: mk ['T] ( array['T 4] -- array['T 4] ) ;
+: caller ['U] ( array['U 4] -- array['U 4] ) mk ;
+: main ( -- ) ;

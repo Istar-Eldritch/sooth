@@ -1,0 +1,15 @@
+\ S13 probe C1 — callee returns an App-typed output; poly caller cross-calls it.
+\ Two prior attempts are recorded in the baseline: an empty body cannot declare
+\ an App output (stack mismatch), and a member row over a bare value input
+\ cannot dispatch ("has no input for a call to dispatch on"). This attempt:
+\ the member takes the trait's head var BARE as its dispatch input (the shape
+\ the dispatch error itself names), and mk forwards it.
+import: intrinsics * ;
+
+trait: Lift['F: * -> *]
+  : up ( 'F -- 'F['T] ) ;
+;
+
+: mk ['F: Lift 'T] ( 'F -- 'F['T] ) up ;
+: caller ['It 'T] ( 'T -- 'It['T] ) mk ;
+: main ( -- ) ;

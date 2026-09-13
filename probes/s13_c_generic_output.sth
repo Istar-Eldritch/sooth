@@ -1,0 +1,12 @@
+\ S13 probe C2 — callee returns a concrete-ctor (Generic) output; poly caller
+\ cross-calls it, asking for a different head var ('T -> 'U) in its own output.
+\ The handed-down `type: Wrap['X] ( w: 'X ) ;` syntax does not parse (parse
+\ error recorded in the baseline); the real syntax is variant-style. The body
+\ constructs Wrap['T] with the variant ctor so the callee's own check passes.
+import: intrinsics * ;
+
+type: Wrap['X] | Wrap 'X ;
+
+: mk ['T] ( 'T -- Wrap['T] ) Wrap ;
+: caller ['T 'U] ( 'T -- Wrap['U] ) mk ;
+: main ( -- ) ;

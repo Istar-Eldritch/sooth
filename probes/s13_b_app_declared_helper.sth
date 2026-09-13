@@ -1,0 +1,7 @@
+\ S13 probe B1 — callee declares App-headed input; poly caller cross-calls it.
+\ Predicted: the S1-17.i fence bytes (input-side App slot on both sides).
+import: intrinsics * ;
+
+: step ['F 'T] ( 'F['T] -- 'F['T] ) ;
+: outer ['It 'T] ( 'It['T] -- 'It['T] ) step ;
+: main ( -- ) ;

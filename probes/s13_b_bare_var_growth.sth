@@ -1,0 +1,7 @@
+\ S13 probe B2 — callee declares a bare var; caller hands it an App-typed value.
+\ Predicted: NOT the fence — the growth error (Var arm precedes the App arm).
+import: intrinsics * ;
+
+: step ['T] ( 'T -- 'T ) ;
+: outer ['It 'T] ( 'It['T] -- 'It['T] ) step ;
+: main ( -- ) ;

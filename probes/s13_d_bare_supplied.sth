@@ -1,0 +1,8 @@
+\ S13 probe D3 — declared App, supplied bare var ('F as a plain value).
+\ First write had an unused bound 'T in outer (rejected: "never appears in the
+\ effect" — recorded); binds now list only 'F. Callee declares pass-through.
+\ Predicted: the S1-17.i input fence (declared-App arm).
+import: intrinsics * ;
+
+: step ['F 'T] ( 'F['T] -- 'F['T] ) ;
+: outer ['F] ( 'F -- ) step ;

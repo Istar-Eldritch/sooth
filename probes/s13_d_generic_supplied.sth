@@ -1,0 +1,9 @@
+\ S13 probe D4 — concrete ctor supplied where an abstract head is declared
+\ (Wrap['T] where 'F['T] is declared). Callee declares pass-through (see D1).
+\ Predicted: the S1-17.i input fence; post-lift a verdict candidate.
+import: intrinsics * ;
+
+type: Wrap['X] | Wrap 'X ;
+
+: step ['F 'T] ( 'F['T] -- 'F['T] ) ;
+: outer ['T] ( Wrap['T] -- ) step ;

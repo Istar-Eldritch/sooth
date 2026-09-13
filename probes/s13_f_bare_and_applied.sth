@@ -1,0 +1,7 @@
+\ S13 probe F1 — one type var used both bare and App-headed in one signature.
+\ Decides whether a callee head var could ever need Image::Concrete: if the
+\ checker rejects this declaration, CallerVar is the only possible head image.
+import: intrinsics * ;
+
+: w ['F 'T] ( 'F -- 'F['T] ) ;
+: main ( -- ) ;

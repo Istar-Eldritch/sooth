@@ -1,0 +1,7 @@
+\ S13 probe F2 — self-application ('F applied to itself in the signature).
+\ Decides whether a callee head var could ever need Image::Concrete: if the
+\ checker rejects this declaration, CallerVar is the only possible head image.
+import: intrinsics * ;
+
+: w ['F] ( 'F['F] -- ) ;
+: main ( -- ) ;

@@ -1,0 +1,12 @@
+\ S13 probe E — the end-to-end program the cross-call App lift should make pass.
+\ Helper with an App-typed pass-through signature, a poly caller doing the
+\ cross-call, and a concrete grounding in main (Wrap over i64, intrinsics only).
+\ Today: the S1-17.i fence must fire (captured here as the pre-lift golden);
+\ post-lift this is the primary green golden candidate.
+import: intrinsics * ;
+
+type: Wrap['X] | Wrap 'X ;
+
+: step ['F 'T] ( 'F['T] -- 'F['T] ) ;
+: outer ['It 'T] ( 'It['T] -- 'It['T] ) step ;
+: main ( -- ) 42 Wrap outer drop ;

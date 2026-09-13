@@ -1,0 +1,7 @@
+\ S13 probe D2 — App-vs-App cross-call, concrete argument ('It[i64] supplied
+\ where 'F['T] is declared). Callee declares pass-through (see D1 note).
+\ Predicted: the S1-17.i input fence; post-lift a verdict candidate.
+import: intrinsics * ;
+
+: step ['F 'T] ( 'F['T] -- 'F['T] ) ;
+: outer ['It] ( 'It[i64] -- ) step ;

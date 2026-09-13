@@ -1,0 +1,8 @@
+\ S13 probe D1 — App-vs-App cross-call, argument vars differ ('T callee, 'U caller).
+\ As first written the callee ( 'F['T] -- ) with an empty body failed its OWN
+\ stack check (the input passes through); step now declares pass-through.
+\ Predicted: the S1-17.i input fence; post-lift an App-vs-App verdict candidate.
+import: intrinsics * ;
+
+: step ['F 'T] ( 'F['T] -- 'F['T] ) ;
+: outer ['It 'U] ( 'It['U] -- ) step ;
