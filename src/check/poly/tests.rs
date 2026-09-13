@@ -599,31 +599,22 @@ fn mono_member_concrete_impl_undeclared_quotation_arg_is_rejected() {
     );
 }
 
-/// P7b.S2 (S2-10): the cross-call fence is NOT lifted. A named poly-word
-/// cross-call carrying an App slot still rejects with p8's exact fence
-/// text (S1-17.i's scope fence, amended R7) -- member calls never reach
-/// this site (`poly_trait_member_call` fronts them), so the fence
-/// governs only non-member cross-calls, unchanged.
+/// P7b.S13 (S1-17.i lift; was S2-10's fence pin): the non-member App
+/// cross-call checks clean. The lifted input arm binds the App-vs-App shape
+/// structurally -- callee `inner['G 'T]`'s head `G` to `CallerVar(G)` and
+/// its arg `T` to `CallerVar(T)` -- with no outputs and no bounds, so the
+/// body walk admits it. Member calls never reach this site
+/// (`poly_trait_member_call` fronts them); this is the named-word
+/// cross-call face alone.
 #[test]
-fn non_member_app_cross_call_still_rejects_with_p8_fence_text() {
-    let err = check_src(
+fn non_member_app_cross_call_checks_clean_after_the_lift() {
+    check_src(
         "type: Opt['T] | None | Some 'T ;\n\
              : inner['G 'T] ( 'G['T] -- ) drop ;\n\
              : outer['G 'T] ( 'G['T] -- ) inner ;\n\
              : main ( -- ) ;\n",
     )
-    .expect_err("a poly cross-call with an App slot is fenced");
-    assert!(
-        err.contains("cannot call the polymorphic word `inner`"),
-        "{err}"
-    );
-    assert!(
-        err.contains(
-            "a higher-kinded application in a cross-called polymorphic word is not \
-                 yet supported from a polymorphic body"
-        ),
-        "{err}"
-    );
+    .expect("the App cross-call checks clean after the S1-17.i lift");
 }
 
 /// P7b.S2 (S2-15.f, splice guard a): an application-headed member called
@@ -1775,11 +1766,12 @@ fn app_sig() -> PolySig {
     }
 }
 
-/// S1-17.i: a poly *cross-call* with an `App` slot stays a located
-/// "unsupported" rejection, not a bare mismatch -- S2 owns
-/// constructor-keyed dispatch.
+/// P7b.S13 (G5's unit pin; was S1-17.i's not-a-panic pin): a supplied
+/// bare variable cannot fill an applied head -- a bare var always has kind
+/// `*`, and a `* -> *` variable cannot be used bare -- so the (App, Var)
+/// face falls to the rendered mismatch, not a fence and not a panic.
 #[test]
-fn poly_cross_match_app_slot_is_unsupported_not_a_panic() {
+fn poly_cross_match_app_slot_vs_bare_var_is_a_rendered_mismatch() {
     let callee_sig = app_sig();
     let caller_sig = app_sig();
     let probe = probe_word();
@@ -1798,8 +1790,361 @@ fn poly_cross_match_app_slot_is_unsupported_not_a_panic() {
         Span::default(),
         &ctx,
     )
-    .expect_err("an App-shaped declared slot must be rejected, not accepted");
-    assert!(err.contains("supported"), "{err}");
+    .expect_err("a supplied bare variable must mismatch, not bind");
+    assert!(err.contains("type mismatch"), "{err}");
+    assert!(
+        err.contains("expected `'F['T]`, found `'F`"),
+        "both renderings in caller/callee spellings: {err}"
+    );
+}
+
+/// `probe_ctx`'s twin carrying a `GenericTypes` registry, for the lifted
+/// (App, Generic) cross-call faces that mint through `ctx.generics()` --
+/// which `probe_ctx` itself passes `None` for (P7b.S13 REQ-1's note: a
+/// direct-call unit over a mint face hits the not-yet-groundable verdict
+/// unless the Ctx carries generics).
+fn probe_ctx_with_generics<'a>(
+    word: &'a WordDef,
+    generics: &'a std::cell::RefCell<GenericTypes>,
+) -> Ctx<'a> {
+    word_ctx(
+        word,
+        &[],
+        &[],
+        &[],
+        None,
+        &CombinatorIndex::new(),
+        Some(generics),
+    )
+}
+
+/// A `GenericTypes` registry with one single-type-variable generic struct
+/// header named `Wrap` at idx 0, module 0 -- the R-13.1 fixture's ctor.
+fn wrap_generics() -> GenericTypes {
+    let mut generics = GenericTypes::with_bases(0, 0);
+    generics.structs.push(GenericStructDecl {
+        name: "Wrap".to_string(),
+        ty_var_names: vec!["'X".to_string()],
+        ty_kinds: Vec::new(),
+        len_var_names: Vec::new(),
+        fields: vec![("val".to_string(), PolyType::Var(0))],
+        span: Span::default(),
+        module: 0,
+    });
+    generics
+}
+
+/// P7b.S13 (the lifted input arm, App/App face): the caller applied one of
+/// its own variables, so the callee's head variable images to that caller
+/// variable and each argument recurses into its own bind -- head and arg
+/// both land in the mapping, in first-mention order.
+#[test]
+fn poly_cross_match_app_vs_app_binds_head_and_arg_vars() {
+    let callee_sig = app_sig();
+    let caller_sig = app_sig();
+    let probe = probe_word();
+    let ctx = probe_ctx(&probe);
+    let mut mapping = Vec::new();
+    poly_cross_match(
+        &PolyType::App {
+            head: 0,
+            args: vec![PolyType::Var(1)],
+        },
+        &PolyType::App {
+            head: 1,
+            args: vec![PolyType::Var(0)],
+        },
+        &mut mapping,
+        &callee_sig,
+        &caller_sig,
+        "f",
+        Span::default(),
+        &ctx,
+    )
+    .expect("an App-vs-App cross-call of equal arity binds structurally");
+    assert_eq!(
+        mapping,
+        vec![(0, Image::CallerVar(1)), (1, Image::CallerVar(0))]
+    );
+}
+
+/// P7b.S13 (the lifted input arm, concrete arg): a concrete argument
+/// matches slot-for-slot and binds nothing, so only the head lands in the
+/// mapping -- the element's concreteness travels through the mapping's
+/// head, not around it (the D2 shape).
+#[test]
+fn poly_cross_match_app_vs_app_concrete_arg_binds_only_the_head() {
+    let callee_sig = app_sig();
+    let caller_sig = app_sig();
+    let probe = probe_word();
+    let ctx = probe_ctx(&probe);
+    let mut mapping = Vec::new();
+    poly_cross_match(
+        &PolyType::App {
+            head: 0,
+            args: vec![PolyType::Concrete(Type::I64)],
+        },
+        &PolyType::App {
+            head: 1,
+            args: vec![PolyType::Concrete(Type::I64)],
+        },
+        &mut mapping,
+        &callee_sig,
+        &caller_sig,
+        "f",
+        Span::default(),
+        &ctx,
+    )
+    .expect("equal-arity App slots with a concrete arg match");
+    assert_eq!(mapping, vec![(0, Image::CallerVar(1))]);
+}
+
+/// P7b.S13 (R-13.1, the mint face on a generics-carrying Ctx): a concrete
+/// ctor supplied as an App head binds the callee's head variable to
+/// `Image::Concrete(Type::CtorImage)` minted via `ctor_image_type` over the
+/// supplied Generic's header -- the same binding the mono route's App arm
+/// inserts -- and the argument recurses into its own bind (the D4 shape).
+#[test]
+fn poly_cross_match_app_vs_generic_binds_the_ctor_image() {
+    let callee_sig = app_sig();
+    let caller_sig = app_sig();
+    let generics = std::cell::RefCell::new(wrap_generics());
+    let probe = probe_word();
+    let ctx = probe_ctx_with_generics(&probe, &generics);
+    let mut mapping = Vec::new();
+    poly_cross_match(
+        &PolyType::App {
+            head: 0,
+            args: vec![PolyType::Var(1)],
+        },
+        &PolyType::Generic {
+            is_enum: false,
+            idx: 0,
+            module: 0,
+            args: vec![PolyType::Var(1)],
+            len_args: Vec::new(),
+            name: "Wrap",
+        },
+        &mut mapping,
+        &callee_sig,
+        &caller_sig,
+        "f",
+        Span::default(),
+        &ctx,
+    )
+    .expect("a concrete ctor head binds through the minted ctor image");
+    assert_eq!(mapping.len(), 2, "head and arg both bind: {mapping:?}");
+    assert_eq!(mapping[0].0, 0, "the callee's head variable binds first");
+    match &mapping[0].1 {
+        Image::Concrete(t) => {
+            assert!(
+                matches!(t, Type::CtorImage(gid, _) if *gid == GenericId { is_enum: false, idx: 0, module: 0 }),
+                "the head image is a CtorImage over the supplied header: {t:?}"
+            );
+            assert_eq!(
+                t.name(),
+                "Wrap",
+                "the ctor's declared name, not a placeholder"
+            );
+        }
+        other => panic!("the head binds to a ctor-valued image, got {other:?}"),
+    }
+    assert_eq!(mapping[1], (1, Image::CallerVar(1)));
+}
+
+/// P7b.S13 (the None-generics verdict): on a standalone probe Ctx -- which
+/// carries no `GenericTypes` (`probe_ctx` passes `None`) -- the (App,
+/// Generic) face reuses the mono route's not-yet-groundable rejection
+/// rather than minting through a table that is not there.
+#[test]
+fn poly_cross_match_app_vs_generic_without_generics_is_not_yet_groundable() {
+    let callee_sig = app_sig();
+    let caller_sig = app_sig();
+    let probe = probe_word();
+    let ctx = probe_ctx(&probe);
+    let mut mapping = Vec::new();
+    let err = poly_cross_match(
+        &PolyType::App {
+            head: 0,
+            args: vec![PolyType::Var(1)],
+        },
+        &PolyType::Generic {
+            is_enum: false,
+            idx: 0,
+            module: 0,
+            args: vec![PolyType::Var(1)],
+            len_args: Vec::new(),
+            name: "Wrap",
+        },
+        &mut mapping,
+        &callee_sig,
+        &caller_sig,
+        "f",
+        Span::default(),
+        &ctx,
+    )
+    .expect_err("no registry, no mint");
+    assert!(err.contains("cannot yet be instantiated"), "{err}");
+    assert!(
+        err.contains("'F['T]"),
+        "the declared App is the named generic type: {err}"
+    );
+}
+
+/// P7b.S13 (S1-7, the len_args face on a generics-carrying Ctx): a supplied
+/// header that declares length parameters takes the mono route's own
+/// rejection -- an App head supplies type arguments only -- raised inside
+/// the arm body because it is a distinct diagnostic, not the mismatch a
+/// guard failure could only reach.
+#[test]
+fn poly_cross_match_app_vs_len_arg_generic_is_the_len_domain_rejection() {
+    let callee_sig = app_sig();
+    let caller_sig = app_sig();
+    let generics = std::cell::RefCell::new(wrap_generics());
+    let probe = probe_word();
+    let ctx = probe_ctx_with_generics(&probe, &generics);
+    let mut mapping = Vec::new();
+    let err = poly_cross_match(
+        &PolyType::App {
+            head: 0,
+            args: vec![PolyType::Var(1)],
+        },
+        &PolyType::Generic {
+            is_enum: false,
+            idx: 0,
+            module: 0,
+            args: vec![PolyType::Var(1)],
+            len_args: vec![Len::Concrete(4)],
+            name: "Wrap",
+        },
+        &mut mapping,
+        &callee_sig,
+        &caller_sig,
+        "f",
+        Span::default(),
+        &ctx,
+    )
+    .expect_err("a length-parameterized ctor cannot fill an App head");
+    assert!(
+        err.contains("applies `'F` to the constructor `Wrap`, which declares a length parameter"),
+        "{err}"
+    );
+    assert!(mapping.is_empty(), "nothing binds: {mapping:?}");
+}
+
+/// P7b.S13 (the arity guard): a supplied App of a different arity rides the
+/// guard to the catch-all -- the rendered mismatch, the same mechanism the
+/// same-header Generic/Generic guard's failure takes.
+#[test]
+fn poly_cross_match_app_arity_mismatch_is_a_rendered_mismatch() {
+    let callee_sig = app_sig();
+    let caller_sig = app_sig();
+    let probe = probe_word();
+    let ctx = probe_ctx(&probe);
+    let mut mapping = Vec::new();
+    let err = poly_cross_match(
+        &PolyType::App {
+            head: 0,
+            args: vec![PolyType::Var(1)],
+        },
+        &PolyType::App {
+            head: 0,
+            args: Vec::new(),
+        },
+        &mut mapping,
+        &callee_sig,
+        &caller_sig,
+        "f",
+        Span::default(),
+        &ctx,
+    )
+    .expect_err("an arity-mismatching App is a mismatch, not a bind");
+    assert!(
+        err.contains("expected `'F['T]`, found `'F[]`"),
+        "both renderings: {err}"
+    );
+}
+
+/// P7b.S13 (the head-var conflict): the callee's head variable pinned to
+/// two different caller images at one call site cannot be one type at any
+/// instantiation -- the same consistency requirement the Var arm enforces,
+/// reached through the lifted arm's head bind.
+#[test]
+fn poly_cross_match_app_head_conflict_is_a_cross_call_conflict() {
+    let callee_sig = app_sig();
+    let caller_sig = app_sig();
+    let probe = probe_word();
+    let ctx = probe_ctx(&probe);
+    let mut mapping = Vec::new();
+    let declared = PolyType::App {
+        head: 0,
+        args: vec![PolyType::Var(1)],
+    };
+    poly_cross_match(
+        &declared,
+        &PolyType::App {
+            head: 0,
+            args: vec![PolyType::Var(0)],
+        },
+        &mut mapping,
+        &callee_sig,
+        &caller_sig,
+        "f",
+        Span::default(),
+        &ctx,
+    )
+    .expect("the first call binds the head cleanly");
+    let err = poly_cross_match(
+        &declared,
+        &PolyType::App {
+            head: 1,
+            args: vec![PolyType::Var(0)],
+        },
+        &mut mapping,
+        &callee_sig,
+        &caller_sig,
+        "f",
+        Span::default(),
+        &ctx,
+    )
+    .expect_err("a second, different head image conflicts");
+    assert!(err.contains("matched `'F` to both `'F` and `'T`"), "{err}");
+}
+
+/// P7b.S13 (R-13.2, the deliberately unpinned face): with the fence's
+/// second pattern deleted, a supplied App against a declared non-App slot
+/// falls to the catch-all mismatch -- no third diagnostic, no fence text.
+/// (A declared bare Var keeps the growth error instead: that arm precedes
+/// everything, pinned by `check_growing_cross_call_is_error`.)
+#[test]
+fn poly_cross_match_supplied_app_against_declared_non_app_is_a_mismatch() {
+    let callee_sig = app_sig();
+    let caller_sig = app_sig();
+    let probe = probe_word();
+    let ctx = probe_ctx(&probe);
+    let mut mapping = Vec::new();
+    let err = poly_cross_match(
+        &PolyType::Concrete(Type::I64),
+        &PolyType::App {
+            head: 0,
+            args: vec![PolyType::Var(1)],
+        },
+        &mut mapping,
+        &callee_sig,
+        &caller_sig,
+        "f",
+        Span::default(),
+        &ctx,
+    )
+    .expect_err("a supplied App fills no concrete slot");
+    assert!(
+        err.contains("expected `i64`, found `'F['T]`"),
+        "both renderings: {err}"
+    );
+    assert!(
+        !err.contains("supported"),
+        "the fence text is gone from this face: {err}"
+    );
 }
 
 /// S1-12 (R5): two call sites binding `'F` to *distinct* constructors

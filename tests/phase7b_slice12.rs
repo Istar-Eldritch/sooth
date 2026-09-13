@@ -15,8 +15,9 @@
 //! - G7: a member-sig diagnostic renders `Option['T]`-shaped declared inputs
 //!   in caller space (`no_candidate_fits_operands_error`'s shape strings, the
 //!   `substitute_member_var` callers).
-//! - G8: the cross-call App fence byte-identical to its frozen baseline
-//!   (R4 — the fence does not move).
+//! - G8 (retargeted by P7b.S13/SOO-60, which lifted the fence): the
+//!   cross-call App slot checks clean — its byte-pin moved with the fence
+//!   it pinned (`cross_call_app_slot_checks_clean_after_the_hkt_lift`).
 //! - G11: the structurally-pinned subclass (R3 tier 1) stays compiling with
 //!   the pinned payload flowing through typed.
 //!
@@ -32,8 +33,9 @@
 //! strings, not reads of `probes/` (those files stay byte-frozen as the
 //! pre-fix baseline); the harness prelude's `import: intrinsics * ;` replaces
 //! the probes' own import line, so a golden that pins stderr line numbers
-//! pins the harness-layout value, and G8 embeds its probe byte-verbatim
-//! (own import, no manifest) to stay byte-identical to the frozen baseline.
+//! pins the harness-layout value. (G8's byte-verbatim bare-dir capture and
+//! its `build_error_bare` helper moved to `tests/phase7b_slice13.rs` with
+//! SOO-60, the slice that lifted the fence it pinned.)
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -130,28 +132,6 @@ fn build_ok(tag: &str, src: &str) {
 /// `error: ...` stderr, never a panic), and return that stderr.
 fn build_error_located(tag: &str, src: &str) -> String {
     let (_t, entry) = single_file_hosted(tag, src);
-    let build = Command::new(env!("CARGO_BIN_EXE_sooth"))
-        .arg("build")
-        .arg(&entry)
-        .output()
-        .expect("sooth build should spawn");
-    assert!(!build.status.success(), "build should have failed");
-    let stderr = String::from_utf8(build.stderr).expect("stderr should be utf8");
-    assert!(
-        !stderr.contains("panicked"),
-        "a check rejection must never panic, got: {stderr}"
-    );
-    stderr
-}
-
-/// Build `src` the way the frozen baseline was captured — the source
-/// byte-verbatim (its own `import: intrinsics * ;` line included) in a bare
-/// temp dir with no `sooth.pkg`, so line numbers match
-/// `probes/s12_baseline.md`'s capture exactly. Used only by G8's
-/// byte-identity pin (R4): every other golden rides the harness prelude.
-fn build_error_bare(tag: &str, src: &str) -> String {
-    let t = Tree::new(tag);
-    let entry = t.write("main.sth", src);
     let build = Command::new(env!("CARGO_BIN_EXE_sooth"))
         .arg("build")
         .arg(&entry)
@@ -438,21 +418,25 @@ trait: TB['F: * -> *]
     );
 }
 
-/// (G8, R4 pin) Probe E (`probes/s12_e_cross_call_app_fence.sth`): the
-/// cross-call App fence (S1-17.i) stays byte-identical. The slice fixes the
-/// member-output *render*; the poly-body cross-call fence over compound
-/// receivers is a follow-up slice (SOO-60) and does not move. Built the way
-/// the baseline was captured — probe source byte-verbatim (its own
-/// `import: intrinsics * ;`, keeping `step ;` on line 13), bare temp dir, no
-/// manifest — so the stderr equals the frozen
-/// `probes/s12_baseline.md` entry byte for byte.
+/// (G10.4 retarget — P7b.S13/SOO-60) The cross-call App fence is LIFTED:
+/// SOO-60 is the follow-up slice this test's pre-lift form deferred to, and
+/// the Cursor-bounded pass-through pair now checks clean. Post-lift the
+/// input App-vs-App binds `It` to `CallerVar(It)` with the concrete `i64`
+/// args matching slot-for-slot; the `Bound::User(Cursor)` discharges
+/// symbolically (the caller declares `['It: Cursor]` too, so
+/// `sig.has_bound` holds); the concrete `i64` output never touches
+/// `poly_cross_output`'s wildcard. The byte-pin this test used to carry
+/// (slice12's G8, R4) moved by design — the verdict it pinned is the fence
+/// SOO-60 deletes — and the grounding twin for this same pair is that
+/// slice's required phase-3 golden (G12). Probe source with its own
+/// `import:` line dropped (the harness prelude supplies it) plus the empty
+/// `main` the link step needs.
 #[test]
-fn cross_call_app_fence_stays_byte_identical() {
-    let stderr = build_error_bare(
-        "g8-cross-call-app-fence",
+fn cross_call_app_slot_checks_clean_after_the_hkt_lift() {
+    build_ok(
+        "g10_4-cross-call-app-lift",
         "\\ S12 probe E — control: the cross-call App fence (S1-17.i).\n\
-         \\ Expected today: located rejection, not a stack loss.\n\
-         import: intrinsics * ;\n\
+         \\ SOO-60 lifts the fence: this pair now checks clean.\n\
          \n\
          trait: Cursor['It: * -> *]\n\
          \x20 : next ( 'It['T] -- 'It['T] ) ;\n\
@@ -462,11 +446,8 @@ fn cross_call_app_fence_stays_byte_identical() {
          \x20 drop ;\n\
          \n\
          : outer ['It: Cursor] ( i64 'It[i64] -- i64 )\n\
-         \x20 step ;\n",
-    );
-    assert_eq!(
-        stderr,
-        "error: `outer` cannot call the polymorphic word `step` (line 13, col 3)\n  a higher-kinded application in a cross-called polymorphic word is not yet supported from a polymorphic body\n  call `step` from a monomorphic word instead\n"
+         \x20 step ;\n\
+         : main ( -- ) ;\n",
     );
 }
 

@@ -341,15 +341,113 @@ pub(super) fn poly_cross_match(
             }
             Ok(())
         }
-        // S1-17.i: a poly *cross-call* with an `App` slot stays a located
-        // "unsupported" rejection -- S2 owns constructor-keyed dispatch.
-        (PolyType::App { .. }, _) | (_, PolyType::App { .. }) => {
-            Err(poly_cross_call_unsupported_error(
-                ctx,
-                span,
-                callee,
-                "a higher-kinded application in a cross-called polymorphic word",
-            ))
+        // P7b.S13 (S1-17.i lift, R-13.1): a declared App slot is matched
+        // structurally like any other compound input, by sub-dispatching on
+        // the supplied type. Each arm carries its arity test as a guard, so
+        // an arity-mismatching shape rides the guard to the catch-all
+        // mismatch below -- the same mechanism the same-header
+        // Generic/Generic guard's failure already takes. The second fence
+        // pattern is deliberately gone (R-13.2): a supplied App against a
+        // declared non-App slot now falls to that same catch-all (except a
+        // declared bare Var, whose arm above precedes everything and keeps
+        // the growth error).
+        (PolyType::App { head: dh, args: da }, PolyType::App { head: sh, args: sa })
+            if da.len() == sa.len() =>
+        {
+            // The caller applied one of its own variables, so the callee's
+            // head variable images to that caller variable -- the same
+            // consistency/conflict block the Var arm uses above (kept inline
+            // there; this is its verbatim twin).
+            let image = Image::CallerVar(*sh);
+            match mapping.iter().find(|(id, _)| id == dh) {
+                Some((_, prev)) if *prev != image => {
+                    return Err(poly_cross_var_conflict_error(
+                        ctx,
+                        span,
+                        callee,
+                        &callee_sig.ty_var_names[*dh as usize],
+                        &poly_image_str(prev, caller_sig),
+                        &poly_image_str(&image, caller_sig),
+                    ));
+                }
+                Some(_) => {}
+                None => mapping.push((*dh, image)),
+            }
+            for (d, sup) in da.iter().zip(sa) {
+                poly_cross_match(d, sup, mapping, callee_sig, caller_sig, callee, span, ctx)?;
+            }
+            Ok(())
+        }
+        (
+            PolyType::App { head: dh, args: da },
+            PolyType::Generic {
+                is_enum: se,
+                idx: si,
+                module: sm,
+                args: sa,
+                len_args: sl_args,
+                name: sname,
+                ..
+            },
+        ) if da.len() == sa.len() => {
+            // R-13.1: a concrete constructor supplied as the head binds the
+            // callee's head variable to a ctor-valued image -- the same
+            // `CtorImage` binding the mono route's App arm inserts, so the
+            // cross-call route is exactly as strong as the mono route for
+            // this shape. The bind READS the generics registry
+            // (`ctor_image_type` reads the ctor's declared name off it);
+            // the walk-time "no registry interning" claim is about
+            // interning only.
+            let Some(cell) = ctx.generics() else {
+                return Err(poly_generic_not_yet_groundable_error(
+                    ctx,
+                    span,
+                    callee,
+                    &poly_type_str(declared, callee_sig),
+                ));
+            };
+            let generics = cell.borrow();
+            // S1-7 (the mono route's own rejection, checked in the arm body
+            // because it is a distinct diagnostic, not the mismatch a guard
+            // failure could only reach): the supplied header declares length
+            // parameters, which an App head can never supply -- an
+            // application carries type arguments only.
+            if !sl_args.is_empty() {
+                return Err(poly_app_len_domain_unsupported_error(
+                    ctx,
+                    span,
+                    callee,
+                    &callee_sig.ty_var_names[*dh as usize],
+                    sname,
+                ));
+            }
+            let gid = GenericId {
+                is_enum: *se,
+                idx: *si,
+                module: *sm,
+            };
+            let image = Image::Concrete(crate::ast::ctor_image_type(&generics, gid));
+            drop(generics);
+            // The head bind, through the same consistency/conflict block the
+            // Var arm uses above.
+            match mapping.iter().find(|(id, _)| id == dh) {
+                Some((_, prev)) if *prev != image => {
+                    return Err(poly_cross_var_conflict_error(
+                        ctx,
+                        span,
+                        callee,
+                        &callee_sig.ty_var_names[*dh as usize],
+                        &poly_image_str(prev, caller_sig),
+                        &poly_image_str(&image, caller_sig),
+                    ));
+                }
+                Some(_) => {}
+                None => mapping.push((*dh, image)),
+            }
+            for (d, sup) in da.iter().zip(sa) {
+                poly_cross_match(d, sup, mapping, callee_sig, caller_sig, callee, span, ctx)?;
+            }
+            Ok(())
         }
         _ => Err(mismatch()),
     }
