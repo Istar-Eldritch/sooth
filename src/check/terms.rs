@@ -2037,6 +2037,27 @@ fn bare_generated_word_own_module_grounding(
             ));
         }
     }
+    // P7b.S14 (R-1/R-2/R-3): the narrowed provenance gate -- the borrowed
+    // argument list's declaring module must be reachable through the
+    // caller's own import set. Deliberately omits the ambiguity-count clause
+    // `foreign_single_candidate_grounding` layers on the same reachable set:
+    // the header itself is never in question here (it is the caller's own,
+    // already selected above), only the borrowed arguments' provenance is
+    // (see the Ruling in docs/roadmap/P7b/slice14-spec.md).
+    if let Some(modules) = ctx.modules() {
+        let caller = &modules[span.module as usize];
+        let (_, reachable) = reachable_modules_for_header(cell, header_name, caller, modules);
+        if !reachable.contains(&declaring_module) {
+            return Err(own_header_cannot_ground_error(
+                ctx,
+                span,
+                header_name,
+                &format!(
+                    "the only `{header_name}` instantiation in scope is declared in a module this module does not import"
+                ),
+            ));
+        }
+    }
     let ty = {
         let mut guard = cell.borrow_mut();
         let regs = crate::ast::MutRegistries {
@@ -2098,35 +2119,8 @@ fn foreign_single_candidate_grounding(
     let Some(modules) = ctx.modules() else {
         return Ok(());
     };
-    let guard = cell.borrow();
-    // The whole-program list of modules declaring a same-named generic header
-    // (`ctx.generics().structs` -- complete at env-build time, probe P6).
-    let declarers: HashSet<u32> = guard
-        .structs
-        .iter()
-        .filter(|d| d.name == header_name)
-        .map(|d| d.module)
-        .collect();
     let caller = &modules[span.module as usize];
-    // Exemption 2's reachable set: the caller's own import set -- plain
-    // imports and selective targets alike, one hop, regardless of which name
-    // each selective entry was keyed by (GO: a selective import of a
-    // *different* name still makes its target reachable) -- plus, for every
-    // module in that raw set, whatever module the export-origin walk resolves
-    // the surface name to when started there (GN: a re-exporting hub with no
-    // header of its own still chains through to the declaring module).
-    let raw: Vec<u32> = caller
-        .imports
-        .values()
-        .copied()
-        .chain(caller.selective.values().copied())
-        .collect();
-    let mut reachable: HashSet<u32> = raw.iter().copied().collect();
-    for start in &raw {
-        if let Some(origin) = walk_generic_header_origin(*start, header_name, &declarers, modules) {
-            reachable.insert(origin);
-        }
-    }
+    let (declarers, reachable) = reachable_modules_for_header(cell, header_name, caller, modules);
     // Exemption 2, both halves required: at most one same-named header
     // reachable, **and** the sole candidate's declaring module among them. A
     // reachable header that never mints does not entitle the caller to borrow
@@ -2191,6 +2185,53 @@ fn foreign_single_candidate_grounding(
 /// -- and not the precomputed `type_origin` table either: both are
 /// concrete-type-only, so neither can resolve a generic header through a hub
 /// at all (GL/GN would fail if built on either).
+/// P7b.S14 (R-1): the caller's fully-resolved reachable-module set for a
+/// given header name, extracted from `foreign_single_candidate_grounding`'s
+/// own construction so the S9 pre-guard's provenance gate can share it
+/// without sharing that function's ambiguity-count and exemption-4 logic
+/// layered on top (the narrowed gate the own-header path needs, per the
+/// Ruling). Returns `(declarers, reachable)`: `declarers` is the whole-program
+/// set of modules declaring a same-named generic header; `reachable` is the
+/// caller's raw import/selective targets, plus the export-origin walk's
+/// resolution from each of those targets (GN: a re-exporting hub with no
+/// header of its own still chains through to the declaring module).
+fn reachable_modules_for_header(
+    cell: &std::cell::RefCell<crate::ast::GenericTypes>,
+    header_name: &str,
+    caller: &ModuleInfo,
+    modules: &[ModuleInfo],
+) -> (HashSet<u32>, HashSet<u32>) {
+    let guard = cell.borrow();
+    // The whole-program list of modules declaring a same-named generic header
+    // (`ctx.generics().structs` -- complete at env-build time, probe P6).
+    let declarers: HashSet<u32> = guard
+        .structs
+        .iter()
+        .filter(|d| d.name == header_name)
+        .map(|d| d.module)
+        .collect();
+    // The caller's own import set -- plain imports and selective targets
+    // alike, one hop, regardless of which name each selective entry was
+    // keyed by (GO: a selective import of a *different* name still makes its
+    // target reachable) -- plus, for every module in that raw set, whatever
+    // module the export-origin walk resolves the surface name to when
+    // started there (GN: a re-exporting hub with no header of its own still
+    // chains through to the declaring module).
+    let raw: Vec<u32> = caller
+        .imports
+        .values()
+        .copied()
+        .chain(caller.selective.values().copied())
+        .collect();
+    let mut reachable: HashSet<u32> = raw.iter().copied().collect();
+    for start in &raw {
+        if let Some(origin) = walk_generic_header_origin(*start, header_name, &declarers, modules) {
+            reachable.insert(origin);
+        }
+    }
+    (declarers, reachable)
+}
+
 fn walk_generic_header_origin(
     start: u32,
     name: &str,
@@ -5840,6 +5881,79 @@ mod tests {
         assert_eq!(
             grounded.module, 3,
             "the grounded candidate is the caller's own mint, never the borrowed one"
+        );
+    }
+
+    /// P7b.S14 (R-1/R-3): the own-header path's new provenance gate, reachable
+    /// case -- the caller (module 3) declares its own `Widget` header and
+    /// imports the module (4) that declares and mints the borrowed candidate.
+    /// The gate's `reachable.contains(&declaring_module)` check passes, so
+    /// grounding proceeds exactly as before the gate existed.
+    #[test]
+    fn own_header_gate_reachable_still_grounds() {
+        let mut generics = GenericTypes::with_bases(0, 0);
+        generics.structs.push(generic_struct_decl(
+            "Widget",
+            3,
+            &["'T"],
+            &[("v", PolyType::Var(0))],
+        ));
+        generics.structs.push(generic_struct_decl(
+            "Widget",
+            4,
+            &["'T"],
+            &[("v", PolyType::Var(0))],
+        ));
+        let mut scratch = ScratchRegs::default();
+        let borrowed = generics.instantiate_struct(1, &[Type::I64], &[], 4, scratch.regs());
+        let cell = RefCell::new(generics);
+        let only = widget_ctor_candidate(borrowed, 4);
+        let modules = module_views(module_view(&[("lib", 4)], &[], &[]), 5);
+        let grounded = ground_in_module_3_view(&only, "Widget", &cell, &[], Some(&modules))
+            .expect("the two headers agree on parameter count, so this must not error")
+            .expect(
+                "the borrowed candidate's declaring module is reachable, so grounding proceeds",
+            );
+        assert_eq!(
+            grounded.module, 3,
+            "the grounded candidate is the caller's own mint"
+        );
+    }
+
+    /// P7b.S14 (R-1/R-2): the own-header path's new provenance gate,
+    /// unreachable case -- the caller (module 3) declares its own `Widget`
+    /// header but does not import the module (4) that declares and mints
+    /// the borrowed candidate. The gate refuses the borrow with the new
+    /// `own_header_cannot_ground_error` detail (R-2), rather than silently
+    /// minting the caller's own header from an unreachable module's argument
+    /// list.
+    #[test]
+    fn own_header_gate_unreachable_is_located_error() {
+        let mut generics = GenericTypes::with_bases(0, 0);
+        generics.structs.push(generic_struct_decl(
+            "Widget",
+            3,
+            &["'T"],
+            &[("v", PolyType::Var(0))],
+        ));
+        generics.structs.push(generic_struct_decl(
+            "Widget",
+            4,
+            &["'T"],
+            &[("v", PolyType::Var(0))],
+        ));
+        let mut scratch = ScratchRegs::default();
+        let borrowed = generics.instantiate_struct(1, &[Type::I64], &[], 4, scratch.regs());
+        let cell = RefCell::new(generics);
+        let only = widget_ctor_candidate(borrowed, 4);
+        let modules = module_views(module_view(&[], &[], &[]), 5);
+        let err = ground_in_module_3_view(&only, "Widget", &cell, &[], Some(&modules))
+            .expect_err("the borrowed candidate's declaring module is unreachable, so the borrow must be refused");
+        assert!(
+            err.contains(
+                "the only `Widget` instantiation in scope is declared in a module this module does not import"
+            ),
+            "unexpected message: {err}"
         );
     }
 

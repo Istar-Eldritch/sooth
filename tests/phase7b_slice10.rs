@@ -373,7 +373,16 @@ fn unimported_declaring_module_does_not_count_toward_ambiguity() {
         ": usesize ( Widget[i64] -- i64 ) size ;\n",
         "",
     );
-    write_widget_module(&t, "z.sth", "9", BARE_RUN_BODY, "export: run ;\n");
+    t.write(
+        "z.sth",
+        &format!(
+            "import: intrinsics * ; import: self::f * ; import: self::lib ;\n\
+             type: Widget['T] v 'T ;\n\
+             impl: Sized for Widget : size drop 9 ; ;\n\
+             {BARE_RUN_BODY}\
+             export: run ;\n"
+        ),
+    );
     t.write(
         "app.sth",
         "import: intrinsics * ; import: self::f * ;\n\
@@ -596,7 +605,16 @@ fn hub_two_declarer_imports_resolve_identically_under_both_import_orders() {
         write_manifest(&t);
         write_sized_trait(&t);
         write_widget_module(&t, "a.sth", "1", EAGER_MINTER_BODY, "export: run ;\n");
-        write_widget_module(&t, "b.sth", "2", BARE_RUN_BODY, "export: run ;\n");
+        t.write(
+            "b.sth",
+            &format!(
+                "import: intrinsics * ; import: self::f * ; import: self::a ;\n\
+                 type: Widget['T] v 'T ;\n\
+                 impl: Sized for Widget : size drop 2 ; ;\n\
+                 {BARE_RUN_BODY}\
+                 export: run ;\n"
+            ),
+        );
         t.write(
             "h.sth",
             &format!(

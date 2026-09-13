@@ -261,7 +261,7 @@ each keeping its own field layout — is fully preserved after the import is
 added; the import only prevents the new gate from rejecting the borrow before
 that collision-handling code ever runs.
 
-### O-2: no test file beyond `phase7b_slice9.rs` is affected
+### O-2: no test file beyond `phase7b_slice9.rs` and `phase7b_slice10.rs` is affected
 
 Grepped every `tests/*.rs` for a second same-named cross-module generic header
 declaration (`type: {Name}['`, repeated across files). Hits beyond
@@ -272,8 +272,30 @@ own header an explicit `: mk ( i64 -- Widget[i64] ) Widget ;` (or equivalent
 explicit-signature mint) before any bare ctor call — so `env["Widget"]` always
 holds 2 candidates in every one of these fixtures, and none ever reaches the
 `[only]`-candidate pre-guard this slice touches. Confirmed by reading each
-fixture's body, not by name-matching alone. NFR-1 can therefore state a closed
-file list rather than a conditional one.
+fixture's body, not by name-matching alone.
+
+**Amendment, found during Phase 1 implementation:** this audit missed a
+second shape in `phase7b_slice10.rs` itself: `write_widget_module`'s shared
+`BARE_RUN_BODY` (`: run ( i64 -- i64 ) Widget sized ;`) is the pre-guard's own
+bare-call shape, not an explicit mint, and two fixtures use it on a module
+that is compiled into the program (for link/import-graph completeness) but
+never actually invoked: `unimported_declaring_module_does_not_count_toward_ambiguity`'s
+`z.sth` (own header, module 9, only program-wide `Widget` instantiation is
+`lib.sth`'s, module 7, which `z` does not import) and
+`hub_two_declarer_imports_resolve_identically_under_both_import_orders`'s
+`b.sth` (own header, module 2, only program-wide instantiation is `a.sth`'s,
+module 1, which `b` does not import). Both now hit the new gate and fail to
+build. Traced against R-5: neither fixture's own point (`app`'s reachability
+count in the first; `h`'s import-order-independent resolution in the second)
+involves `z::run`/`b::run` at all — those bodies exist only so the module
+compiles, are never called, and adding an import does not change which header
+any tested call grounds at. **Disposition: add `import: self::lib ;` to
+`z.sth` and `import: self::a ;` to `b.sth`** — the same in-scope,
+R-4-sanctioned import-add already applied to the six `phase7b_slice9.rs`
+fixtures, just also needed in these two `phase7b_slice10.rs` ones. This is a
+test-fixture edit only; `foreign_single_candidate_grounding`'s own behavior
+(NFR-2) is untouched. NFR-1's file list is amended below to include these two
+named edits.
 
 ### Unit-test harness
 
@@ -371,15 +393,22 @@ face — per the Ruling, the narrowed gate cannot produce it there.
 - **NFR-1 — checker-stage only, closed file list.** No diff in `src/ir`,
   `src/parser.rs`, or `src/emit`. Changes confined to: `src/check/terms.rs` (the
   helper extraction, the new gate, and units), `tests/phase7b_slice9.rs` (the 6
-  fixture import-adds), `tests/phase7b_slice14.rs` (new file, the 4 new
-  goldens), and roadmap docs (`slice11-spec.md`,
+  fixture import-adds), `tests/phase7b_slice10.rs` (the 2 import-adds to
+  `z.sth`/`b.sth`, per the O-2 amendment above — fixture bodies and
+  assertions otherwise untouched), `tests/phase7b_slice14.rs` (new file, the 4
+  new goldens), and roadmap docs (`slice11-spec.md`,
   `P7b-higher-kinded-types.md`, `ROADMAP.md`). This list is closed, not
-  conditional — O-2 (above) already confirms no other test file is in scope.
-- **NFR-2 — S10 unchanged.** `foreign_single_candidate_grounding`'s own goldens
-  (`tests/phase7b_slice10.rs`) and diagnostics stay byte-identical; the only
-  permitted edit to that function is the mechanical extraction of
+  conditional — O-2 (above) audits the full scope, amendment included.
+- **NFR-2 — S10 behaviorally unchanged.** `foreign_single_candidate_grounding`'s
+  own decision logic and diagnostics stay byte-identical; the only permitted
+  edit to that function is the mechanical extraction of
   `reachable_modules_for_header` (R-1), which changes how its inputs are
-  computed, not what it decides.
+  computed, not what it decides. Its goldens' *fixture source* may gain the
+  two import-adds named above (a different gate, the new own-header one,
+  requires it for those two fixtures to build at all) but their *assertions*
+  (expected output, expected error bytes) stay byte-identical — the two edited
+  tests still pin the same ambiguity/order-independence behavior they always
+  did, per the traced R-5 check in the O-2 amendment.
 - **NFR-3 — the delta is preservation, not loss.** Every affected G-series
   fixture is an intentional import-add (R-4), verified per-fixture above,
   including that G1e/G1f's collision-under-test survives the rewrite (R-5). No
