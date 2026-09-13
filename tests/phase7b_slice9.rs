@@ -106,7 +106,7 @@ fn cross_module_same_shaped_impls_dispatch_each_callers_own_impl() {
     );
     t.write(
         "a.sth",
-        "import: intrinsics * ; import: self::f * ;\n\
+        "import: intrinsics * ; import: self::f * ; import: self::b ;\n\
          type: Widget['T] v 'T ;\n\
          impl: Sized for Widget : size drop 1 ; ;\n\
          : run ( i64 -- i64 ) Widget sized ;\n\
@@ -191,7 +191,7 @@ fn every_bare_ctor_site_in_one_module_grounds_at_the_callers_own_header() {
     write_eager_minter_shaped(&t, "v 'T w 'T", "i64 i64");
     t.write(
         "a.sth",
-        "import: intrinsics * ; import: self::f * ;\n\
+        "import: intrinsics * ; import: self::f * ; import: self::b ;\n\
          type: Widget['T] v 'T ;\n\
          impl: Sized for Widget : size drop 1 ; ;\n\
          : run ( i64 -- i64 ) Widget sized ;\n\
@@ -224,7 +224,7 @@ fn field_projection_reads_the_caller_grounded_mints_own_field() {
     write_eager_minter(&t);
     t.write(
         "a.sth",
-        "import: intrinsics * ; import: self::f * ;\n\
+        "import: intrinsics * ; import: self::f * ; import: self::b ;\n\
          type: Widget['T] v 'T ;\n\
          impl: Sized for Widget : size drop 1 ; ;\n\
          : run ( i64 -- i64 ) Widget | w | &w &v @ | x | w drop x ;\n\
@@ -339,7 +339,7 @@ fn same_named_headers_of_differing_shapes_destructure_each_modules_own_layout() 
     write_manifest(&t);
     t.write(
         "a.sth",
-        "import: intrinsics * ;\n\
+        "import: intrinsics * ; import: self::b ;\n\
          type: Widget['T] v 'T ;\n\
          : mk3 ( i64 -- ) Widget drop ;\n\
          export: mk3 ;\n",
@@ -378,7 +378,7 @@ fn same_named_headers_of_differing_shapes_pack_each_modules_own_field_values() {
     write_manifest(&t);
     t.write(
         "a.sth",
-        "import: intrinsics * ;\n\
+        "import: intrinsics * ; import: self::b ;\n\
          type: Widget['T] v 'T ;\n\
          : mk3 ( i64 -- ) Widget drop ;\n\
          export: mk3 ;\n",
@@ -474,7 +474,7 @@ fn cross_module_same_shaped_impls_eager_minter_wins_regardless_of_caller() {
     );
     t.write(
         "b.sth",
-        "import: intrinsics * ; import: self::f * ;\n\
+        "import: intrinsics * ; import: self::f * ; import: self::a ;\n\
          type: Widget['T] v 'T ;\n\
          impl: Sized for Widget : size drop 2 ; ;\n\
          : run ( i64 -- i64 ) Widget sized ;\n\
