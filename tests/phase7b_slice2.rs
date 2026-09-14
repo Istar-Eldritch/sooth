@@ -130,18 +130,16 @@ trait: Functor['F: * -> *] :
     build_ok(&entry);
 }
 
-/// Golden (error #1, S2-15.a): a member of an HKT trait whose only inputs
-/// are member locals has nothing for a call to dispatch on -- the lifted
-/// single-var gate (S2-1) hands the shape to the HKT-aware dispatchability
-/// rule (S2-2), which rejects it as a located declaration-time error naming
-/// the member and the expected trait-var-headed form. The asserted text is
-/// the brief's pinned S2-15.a draft (slice2-brief.md, R4) with this
-/// fixture's names/spans substituted; the nested-composite note is NOT part
-/// of that pinned text and this fixture has no composite input, so it must be
-/// absent (it appears only when the inputs actually nest the trait var --
-/// pinned at unit level in `check/declarations.rs`).
+/// Golden (G10.1, P7b.S15 R-30.1): the S2-15.a pin retargets IN PLACE to the
+/// relaxation's positive. The declaration gate now admits a member whose
+/// nonempty inputs lack a dispatchable trait-var head iff at least one
+/// output mentions the var as an application head (`App { head: 0 }`, under
+/// one `Ref`), so `pick ( 'T -- 'F['T] )` -- the exact fixture r2f measured
+/// flipping from the located error to a clean build under the relaxation --
+/// declares. The refusal faces the old pin covered keep golden-level
+/// coverage in the two negative siblings below (G10.3/G10.4).
 #[test]
-fn hkt_member_without_dispatchable_input_is_located_error() {
+fn hkt_member_with_only_output_trait_var_declares() {
     let src = "\
 trait: Functor['F: * -> *] :
   map ( 'F['T] [ 'T -- 'U ] -- 'F['U] ) ;
@@ -149,9 +147,29 @@ trait: Functor['F: * -> *] :
 ;
 : main ( -- ) ;
 ";
-    let (_t, entry) = single_file("s2-15a-no-dispatchable-input", src);
+    let (_t, entry) = single_file("s15-output-trait-var-declares", src);
+    build_ok(&entry);
+}
+
+/// Golden (G10.3, REQ-30.2): the refusal arm stays observable -- a member
+/// that mentions the trait var NOWHERE still refuses, with the same S2-15.a
+/// error bytes the moved pin used to assert (same fixture layout, same
+/// member span), and the nested-input note stays absent (the inputs don't
+/// nest the var -- they don't mention it at all). Unit twin:
+/// `check_trait_decls_rejects_member_mentioning_the_trait_var_nowhere`.
+#[test]
+fn hkt_member_mentioning_the_trait_var_nowhere_is_located_error() {
+    let src = "\
+trait: Functor['F: * -> *] :
+  map ( 'F['T] [ 'T -- 'U ] -- 'F['U] ) ;
+  : pick ( 'T -- 'T ) ;
+;
+: main ( -- ) ;
+";
+    let (_t, entry) = single_file("s15-nowhere-mention", src);
     let err = build_error(&entry);
-    // The spec's pinned S2-15.a text, verbatim for this fixture.
+    // The spec's pinned S2-15.a text, verbatim for this fixture -- the same
+    // bytes the retargeted pin's fixture used to produce.
     assert!(
         err.contains(
             "error: trait member `pick` of `Functor` (line 4, col 5) has no input for a call to \
@@ -166,6 +184,40 @@ trait: Functor['F: * -> *] :
     // Distinguishing fragment: the lifted member gate must not fire --
     // `pick` legitimately declares a local; what fails is dispatchability.
     assert!(!err.contains("more than one type variable"), "{err}");
+}
+
+/// Golden (G10.4, REQ-30.2 -- the R-30.1 delta pin): a member whose only
+/// trait-var mention is a *bare* output var is refused. R-30.1's output arm
+/// is App-headed-only -- the r2 probe patch's verbatim `dispatchable_head`
+/// reuse over the outputs would admit exactly this shape (`Var(0)` passes
+/// it); the ruling does not, because the dissolved member word has no App
+/// in its output to key impl selection on. The header is deliberately
+/// UNANNOTATED: under `Functor['F: * -> *]` the parser's bare-HKT-var fence
+/// (S2-15.b) refuses the shape at parse, before the gate runs (measured:
+/// line 4, col 18), so the gate's own refusal would be unobservable; with
+/// the kind unannotated the bare output mention establishes `Star` and the
+/// declaration gate is what refuses. Negative bytes measured live at the
+/// tightened gate before pinning. Unit twin:
+/// `check_trait_decls_rejects_member_with_only_a_bare_output_trait_var`.
+#[test]
+fn hkt_member_with_only_a_bare_output_trait_var_is_located_error() {
+    let src = "\
+trait: Functor['F]
+  : pick ( 'T -- 'F ) ;
+;
+: main ( -- ) ;
+";
+    let (_t, entry) = single_file("s15-bare-output-trait-var", src);
+    let err = build_error(&entry);
+    assert!(
+        err.contains(
+            "error: trait member `pick` of `Functor` (line 3, col 5) has no input for a call to \
+             dispatch on (expected the trait's variable `'F` bare or heading an application like \
+             `'F['T]`)"
+        ),
+        "{err}"
+    );
+    assert!(!err.contains("note:"), "{err}");
 }
 
 /// Golden (error #2, S2-15.b): the header's kind annotation conflicts with a

@@ -405,11 +405,23 @@ fn dispatchable_head(t: &PolyType) -> bool {
     matches!(t, PolyType::Var(0) | PolyType::App { head: 0, .. })
 }
 
+/// P7b.S15 (R-30.1): the gate gains an output arm -- a member whose nonempty
+/// inputs lack a dispatchable trait-var head is admitted iff at least one
+/// output mentions the var *as an application head* (`App { head: 0 }`,
+/// under one `Ref`, the input arm's ref-unwrapping courtesy). App-headed
+/// only: a bare output var (`pick ( 'T -- 'F )`) leaves the dissolved member
+/// word's output with no App to key impl selection on, so it stays refused
+/// (pinned by G10.4) -- the r2 probe patch's verbatim `dispatchable_head`
+/// reuse over the outputs would have admitted it.
 fn member_binds_trait_var(member: &TraitMember) -> bool {
     member.sig.inputs.is_empty()
         || member.sig.inputs.iter().any(|input| match input {
             PolyType::Ref(referent, _) => dispatchable_head(referent),
             other => dispatchable_head(other),
+        })
+        || member.sig.outputs.iter().any(|output| match output {
+            PolyType::Ref(referent, _) => matches!(&**referent, PolyType::App { head: 0, .. }),
+            other => matches!(other, PolyType::App { head: 0, .. }),
         })
 }
 
@@ -3905,6 +3917,55 @@ mod tests {
         assert_eq!(binds, vec![("at", true), ("sink", true), ("fresh", true)]);
     }
 
+    /// The one-member probe behind the output-arm units: parse a
+    /// single-member trait, run `member_binds_trait_var` on its member.
+    fn trait_member_binds(src: &str) -> bool {
+        let tokens = lex(src).unwrap();
+        let module = crate::parser::parse(&tokens).unwrap();
+        let member = module
+            .traits
+            .iter()
+            .find(|t| !t.members.is_empty())
+            .expect("the trait parsed")
+            .members
+            .first()
+            .expect("the member parsed");
+        member_binds_trait_var(member)
+    }
+
+    /// P7b.S15 (R-30.1): the output arm. An output mentioning the trait var
+    /// as an application head (`'F['T]`) admits a member whose nonempty
+    /// inputs lack a dispatchable head -- `pure ( 'A -- 'F['A] )`'s shape.
+    #[test]
+    fn member_binds_trait_var_accepts_an_app_headed_output_mention() {
+        assert!(trait_member_binds(
+            "trait: Functor['F: * -> *] : pick ( 'T -- 'F['T] ) ; ;"
+        ));
+    }
+
+    /// P7b.S15 (R-30.1, the App-headed-only face): a *bare* output var is
+    /// not an application head -- the r2 probe patch's verbatim
+    /// `dispatchable_head` reuse over the outputs would admit this shape;
+    /// the ruling does not. The header is unannotated so the bare output
+    /// mention establishes `Star` at parse (under `* -> *` the parser's
+    /// bare-HKT-var fence refuses the shape before the gate could run).
+    #[test]
+    fn member_binds_trait_var_rejects_a_bare_output_mention() {
+        assert!(!trait_member_binds(
+            "trait: Functor['F] : pick ( 'T -- 'F ) ; ;"
+        ));
+    }
+
+    /// P7b.S15 (R-30.1): the output arm keys on the trait var only -- a
+    /// member that mentions it nowhere (all member locals) still returns
+    /// false.
+    #[test]
+    fn member_binds_trait_var_rejects_a_member_mentioning_the_var_nowhere() {
+        assert!(!trait_member_binds(
+            "trait: Functor['F: * -> *] : pick ( 'T -- 'T ) ; ;"
+        ));
+    }
+
     #[test]
     fn check_trait_decls_accepts_a_member_binding_no_receiver() {
         trait_check_src("trait: Show['T] : fresh ( -- i64 ) ; ;").unwrap();
@@ -3924,33 +3985,66 @@ mod tests {
         .unwrap();
     }
 
-    /// P7b.S2 (S2-2/S2-15.a): with the member single-var gate lifted (S2-1),
-    /// a member whose only inputs are member locals (or a member-local-headed
-    /// application) has nothing to dispatch on -- a located declaration-time
-    /// error naming the member, not the old single-var rejection.
+    /// P7b.S15 (R-30.1, G10.1): the S2-15.a pin retargets to a success
+    /// assertion -- the gate now admits a member whose nonempty inputs lack
+    /// a dispatchable trait-var head iff at least one output mentions the
+    /// var as an application head (`App { head: 0 }`, under one `Ref`).
+    /// `pick ( 'T -- 'F['T] )` is the exact shape r2f measured flipping from
+    /// the located error to a clean build under the relaxation; the refusal
+    /// faces (var mentioned nowhere; bare output var) are pinned by the
+    /// rejection units below.
     #[test]
-    fn check_trait_decls_rejects_member_with_no_dispatchable_input() {
-        let err = trait_check_src(
+    fn check_trait_decls_accepts_member_with_only_output_trait_var() {
+        trait_check_src(
             "trait: Functor['F: * -> *] : map ( 'F['T] [ 'T -- 'U ] -- 'F['U] ) ;\n\
              : pick ( 'T -- 'F['T] ) ;\n\
              ;",
         )
-        .unwrap_err();
+        .unwrap();
+    }
+
+    /// P7b.S15 (G10.3's unit twin): the refusal arm stays observable -- a
+    /// member that mentions the trait var nowhere (all member locals) still
+    /// refuses with the located S2-15.a text, and the nested-input note
+    /// stays absent (the inputs don't nest the var -- they don't mention it
+    /// at all).
+    #[test]
+    fn check_trait_decls_rejects_member_mentioning_the_trait_var_nowhere() {
+        let err =
+            trait_check_src("trait: Functor['F: * -> *]\n  : pick ( 'T -- 'T ) ;\n;").unwrap_err();
         assert!(
-            err.contains("`pick` of `Functor`")
-                && err.contains("has no input for a call to dispatch on"),
+            err.contains(
+                "error: trait member `pick` of `Functor` (line 2, col 5) has no input for a call to \
+                 dispatch on (expected the trait's variable `'F` bare or heading an application like \
+                 `'F['T]`)"
+            ),
             "{err}"
         );
-        assert!(
-            !err.contains("more than one type variable"),
-            "the lifted member gate must not fire: {err}"
-        );
-        // S2-15.a review fix: the nested-composite note is conditional -- it
-        // rides along only when the inputs actually nest the trait var. Here
-        // the var appears only in the *outputs* (`'F['T]`), so no note.
         assert!(!err.contains("note:"), "{err}");
-        // Located at the member (`pick` on line 2), not the trait header.
-        assert!(err.contains("line 2, col 3"), "member position: {err}");
+    }
+
+    /// P7b.S15 (R-30.1's delta pin, G10.4's unit twin): a member whose only
+    /// trait-var mention is a *bare* output var is refused by the gate --
+    /// the r2 probe patch's verbatim `dispatchable_head` reuse over the
+    /// outputs would admit exactly this shape. The header is deliberately
+    /// UNANNOTATED: under `'F: * -> *` the parser's bare-HKT-var fence
+    /// (S2-15.b) refuses the shape at parse, before the gate runs; with the
+    /// kind unannotated the bare output mention establishes `Star` and the
+    /// declaration gate is what refuses.
+    #[test]
+    fn check_trait_decls_rejects_member_with_only_a_bare_output_trait_var() {
+        let err = trait_check_src("trait: Functor['F]\n  : pick ( 'T -- 'F ) ;\n;").unwrap_err();
+        assert!(
+            err.contains(
+                "error: trait member `pick` of `Functor` (line 2, col 5) has no input for a call to \
+                 dispatch on (expected the trait's variable `'F` bare or heading an application like \
+                 `'F['T]`)"
+            ),
+            "{err}"
+        );
+        // The inputs don't nest the trait var (they don't mention it at all),
+        // so the conditional note stays absent.
+        assert!(!err.contains("note:"), "{err}");
     }
 
     /// The gate is syntactic, so a receiver mentioned only *nested* inside a
