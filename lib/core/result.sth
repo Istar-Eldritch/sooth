@@ -1,4 +1,9 @@
+import: self::applicative | Applicative | ;
 type: Result['T 'E] | Ok 'T | Err 'E ;
 export: Result ;
 export: Ok ;
 export: Err ;
+
+impl: Applicative for Result
+  : pure Ok ;
+;

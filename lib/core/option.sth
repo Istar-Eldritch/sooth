@@ -1,4 +1,9 @@
+import: self::applicative | Applicative | ;
 type: Option['T] | None | Some 'T ;
 export: Option ;
 export: Some ;
 export: None ;
+
+impl: Applicative for Option
+  : pure Some ;
+;

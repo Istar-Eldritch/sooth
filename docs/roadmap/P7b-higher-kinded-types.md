@@ -903,6 +903,85 @@ which the `reachable_modules_for_header` extraction (R-1) already resolves by
 sharing only that computation, not the whole gate; no further split is
 warranted.
 
+**P7b.S15 — Applicative.pure: return-type-polymorphic construction.**
+Implemented on branch `soo-30` (spec
+[slice15-spec](./P7b/slice15-spec.md) with its
+[paper tests](./P7b/slice15-paper-tests.md); phases 1–2 in `bc702fb` +
+`7373e2d`, the library payload in the phase-3 commit). Lands SOO-30 — and
+corrects the record: S6 settled **no** grounding for return-type-polymorphic
+words (the out-of-scope line below said it had; the probes falsified that).
+Three probe rounds measured before any golden was pinned
+(`probes/soo30_findings.md`, `probes/soo30r2_findings.md`,
+`probes/soo30r3_findings.md`, byte-exact baselines alongside): at the old
+tree, `pure ( 'A -- 'F['A] )` was undeclarable (the S2-15.a gate refused any
+member whose nonempty inputs lack a dispatchable trait-var head) and every
+mono call route for an output-only-`'F` member was walled — the arity wall,
+the parse-refused bare-ctor spelling, operand-blind impl selection.
+
+Compiler work (R-30.1–R-30.3, phases 1–2). The declaration gate
+(`member_binds_trait_var`, `src/check/declarations.rs`) gains an output arm,
+**App-headed only**: a member whose nonempty inputs lack a dispatchable
+trait-var head is admitted iff at least one output mentions the var as an
+application head (`App { head: 0 }` under one `Ref` layer, the input arm's
+ref-unwrapping courtesy); the bare-output shape (`pick ( 'T -- 'F )` — a
+different beast whose dissolved member word has no App in its output to key
+impl selection on) and the nowhere-mentioned shape stay refused with the
+S2-15.a text (G10.3/G10.4; r2f measured the relaxation's blast radius as
+exactly two flipped pins, both retargeted in place per REQ-30.3). At a mono
+member call on the admitted shape, a **single** explicit type argument is the
+output-App instantiation (`resolve_mono_member_call`'s S6/S8b escape hatch,
+`src/check/poly/ground.rs`): `find_bound_impl` on the argument already keys
+impl selection on the dissolved ctor head; the route's addition binds the
+member's residual vars from the output App's arguments (positionally against
+the instantiation's ctor arguments — 2-param Result grounds through the 1-arg
+`pure[Result[i64 i64]]` spelling, the partial-head ride-along), extends the
+impl-target seed with them, and the arity gate (`src/check/poly.rs`) exempts
+exactly the routed supply. No new `PolyType`/`Image` variant, no new
+unification machinery, no IR change — the seed channel, the span-keyed
+`CallInst` lowering, and the subst plumbing as they stood (REQ-30.10). Fires
+only on an explicit instantiation, never a consuming-context lookahead (the
+S6 Q1 rule); positional supplies, plain-word output-only grounding (the twin
+class), and the zero-input escape hatch's recorded defect keep their measured
+bytes (G8/G11/G13, G12 — R-30.4/R-30.6 defer, they do not leak). The bare-
+call remedy's example becomes the achievable output-App spelling
+(`pure[Box[i64]]`, R-30.3 — measure-then-pin, G6).
+
+Library payload (R-30.7, phase 3). `lib/core/applicative.sth`: the
+`Applicative['F: * -> *]` trait declaring `pure` ONLY — `ap` is parse-fenced
+behind S1-6 (r1 P5), so no trait can declare it and the S7 deferral stands
+(R-30.5) — with `export: Applicative ;` and no member name (synthesized
+member words are never bare-nameable; the `core::iterator` export
+convention). `applicative` sits before `option` in the pkg module list; the
+per-ctor impls are co-located in their target modules (the orphan rule's
+target-module arm, each headed with its own applicative import, list's
+cell-boxing body adding `import: intrinsics | ^ | ;` — `check_owned_cell_word`
+interns the owned cell over the payload): option `: pure Some ;`, result
+`: pure Ok ;`, list `: pure Nil ^ Cons ;` — the r2c/r3-measured scaffold.
+A consumer writes `import: core::applicative | Applicative | ;` and calls
+`5 pure[Option[i64]]`; per-constructor dispatch produces real `Some`/`Ok`/
+`Cons` values. Goldens G1–G14 in `tests/phase7b_slice15.rs`: G2–G4 print
+`5\n` per ctor against the real lib, G5 prints `7\n7\n` — one shared-bound
+definition (`repure['F: Applicative 'A] ( 'F['A] 'A -- 'F['A] ) swap drop
+pure ;`, called bare at two mono sites) re-puring two constructors — and G7
+pins the bare-ctor fence (`pure[Option]` parse-refused) on the lib spelling.
+Every at-risk expectation is a round-3-measured byte
+(`probes/soo30r3_baseline.md`); nothing was pinned from prediction.
+Growth-structure re-check (CLAUDE.md, at phase exit) over the two files the
+compiler phases grew — `src/check/declarations.rs` (4717 lines) and
+`src/check/poly/ground.rs` (2695 lines): none of the five signals fires.
+Single import sections (`use super::*` plus std collections, no divergence);
+each file is one compiler-stage responsibility — declarations.rs is the
+declaration-time check pass (externs, exports, types, words, trait/impl
+declarations — the gate arm and its predicate units are declaration checks),
+ground.rs is mono member-call grounding (the route's helpers
+`output_trait_var_app`/`instantiation_ctor_args`/`mono_nullary_remedy_example`
+hang off the same `resolve_mono_member_call` flow, no X+Y+Z); both stay
+walk-level check code over the AST/env (no high/low mixing); every function
+reaches the others through the `check_*_decls` entry points and the grounding
+flow respectively (no orphans); no split is forced by a would-be circular
+dependency (the route reuses `find_bound_impl` and the seed channel, it does
+not couple the files). The closed file list (NFR-3) held: no new module.
+
 **Dogfood:** S6 — a program that `map`s and folds over `Option`, `Result`, and `List` through
 shared bounds, with the impls declared against the real lib types and output matching
 hand-written inline equivalents. S7 — `bind` dispatching per constructor over `Option`/`Result`
@@ -912,8 +991,14 @@ impls, no per-impl copy of either consumer.
 ## Out of scope
 
 GATs (generic associated types), associated types, dependent types, polymorphic kind recursion,
-kind polymorphism. `Applicative.pure` alone is library work once S6 settles
-grounding for return-type-polymorphic words. A general `Default` trait for construction stays
+kind polymorphism. `Applicative.pure` is **no longer** out of scope: S6 did not settle
+grounding for return-type-polymorphic words (its out-of-scope line claimed otherwise; the S15
+probes falsified that), and P7b.S15 landed it as compiler work (the output-App declaration arm
+and the mono-call output-side grounding route) plus the `Applicative` library slice with
+co-located Option/Result/List impls. What remains out: `Applicative.ap` (parse-fenced, S1-6; the
+S7 deferral stands), plain-word output-only bound-var grounding (the twin class's three walls
+stay byte-identical, R-30.4), and the P2e zero-input escape-hatch impl mismatch (recorded-not-
+fixed, R-30.6 — a separate defect ticket). A general `Default` trait for construction stays
 out (S6's `Monoid.empty` is scoped to merge identities, not defaults). Drop-forwarding for
 user-declared generic containers (a `Drop` trait) rides with P9's alloc layer where the need
 first becomes real; whether drop_graph already covers payload drops for minted generic

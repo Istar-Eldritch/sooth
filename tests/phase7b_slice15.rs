@@ -8,7 +8,13 @@
 //! with no `'F` operand (G14), the bare-call remedy's example becomes
 //! achievable (G6, R-30.3), conservative supplies keep their measured bytes
 //! (G8/G13), and the twin-class walls stay byte-identical (G11.a-c, R-30.4).
-//! Phase 3 will add the lib goldens (G2-G5, G7). Driven through the real
+//! Phase 3 adds the lib goldens (G2-G5, G7): the `Applicative` trait ships
+//! in `lib/core` (REQ-30.11) with co-located per-ctor impls (REQ-30.12), so
+//! a consumer's `5 pure[Option[i64]]`-class call dispatches the real
+//! constructors (G2-G4 print `5\n`), one shared-bound definition re-pures
+//! two constructors (G5 prints `7\n7\n`, REQ-30.13), and the bare-ctor
+//! instantiation fence stays word-general on the lib spelling (G7,
+//! REQ-30.14). Driven through the real
 //! `sooth` binary, harness helpers copied from `tests/phase7b_slice2.rs`;
 //! error goldens keep the minimal two-line prefix so their line/column
 //! assertions stay readable against the fixture.
@@ -430,4 +436,152 @@ fn output_app_instantiation_prints_at_mono_call_without_operand() {
     let (_t, entry) = single_file_hosted("s15-g14-output-app-route", src);
     let out = build_and_run(&entry);
     assert_eq!(out, "42\n");
+}
+
+/// Golden (G2, REQ-30.12 via REQ-30.6's route): the R-30.2 spelling on the
+/// real lib Option -- the ticket's central construction surface. `5
+/// pure[Option[i64]]` dissolves `'F:=Option, 'A:=i64`, keys impl selection
+/// on the dissolved ctor head, and dispatches the shipped `impl: Applicative
+/// for Option : pure Some ;` end-to-end, producing `Some(5)`; `showopt`
+/// prints the inner `5`. Bytes: `probes/soo30r3_baseline.md` § g2 (measured
+/// under the round-3 probe, then re-verified against the real lib at this
+/// phase's start). Fixture: `probes/soo30r3_g2.sth` minus its two import
+/// lines (the harness prepends both; duplicate imports collide) -- the
+/// probe's comment header kept, code lines at column 0 (leading fixture
+/// whitespace would shift spans; none are asserted here).
+#[test]
+fn option_ctor_constructs_through_the_output_app_instantiation() {
+    let src = "\
+\\ SOO-30 R3-G2 -- lib Option through the R-30.2 route: `5 pure[Option[i64]]`
+\\ dispatches the real Some ctor.
+import: core::option * ;
+import: core::applicative | Applicative | ;
+: showopt ( Option[i64] -- ) ~[ ( Some ) Some> . ] ~[ ( None ) drop 0 . ] Option? ;
+: main ( -- ) 5 pure[Option[i64]] showopt ;
+";
+    let (_t, entry) = single_file_hosted("s15-g2-option-pure", src);
+    let out = build_and_run(&entry);
+    assert_eq!(out, "5\n");
+}
+
+/// Golden (G3, REQ-30.12 via REQ-30.6's route): the 2-param ctor through the
+/// same 1-arg spelling -- the "partially-applied ctor heads ride along"
+/// case. `5 pure[Result[i64 i64]]` fills `'F:=Result`, the seed binds both
+/// ctor params from the instantiation's ctor arguments, and the residual
+/// `'A` binds from the output App's single argument (r3 findings § g3).
+/// Bytes: `probes/soo30r3_baseline.md` § g3. Fixture:
+/// `probes/soo30r3_g3.sth` minus its two import lines.
+#[test]
+fn result_two_arity_ctor_constructs_with_partial_head() {
+    let src = "\
+\\ SOO-30 R3-G3 -- lib Result (2 params) through the R-30.2 route: the
+\\ 2-arity spelling `pure[Result[i64 i64]]` (partial-head ride-along, P3b
+\\ receipt class).
+import: core::result * ;
+import: core::applicative | Applicative | ;
+: showres ( Result[i64 i64] -- ) ~[ ( Ok ) Ok> . ] ~[ ( Err ) drop 1 . ] Result? ;
+: main ( -- ) 5 pure[Result[i64 i64]] showres ;
+";
+    let (_t, entry) = single_file_hosted("s15-g3-result-pure", src);
+    let out = build_and_run(&entry);
+    assert_eq!(out, "5\n");
+}
+
+/// Golden (G4, REQ-30.12 via REQ-30.6's route): the allocating ctor --
+/// `pure` must produce a genuine `Cons` cell, not a wrapper. The shipped
+/// List impl body `Nil ^ Cons` boxes the payload with the owned-cell `^`
+/// (`check_owned_cell_word`, src/check/word_families.rs:1153); `showlist`
+/// walks the real cell. Unlike the r2c operand-path fixture, no
+/// `nile`/`single` helpers are needed: `pure` constructs the list, so
+/// `Nil`'s consumer is the impl body, whose dissolved declared output pins
+/// it (r2c's impl-check receipt). Bytes: `probes/soo30r3_baseline.md` § g4.
+/// Fixture: `probes/soo30r3_g4.sth` minus its two import lines.
+#[test]
+fn list_ctor_constructs_a_real_cons_cell() {
+    let src = "\
+\\ SOO-30 R3-G4 -- lib List through the R-30.2 route: `5 pure[List[i64]]`
+\\ produces a real Cons cell (the cell-boxing impl body `Nil ^ Cons`),
+\\ walked by showlist.
+import: core::list * ;
+import: core::applicative | Applicative | ;
+: showlist ( List[i64] -- )
+  ~[ ( Nil ) drop ]
+  ~[ ( Cons ) Cons> | v rest | v . rest ^> showlist ]
+  List? ;
+: main ( -- ) 5 pure[List[i64]] showlist ;
+";
+    let (_t, entry) = single_file_hosted("s15-g4-list-pure", src);
+    let out = build_and_run(&entry);
+    assert_eq!(out, "5\n");
+}
+
+/// Golden (G5, REQ-30.13): the ticket's "declared on a shared `Applicative`
+/// bound ... dispatches per constructor" surface -- ONE poly definition,
+/// called BARE at two mono sites with different ctor operands (both vars
+/// operand-grounded, no explicit instantiation; the R-30.4 consumer shape
+/// with `'F` in an input). The body is the paper's corrected `swap drop
+/// pure` (the ticket sketch's `swap pure` would feed `pure` the old
+/// container); the `7` (not the operands' `5`) makes dispatch observable:
+/// each call drops its ctor operand and re-pures the value through the SAME
+/// definition. Bytes: `probes/soo30r3_baseline.md` § g5 (`7\n7\n`; the
+/// baseline also records an intermediate probe-authoring bug -- an
+/// unconsumed literal before `nile` -- as a main stack-effect mismatch, not
+/// a checker wall). Fixture: `probes/soo30r3_g5.sth` minus its two import
+/// lines.
+#[test]
+fn shared_bound_consumer_dispatches_two_ctors_through_one_definition() {
+    let src = "\
+\\ SOO-30 R3-G5 -- the shared-bound consumer: `repure['F: Applicative 'A]
+\\ ( 'F['A] 'A -- 'F['A] ) swap drop pure ;` (the paper's corrected body),
+\\ called at two mono sites with Option and List operands.
+import: core::option * ;
+import: core::list * ;
+import: core::applicative | Applicative | ;
+: showopt ( Option[i64] -- ) ~[ ( Some ) Some> . ] ~[ ( None ) drop 0 . ] Option? ;
+: showlist ( List[i64] -- )
+  ~[ ( Nil ) drop ]
+  ~[ ( Cons ) Cons> | v rest | v . rest ^> showlist ]
+  List? ;
+\\ pins Nil to List[i64] so the operand construction is unambiguous (r2c
+\\ idiom)
+: nile ( -- List[i64] ) Nil ;
+: repure['F: Applicative 'A] ( 'F['A] 'A -- 'F['A] ) swap drop pure ;
+: main ( -- ) 5 Some 7 repure showopt nile 7 repure showlist ;
+";
+    let (_t, entry) = single_file_hosted("s15-g5-shared-bound-repure", src);
+    let out = build_and_run(&entry);
+    assert_eq!(out, "7\n7\n");
+}
+
+/// Golden (G7, REQ-30.14): the bare-ctor instantiation fence stays
+/// word-general on the lib spelling -- `pure[Option]` is parse-refused
+/// before any checking, so the R-30.2 landing does not weaken the S1 fence
+/// (the fence precedes module checking, so the shipped core::applicative
+/// cannot change it; r1 P3 proved parse precedes the declaration gate the
+/// same way). Bytes: the paper's G7 layout measurement, re-measured live at
+/// this phase's start under the exact hosted-harness layout (line 5, col 22
+/// -- no span shift; both lines + exit 1). Fixture: the paper's G7 text
+/// verbatim minus its two import lines (the harness prepends both); no
+/// comment header, so main sits at the measured line 5.
+#[test]
+fn bare_ctor_instantiation_argument_stays_parse_refused() {
+    let src = "\
+import: core::option * ;
+import: core::applicative | Applicative | ;
+: main ( -- ) 5 pure[Option] drop ;
+";
+    let (_t, entry) = single_file_hosted("s15-g7-bare-ctor-fence", src);
+    let err = build_error(&entry);
+    assert!(
+        err.contains(
+            "error: generic type `Option` declares 1 type variable, but none were supplied at line 5, col 22 (apply it as `Option[T]`, one type argument per declared variable)"
+        ),
+        "{err}"
+    );
+    assert!(
+        err.contains(
+            "note: a glued bracket is an explicit type instantiation; insert a space for a quotation or array literal"
+        ),
+        "{err}"
+    );
 }

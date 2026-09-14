@@ -1,0 +1,16 @@
+\ core::applicative -- return-type-polymorphic construction (P7b.S15, SOO-30).
+\ `Applicative['F: * -> *]` declares `pure`, the R-30.1-admitted output-App
+\ member: its nonempty inputs mention no dispatchable trait-var head and its
+\ output names the trait var as an application head. Grounding happens at the
+\ mono call site through the explicit instantiation (`5 pure[Option[i64]]`,
+\ R-30.2's output-side route); there is no consuming-context inference (the
+\ S6 Q1 rule). Member words are synthesized per impl and never bare-nameable,
+\ so no member name is exported (the `core::iterator` export convention).
+\ The trait declares `pure` ONLY: the companion `ap` is parse-fenced (S1-6,
+\ r1 P5) -- a trait member may not spell a quotation type
+\ (`'F[ [ 'A -- 'B ] ]`), so `ap` cannot appear in any trait declaration and
+\ the S7 deferral stands.
+export: Applicative ;
+trait: Applicative['F: * -> *]
+  : pure ( 'A -- 'F['A] ) ;
+;
