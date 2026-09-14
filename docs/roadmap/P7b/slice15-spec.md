@@ -141,7 +141,8 @@ Units beside the machinery — gate:
 `member_binds_trait_var_accepts_an_app_headed_output_mention`,
 `member_binds_trait_var_rejects_a_bare_output_mention`,
 `member_binds_trait_var_rejects_a_member_mentioning_the_var_nowhere`,
-`check_trait_decls_rejects_member_mentioning_the_trait_var_nowhere`
+`check_trait_decls_rejects_member_mentioning_the_trait_var_nowhere`,
+`check_trait_decls_rejects_member_with_only_a_bare_output_trait_var`
 (`src/check/declarations.rs` tests); route:
 `mono_member_output_app_route_binds_residual_vars_from_ctor_args`,
 `two_param_ctor_target_binds_residual_var_from_single_output_app_arg`,
@@ -279,6 +280,17 @@ name.
   relied on via existing pins; no dedicated unit was added.
 - **Multi-impl remedy rendering.** First-impl is the recorded choice; no
   golden pins the multi-impl case.
+- **Nested-App output members (post-landing review finding).**
+  `m ( 'A -- 'F['G['A]] )` now clears the R-30.1 gate (the output arm sees
+  the head-0 outer App) but has no routable call spelling: the route binds
+  only `Var` App args (`ground.rs`), impl bodies cannot construct the
+  nested output, and calls land in located errors (`instantiation_arity_error`
+  or impl-check failure) — fail-closed, never a silent mis-grounding, but
+  the pre-S15 declaration-time refusal was clearer. Follow-up ticket
+  candidate; unmeasured by the probes.
+- **Multi-output-App members bind from the first head-0 App only.**
+  `m ( -- 'F['A] 'F['B] )` grounds `'A` from ctor args; `'B` surfaces later
+  as `poly_unbound_output_ty_error` — fail-closed and located, unpinned.
 - (Recorded, not fixed: the declaration-gate error omits the file path when
   it fires inside an imported lib module — round-1 P3min.)
 
