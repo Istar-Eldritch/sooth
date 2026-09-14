@@ -136,10 +136,17 @@ two-defect fix (required, not optional), and the traitful `List` surface as gold
 - **R9.** `append` grounds through the ruled host trait `Monoid for List` (PB-5: `combine`
   = append, `empty` = `Nil`): `combine` through a shared `Monoid` bound appends two
   `List[i64]` spines (prints `1 2 3 5 3`); `empty[List[i64]]` grounds explicitly in a mono
-  main. Bound-directed `empty` resolving at the `List` impl itself is **unverified** and a
-  future item — constrained by the single-`List`-instantiation-per-program spelling fence
-  (no nested `List[List[i64]]` helpers); the S6 `mconcat_over_list_dispatches` golden
-  dispatches `Monoid for i64`'s `empty` and stays byte-identical.
+  main. Bound-directed `empty` resolving at the `List` impl itself: originally recorded
+  unverified, then **verified post-merge** (SOO-50 probe round, 260914, at HEAD past S9 and
+  S14) — a poly `getempty['T: Monoid] ( -- 'T )` consumer instantiated at `List[i64]`
+  grounds bare `empty` to the `List` impl's `Nil`, dispatches `Monoid for i64`'s `empty`
+  at `i64`, and acts as the `Monoid` identity combined through the same bound. The
+  single-`List`-instantiation spelling constraint this item originally carried was
+  **deliberately retired** by P7b.S6d Phase 5's consumer-type tie-break
+  (`generated_enum_consumer_type_pick`, pinned by
+  `two_instantiations_ground_a_bare_nullary_variant_from_its_consumer_type`); only the
+  poly-type nesting fence survives (`List[List['T]]` is the located
+  nesting-depth error, never a panic).
 - **R10.** Linearity teeth: an undropped `map` or `append` result is a compile error.
 - **R11.** `dup` of a `List['T]` operand stays fenced byte-exact (`poly_copy_gate`,
   `Generic`/`App` arms; `poly_copy_generic_error`).
