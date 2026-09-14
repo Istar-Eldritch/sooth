@@ -841,6 +841,7 @@ pub(in crate::check) fn resolve_splice_member_call(
                 &[],
                 &[],
                 None,
+                false,
                 stack,
                 ctx,
                 env,
@@ -1180,6 +1181,12 @@ pub(in crate::check) fn resolve_mono_member_call(
     // `Opt[Opt[i64]]`, whose variant words then clobbered lowering's
     // bare-name map and re-typed every `Some`/`Cons` in the program.
     let mut impl_target_seed: Option<Subst> = None;
+    // P7b.S15 R-30.2: true when the escape hatch routed a single explicit type
+    // argument through the member's trait-var-headed output App (the extended
+    // seed below). `check_poly_call`'s arity gate exempts the routed supply:
+    // the written argument is the output-App instantiation, not one positional
+    // value per dissolved variable.
+    let mut output_app_route = false;
     if viable.is_empty() {
         if let (Some(&ty), [(zero_tid, zero_m)]) = (
             type_args.first(),
@@ -1203,8 +1210,53 @@ pub(in crate::check) fn resolve_mono_member_call(
                 refs,
                 &mut visited,
             )? {
+                let mut seed = subst;
+                // P7b.S15 R-30.2: for an R-30.1-admitted member (no
+                // dispatchable input, output row carries a trait-var-headed
+                // App) the single written type argument IS the output-App
+                // instantiation: `find_bound_impl` above already keyed impl
+                // selection on the dissolved ctor head and bound the target's
+                // own variables (`'ctor0 := i64` for `pure[Box[i64]]`). What
+                // is missing is the member's residual locals: bind each from
+                // the output App's arguments, positionally against the
+                // instantiation's ctor arguments (`'A := i64`), so θ is
+                // complete before the operand unifies and a disagreeing
+                // operand stays the seeded-conflict diagnostic (P7.S3t)
+                // instead of silently re-grounding the written instantiation.
+                // The union id of an appended member local is `target vars +
+                // declaration rank` (`build_member_var_union`,
+                // src/parser.rs:768): with no dispatchable input no local is
+                // identifying, so member-sig variable `v >= 1` lands at
+                // `target_var_count + v - 1`.
+                if type_args.len() == 1 {
+                    if let Some(app_args) = output_trait_var_app(&zero_m.sig) {
+                        let target_var_count =
+                            poly.trait_resolve.impls[imp_idx].target.ty_var_names.len() as u32;
+                        for (i, arg) in app_args.iter().enumerate() {
+                            let PolyType::Var(v) = arg else {
+                                continue;
+                            };
+                            if *v == 0 {
+                                continue;
+                            }
+                            let uid = target_var_count + v - 1;
+                            if seed.ty_of(uid).is_some() {
+                                continue;
+                            }
+                            let Some(ctor_args) = instantiation_ctor_args(ty, ctx) else {
+                                continue;
+                            };
+                            let Some(val) = ctor_args.get(i) else {
+                                continue;
+                            };
+                            let pos = seed.ty.partition_point(|(id, _)| *id < uid);
+                            seed.ty.insert(pos, (uid, *val));
+                            output_app_route = true;
+                        }
+                    }
+                }
                 viable.push((*zero_tid, *zero_m, imp_idx));
-                impl_target_seed = Some(subst);
+                impl_target_seed = Some(seed);
             }
         }
     }
@@ -1215,8 +1267,14 @@ pub(in crate::check) fn resolve_mono_member_call(
                     .iter()
                     .any(|(_, m)| dispatchable_input_pos(&m.sig).is_none())
             {
+                let example = mono_nullary_remedy_example(
+                    member,
+                    &candidates,
+                    poly.trait_resolve.impls,
+                    stack,
+                );
                 return Err(mono_nullary_member_no_instantiation_error(
-                    ctx, span, member,
+                    ctx, span, member, &example,
                 ));
             }
             return Err(mono_member_no_dispatch_error(
@@ -1470,6 +1528,7 @@ pub(in crate::check) fn resolve_mono_member_call(
             type_args,
             len_args,
             impl_target_seed.as_ref(),
+            output_app_route,
             stack,
             ctx,
             env,
@@ -1511,13 +1570,114 @@ fn mono_member_no_dispatch_error(
 /// zero-dispatchable-input member with no explicit type argument to ground
 /// its trait variable. Q1 rules out consuming-context inference for this
 /// slice, so this is a located error naming the remedy, not a lookahead.
-fn mono_nullary_member_no_instantiation_error(ctx: &Ctx, span: Span, member: &str) -> String {
+fn mono_nullary_member_no_instantiation_error(
+    ctx: &Ctx,
+    span: Span,
+    member: &str,
+    example: &str,
+) -> String {
     format!(
-        "error: `{member}` in {name} (line {}, col {}) is a trait member with no operand to dispatch on\n  a monomorphic body cannot infer the trait's type here; write an explicit type argument, e.g. `{member}[i64]`",
+        "error: `{member}` in {name} (line {}, col {}) is a trait member with no operand to dispatch on\n  a monomorphic body cannot infer the trait's type here; write an explicit type argument, e.g. `{example}`",
         span.line,
         span.col,
         name = ctx.rendered_word(),
     )
+}
+
+/// P7b.S15 R-30.2: the member's trait-var-headed output App, if its output
+/// row contains one -- the App whose arguments bind the member's residual
+/// locals. One `Ref` layer is unwrapped, mirroring the declaration gate's
+/// courtesy (`member_binds_trait_var`'s output arm).
+fn output_trait_var_app(sig: &PolySig) -> Option<&[PolyType]> {
+    sig.outputs.iter().find_map(|t| match t {
+        PolyType::App { head: 0, args } => Some(args.as_slice()),
+        PolyType::Ref(referent, _) => match referent.as_ref() {
+            PolyType::App { head: 0, args } => Some(args.as_slice()),
+            _ => None,
+        },
+        _ => None,
+    })
+}
+
+/// P7b.S15 R-30.2: the concrete ctor arguments an instantiation type carries
+/// (`Box[i64]` -> `[i64]`), read off the interned instantiation the parser
+/// minted for the call-site type argument.
+fn instantiation_ctor_args(ty: Type, ctx: &Ctx) -> Option<Vec<Type>> {
+    let generics = ctx.generics()?;
+    let g = generics.borrow();
+    match ty {
+        Type::Struct(id, _) => g
+            .struct_instantiation_of(id)
+            .map(|(_, _, args, _)| args.to_vec()),
+        Type::Enum(id, _) => g
+            .enum_instantiation_of(id)
+            .map(|(_, _, args, _)| args.to_vec()),
+        _ => None,
+    }
+}
+
+/// P7b.S15 R-30.3: the bare-call remedy's example token -- the achievable
+/// output-App spelling `member[Head[args]]`, rendered from the member's
+/// trait-var-headed output App and the trait's impl target head. App
+/// arguments resolve against the operand stack: an App argument naming a
+/// member local takes the declared input's operand type (the input that
+/// binds it), so the advice substituted at the call site builds and
+/// dispatches under R-30.2. The single-impl case is the pinned one (G6);
+/// multi-impl traits take the first impl (the `find` below) — the choice the
+/// spec's open question left unspecified, recorded here as deliberate. Every
+/// shape the rendering cannot name keeps the placeholder spelling.
+fn mono_nullary_remedy_example(
+    member: &str,
+    candidates: &[(TraitId, &TraitMember)],
+    impls: &[ImplDecl],
+    stack: &[Slot],
+) -> String {
+    let fallback = || format!("{member}[i64]");
+    let zero: Vec<&(TraitId, &TraitMember)> = candidates
+        .iter()
+        .filter(|(_, m)| dispatchable_input_pos(&m.sig).is_none())
+        .collect();
+    let [(tid, m)] = zero.as_slice() else {
+        return fallback();
+    };
+    let Some(app_args) = output_trait_var_app(&m.sig) else {
+        return fallback();
+    };
+    if app_args.is_empty() {
+        return fallback();
+    }
+    let Some(imp) = impls.iter().find(|i| i.trait_id == *tid) else {
+        return fallback();
+    };
+    let head = imp
+        .target
+        .user_spelling
+        .as_ref()
+        .map(|(n, _)| &**n)
+        .unwrap_or_else(|| match &imp.target.pattern {
+            PolyType::Generic { name, .. } => &**name,
+            _ => "",
+        });
+    if head.is_empty() {
+        return fallback();
+    }
+    let n_in = m.sig.inputs.len();
+    let parts: Vec<String> = app_args
+        .iter()
+        .map(|arg| match arg {
+            PolyType::Var(v) if *v >= 1 => m
+                .sig
+                .inputs
+                .iter()
+                .position(|i| matches!(i, PolyType::Var(w) if *w == *v))
+                .filter(|_| stack.len() >= n_in)
+                .map(|p| stack[stack.len() - n_in + p].ty.name().to_string())
+                .unwrap_or_else(|| "i64".to_string()),
+            PolyType::Concrete(t) => t.name().to_string(),
+            _ => "i64".to_string(),
+        })
+        .collect();
+    format!("{member}[{head}[{}]]", parts.join(" "))
 }
 
 /// P7b.S2 (S2-16, mono caller). `poly_env` is in fact built once,

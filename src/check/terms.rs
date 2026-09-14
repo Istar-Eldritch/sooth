@@ -900,8 +900,8 @@ fn check_term(
             // has already established is where a non-empty one may arrive.
             if poly.env.contains_key(name) && !fall_through_to_env {
                 return check_poly_call(
-                    name, span, type_args, len_args, None, &mut stack, ctx, env, scope, arrays,
-                    cells, refs, slices, prov, live, at, poly,
+                    name, span, type_args, len_args, None, false, &mut stack, ctx, env, scope,
+                    arrays, cells, refs, slices, prov, live, at, poly,
                 );
             }
             // P7.S3o Phase 3: a bare trait member call (like `cmp` directly)

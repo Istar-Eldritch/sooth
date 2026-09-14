@@ -1,13 +1,17 @@
-//! P7b.S15 exit goldens: the Applicative.pure declaration surface. Phase 1
-//! starts the file with the three fully-measured goldens: the true-shape
-//! member `pure ( 'A -- 'F['A] )` declares and its ctor-keyed impl checks
-//! (G1, R-30.1), the `ap` parse fence holds (G9, R-30.5), and the zero-input
+//! P7b.S15 exit goldens: the Applicative.pure surface. Phase 1 started the
+//! file with the three fully-measured goldens: the true-shape member
+//! `pure ( 'A -- 'F['A] )` declares and its ctor-keyed impl checks (G1,
+//! R-30.1), the `ap` parse fence holds (G9, R-30.5), and the zero-input
 //! escape-hatch impl mismatch keeps its recorded-not-fixed bytes (G12,
-//! R-30.6). Later phases add the call-site route goldens (G6/G8/G11/G13/G14)
-//! and the lib goldens (G2-G5, G7). Driven through the real `sooth` binary,
-//! harness helpers copied from `tests/phase7b_slice2.rs`; error goldens keep
-//! the minimal two-line prefix so their line/column assertions stay readable
-//! against the fixture.
+//! R-30.6). Phase 2 adds the call-site goldens (G6/G8/G11.a-c/G13/G14): the
+//! R-30.2 output-App route builds and runs `pure[Box[i64]]` at a mono call
+//! with no `'F` operand (G14), the bare-call remedy's example becomes
+//! achievable (G6, R-30.3), conservative supplies keep their measured bytes
+//! (G8/G13), and the twin-class walls stay byte-identical (G11.a-c, R-30.4).
+//! Phase 3 will add the lib goldens (G2-G5, G7). Driven through the real
+//! `sooth` binary, harness helpers copied from `tests/phase7b_slice2.rs`;
+//! error goldens keep the minimal two-line prefix so their line/column
+//! assertions stay readable against the fixture.
 
 // Each helper carries its own `#[allow(dead_code)]` rather than the module
 // taking a blanket one: a phase may use only a subset, but a helper nothing
@@ -92,8 +96,11 @@ fn build_and_run(entry: &Path) -> String {
 
 /// The hosted twin of `single_file`, from `tests/phase7b_slice2.rs`: adds
 /// the hosted manifest (a bare package cannot import `core`) and the
-/// selective `hosted::show | . |` import. Phase 2/3's lib goldens (G2-G5,
-/// G7) use it; Phase 1's goldens do not.
+/// selective `hosted::show | . |` import (P7.S7d retired the `.` intrinsic
+/// onto `hosted::show`'s ordinary word, so a printing fixture needs it --
+/// which is why the probe-fixture goldens G6/G8/G13/G14 ride this harness
+/// rather than `single_file`, matching the probe fixtures' own imports).
+/// Phase 2/3's lib goldens (G2-G5, G7) use it; Phase 1's goldens do not.
 #[allow(dead_code)]
 fn single_file_hosted(tag: &str, src: &str) -> (Tree, PathBuf) {
     let t = Tree::new(tag);
@@ -204,4 +211,223 @@ impl: Applicative for Box
         err.contains("body leaves `Box[i64]`, but the declared outputs are `Box[i64]`"),
         "{err}"
     );
+}
+
+/// Golden (G6, REQ-30.8): the bare-call remedy keeps line 1 byte-identical
+/// (r2b-2's template, located at this fixture's own line/col) and its example
+/// becomes the achievable output-App spelling `pure[Box[i64]]` (R-30.3) --
+/// achievable because G14 proves that exact spelling builds and dispatches.
+/// The r2b-2 example `pure[i64]` reproduced the arity wall the route removes;
+/// its absence is asserted too. Bytes: `probes/soo30r3_baseline.md` § g6
+/// (measured under the round-3 probe). Fixture: `probes/soo30r3_g6.sth` minus
+/// its two import lines (the harness prepends both; the probe's comment lines
+/// stay, keeping main's span at line 13, col 18 -- the measured bytes).
+#[test]
+fn bare_call_remedy_example_is_the_achievable_output_app_spelling() {
+    let src = "\\ SOO-30 R3-G6 -- the bare-call remedy error with the CORRECTED (output-App)\n\
+        \\ example. Line 1 must stay byte-identical to r2b-2's; the example line must\n\
+        \\ now name the `pure[Box[i64]]`-shape (R-30.3).\n\
+        type: Box['A] | MkBox 'A ;\n\
+        trait: Applicative['F: * -> *]\n\
+          : pure ( 'A -- 'F['A] ) ;\n\
+        ;\n\
+        impl: Applicative for Box\n\
+          : pure MkBox ;\n\
+        ;\n\
+        : main ( -- ) 42 pure drop ;\n";
+    let (_t, entry) = single_file_hosted("s15-g6-remedy-example", src);
+    let err = build_error(&entry);
+    assert!(
+        err.contains("error: `pure` in `main` (line 13, col 18) is a trait member with no operand to dispatch on"),
+        "{err}"
+    );
+    assert!(
+        err.contains(
+            "a monomorphic body cannot infer the trait's type here; write an explicit type argument, e.g. `pure[Box[i64]]`"
+        ),
+        "{err}"
+    );
+    assert!(
+        !err.contains("pure[i64]"),
+        "the old unachievable example is gone (and `pure[Box[i64]]` never contains it): {err}"
+    );
+}
+
+/// Golden (G8, REQ-30.7): a 2-argument POSITIONAL supply is not the
+/// single-argument output-App form, so the route never fires -- impl
+/// selection stays operand-driven, `find_bound_impl(i64)` finds no impl, and
+/// the no-dispatch diagnostic keeps its r2b-1c bytes (R-30.2's conservative
+/// face). Bytes: `probes/soo30r3_baseline.md` § g8. Fixture:
+/// `probes/soo30r3_g8.sth` minus its two import lines (the harness prepends
+/// both, keeping the measured span).
+#[test]
+fn two_arg_positional_supply_stays_operand_driven_no_dispatch_error() {
+    let src = "\\ SOO-30 R3-G8 -- conservative face of R-30.2: a 2-argument POSITIONAL supply\n\
+        \\ keeps operand-driven selection; the route must NOT fire here. Expected:\n\
+        \\ r2b-1c's no-dispatch bytes, unchanged.\n\
+        type: Box['A] | MkBox 'A ;\n\
+        trait: Applicative['F: * -> *]\n\
+          : pure ( 'A -- 'F['A] ) ;\n\
+        ;\n\
+        impl: Applicative for Box\n\
+          : pure MkBox ;\n\
+        ;\n\
+        : main ( -- ) 42 pure[i64 i64] drop ;\n";
+    let (_t, entry) = single_file_hosted("s15-g8-positional-supply", src);
+    let err = build_error(&entry);
+    assert!(
+        err.contains("error: `pure` in `main` (line 13, col 18) is a trait member of Applicative, but no `impl:` in this program dispatches on these operands"),
+        "{err}"
+    );
+    assert!(
+        err.contains(
+            "the operand types here are `i64`; declare an impl of one of those traits for the operand's type, or import a word that claims this name"
+        ),
+        "{err}"
+    );
+}
+
+/// Golden (G11.a, REQ-30.9): the twin class's arity wall stays
+/// byte-identical -- a plain word's output-only bound var is NOT a member
+/// call, so R-30.2's route never touches it and the dissolved word's
+/// positional arity gate keeps its r2d bytes. Bytes:
+/// `probes/soo30r2_baseline.md` § soo30r2_d_twin. Fixture:
+/// `probes/soo30r2_d_twin.sth` minus the intrinsics import (the harness
+/// prepends it, keeping main at line 10 -- the measured span).
+#[test]
+fn plain_word_output_only_var_single_arg_supply_is_arity_error() {
+    let src = "type: Box['A] | MkBox 'A ;\n\
+        trait: Applicative['F: * -> *]\n\
+          : pure ( 'A -- 'F['A] ) ;\n\
+        ;\n\
+        impl: Applicative for Box\n\
+          : pure MkBox ;\n\
+        ;\n\
+        : twin['F: Applicative 'A] ( 'A 'A -- 'F['A] 'F['A] ) pure swap pure ;\n\
+        : main ( -- ) 1 2 twin[Box[i64]] drop drop ;\n";
+    let (_t, entry) = single_file("s15-g11a-twin-arity", src);
+    let err = build_error(&entry);
+    assert!(
+        err.contains(
+            "error: `twin` (line 10) declares 2 type variables (`'A`, `'F`) but was given 1 type argument"
+        ),
+        "{err}"
+    );
+}
+
+/// Golden (G11.b, REQ-30.9): the twin class's named wall stays
+/// byte-identical -- a bare call on a plain word whose output variable no
+/// input binds keeps `poly_unbound_output_error`'s r2d bytes. Bytes:
+/// `probes/soo30r2_baseline.md` § soo30r2_d2_twin_bare. Fixture:
+/// `probes/soo30r2_d2_twin_bare.sth` minus the intrinsics import (the
+/// harness prepends it, keeping main at line 10 -- the measured span).
+#[test]
+fn plain_word_output_only_var_bare_call_is_named_unbound_output_error() {
+    let src = "type: Box['A] | MkBox 'A ;\n\
+        trait: Applicative['F: * -> *]\n\
+          : pure ( 'A -- 'F['A] ) ;\n\
+        ;\n\
+        impl: Applicative for Box\n\
+          : pure MkBox ;\n\
+        ;\n\
+        : twin['F: Applicative 'A] ( 'A 'A -- 'F['A] 'F['A] ) pure swap pure ;\n\
+        : main ( -- ) 1 2 twin drop drop ;\n";
+    let (_t, entry) = single_file("s15-g11b-twin-bare", src);
+    let err = build_error(&entry);
+    assert!(
+        err.contains(
+            "error: `twin` in `main` (line 10) has output variable `'F` that no input binds"
+        ),
+        "{err}"
+    );
+    assert!(
+        err.contains("note: supply it explicitly: `twin[SomeType SomeType]`"),
+        "{err}"
+    );
+}
+
+/// Golden (G11.c, REQ-30.9): the twin class's unachievable-HKT-remedy wall
+/// stays byte-identical -- naming a `* -> *` var's position with a bare ctor
+/// head (`twin[i64 Box]`) is parse-refused with the r2d bytes, so the
+/// unbound-output remedy is unachievable exactly as measured. Bytes:
+/// `probes/soo30r2_baseline.md` § soo30r2_d3_twin_hkt_arg. Fixture:
+/// `probes/soo30r2_d3_twin_hkt_arg.sth` minus the intrinsics import (the
+/// harness prepends it, keeping main at line 10 -- the measured span).
+#[test]
+fn plain_word_output_only_var_hkt_remedy_spelling_stays_parse_refused() {
+    let src = "type: Box['A] | MkBox 'A ;\n\
+        trait: Applicative['F: * -> *]\n\
+          : pure ( 'A -- 'F['A] ) ;\n\
+        ;\n\
+        impl: Applicative for Box\n\
+          : pure MkBox ;\n\
+        ;\n\
+        : twin['F: Applicative 'A] ( 'A 'A -- 'F['A] 'F['A] ) pure swap pure ;\n\
+        : main ( -- ) 1 2 twin[i64 Box] drop drop ;\n";
+    let (_t, entry) = single_file("s15-g11c-twin-hkt-arg", src);
+    let err = build_error(&entry);
+    assert!(
+        err.contains(
+            "error: generic type `Box` declares 1 type variable, but none were supplied at line 10, col 28 (apply it as `Box[T]`, one type argument per declared variable)"
+        ),
+        "{err}"
+    );
+}
+
+/// Golden (G13, REQ-30.7): the double-wrap operand idiom -- the ONLY working
+/// mono route before this slice -- survives the route byte-identically (build
+/// clean, run `42\n`): the operand carries the target head, the 2-arg
+/// positional supply rides the ordinary S8b seed channel positionally (arity
+/// 2 == 2 vars), and the extended-seed route is single-argument only.
+/// Bytes: `probes/soo30r3_baseline.md` § g13 (== r2b-3b). Fixture:
+/// `probes/soo30r3_g13.sth` minus its two import lines (the harness prepends
+/// both).
+#[test]
+fn double_wrap_operand_idiom_survives_the_route() {
+    let src = "\\ SOO-30 R3-G13 -- non-leakage: the double-wrap operand idiom (r2b-3b, the ONLY\n\
+        \\ working mono route before round 3) must survive byte-identically. The\n\
+        \\ operand carries the target head; the 2-arg positional supply rides the\n\
+        \\ ordinary S8b seed channel, not the new route.\n\
+        type: Box['A] | MkBox 'A ;\n\
+        trait: Applicative['F: * -> *]\n\
+          : pure ( 'A -- 'F['A] ) ;\n\
+        ;\n\
+        impl: Applicative for Box\n\
+          : pure MkBox ;\n\
+        ;\n\
+        : showbox ( Box[i64] -- ) ~[ ( MkBox ) MkBox> . ] Box? ;\n\
+        : showbox2 ( Box[Box[i64]] -- ) ~[ ( MkBox ) MkBox> showbox ] Box? ;\n\
+        : main ( -- ) 42 MkBox pure[Box[i64] Box[i64]] showbox2 ;\n";
+    let (_t, entry) = single_file_hosted("s15-g13-double-wrap", src);
+    let out = build_and_run(&entry);
+    assert_eq!(out, "42\n");
+}
+
+/// Golden (G14, REQ-30.6): THE primary target. `42 pure[Box[i64]]` at a mono
+/// call site with no `'F` operand builds and prints `42\n` -- the single
+/// explicit instantiation IS the output-App instantiation: impl selection
+/// keys on the dissolved ctor head, the seed extension binds the member's
+/// residual `'A` from the App's argument, the arity gate exempts the routed
+/// supply, and dispatch lowers end-to-end. Fires only on the explicit
+/// instantiation (no consuming-context inference, the S6 Q1 rule). Bytes:
+/// `probes/soo30r3_baseline.md` § g14 (measured under the round-3 probe).
+/// Fixture: `probes/soo30r3_g14.sth` minus its two import lines (the harness
+/// prepends both).
+#[test]
+fn output_app_instantiation_prints_at_mono_call_without_operand() {
+    let src = "\\ SOO-30 R3-G14 -- the R-30.2 output-App route (fixture-local Box): a single\n\
+        \\ explicit instantiation `pure[Box[i64]]` grounds the return type at a mono\n\
+        \\ call site with no 'F operand. THE primary round-3 measurement.\n\
+        type: Box['A] | MkBox 'A ;\n\
+        trait: Applicative['F: * -> *]\n\
+          : pure ( 'A -- 'F['A] ) ;\n\
+        ;\n\
+        impl: Applicative for Box\n\
+          : pure MkBox ;\n\
+        ;\n\
+        : showbox ( Box[i64] -- ) ~[ ( MkBox ) MkBox> . ] Box? ;\n\
+        : main ( -- ) 42 pure[Box[i64]] showbox ;\n";
+    let (_t, entry) = single_file_hosted("s15-g14-output-app-route", src);
+    let out = build_and_run(&entry);
+    assert_eq!(out, "42\n");
 }

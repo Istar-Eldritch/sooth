@@ -532,6 +532,130 @@ fn bare_nullary_member_without_instantiation_is_located_error() {
     );
 }
 
+/// P7b.S15 R-30.2 (route, happy path): at a mono call on an R-30.1-admitted
+/// member (no dispatchable input, trait-var-headed output App), the single
+/// explicit type argument is the output-App instantiation -- impl selection
+/// keys on the dissolved ctor head (`find_bound_impl` on `Box[i64]`, the
+/// pre-existing S6/S8b escape hatch) and the member's residual local `'A`
+/// binds from the output App's argument against the instantiation's ctor
+/// arguments. θ is then complete, so the call checks with no arity error and
+/// the body's ctor word mints the one-level instantiation -- a positional or
+/// self-referential binding would mint `Box[Box[i64]]` (the S8b failure
+/// shape) or leave `'A` unbound.
+#[test]
+fn mono_member_output_app_route_binds_residual_vars_from_ctor_args() {
+    let (module, _) = checked_like_a_build(
+        "type: Box['A] | MkBox 'A ;\n\
+             trait: Applicative['F: * -> *]\n\
+               : pure ( 'A -- 'F['A] ) ;\n\
+             ;\n\
+             impl: Applicative for Box\n\
+               : pure MkBox ;\n\
+             ;\n\
+             : main ( -- ) 42 pure[Box[i64]] drop ;\n",
+    )
+    .expect("the routed call grounds 'F and 'A from the one written argument");
+    let names: Vec<&str> = module.enums.iter().map(|e| e.name.as_str()).collect();
+    assert!(
+        names.contains(&"Box[i64]"),
+        "the member body's ctor word mints the one-level instantiation: {names:?}"
+    );
+    assert!(
+        !names.contains(&"Box[Box[i64]]"),
+        "the residual var binds from the ctor argument, not the written App itself: {names:?}"
+    );
+}
+
+/// P7b.S15 R-30.2 (route, 2-param ctor): the output App has one argument but
+/// the dissolved ctor head has two parameters -- `find_bound_impl` binds both
+/// target vars (`'ctor0 := i64`, `'ctor1 := i64`) and the route appends the
+/// residual `'A` at union id `target vars + rank`, so the partially-applied
+/// ctor head rides along exactly as on the operand path (P3b's receipt).
+#[test]
+fn two_param_ctor_target_binds_residual_var_from_single_output_app_arg() {
+    let (module, _) = checked_like_a_build(
+        "type: Res['T 'E] | Good 'T | Bad 'E ;\n\
+             trait: Applicative['F: * -> *]\n\
+               : pure ( 'A -- 'F['A] ) ;\n\
+             ;\n\
+             impl: Applicative for Res\n\
+               : pure Good ;\n\
+             ;\n\
+             : main ( -- ) 42 pure[Res[i64 i64]] drop ;\n",
+    )
+    .expect("the 2-param target grounds through the 1-arg output-App spelling");
+    let names: Vec<&str> = module.enums.iter().map(|e| e.name.as_str()).collect();
+    assert!(
+        names.contains(&"Res[i64 i64]"),
+        "the member body's ctor word mints the full 2-param instantiation: {names:?}"
+    );
+    assert!(
+        !names.contains(&"Res[Res[i64 i64] i64]"),
+        "the residual var binds from the App argument, not the written App itself: {names:?}"
+    );
+}
+
+/// P7b.S15 R-30.2 (arity-gate exception): the routed supply is ONE written
+/// argument (the output-App instantiation) for a dissolved member word with
+/// target params + member locals -- `check_poly_call`'s positional gate
+/// compares `type_args.len()` against the var count and must exempt exactly
+/// this shape (the fixture above builds only because it does). The exemption
+/// is asserted by the routing units; this twin pins the gate's PRESERVED
+/// bytes: a wrong-arity supply on a non-route shape (three written arguments,
+/// so `type_args.len() != 1` keeps the route off) still fires
+/// `instantiation_arity_error` on the same member.
+#[test]
+fn unrouted_wrong_arity_supply_on_route_shaped_member_keeps_arity_error() {
+    let err = check_src(
+        "type: Box['A] | MkBox 'A ;\n\
+             trait: Applicative['F: * -> *]\n\
+               : pure ( 'A -- 'F['A] ) ;\n\
+             ;\n\
+             impl: Applicative for Box\n\
+               : pure MkBox ;\n\
+             ;\n\
+             : main ( -- ) 42 pure[Box[i64] i64 i64] drop ;\n",
+    )
+    .expect_err("three written arguments is not the single-argument output-App form");
+    assert!(
+        err.contains("declares 2 type variables") && err.contains("given 3 type arguments"),
+        "the untouched arity gate still fires on the non-route supply: {err}"
+    );
+}
+
+/// P7b.S15 R-30.3 (remedy correction): the bare-call remedy on an
+/// output-App member renders its example as the achievable output-App
+/// spelling -- the member's output App with the impl target head and the
+/// declared input's operand type (`pure[Box[i64]]`, proven buildable by the
+/// routing unit above) -- replacing the old hardcoded `pure[i64]`, whose
+/// advice reproduced exactly the arity wall the route removes.
+#[test]
+fn bare_output_app_member_remedy_names_the_achievable_spelling() {
+    let err = check_src(
+        "type: Box['A] | MkBox 'A ;\n\
+             trait: Applicative['F: * -> *]\n\
+               : pure ( 'A -- 'F['A] ) ;\n\
+             ;\n\
+             impl: Applicative for Box\n\
+               : pure MkBox ;\n\
+             ;\n\
+             : main ( -- ) 42 pure drop ;\n",
+    )
+    .expect_err("a bare output-App member call has no operand to dispatch on");
+    assert!(
+        err.contains("is a trait member with no operand to dispatch on"),
+        "{err}"
+    );
+    assert!(
+        err.contains("e.g. `pure[Box[i64]]`"),
+        "the example names the achievable output-App spelling: {err}"
+    );
+    assert!(
+        !err.contains("`pure[i64]`"),
+        "the old unachievable placeholder example is gone: {err}"
+    );
+}
+
 /// P7b.S6 Phase 4 (R4) scope fence: an operand-carrying member (`size`
 /// has a dispatchable input) never falls into the zero-dispatchable-input
 /// branch, even when the call carries an explicit type argument and the

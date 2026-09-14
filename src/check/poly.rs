@@ -4109,6 +4109,13 @@ pub(super) fn check_poly_call(
     // variable `i` from argument `i`. `None` at every other caller, which
     // keeps that contract exactly as it was.
     impl_target_seed: Option<&Subst>,
+    // P7b.S15 R-30.2: the supply rode the output-App route
+    // (`resolve_mono_member_call`'s extended seed): the single written type
+    // argument is the output-App instantiation, not one value per dissolved
+    // variable, so the positional arity comparison below is exempted for
+    // exactly that shape. Every other caller passes `false` and keeps
+    // today's bytes.
+    output_app_route: bool,
     stack: &mut Vec<Slot>,
     ctx: &Ctx,
     env: &HashMap<String, Vec<Overload>>,
@@ -4160,7 +4167,13 @@ pub(super) fn check_poly_call(
     // after pass 2.
     let mut seeded: Vec<u32> = Vec::new();
     if !type_args.is_empty() {
-        if type_args.len() != sig.ty_var_names.len() {
+        // P7b.S15 R-30.2: the output-App route's exception. A supply routed
+        // through the extended impl-target seed carries ONE written argument
+        // (the output-App instantiation, e.g. `pure[Box[i64]]`) for a
+        // dissolved member word with target params + member locals; it is not
+        // compared positionally against the var count. Wrong-arity supplies
+        // on any non-route shape keep this gate's bytes.
+        if type_args.len() != sig.ty_var_names.len() && !output_app_route {
             return Err(instantiation_arity_error(span, name, &sig, type_args.len()));
         }
         // P7b.S8b Phase 1 (R4): the arity gate above still reads the
