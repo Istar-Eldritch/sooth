@@ -393,9 +393,18 @@ flips from a panic pin to a positive golden
 shared `Functor` bound grounds a real `List[i64]` end-to-end, including a
 shared-bound-dispatched-twice variant; `combine` through a `Monoid` bound (one poly
 middleman at a single impl) prints `1 2 3 5 3`; `empty[List[i64]]` grounds
-explicitly in a mono main. Residual (R9, recorded not measured): bound-directed
-`empty` resolving at the `List` impl itself remains unverified — the S6 golden
-exercises `Monoid for i64`'s `empty`, and no Phase 3 golden pins the `List` route.
+explicitly in a mono main. Former residual (R9, closed by the SOO-50 post-merge
+probe round, 260914, at HEAD past S9/S14): bound-directed `empty` resolving at the
+`List` impl itself — now verified: a poly `getempty['T: Monoid]` consumer
+instantiated at `List[i64]` grounds bare `empty` to the `List` impl's `Nil`, with
+the `Monoid for i64` control intact and `empty` as bound-directed identity under
+`combine`. The single-`List`-instantiation spelling constraint R9 originally
+carried was deliberately retired by S6d Phase 5's consumer-type tie-break (pinned
+by `two_instantiations_ground_a_bare_nullary_variant_from_its_consumer_type`);
+only poly-type nesting (`List[List['T]]`) stays fenced. Regression half of the
+same round: 15/15 fresh-program probes re-verify the S8b surface at HEAD
+(two-defect orderings, wall shapes with located errors and no panics, linearity
+teeth, byte-identical golden outputs).
 Linearity teeth hold on the new constructions: an
 undropped `map`/`append` result is a located compile error, and `dup` of a
 `List['T]` operand stays fenced byte-exact

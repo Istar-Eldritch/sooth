@@ -898,3 +898,72 @@ No log was written by the worker; this file is the round's log.
 - Witness sweep: green in suite (flipped witness passes, nothing else changed).
 - Log: /tmp/sooth_p8b_spellings.md. Worktree reverted clean at c406149; probe-arm stash preserved separately.
 - Ledger status: ALL P8b questions closed. Spec-writer unblocked.
+
+# Part 5 — post-merge verification round (SOO-50, 260914, HEAD `79937a9`)
+
+The S8b merge predates S6d Phase 5, S9's grounding rework, and S14's provenance
+gate, so the merged surface was re-probed at HEAD with two workers on fresh
+programs (not golden copies). Full logs: `/tmp/sooth_soo50_r9_probes.md`,
+`/tmp/sooth_soo50_regression_probes.md`; fixtures under
+`/tmp/sooth_soo50_r9/`, `/tmp/sooth_soo50_reg/`. Full suite green at HEAD;
+repo untouched (probe convention).
+
+## R9 closed — bound-directed `empty` at the `List` impl verified
+
+```text
+P-R9-1  getempty['T: Monoid] instantiated at List[i64], bare `empty` in the body
+        build: OK  run exit: 0  stdout: nilok          (mints a real List[i64] Nil)
+P-R9-2  same shape at i64 (control, the S6 golden's dispatch)
+        build: OK  run exit: 0  stdout: 0              (Monoid for i64's empty)
+P-R9-3  bound-directed `empty` as Monoid identity combined through the same bound
+        build: OK  run exit: 0  stdout: 1 2 3
+```
+
+Verdict: **verified** — no FAILs.
+
+Fence-wording finding: R9's original constraint ("single-`List`-instantiation per
+program, no nested `List[List[i64]]` helpers") is **stale at HEAD** — it was
+deliberately retired by P7b.S6d Phase 5's consumer-type tie-break
+(`generated_enum_consumer_type_pick`, pinned by
+`two_instantiations_ground_a_bare_nullary_variant_from_its_consumer_type`):
+
+```text
+P-R9-4a  lone `mkouter ( -- List[List[i64]] ) Nil ;` helper       build: OK, runs exit 0
+P-R9-4c  two-instantiation helper pair                            build: OK, runs exit 0
+P-R9-4d  coexists with a real Cons construction/destructure       stdout: 1 2 3 ok
+P-R9-4e  full recorded-hazard shape incl. empty[List[i64]]        build: OK, runs exit 0
+P-R9-4b  poly spelling List[List['T]]                             build FAILED — located
+         "nesting depth > 1" error, no panic (the surviving fence)
+```
+
+## Regression battery — 15/15 PASS at HEAD
+
+Two-defect family (B-1): both orderings of two constructed `Cell` instantiations
+with explicit `empty[Inst]` calls, plus an `empty[Cell[f64]]` mint interleaved
+between constructions of different instantiations (the exact pre-fix
+program-global layout-corruption shape) — all build/run exit 0, correct prints,
+no SIGSEGV.
+
+Wall shapes (B-2): self-referential tail constructs inside a trait member body
+(append prints the merged spine); differently-headed operand against a self-ref
+field = located `type mismatch` in both member-body and plain-word spellings, no
+`panicked`; length-variable self-ref field = dedicated cannot-bind-length error;
+concrete length grounds on agreement (`Hoop[i64 3]`) and is an in-range located
+mismatch otherwise (`Hoop[i64 3]` vs `Hoop[i64 5]`); foreign length-variable
+error path renders `Hoop['?0 2]` — the `poly_type_str` totality fix holds, no ICE.
+
+Linearity teeth (B-3): undropped `map`, `combine`, `empty[Inst]`, and plain
+construction results over pointer-carrying headers are all located
+`linear value left on the stack` errors. Recorded nuance: a Copy-payload enum
+(`Cell[i64]`) is not linear, so its undropped result is a located *stack effect
+mismatch* instead — still a hard error, nothing auto-drops.
+
+Output stability (B-4): transcribed goldens byte-identical on rerun — combine
+prints `1 2 3 5 3` (twice), map `2 3 4`, Opt repro `ok`.
+
+Program-side spelling notes (pre-existing conventions, not defects): `type:`
+self-ref fields must be named (`rest ^Chain['T]`, as in `lib/core/list.sth`);
+the first trait member decl takes no leading colon.
+
+**Ledger: S8b surface fully re-verified at HEAD; R9 closed; spec + roadmap
+residual wording corrected in the same commit as this section.**
