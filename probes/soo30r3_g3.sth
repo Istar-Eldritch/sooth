@@ -1,0 +1,9 @@
+\ SOO-30 R3-G3 — lib Result (2 params) through the R-30.2 route: the 2-arity
+\ spelling `pure[Result[i64 i64]]` (partial-head ride-along, P3b receipt
+\ class). Measured finding either way; a ground failure here is ESCALATE.
+import: intrinsics * ;
+import: core::result * ;
+import: core::applicative | Applicative | ;
+import: hosted::show | . | ;
+: showres ( Result[i64 i64] -- ) ~[ ( Ok ) Ok> . ] ~[ ( Err ) drop 1 . ] Result? ;
+: main ( -- ) 5 pure[Result[i64 i64]] showres ;

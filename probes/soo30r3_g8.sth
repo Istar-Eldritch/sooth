@@ -1,0 +1,13 @@
+\ SOO-30 R3-G8 — conservative face of R-30.2: a 2-argument POSITIONAL supply
+\ keeps operand-driven selection; the route must NOT fire here. Expected:
+\ r2b-1c's no-dispatch bytes, unchanged.
+import: intrinsics * ;
+import: hosted::show | . | ;
+type: Box['A] | MkBox 'A ;
+trait: Applicative['F: * -> *]
+  : pure ( 'A -- 'F['A] ) ;
+;
+impl: Applicative for Box
+  : pure MkBox ;
+;
+: main ( -- ) 42 pure[i64 i64] drop ;

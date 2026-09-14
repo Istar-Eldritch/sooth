@@ -1,0 +1,13 @@
+\ SOO-30 R3-G6 — the bare-call remedy error with the CORRECTED (output-App)
+\ example. Line 1 must stay byte-identical to r2b-2's; the example line must
+\ now name the `pure[Box[i64]]`-shape (R-30.3).
+import: intrinsics * ;
+import: hosted::show | . | ;
+type: Box['A] | MkBox 'A ;
+trait: Applicative['F: * -> *]
+  : pure ( 'A -- 'F['A] ) ;
+;
+impl: Applicative for Box
+  : pure MkBox ;
+;
+: main ( -- ) 42 pure drop ;

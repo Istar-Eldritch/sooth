@@ -1,0 +1,16 @@
+\ SOO-30 R3-G13 — non-leakage: the double-wrap operand idiom (r2b-3b, the ONLY
+\ working mono route before round 3) must survive byte-identically. The
+\ operand carries the target head; the 2-arg positional supply rides the
+\ ordinary S8b seed channel, not the new route.
+import: intrinsics * ;
+import: hosted::show | . | ;
+type: Box['A] | MkBox 'A ;
+trait: Applicative['F: * -> *]
+  : pure ( 'A -- 'F['A] ) ;
+;
+impl: Applicative for Box
+  : pure MkBox ;
+;
+: showbox ( Box[i64] -- ) ~[ ( MkBox ) MkBox> . ] Box? ;
+: showbox2 ( Box[Box[i64]] -- ) ~[ ( MkBox ) MkBox> showbox ] Box? ;
+: main ( -- ) 42 MkBox pure[Box[i64] Box[i64]] showbox2 ;

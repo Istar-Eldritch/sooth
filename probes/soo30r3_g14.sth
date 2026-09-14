@@ -1,0 +1,14 @@
+\ SOO-30 R3-G14 — the R-30.2 output-App route (fixture-local Box): a single
+\ explicit instantiation `pure[Box[i64]]` grounds the return type at a mono
+\ call site with no 'F operand. THE primary round-3 measurement.
+import: intrinsics * ;
+import: hosted::show | . | ;
+type: Box['A] | MkBox 'A ;
+trait: Applicative['F: * -> *]
+  : pure ( 'A -- 'F['A] ) ;
+;
+impl: Applicative for Box
+  : pure MkBox ;
+;
+: showbox ( Box[i64] -- ) ~[ ( MkBox ) MkBox> . ] Box? ;
+: main ( -- ) 42 pure[Box[i64]] showbox ;

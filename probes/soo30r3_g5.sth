@@ -1,0 +1,16 @@
+\ SOO-30 R3-G5 — the shared-bound consumer: `repure['F: Applicative 'A]
+\ ( 'F['A] 'A -- 'F['A] ) swap drop pure ;` (the paper's corrected body),
+\ called at two mono sites with Option and List operands → `7\n7\n`.
+import: intrinsics * ;
+import: core::option * ;
+import: core::list * ;
+import: core::applicative | Applicative | ;
+import: hosted::show | . | ;
+: showopt ( Option[i64] -- ) ~[ ( Some ) Some> . ] ~[ ( None ) drop 0 . ] Option? ;
+: showlist ( List[i64] -- )
+  ~[ ( Nil ) drop ]
+  ~[ ( Cons ) Cons> | v rest | v . rest ^> showlist ]
+  List? ;
+: nile ( -- List[i64] ) Nil ;
+: repure['F: Applicative 'A] ( 'F['A] 'A -- 'F['A] ) swap drop pure ;
+: main ( -- ) 5 Some 7 repure showopt nile 7 repure showlist ;

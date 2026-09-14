@@ -1,0 +1,12 @@
+\ SOO-30 R3-G4 — lib List through the R-30.2 route: `5 pure[List[i64]]`
+\ produces a real Cons cell (the cell-boxing impl body `Nil ^ Cons`), walked
+\ by showlist.
+import: intrinsics * ;
+import: core::list * ;
+import: core::applicative | Applicative | ;
+import: hosted::show | . | ;
+: showlist ( List[i64] -- )
+  ~[ ( Nil ) drop ]
+  ~[ ( Cons ) Cons> | v rest | v . rest ^> showlist ]
+  List? ;
+: main ( -- ) 5 pure[List[i64]] showlist ;

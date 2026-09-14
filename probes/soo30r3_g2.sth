@@ -1,0 +1,8 @@
+\ SOO-30 R3-G2 — lib Option through the R-30.2 route: `5 pure[Option[i64]]`
+\ dispatches the real Some ctor. Temporary lib scaffolding (reverted after).
+import: intrinsics * ;
+import: core::option * ;
+import: core::applicative | Applicative | ;
+import: hosted::show | . | ;
+: showopt ( Option[i64] -- ) ~[ ( Some ) Some> . ] ~[ ( None ) drop 0 . ] Option? ;
+: main ( -- ) 5 pure[Option[i64]] showopt ;
