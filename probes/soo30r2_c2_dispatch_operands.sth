@@ -1,0 +1,31 @@
+\ SOO-30 R2c-adapted — operand-carrying mono calls (R2b-3b idiom): the 'A
+\ operand itself is an 'F value, so dispatch sees the target head. Instantiation
+\ args are positional over the dissolved member word's vars (target params first).
+import: intrinsics * ;
+import: core::option * ;
+import: core::result * ;
+import: core::list * ;
+import: core::applicative | Applicative | ;
+import: hosted::show | . | ;
+
+: showopt ( Option[i64] -- ) ~[ ( Some ) Some> . ] ~[ ( None ) drop 0 . ] Option? ;
+: showres ( Result[i64 i64] -- ) ~[ ( Ok ) Ok> . ] ~[ ( Err ) drop 1 . ] Result? ;
+: showlist ( List[i64] -- )
+  ~[ ( Nil ) drop ]
+  ~[ ( Cons ) Cons> | v rest | v . rest ^> showlist ]
+  List? ;
+: showopt2 ( Option[Option[i64]] -- ) ~[ ( Some ) Some> showopt ] ~[ ( None ) drop 0 . ] Option? ;
+: showres2 ( Result[Result[i64 i64] i64] -- ) ~[ ( Ok ) Ok> showres ] ~[ ( Err ) drop 1 . ] Result? ;
+: showlist2 ( List[List[i64]] -- )
+  ~[ ( Nil ) drop ]
+  ~[ ( Cons ) Cons> | v rest | v showlist rest ^> showlist2 ]
+  List? ;
+
+\ pins Nil to List[i64] so the operand construction is unambiguous
+: nile ( -- List[i64] ) Nil ;
+: single ( i64 -- List[i64] ) nile ^ Cons ;
+
+: main ( -- )
+  5 Some pure[Option[i64] Option[i64]] showopt2
+  5 Ok pure[Result[i64 i64] i64 Result[i64 i64]] showres2
+  5 single pure[List[i64] List[i64]] showlist2 ;

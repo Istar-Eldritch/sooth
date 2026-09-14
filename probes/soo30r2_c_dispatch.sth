@@ -1,0 +1,21 @@
+\ SOO-30 R2c — real lib types end-to-end under the relaxed gate: true-shape
+\ pure ( 'A -- 'F['A] ), per-ctor impls (Some/Ok/Nil-^--Cons), specified mono
+\ calls `5 pure[Option[i64]]` etc., each followed by an observable dispatch.
+import: intrinsics * ;
+import: core::option * ;
+import: core::result * ;
+import: core::list * ;
+import: core::applicative | Applicative | ;
+import: hosted::show | . | ;
+
+: showopt ( Option[i64] -- ) ~[ ( Some ) Some> . ] ~[ ( None ) drop 0 . ] Option? ;
+: showres ( Result[i64 i64] -- ) ~[ ( Ok ) Ok> . ] ~[ ( Err ) drop 1 . ] Result? ;
+: showlist ( List[i64] -- )
+  ~[ ( Nil ) drop ]
+  ~[ ( Cons ) Cons> | v rest | v . rest ^> showlist ]
+  List? ;
+
+: main ( -- )
+  5 pure[Option[i64]] showopt
+  5 pure[Result[i64 i64]] showres
+  5 pure[List[i64]] showlist ;

@@ -1,0 +1,22 @@
+\ SOO-30 P3b — supplementary: real lib impls on the P1b-proven dummy-input
+\ shape ( 'F['A] 'A -- 'F['A] ). Per constructor, one operand-carrying mono
+\ call followed by an observable dispatch. Expected stdout if all ground:
+\ 5 / 5 / 5.
+import: intrinsics * ;
+import: core::option * ;
+import: core::result * ;
+import: core::list * ;
+import: core::applicative | Applicative | ;
+import: hosted::show | . | ;
+
+: showopt ( Option[i64] -- ) ~[ ( Some ) Some> . ] ~[ ( None ) drop 0 . ] Option? ;
+: showres ( Result[i64 i64] -- ) ~[ ( Ok ) Ok> . ] ~[ ( Err ) drop 1 . ] Result? ;
+: showlist ( List[i64] -- )
+  ~[ ( Nil ) drop ]
+  ~[ ( Cons ) Cons> | v rest | v . rest ^> showlist ]
+  List? ;
+
+: main ( -- )
+  None 5 pure showopt
+  9 Err 5 pure showres
+  Nil 5 pure showlist ;

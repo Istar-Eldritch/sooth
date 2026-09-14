@@ -1,0 +1,10 @@
+\ SOO-30 P3-min — same lib scaffolding, main parses clean, so the lib-side
+\ trait declaration gate (if any) fires with its true location.
+import: intrinsics * ;
+import: core::option * ;
+import: core::result * ;
+import: core::list * ;
+import: core::applicative | Applicative | ;
+import: hosted::show | . | ;
+
+: main ( -- ) ;

@@ -1,0 +1,10 @@
+import: intrinsics * ;
+type: Box['A] | MkBox 'A ;
+trait: Applicative['F: * -> *]
+  : pure ( 'A -- 'F['A] ) ;
+;
+impl: Applicative for Box
+  : pure MkBox ;
+;
+: twin['F: Applicative 'A] ( 'A 'A -- 'F['A] 'F['A] ) pure swap pure ;
+: main ( -- ) 1 2 twin drop drop ;

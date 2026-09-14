@@ -1,0 +1,11 @@
+import: intrinsics * ;
+import: hosted::show | . | ;
+type: Box['A] | MkBox 'A ;
+trait: Applicative['F: * -> *]
+  : pure ( 'A -- 'F['A] ) ;
+;
+impl: Applicative for Box
+  : pure MkBox ;
+;
+: showbox ( Box[i64] -- ) ~[ ( MkBox ) MkBox> . ] Box? ;
+: main ( -- ) 42 pure[Box[i64]] showbox ;

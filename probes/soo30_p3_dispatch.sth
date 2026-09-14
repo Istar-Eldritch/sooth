@@ -1,0 +1,21 @@
+\ SOO-30 P3 — real lib types: one mono `pure[...]` call per constructor,
+\ each followed by an observable dispatch. Expected today (post-P1/P2): the
+\ ticket-shaped trait fails somewhere; record where.
+import: intrinsics * ;
+import: core::option * ;
+import: core::result * ;
+import: core::list * ;
+import: core::applicative | Applicative | ;
+import: hosted::show | . | ;
+
+: showopt ( Option[i64] -- ) ~[ ( Some ) Some> . ] ~[ ( None ) drop 0 . ] Option? ;
+: showres ( Result[i64 i64] -- ) ~[ ( Ok ) Ok> . ] ~[ ( Err ) drop 1 . ] Result? ;
+: showlist ( List[i64] -- )
+  ~[ ( Nil ) drop ]
+  ~[ ( Cons ) Cons> | v rest | v . rest ^> showlist ]
+  List? ;
+
+: main ( -- )
+  5 pure[Option] showopt
+  5 pure[Result] showres
+  5 pure[List] showlist ;

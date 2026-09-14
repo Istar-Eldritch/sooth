@@ -1,0 +1,9 @@
+import: intrinsics * ;
+type: Box['A] | MkBox 'A ;
+trait: Applicative['F: * -> *]
+  : pure ( 'A -- 'F['A] ) ;
+;
+impl: Applicative for Box
+  : pure MkBox ;
+;
+: main ( -- Box[i64] ) 42 pure ;

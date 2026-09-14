@@ -1,0 +1,9 @@
+import: intrinsics * ;
+type: Box['A] | MkBox 'A ;
+trait: Applicative['F: * -> *]
+  : pure ( 'F['A] 'A -- 'F['A] ) ;
+;
+impl: Applicative for Box
+  : pure swap drop MkBox ;
+;
+: main ( -- ) 42 drop ;
